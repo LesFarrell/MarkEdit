@@ -12,6 +12,9 @@ Launching with no arguments shows just the editor; launching with a file path sh
 ## Features
 
 - CommonMark plus GFM tables, task lists, strikethrough, bare-URL autolinks, and footnotes, along with code-fence language classes used by syntax-aware preview features.
+- GitHub-style note, tip, important, warning, and caution alerts.
+- Local syntax highlighting for named code fences, with matching light and dark themes.
+- Stable heading permalinks and a floating document outline for documents with multiple headings.
 - Mermaid diagram rendering with a zoom/pan toolbar.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Editor font is configurable (Format → Font) and remembered between sessions.
@@ -72,17 +75,19 @@ markedit.manifest        DPI-awareness and long-path declarations
 preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid
 github-markdown.css      GitHub-flavored preview stylesheet (light + dark)
 mermaid.min.js           bundled Mermaid renderer
+highlight*.js / .css     bundled Highlight.js renderer and light/dark themes
 make_icon.ps1            regenerates markedit.ico
 build.bat                build script
 test.bat / tests/        parser regression tests
 third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
 third_party/cmark-gfm/   cmark-gfm 0.29.0.gfm.13 source and BSD-2-Clause licence
+third_party/highlightjs/ Highlight.js 11.11.1 licence and provenance
 ```
 
 ## GitHub-style preview
 
-The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look, including a dark-mode variant that's applied automatically when Dark Mode is on. Preview assets are local so rendering works offline and does not silently fetch executable content or styles from a CDN.
+The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look, including a dark-mode variant that's applied automatically when Dark Mode is on. Mermaid and Highlight.js assets are also local, so rendering works offline and does not silently fetch executable content or styles from a CDN.
 
 Files such as `markedit.exe`, `markedit.ini` (saved settings), and `webview2_data/` (WebView2's browser profile/cache) are generated at build or run time and are not tracked in git.
 

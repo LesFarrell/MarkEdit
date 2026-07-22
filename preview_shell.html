@@ -35,6 +35,26 @@ img{max-width:100%;}
 .mermaid-toolbar button{cursor:pointer;border:1px solid #ccc;background:#fafafa;border-radius:4px;width:26px;height:24px;font-size:14px;line-height:1;}
 .mermaid-toolbar .zoom-readout{width:52px;font-variant-numeric:tabular-nums;}
 .mermaid-toolbar button:hover{background:#eee;}
+.markdown-body blockquote.markdown-alert{--alert-color:#0969da;margin:1rem 0;padding:.5rem 1rem;border-left:.25em solid var(--alert-color);color:inherit;font-style:normal;}
+.markdown-alert>:first-child{margin-top:0;}
+.markdown-alert>:last-child{margin-bottom:0;}
+.markdown-alert-title{margin:0 0 .35rem!important;color:var(--alert-color);font-weight:600;line-height:1.5;}
+.markdown-alert-note{--alert-color:#0969da;}
+.markdown-alert-tip{--alert-color:#1a7f37;}
+.markdown-alert-important{--alert-color:#8250df;}
+.markdown-alert-warning{--alert-color:#9a6700;}
+.markdown-alert-caution{--alert-color:#cf222e;}
+.heading-anchor{margin-left:.35em;color:inherit!important;text-decoration:none!important;opacity:0;}
+h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:hover>.heading-anchor,h5:hover>.heading-anchor,h6:hover>.heading-anchor,.heading-anchor:focus{opacity:.55;}
+.document-outline{position:fixed;top:8px;right:12px;z-index:20;max-width:min(300px,70vw);border:1px solid #d0d7de;border-radius:6px;background:rgba(255,255,255,.96);box-shadow:0 3px 12px rgba(31,35,40,.15);font-size:13px;}
+.document-outline[hidden]{display:none;}
+.document-outline summary{cursor:pointer;padding:5px 9px;font-weight:600;user-select:none;}
+.document-outline nav{max-height:60vh;overflow:auto;border-top:1px solid #d8dee4;padding:6px 8px 8px;}
+.document-outline ol{margin:0;padding:0;list-style:none;}
+.document-outline li{margin:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.document-outline a{color:#0969da;text-decoration:none;}
+.document-outline a:hover{text-decoration:underline;}
+.markdown-body pre code.hljs{padding:0;overflow:visible;background:transparent;}
 .theme-dark, .theme-dark body{background:#0d1117;color:#e6edf3;color-scheme:dark;}
 .theme-dark code{background:#161b22;color:#e6edf3;}
 .theme-dark pre.codeblock{background:#161b22;}
@@ -47,14 +67,22 @@ img{max-width:100%;}
 .theme-dark .mermaid-toolbar{background:rgba(13,17,23,0.9);border-color:#30363d;}
 .theme-dark .mermaid-toolbar button{background:#161b22;color:#e6edf3;border-color:#30363d;}
 .theme-dark .mermaid-toolbar button:hover{background:#21262d;}
+.theme-dark .document-outline{border-color:#30363d;background:rgba(13,17,23,.96);box-shadow:0 3px 12px rgba(0,0,0,.45);}
+.theme-dark .document-outline nav{border-color:#30363d;}
+.theme-dark .document-outline a{color:#58a6ff;}
+.theme-dark .markdown-body blockquote.markdown-alert{border-left-color:var(--alert-color);color:inherit;}
 </style>
 <link id="gh-css-local" rel="stylesheet" href="github-markdown.css">
+<link id="hljs-light" rel="stylesheet" href="highlight-github.min.css">
+<link id="hljs-dark" rel="stylesheet" href="highlight-github-dark.min.css" disabled>
 <script>
 (function(){
   function applyTheme(theme) {
     var isDark = theme === 'dark';
     document.documentElement.classList.toggle('theme-dark', isDark);
     document.body.classList.toggle('theme-dark', isDark);
+    document.getElementById('hljs-light').disabled = isDark;
+    document.getElementById('hljs-dark').disabled = !isDark;
     var content = document.getElementById('content');
     if (content) {
       content.classList.toggle('theme-dark', isDark);
@@ -82,7 +110,13 @@ img{max-width:100%;}
 </script>
 </head>
 <body>
+<details id="document-outline" class="document-outline" hidden>
+  <summary>Outline</summary>
+  <nav aria-label="Document outline"><ol></ol></nav>
+</details>
 <div id="content"></div>
+<script src="highlight.min.js"></script>
+<script src="highlight-powershell.min.js"></script>
 <script src="mermaid.min.js"></script>
 <script>
 mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
@@ -90,6 +124,92 @@ const documentBase = document.createElement('base');
 documentBase.href = 'https://document.local/';
 document.head.appendChild(documentBase);
 let zoomSeq = 0;
+
+function enhanceAlerts(root) {
+  const alertNames = {
+    NOTE: 'Note', TIP: 'Tip', IMPORTANT: 'Important',
+    WARNING: 'Warning', CAUTION: 'Caution'
+  };
+  root.querySelectorAll('blockquote').forEach((quote) => {
+    const firstParagraph = quote.firstElementChild;
+    const firstText = firstParagraph && firstParagraph.tagName === 'P' ? firstParagraph.firstChild : null;
+    if (!firstText || firstText.nodeType !== Node.TEXT_NODE) return;
+    const match = firstText.nodeValue.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:[ \t]*\n|[ \t]+|$)/i);
+    if (!match) return;
+    const type = match[1].toUpperCase();
+    firstText.nodeValue = firstText.nodeValue.slice(match[0].length);
+    quote.classList.add('markdown-alert', 'markdown-alert-' + type.toLowerCase());
+    const title = document.createElement('p');
+    title.className = 'markdown-alert-title';
+    title.textContent = alertNames[type];
+    quote.insertBefore(title, firstParagraph);
+    if (firstParagraph.textContent.trim() === '' && firstParagraph.children.length === 0) {
+      firstParagraph.remove();
+    }
+  });
+}
+
+function headingSlug(text) {
+  return text.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/['’]/g, '').replace(/[^a-z0-9\u00c0-\uffff]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'section';
+}
+
+function navigateToHeading(event, heading, id) {
+  event.preventDefault();
+  heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const url = new URL(window.location.href);
+  url.hash = id;
+  history.replaceState(null, '', url.href);
+}
+
+function enhanceHeadings(root) {
+  const headings = Array.from(root.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+  const outline = document.getElementById('document-outline');
+  const list = outline.querySelector('ol');
+  const used = new Map();
+  list.replaceChildren();
+
+  headings.forEach((heading) => {
+    const label = heading.textContent.trim();
+    const base = headingSlug(label);
+    const duplicate = used.get(base) || 0;
+    used.set(base, duplicate + 1);
+    const id = duplicate ? base + '-' + duplicate : base;
+    heading.id = id;
+
+    const permalink = document.createElement('a');
+    permalink.className = 'heading-anchor';
+    permalink.href = '#' + id;
+    permalink.textContent = '#';
+    permalink.setAttribute('aria-label', 'Permalink to ' + label);
+    permalink.addEventListener('click', (event) => navigateToHeading(event, heading, id));
+    heading.appendChild(permalink);
+
+    const item = document.createElement('li');
+    item.style.marginLeft = ((Number(heading.tagName.slice(1)) - 1) * 10) + 'px';
+    const link = document.createElement('a');
+    link.href = '#' + id;
+    link.textContent = label;
+    link.addEventListener('click', (event) => navigateToHeading(event, heading, id));
+    item.appendChild(link);
+    list.appendChild(item);
+  });
+
+  outline.hidden = headings.length < 2;
+  if (outline.hidden) outline.open = false;
+}
+
+function highlightCodeBlocks(root) {
+  if (!window.hljs) return;
+  root.querySelectorAll('pre > code[class*="language-"]').forEach((code) => {
+    const languageClass = Array.from(code.classList).find((name) => name.startsWith('language-'));
+    if (!languageClass) return;
+    const language = languageClass.slice('language-'.length).toLowerCase();
+    if (language === 'mermaid' || !hljs.getLanguage(language)) return;
+    hljs.highlightElement(code);
+  });
+}
 
 function wrapMermaidBlocks() {
   const blocks = document.querySelectorAll('pre.mermaid:not([data-wrapped]), pre > code.language-mermaid');
@@ -194,6 +314,10 @@ function updateSoloDiagramLayout() {
 function setContent(html) {
   // Wrap preview HTML in a container that GitHub's CSS targets.
   document.getElementById('content').innerHTML = '<article class="markdown-body">' + html + '</article>';
+  const article = document.querySelector('#content > .markdown-body');
+  enhanceAlerts(article);
+  enhanceHeadings(article);
+  highlightCodeBlocks(article);
   wrapMermaidBlocks();
   mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => updateSoloDiagramLayout());
   updateSoloDiagramLayout();

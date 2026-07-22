@@ -34,6 +34,8 @@ int main(void) {
     expect_contains("task list", "- [x] done\n", "<input type=\"checkbox\" checked=\"\" disabled=\"\" />");
     expect_contains("bare URL autolink", "Visit https://example.com now.\n", "href=\"https://example.com\"");
     expect_contains("footnote", "A note.[^1]\n\n[^1]: Footnote text.\n", "class=\"footnotes\"");
+    expect_contains("alert marker preserved", "> [!NOTE]\n> Useful information.\n", "[!NOTE]\nUseful information.");
+    expect_contains("code language", "```c\nint main(void) {}\n```\n", "class=\"language-c\"");
     expect_contains("raw html omitted", "<img src=x onerror=alert(1)>\n", "raw HTML omitted");
     expect_not_contains("raw html inactive", "<img src=x onerror=alert(1)>\n", "<img src=x");
     expect_not_contains("unsafe URL inactive", "[click](javascript:alert(1))\n", "href=\"javascript:");

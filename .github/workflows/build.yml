@@ -27,6 +27,12 @@ jobs:
             preview_shell.html
             github-markdown.css
             mermaid.min.js
+            highlight.min.js
+            highlight-powershell.min.js
+            highlight-github.min.css
+            highlight-github-dark.min.css
             LICENSE
             THIRD_PARTY_NOTICES.md
             third_party/cmark-gfm/COPYING
+            third_party/highlightjs/LICENSE
+            third_party/highlightjs/VERSION.txt

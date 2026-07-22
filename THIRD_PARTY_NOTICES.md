@@ -16,6 +16,13 @@ components are reproduced at `third_party/cmark-gfm/COPYING`.
 copyright (c) 2014–2022 Knut Sveidqvist and contributors, licensed under the
 MIT License.
 
+## Highlight.js 11.11.1
+
+Fenced-code syntax highlighting uses
+[Highlight.js](https://github.com/highlightjs/highlight.js), copyright (c) 2006
+Ivan Sagalaev and contributors, licensed under the BSD 3-Clause License. A copy
+is at `third_party/highlightjs/LICENSE`.
+
 ## github-markdown-css
 
 `github-markdown.css` is derived from
