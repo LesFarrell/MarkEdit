@@ -65,6 +65,7 @@ static ICoreWebView2Controller *g_webviewController = NULL;
 static ICoreWebView2_3 *g_webview3 = NULL;
 static int g_webviewReady = 0;
 static HBRUSH g_previewBkBrush = NULL; /* matches the preview host's WM_CTLCOLORSTATIC background to the theme, so it doesn't flash white before WebView2 paints */
+static HBRUSH g_helpBkBrush = NULL;
 static char *g_pendingHtmlBody = NULL; /* set if update requested before webview ready */
 static int g_previewDarkMode = 0;
 
@@ -94,6 +95,7 @@ void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
 static void apply_preview_host_theme(void);
+static void apply_help_theme(void);
 static void refresh_menu(HWND hwnd);
 static void update_document_mapping(void);
 
@@ -252,6 +254,16 @@ static void apply_preview_host_theme(void) {
     if (g_previewBkBrush) DeleteObject(g_previewBkBrush);
     g_previewBkBrush = CreateSolidBrush(g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
     if (g_hPreview) InvalidateRect(g_hPreview, NULL, TRUE);
+}
+
+static void apply_help_theme(void) {
+    if (!g_hHelpEdit && !g_hHelpWnd) return;
+    if (g_helpBkBrush) DeleteObject(g_helpBkBrush);
+    g_helpBkBrush = CreateSolidBrush(g_previewDarkMode
+        ? RGB(0x0D, 0x11, 0x17)
+        : RGB(0xFF, 0xFF, 0xFF));
+    if (g_hHelpEdit) InvalidateRect(g_hHelpEdit, NULL, TRUE);
+    if (g_hHelpWnd) InvalidateRect(g_hHelpWnd, NULL, TRUE);
 }
 
 static void configure_scintilla(HWND hEdit) {
@@ -1461,8 +1473,30 @@ static LRESULT CALLBACK HelpWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 0, 0, 0, 0, hwnd, NULL, GetModuleHandleA(NULL), NULL);
             SendMessageA(g_hHelpEdit, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
             SetWindowTextA(g_hHelpEdit, HELP_REFERENCE_TEXT);
+            apply_help_theme();
             return 0;
         }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+            if ((HWND)lParam == g_hHelpEdit && g_helpBkBrush) {
+                HDC hdcEdit = (HDC)wParam;
+                SetBkColor(hdcEdit, g_previewDarkMode
+                    ? RGB(0x0D, 0x11, 0x17)
+                    : RGB(0xFF, 0xFF, 0xFF));
+                SetTextColor(hdcEdit, g_previewDarkMode
+                    ? RGB(0xE6, 0xED, 0xF3)
+                    : RGB(0x1F, 0x23, 0x28));
+                return (LRESULT)g_helpBkBrush;
+            }
+            break;
+        case WM_ERASEBKGND:
+            if (g_helpBkBrush) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                FillRect((HDC)wParam, &rc, g_helpBkBrush);
+                return 1;
+            }
+            break;
         case WM_SIZE:
             layout_help_window(hwnd);
             return 0;
@@ -1478,6 +1512,10 @@ static LRESULT CALLBACK HelpWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case WM_DESTROY:
             g_hHelpEdit = NULL;
             g_hHelpWnd = NULL;
+            if (g_helpBkBrush) {
+                DeleteObject(g_helpBkBrush);
+                g_helpBkBrush = NULL;
+            }
             return 0;
     }
     return DefWindowProcA(hwnd, msg, wParam, lParam);
@@ -1842,6 +1880,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     apply_preview_theme();
                     apply_editor_theme(g_hEdit);
                     apply_preview_host_theme();
+                    apply_help_theme();
                     refresh_menu(hwnd);
                     break;
                 case IDM_HELP_REFERENCE: show_help_reference(); break;
@@ -1856,6 +1895,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_webview3) { ICoreWebView2_3_Release(g_webview3); g_webview3 = NULL; }
             if (g_webview) { ICoreWebView2_Release(g_webview); g_webview = NULL; }
             if (g_webviewController) { ICoreWebView2Controller_Release(g_webviewController); g_webviewController = NULL; }
+            if (g_helpBkBrush) { DeleteObject(g_helpBkBrush); g_helpBkBrush = NULL; }
             for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
             free(g_currentFile);
             PostQuitMessage(0);

@@ -5,7 +5,7 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 - **Left pane** — a [Scintilla](https://www.scintilla.org/) source editor for your Markdown, with line numbers, current-line highlighting, and real Tab/Shift+Tab block indent.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
-- GitHub Light and GitHub Dark themes (View → Theme) apply to both the editor and preview, are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
+- GitHub Light and GitHub Dark themes (View → Theme) apply to the editor, preview, and Markdown Reference window, are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
 
 Launching with no arguments shows just the editor; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
 
