@@ -3,8 +3,9 @@
 A tiny, native Win32 Markdown editor with live HTML preview.
 
 - **Left pane** — a [Scintilla](https://www.scintilla.org/) source editor for your Markdown, with line numbers, current-line highlighting, and real Tab/Shift+Tab block indent.
-- **Right pane** — a WebView2-hosted HTML preview, re-rendered on every keystroke from a small built-in Markdown-to-HTML converter (no external Markdown library).
+- **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits from a small built-in Markdown-to-HTML converter (no external Markdown library).
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
+- Dark mode (View → Use Dark Mode) applies to both the editor and the preview, is remembered between sessions, and the preview starts directly in the right theme (no light-mode flash).
 
 Launching with no arguments shows just the editor; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
 
@@ -14,8 +15,12 @@ Launching with no arguments shows just the editor; launching with a file path sh
 - Mermaid diagram rendering with a zoom/pan toolbar.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Editor font is configurable (Format → Font) and remembered between sessions.
+- Dark mode toggle (View → Use Dark Mode), remembered between sessions.
 - Find/Replace, Undo/Redo, standard clipboard shortcuts.
 - A plain-text Markdown syntax reference (Help → Markdown Reference).
+- Unicode filenames, long Windows paths, drag-and-drop, and document-relative links/images.
+- Failure-safe saves: content is flushed to a temporary file before atomically replacing the destination.
+- Preview hardening for untrusted documents: raw HTML is escaped, Mermaid runs in strict mode, and the shell uses a restrictive content-security policy.
 
 ### Keyboard shortcuts
 
@@ -37,13 +42,22 @@ Launching with no arguments shows just the editor; launching with a file path sh
 
 ## Building
 
-Requires the [zig](https://ziglang.org/) toolchain (used as the C/C++ compiler, linker, and resource compiler).
+Requires a MinGW toolchain ([w64devkit](https://github.com/skeeto/w64devkit) or similar) with `gcc` and `windres` on `PATH`.
 
 ```
 build.bat
 ```
 
-This compiles `markedit.c`, links against the WebView2 loader and Scintilla, and copies the runtime DLLs (`WebView2Loader.dll`, `Scintilla.dll`) next to `markedit.exe`.
+This compiles `markedit.rc` with `windres`, compiles/links `markedit.c` with `gcc`, and copies the runtime DLLs (`WebView2Loader.dll`, `Scintilla.dll`) next to `markedit.exe`.
+
+Run the parser regression tests with:
+
+```
+test.bat
+```
+
+The same test and build commands run in GitHub Actions. Successful workflow
+runs produce a self-contained Windows artifact.
 
 Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) to be installed (present by default on current Windows 10/11).
 
@@ -52,18 +66,32 @@ Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https
 ```
 markedit.c              application source
 markedit.rc / .ico       Win32 resources (icon, version info)
+markedit.manifest        DPI-awareness and long-path declarations
 preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid
+github-markdown.css      GitHub-flavored preview stylesheet (light + dark)
 mermaid.min.js           bundled Mermaid renderer
+make_icon.ps1            regenerates markedit.ico
 build.bat                build script
+test.bat / tests/        parser regression tests
 third_party/webview2/    WebView2 headers + import libs
-third_party/scintilla/   Scintilla editor component (source + built Scintilla.dll)
+third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
 ```
+
+## GitHub-style preview
+
+The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look, including a dark-mode variant that's applied automatically when Dark Mode is on. Preview assets are local so rendering works offline and does not silently fetch executable content or styles from a CDN.
 
 Files such as `markedit.exe`, `markedit.ini` (saved settings), and `webview2_data/` (WebView2's browser profile/cache) are generated at build or run time and are not tracked in git.
 
-## To do / known gaps
+## Security and Markdown scope
 
-- Line breaks via trailing double-space or backslash aren't rendered.
-- Loose vs. tight list paragraph spacing isn't distinguished.
-- Raw HTML embedded in Markdown source is escaped rather than passed through.
-"# MarkEdit" 
+MarkEdit intentionally escapes raw HTML rather than executing it in the preview.
+The built-in converter covers the features listed above but is not intended to
+be a byte-for-byte implementation of every CommonMark extension. Links using
+HTTP, HTTPS, and `mailto:` open in the system handler; relative links resolve
+from the Markdown document's directory.
+
+## Licence
+
+MarkEdit is available under the MIT License. See `LICENSE` and
+`THIRD_PARTY_NOTICES.md` for bundled-component licences and provenance.

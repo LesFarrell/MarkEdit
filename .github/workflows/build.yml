@@ -1,0 +1,31 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: choco install mingw --no-progress -y
+      - name: Test parser
+        shell: cmd
+        run: test.bat
+      - name: Build application
+        shell: cmd
+        run: build.bat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: markedit-windows-x64
+          path: |
+            markedit.exe
+            Scintilla.dll
+            WebView2Loader.dll
+            preview_shell.html
+            github-markdown.css
+            mermaid.min.js
+            LICENSE
+            THIRD_PARTY_NOTICES.md

@@ -1,0 +1,29 @@
+# Build outputs
+markedit.exe
+markedit.pdb
+markedit.res
+tests/test_parser.exe
+/Scintilla.dll
+/WebView2Loader.dll
+
+# Runtime-generated WebView2 browser profile/cache
+webview2_data/
+
+# User settings persisted at runtime
+markedit.ini
+
+# Keep the vendored Scintilla headers, runtime, version, and licence; ignore the
+# upstream source/documentation tree because MarkEdit does not build it.
+third_party/scintilla/*
+!third_party/scintilla/include/
+!third_party/scintilla/include/**
+!third_party/scintilla/bin/
+third_party/scintilla/bin/*
+!third_party/scintilla/bin/Scintilla.dll
+!third_party/scintilla/License.txt
+!third_party/scintilla/version.txt
+
+# The dynamic-loader import library is used; the static loader is not.
+third_party/webview2/x64/WebView2LoaderStatic.lib
+.claude/settings.json
+.claude/

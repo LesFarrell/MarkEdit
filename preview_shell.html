@@ -1,0 +1,200 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src https: http: data:; font-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri https://document.local; form-action 'none'">
+<style>
+html,body{margin:0;padding:0;background:#ffffff;font-family:'Segoe UI',sans-serif;color:#141414;height:100%;color-scheme: light;}
+#content{padding:12px 20px 60px 20px;min-height:calc(100% - 72px);display:flex;flex-direction:column;}
+#content.solo-diagram{padding:12px 20px;height:calc(100vh - 24px);min-height:calc(100vh - 24px);}
+h1{font-size:1.9em;font-weight:700;margin:0.5em 0 0.3em 0;}
+h2{font-size:1.5em;font-weight:700;margin:0.5em 0 0.3em 0;}
+h3{font-size:1.2em;font-weight:700;margin:0.5em 0 0.3em 0;}
+p{margin:0.4em 0;line-height:1.5;}
+code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-family:Consolas,monospace;font-size:0.95em;}
+pre.codeblock{background:#f5f5f5;padding:8px 10px;border-radius:4px;overflow-x:auto;}
+pre.codeblock code{background:none;padding:0;}
+blockquote{border-left:3px solid #ccc;margin:0.4em 0;padding:0.1em 1em;color:#5a5a5a;font-style:italic;}
+hr{border:none;border-top:1px solid #bbb;margin:1em 0;}
+ul,ol{margin:0.3em 0;padding-left:1.6em;}
+li{margin:0.15em 0;}
+li.task-item{list-style:none;margin-left:-1.2em;}
+li.task-item input{margin-right:0.4em;}
+table{border-collapse:collapse;margin:0.6em 0;}
+th,td{border:1px solid #ccc;padding:4px 10px;text-align:left;}
+th{background:#f0f0f0;font-weight:700;}
+a{color:#0969da;}
+img{max-width:100%;}
+.mermaid-wrap{position:relative;border:1px solid #e0e0e0;border-radius:6px;margin:0.6em 0;overflow:auto;background:#fff;max-height:70vh;cursor:grab;}
+.mermaid-wrap.panning{cursor:grabbing;user-select:none;}
+#content.solo-diagram{overflow:hidden;}
+#content.solo-diagram .mermaid-wrap{flex:1 1 auto;max-height:none;margin:0;min-height:0;}
+.mermaid-inner{transform-origin:0 0;display:inline-block;padding:12px;}
+.mermaid-toolbar{position:sticky;top:0;left:0;display:flex;gap:4px;justify-content:flex-end;padding:4px;background:rgba(255,255,255,0.9);border-bottom:1px solid #eee;z-index:5;}
+.mermaid-toolbar button{cursor:pointer;border:1px solid #ccc;background:#fafafa;border-radius:4px;width:26px;height:24px;font-size:14px;line-height:1;}
+.mermaid-toolbar button:hover{background:#eee;}
+.theme-dark, .theme-dark body{background:#0d1117;color:#e6edf3;color-scheme:dark;}
+.theme-dark code{background:#161b22;color:#e6edf3;}
+.theme-dark pre.codeblock{background:#161b22;}
+.theme-dark blockquote{border-left-color:#30363d;color:#8b949e;}
+.theme-dark hr{border-top-color:#30363d;}
+.theme-dark th,.theme-dark td{border-color:#30363d;}
+.theme-dark th{background:#161b22;}
+.theme-dark a{color:#58a6ff;}
+.theme-dark .mermaid-wrap{border-color:#30363d;background:#0d1117;}
+.theme-dark .mermaid-toolbar{background:rgba(13,17,23,0.9);border-color:#30363d;}
+.theme-dark .mermaid-toolbar button{background:#161b22;color:#e6edf3;border-color:#30363d;}
+.theme-dark .mermaid-toolbar button:hover{background:#21262d;}
+</style>
+<link id="gh-css-local" rel="stylesheet" href="github-markdown.css">
+<script>
+(function(){
+  function applyTheme(theme) {
+    var isDark = theme === 'dark';
+    document.documentElement.classList.toggle('theme-dark', isDark);
+    document.body.classList.toggle('theme-dark', isDark);
+    var content = document.getElementById('content');
+    if (content) {
+      content.classList.toggle('theme-dark', isDark);
+      content.setAttribute('data-theme', isDark ? 'dark' : 'light');
+      var article = content.querySelector('.markdown-body');
+      if (article) article.setAttribute('data-theme', isDark ? 'dark' : 'light');
+    }
+  }
+  function apply() {
+    document.getElementById('content').classList.add('markdown-body');
+    if (!window.__markeditTheme) {
+      var params = new URLSearchParams(window.location.search);
+      window.__markeditTheme = params.get('theme') === 'dark' ? 'dark' : 'light';
+    }
+    applyTheme(window.__markeditTheme);
+  }
+  window.setTheme = function(theme) {
+    window.__markeditTheme = theme === 'dark' ? 'dark' : 'light';
+    applyTheme(window.__markeditTheme);
+  };
+  var link = document.getElementById('gh-css-local');
+  link.onload = apply;
+  link.onerror = apply;
+})();
+</script>
+</head>
+<body>
+<div id="content"></div>
+<script src="mermaid.min.js"></script>
+<script>
+mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+const documentBase = document.createElement('base');
+documentBase.href = 'https://document.local/';
+document.head.appendChild(documentBase);
+let zoomSeq = 0;
+
+function wrapMermaidBlocks() {
+  const blocks = document.querySelectorAll('pre.mermaid:not([data-wrapped])');
+  blocks.forEach((el) => {
+    el.setAttribute('data-wrapped', '1');
+    const src = el.textContent;
+    const id = 'mmd-' + (zoomSeq++);
+    const wrap = document.createElement('div');
+    wrap.className = 'mermaid-wrap';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'mermaid-toolbar';
+    toolbar.innerHTML = '<button data-act="out">-</button><button class="zoom-readout" data-act="reset">100%</button><button data-act="in">+</button>';
+    const readout = toolbar.querySelector('.zoom-readout');
+    const inner = document.createElement('div');
+    inner.className = 'mermaid-inner';
+    inner.id = id;
+    inner.textContent = src;
+    inner.dataset.scale = '1';
+    wrap.appendChild(toolbar);
+    wrap.appendChild(inner);
+    el.replaceWith(wrap);
+
+    function applyScale(scale) {
+      inner.dataset.scale = String(scale);
+      inner.style.transform = 'scale(' + scale + ')';
+      readout.textContent = Math.round(scale * 100) + '%';
+    }
+
+    toolbar.addEventListener('click', (e) => {
+      const act = e.target.getAttribute('data-act');
+      if (!act) return;
+      let scale = parseFloat(inner.dataset.scale || '1');
+      if (act === 'in') scale = Math.min(scale * 1.2, 6);
+      else if (act === 'out') scale = Math.max(scale / 1.2, 0.15);
+      else scale = 1;
+      applyScale(scale);
+    });
+
+    wrap.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      let scale = parseFloat(inner.dataset.scale || '1');
+      scale *= (e.deltaY < 0) ? 1.1 : (1 / 1.1);
+      scale = Math.min(Math.max(scale, 0.15), 6);
+      applyScale(scale);
+    }, { passive: false });
+
+    let panning = false;
+    let startX = 0, startY = 0, startScrollLeft = 0, startScrollTop = 0;
+    let moved = false;
+
+    wrap.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest('.mermaid-toolbar')) return;
+      panning = true;
+      moved = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      startScrollLeft = wrap.scrollLeft;
+      startScrollTop = wrap.scrollTop;
+      wrap.classList.add('panning');
+      e.preventDefault();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!panning) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
+      wrap.scrollLeft = startScrollLeft - dx;
+      wrap.scrollTop = startScrollTop - dy;
+    });
+
+    function endPan() {
+      if (!panning) return;
+      panning = false;
+      wrap.classList.remove('panning');
+    }
+    window.addEventListener('mouseup', endPan);
+    window.addEventListener('mouseleave', endPan);
+
+    wrap.addEventListener('click', (e) => {
+      if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; }
+    }, true);
+  });
+}
+
+function updateSoloDiagramLayout() {
+  const content = document.getElementById('content');
+  const children = Array.from(content.children).filter((el) => {
+    if (el.tagName === 'P' && el.textContent.trim() === '') return false;
+    return true;
+  });
+  const solo = children.length === 1 && children[0].classList.contains('mermaid-wrap');
+  content.classList.toggle('solo-diagram', solo);
+}
+
+function setContent(html) {
+  // Wrap preview HTML in a container that GitHub's CSS targets.
+  document.getElementById('content').innerHTML = '<article class="markdown-body">' + html + '</article>';
+  wrapMermaidBlocks();
+  mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => updateSoloDiagramLayout());
+  updateSoloDiagramLayout();
+  window.setTheme(window.__markeditTheme || 'light');
+}
+
+window.setContent = setContent;
+</script>
+</body>
+</html>
