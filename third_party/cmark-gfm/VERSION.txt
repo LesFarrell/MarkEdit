@@ -1,0 +1,7 @@
+cmark-gfm 0.29.0.gfm.13
+Source: https://github.com/github/cmark-gfm/releases/tag/0.29.0.gfm.13
+Commit: 587a12bb54d95ac37241377e6ddc93ea0e45439b
+
+This directory contains the library sources and headers needed by MarkEdit.
+config.h, cmark-gfm_export.h, and cmark-gfm_version.h were generated from the
+release's CMake templates for the static MinGW build.

@@ -3,7 +3,7 @@
 A tiny, native Win32 Markdown editor with live HTML preview.
 
 - **Left pane** — a [Scintilla](https://www.scintilla.org/) source editor for your Markdown, with line numbers, current-line highlighting, and real Tab/Shift+Tab block indent.
-- **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits from a small built-in Markdown-to-HTML converter (no external Markdown library).
+- **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
 - Dark mode (View → Use Dark Mode) applies to both the editor and the preview, is remembered between sessions, and the preview starts directly in the right theme (no light-mode flash).
 
@@ -11,7 +11,7 @@ Launching with no arguments shows just the editor; launching with a file path sh
 
 ## Features
 
-- Headings, emphasis (bold/italic/strikethrough), inline code, code fences, blockquotes, ordered/unordered/nested lists, task list checkboxes, tables, horizontal rules, links, images, and autolinks.
+- CommonMark plus GFM tables, task lists, strikethrough, bare-URL autolinks, and footnotes, along with code-fence language classes used by syntax-aware preview features.
 - Mermaid diagram rendering with a zoom/pan toolbar.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Editor font is configurable (Format → Font) and remembered between sessions.
@@ -20,7 +20,7 @@ Launching with no arguments shows just the editor; launching with a file path sh
 - A plain-text Markdown syntax reference (Help → Markdown Reference).
 - Unicode filenames, long Windows paths, drag-and-drop, and document-relative links/images.
 - Failure-safe saves: content is flushed to a temporary file before atomically replacing the destination.
-- Preview hardening for untrusted documents: raw HTML is escaped, Mermaid runs in strict mode, and the shell uses a restrictive content-security policy.
+- Preview hardening for untrusted documents: raw HTML and dangerous URLs are disabled, Mermaid runs in strict mode, and the shell uses a restrictive content-security policy.
 
 ### Keyboard shortcuts
 
@@ -48,7 +48,7 @@ Requires a MinGW toolchain ([w64devkit](https://github.com/skeeto/w64devkit) or 
 build.bat
 ```
 
-This compiles `markedit.rc` with `windres`, compiles/links `markedit.c` with `gcc`, and copies the runtime DLLs (`WebView2Loader.dll`, `Scintilla.dll`) next to `markedit.exe`.
+This compiles `markedit.rc` with `windres`, compiles/links the application and vendored cmark-gfm sources with `gcc`, and copies the runtime DLLs (`WebView2Loader.dll`, `Scintilla.dll`) next to `markedit.exe`.
 
 Run the parser regression tests with:
 
@@ -65,6 +65,8 @@ Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https
 
 ```
 markedit.c              application source
+markdown.c / .h         cmark-gfm rendering adapter
+cmark-gfm-sources.rsp   vendored renderer source list and compile flags
 markedit.rc / .ico       Win32 resources (icon, version info)
 markedit.manifest        DPI-awareness and long-path declarations
 preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid
@@ -75,6 +77,7 @@ build.bat                build script
 test.bat / tests/        parser regression tests
 third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
+third_party/cmark-gfm/   cmark-gfm 0.29.0.gfm.13 source and BSD-2-Clause licence
 ```
 
 ## GitHub-style preview
@@ -85,11 +88,10 @@ Files such as `markedit.exe`, `markedit.ini` (saved settings), and `webview2_dat
 
 ## Security and Markdown scope
 
-MarkEdit intentionally escapes raw HTML rather than executing it in the preview.
-The built-in converter covers the features listed above but is not intended to
-be a byte-for-byte implementation of every CommonMark extension. Links using
-HTTP, HTTPS, and `mailto:` open in the system handler; relative links resolve
-from the Markdown document's directory.
+MarkEdit uses cmark-gfm without its unsafe-rendering option, so raw HTML is
+omitted and dangerous URL schemes are scrubbed rather than executed in the
+preview. Links using HTTP, HTTPS, and `mailto:` open in the system handler;
+relative links resolve from the Markdown document's directory.
 
 ## Licence
 

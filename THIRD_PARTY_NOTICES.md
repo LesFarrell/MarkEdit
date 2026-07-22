@@ -3,6 +3,13 @@
 MarkEdit redistributes the following components. Their licences remain with
 their respective copyright holders.
 
+## cmark-gfm 0.29.0.gfm.13
+
+Markdown parsing and HTML rendering use
+[cmark-gfm](https://github.com/github/cmark-gfm), copyright (c) 2014 John
+MacFarlane and contributors. Its BSD 2-Clause terms and the notices for derived
+components are reproduced at `third_party/cmark-gfm/COPYING`.
+
 ## Mermaid 11.16.0
 
 `mermaid.min.js` is from [Mermaid](https://github.com/mermaid-js/mermaid),

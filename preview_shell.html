@@ -18,8 +18,8 @@ blockquote{border-left:3px solid #ccc;margin:0.4em 0;padding:0.1em 1em;color:#5a
 hr{border:none;border-top:1px solid #bbb;margin:1em 0;}
 ul,ol{margin:0.3em 0;padding-left:1.6em;}
 li{margin:0.15em 0;}
-li.task-item{list-style:none;margin-left:-1.2em;}
-li.task-item input{margin-right:0.4em;}
+li:has(> input[type="checkbox"]){list-style:none;margin-left:-1.2em;}
+li>input[type="checkbox"]{margin-right:0.4em;}
 table{border-collapse:collapse;margin:0.6em 0;}
 th,td{border:1px solid #ccc;padding:4px 10px;text-align:left;}
 th{background:#f0f0f0;font-weight:700;}
@@ -90,8 +90,10 @@ document.head.appendChild(documentBase);
 let zoomSeq = 0;
 
 function wrapMermaidBlocks() {
-  const blocks = document.querySelectorAll('pre.mermaid:not([data-wrapped])');
-  blocks.forEach((el) => {
+  const blocks = document.querySelectorAll('pre.mermaid:not([data-wrapped]), pre > code.language-mermaid');
+  blocks.forEach((block) => {
+    const el = block.matches('code') ? block.parentElement : block;
+    if (!el || el.hasAttribute('data-wrapped')) return;
     el.setAttribute('data-wrapped', '1');
     const src = el.textContent;
     const id = 'mmd-' + (zoomSeq++);

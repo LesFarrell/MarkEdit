@@ -29,3 +29,4 @@ jobs:
             mermaid.min.js
             LICENSE
             THIRD_PARTY_NOTICES.md
+            third_party/cmark-gfm/COPYING
