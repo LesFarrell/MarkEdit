@@ -14,6 +14,46 @@ static int attach_extension(cmark_parser *parser, cmark_llist **render_extension
     return 1;
 }
 
+static const char *next_line(const char *line_end) {
+    if (*line_end == '\r' && line_end[1] == '\n') return line_end + 2;
+    if (*line_end == '\r' || *line_end == '\n') return line_end + 1;
+    return line_end;
+}
+
+static const char *skip_yaml_front_matter(const char *text) {
+    const char *start = text;
+    const char *line_end;
+    size_t text_length = strlen(text);
+
+    if (text_length >= 3 &&
+        (unsigned char)start[0] == 0xEF &&
+        (unsigned char)start[1] == 0xBB &&
+        (unsigned char)start[2] == 0xBF) {
+        start += 3;
+    }
+
+    line_end = strpbrk(start, "\r\n");
+    if (!line_end || line_end - start != 3 || memcmp(start, "---", 3) != 0) {
+        return text;
+    }
+
+    start = next_line(line_end);
+    while (*start) {
+        size_t length;
+        line_end = strpbrk(start, "\r\n");
+        length = line_end ? (size_t)(line_end - start) : strlen(start);
+        if (length == 3 &&
+            (memcmp(start, "---", 3) == 0 || memcmp(start, "...", 3) == 0)) {
+            return line_end ? next_line(line_end) : start + length;
+        }
+        if (!line_end) break;
+        start = next_line(line_end);
+    }
+
+    /* An unterminated opening marker is ordinary Markdown, not metadata. */
+    return text;
+}
+
 char *markdown_to_html(const char *text) {
     static const char *const extension_names[] = {
         "table",
@@ -44,6 +84,7 @@ char *markdown_to_html(const char *text) {
         }
     }
 
+    text = skip_yaml_front_matter(text);
     cmark_parser_feed(parser, text, strlen(text));
     document = cmark_parser_finish(parser);
     if (!document) {

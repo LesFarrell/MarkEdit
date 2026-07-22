@@ -4,7 +4,7 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 
 - **Left pane** — a [Scintilla](https://www.scintilla.org/) source editor for your Markdown, with line numbers, current-line highlighting, and real Tab/Shift+Tab block indent.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library.
-- Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
+- Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
 - Dark mode (View → Use Dark Mode) applies to both the editor and the preview, is remembered between sessions, and the preview starts directly in the right theme (no light-mode flash).
 
 Launching with no arguments shows just the editor; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
@@ -15,6 +15,8 @@ Launching with no arguments shows just the editor; launching with a file path sh
 - GitHub-style note, tip, important, warning, and caution alerts.
 - Local syntax highlighting for named code fences, with matching light and dark themes.
 - Stable heading permalinks and a floating document outline for documents with multiple headings.
+- Inline (`$...$`) and display (`$$...$$` or fenced `math`) mathematical expressions.
+- YAML front matter delimited by `---` (and closed by `---` or `...`) is treated as document metadata and omitted from the preview.
 - Mermaid diagram rendering with a zoom/pan toolbar.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Editor font is configurable (Format → Font) and remembered between sessions.
@@ -76,6 +78,7 @@ preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid
 github-markdown.css      GitHub-flavored preview stylesheet (light + dark)
 mermaid.min.js           bundled Mermaid renderer
 highlight*.js / .css     bundled Highlight.js renderer and light/dark themes
+katex/                    bundled KaTeX renderer, stylesheet, and fonts
 make_icon.ps1            regenerates markedit.ico
 build.bat                build script
 test.bat / tests/        parser regression tests
@@ -83,11 +86,12 @@ third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
 third_party/cmark-gfm/   cmark-gfm 0.29.0.gfm.13 source and BSD-2-Clause licence
 third_party/highlightjs/ Highlight.js 11.11.1 licence and provenance
+third_party/katex/       KaTeX 0.17.0 licence and provenance
 ```
 
 ## GitHub-style preview
 
-The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look, including a dark-mode variant that's applied automatically when Dark Mode is on. Mermaid and Highlight.js assets are also local, so rendering works offline and does not silently fetch executable content or styles from a CDN.
+The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look, including a dark-mode variant that's applied automatically when Dark Mode is on. Mermaid, Highlight.js, and KaTeX assets are also local, so rendering works offline and does not silently fetch executable content, styles, or fonts from a CDN.
 
 Files such as `markedit.exe`, `markedit.ini` (saved settings), and `webview2_data/` (WebView2's browser profile/cache) are generated at build or run time and are not tracked in git.
 
@@ -95,7 +99,8 @@ Files such as `markedit.exe`, `markedit.ini` (saved settings), and `webview2_dat
 
 MarkEdit uses cmark-gfm without its unsafe-rendering option, so raw HTML is
 omitted and dangerous URL schemes are scrubbed rather than executed in the
-preview. Links using HTTP, HTTPS, and `mailto:` open in the system handler;
+preview. KaTeX runs with trusted commands disabled and bounded expansion and
+output sizing. Links using HTTP, HTTPS, and `mailto:` open in the system handler;
 relative links resolve from the Markdown document's directory.
 
 ## Licence

@@ -36,6 +36,12 @@ int main(void) {
     expect_contains("footnote", "A note.[^1]\n\n[^1]: Footnote text.\n", "class=\"footnotes\"");
     expect_contains("alert marker preserved", "> [!NOTE]\n> Useful information.\n", "[!NOTE]\nUseful information.");
     expect_contains("code language", "```c\nint main(void) {}\n```\n", "class=\"language-c\"");
+    expect_contains("inline math delimiters preserved", "Euler: $e^{i\\pi} + 1 = 0$\n", "$e^{i\\pi} + 1 = 0$");
+    expect_contains("math language", "```math\n\\int_0^1 x^2 \\, dx\n```\n", "class=\"language-math\"");
+    expect_contains("yaml front matter body", "---\ntitle: Example\ntags: [demo]\n---\n# Visible\n", "<h1>Visible</h1>");
+    expect_not_contains("yaml front matter hidden", "---\ntitle: Example\ntags: [demo]\n---\n# Visible\n", "title: Example");
+    expect_contains("yaml front matter CRLF and BOM", "\xEF\xBB\xBF---\r\ntitle: Example\r\n...\r\nBody\r\n", "<p>Body</p>");
+    expect_contains("unterminated yaml marker retained", "---\ntitle: Example\n", "title: Example");
     expect_contains("raw html omitted", "<img src=x onerror=alert(1)>\n", "raw HTML omitted");
     expect_not_contains("raw html inactive", "<img src=x onerror=alert(1)>\n", "<img src=x");
     expect_not_contains("unsafe URL inactive", "[click](javascript:alert(1))\n", "href=\"javascript:");

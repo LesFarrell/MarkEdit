@@ -55,6 +55,8 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
 .document-outline a{color:#0969da;text-decoration:none;}
 .document-outline a:hover{text-decoration:underline;}
 .markdown-body pre code.hljs{padding:0;overflow:visible;background:transparent;}
+.math-display{margin:1em 0;overflow-x:auto;overflow-y:hidden;text-align:center;}
+.math-display>.katex-display{margin:0;padding:.2em 0;}
 .theme-dark, .theme-dark body{background:#0d1117;color:#e6edf3;color-scheme:dark;}
 .theme-dark code{background:#161b22;color:#e6edf3;}
 .theme-dark pre.codeblock{background:#161b22;}
@@ -75,6 +77,7 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
 <link id="gh-css-local" rel="stylesheet" href="github-markdown.css">
 <link id="hljs-light" rel="stylesheet" href="highlight-github.min.css">
 <link id="hljs-dark" rel="stylesheet" href="highlight-github-dark.min.css" disabled>
+<link rel="stylesheet" href="katex/katex.min.css">
 <script>
 (function(){
   function applyTheme(theme) {
@@ -115,6 +118,8 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
   <nav aria-label="Document outline"><ol></ol></nav>
 </details>
 <div id="content"></div>
+<script src="katex/katex.min.js"></script>
+<script src="katex/auto-render.min.js"></script>
 <script src="highlight.min.js"></script>
 <script src="highlight-powershell.min.js"></script>
 <script src="mermaid.min.js"></script>
@@ -206,8 +211,36 @@ function highlightCodeBlocks(root) {
     const languageClass = Array.from(code.classList).find((name) => name.startsWith('language-'));
     if (!languageClass) return;
     const language = languageClass.slice('language-'.length).toLowerCase();
-    if (language === 'mermaid' || !hljs.getLanguage(language)) return;
+    if (language === 'mermaid' || language === 'math' || !hljs.getLanguage(language)) return;
     hljs.highlightElement(code);
+  });
+}
+
+function renderMath(root) {
+  if (!window.katex) return;
+
+  const options = {
+    throwOnError: false,
+    trust: false,
+    strict: 'warn',
+    maxSize: 20,
+    maxExpand: 1000
+  };
+
+  root.querySelectorAll('pre > code.language-math').forEach((code) => {
+    const display = document.createElement('div');
+    display.className = 'math-display';
+    code.parentElement.replaceWith(display);
+    katex.render(code.textContent, display, { ...options, displayMode: true });
+  });
+
+  if (!window.renderMathInElement) return;
+  renderMathInElement(root, {
+    ...options,
+    delimiters: [
+      { left: '$$', right: '$$', display: true },
+      { left: '$', right: '$', display: false }
+    ]
   });
 }
 
@@ -317,6 +350,7 @@ function setContent(html) {
   const article = document.querySelector('#content > .markdown-body');
   enhanceAlerts(article);
   enhanceHeadings(article);
+  renderMath(article);
   highlightCodeBlocks(article);
   wrapMermaidBlocks();
   mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => updateSoloDiagramLayout());

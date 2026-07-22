@@ -23,6 +23,13 @@ Fenced-code syntax highlighting uses
 Ivan Sagalaev and contributors, licensed under the BSD 3-Clause License. A copy
 is at `third_party/highlightjs/LICENSE`.
 
+## KaTeX 0.17.0
+
+Mathematical expressions are rendered by
+[KaTeX](https://github.com/KaTeX/KaTeX), copyright (c) 2013–2020 Khan
+Academy and other contributors, licensed under the MIT License. A copy is at
+`third_party/katex/LICENSE`.
+
 ## github-markdown-css
 
 `github-markdown.css` is derived from

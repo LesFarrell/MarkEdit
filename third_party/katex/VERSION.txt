@@ -1,0 +1,10 @@
+KaTeX 0.17.0
+Source package: https://registry.npmjs.org/katex/-/katex-0.17.0.tgz
+
+Vendored production files:
+45fbe318fea878fdc0a111913dc1f87894b2c439360d0228c086ef313f213efc  katex/katex.min.js
+a34ad8fc188e8f5a3af7ceaa2a58d7210c6c9171335a15bff2b48ebcd6a6f5b0  katex/katex.min.css
+e5372d199bcdae8b4de71d0f7ceba72a4ba12774a27c60a6f1f77d03b3228ee4  katex/auto-render.min.js
+
+The font files under katex/fonts are copied unchanged from the package's
+dist/fonts directory.
