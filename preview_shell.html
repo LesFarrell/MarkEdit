@@ -28,6 +28,7 @@ img{max-width:100%;}
 .mermaid-wrap{position:relative;border:1px solid #e0e0e0;border-radius:6px;margin:0.6em 0;overflow:auto;background:#fff;max-height:70vh;cursor:grab;}
 .mermaid-wrap.panning{cursor:grabbing;user-select:none;}
 #content.solo-diagram{overflow:hidden;}
+#content.solo-diagram>.markdown-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;}
 #content.solo-diagram .mermaid-wrap{flex:1 1 auto;max-height:none;margin:0;min-height:0;}
 .mermaid-inner{transform-origin:0 0;display:inline-block;padding:12px;}
 .mermaid-toolbar{position:sticky;top:0;left:0;display:flex;gap:4px;justify-content:flex-end;padding:4px;background:rgba(255,255,255,0.9);border-bottom:1px solid #eee;z-index:5;}
@@ -180,7 +181,9 @@ function wrapMermaidBlocks() {
 
 function updateSoloDiagramLayout() {
   const content = document.getElementById('content');
-  const children = Array.from(content.children).filter((el) => {
+  const article = content.querySelector(':scope > .markdown-body');
+  const layoutRoot = article || content;
+  const children = Array.from(layoutRoot.children).filter((el) => {
     if (el.tagName === 'P' && el.textContent.trim() === '') return false;
     return true;
   });
