@@ -5,7 +5,7 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 - **Left pane** — a [Scintilla](https://www.scintilla.org/) source editor for your Markdown, with line numbers, current-line highlighting, and real Tab/Shift+Tab block indent.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
-- Dark mode (View → Use Dark Mode) applies to both the editor and the preview, is remembered between sessions, and the preview starts directly in the right theme (no light-mode flash).
+- GitHub Light and GitHub Dark themes (View → Theme) apply to both the editor and preview, are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
 
 Launching with no arguments shows just the editor; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
 
@@ -20,7 +20,7 @@ Launching with no arguments shows just the editor; launching with a file path sh
 - Mermaid diagram rendering with a zoom/pan toolbar.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Editor font is configurable (Format → Font) and remembered between sessions.
-- Dark mode toggle (View → Use Dark Mode), remembered between sessions.
+- GitHub Light and GitHub Dark themes (View → Theme), remembered between sessions.
 - Find/Replace, Undo/Redo, standard clipboard shortcuts.
 - A plain-text Markdown syntax reference (Help → Markdown Reference).
 - Unicode filenames, long Windows paths, drag-and-drop, and document-relative links/images.
@@ -91,7 +91,7 @@ third_party/katex/       KaTeX 0.17.0 licence and provenance
 
 ## GitHub-style preview
 
-The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look, including a dark-mode variant that's applied automatically when Dark Mode is on. Mermaid, Highlight.js, and KaTeX assets are also local, so rendering works offline and does not silently fetch executable content, styles, or fonts from a CDN.
+The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look. Its light and dark variants are synchronized with the matching GitHub editor palette. Mermaid, Highlight.js, and KaTeX assets are also local, so rendering works offline and does not silently fetch executable content, styles, or fonts from a CDN.
 
 Files such as `markedit.exe`, `markedit.ini` (saved settings), and `webview2_data/` (WebView2's browser profile/cache) are generated at build or run time and are not tracked in git.
 

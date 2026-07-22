@@ -3,6 +3,7 @@ markedit.exe
 markedit.pdb
 markedit.res
 tests/test_parser.exe
+/dist/
 /Scintilla.dll
 /WebView2Loader.dll
 

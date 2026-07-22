@@ -47,7 +47,8 @@
 #define IDM_FORMAT_FONT   220
 #define IDM_VIEW_TOGGLEPREVIEW 230
 #define IDM_VIEW_TOGGLEEDITOR  231
-#define IDM_VIEW_TOGGLETHEME   232
+#define IDM_VIEW_THEME_GITHUB_LIGHT 232
+#define IDM_VIEW_THEME_GITHUB_DARK  233
 #define IDM_HELP_REFERENCE 240
 
 #define IDI_APPICON 1
@@ -212,35 +213,33 @@ static void update_linenumber_margin_width(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_LINENUMBERS, width);
 }
 
-/* Apply the editor's color scheme (text, background, caret line, line-number
-   margin, selection) to match g_previewDarkMode. Called once at startup and
-   again whenever the theme is toggled, so it must be idempotent and safe to
-   call after the control already has text/styles set up. */
+/* Apply GitHub's light/dark palette to the editor so it matches the preview.
+   Called once at startup and whenever the selected theme changes. */
 static void apply_editor_theme(HWND hEdit) {
     if (g_previewDarkMode) {
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, 0x00D4D4D4 /* light gray, BGR */);
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, 0x001E1E1E /* dark gray, BGR */);
+        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0xE6, 0xED, 0xF3));
+        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0x0D, 0x11, 0x17));
         SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0);
 
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, 0x00808080 /* mid gray, BGR */);
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, 0x002B2B2B /* dark gray, BGR */);
+        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x7D, 0x85, 0x90));
+        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0x16, 0x1B, 0x22));
 
-        SendMessageA(hEdit, SCI_SETCARETLINEBACK, 0x003A3A3A /* lighter dark gray, BGR */, 0);
-        SendMessageA(hEdit, SCI_SETCARETFORE, 0x00FFFFFF /* white, BGR */, 0);
-        SendMessageA(hEdit, SCI_SETSELBACK, TRUE, 0x00666666 /* gray, BGR */);
-        SendMessageA(hEdit, SCI_SETSELFORE, TRUE, 0x00FFFFFF /* white, BGR */);
+        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0x16, 0x1B, 0x22), 0);
+        SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0xE6, 0xED, 0xF3), 0);
+        SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0x26, 0x4F, 0x78));
+        SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0xFF, 0xFF, 0xFF));
     } else {
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, 0x00000000 /* black, BGR */);
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, 0x00FFFFFF /* white, BGR */);
+        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0x1F, 0x23, 0x28));
+        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0xFF, 0xFF, 0xFF));
         SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0);
 
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, 0x00000000 /* black, BGR */);
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, 0x00F0F0F0 /* light gray, BGR */);
+        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x65, 0x6D, 0x76));
+        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0xF6, 0xF8, 0xFA));
 
-        SendMessageA(hEdit, SCI_SETCARETLINEBACK, 0x00E8E8E8 /* light gray, BGR */, 0);
-        SendMessageA(hEdit, SCI_SETCARETFORE, 0x00000000 /* black, BGR */, 0);
-        SendMessageA(hEdit, SCI_SETSELBACK, TRUE, 0x00C8C8C8 /* light gray, BGR */);
-        SendMessageA(hEdit, SCI_SETSELFORE, TRUE, 0x00000000 /* black, BGR */);
+        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0xF0, 0xF3, 0xF6), 0);
+        SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0x1F, 0x23, 0x28), 0);
+        SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0xB6, 0xD7, 0xFF));
+        SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0x1F, 0x23, 0x28));
     }
     InvalidateRect(hEdit, NULL, TRUE);
 }
@@ -331,16 +330,27 @@ static void load_font_settings(void) {
 static void load_theme_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WCHAR value[16];
-    GetPrivateProfileStringW(L"Preview", L"DarkMode", L"0", value, 16, path);
-    g_previewDarkMode = (value[0] == L'1' || value[0] == L't' || value[0] == L'T' || value[0] == L'y' || value[0] == L'Y');
+    WCHAR value[32];
+    GetPrivateProfileStringW(L"Preview", L"Theme", L"", value, 32, path);
+    if (_wcsicmp(value, L"github-dark") == 0) {
+        g_previewDarkMode = 1;
+    } else if (_wcsicmp(value, L"github-light") == 0) {
+        g_previewDarkMode = 0;
+    } else {
+        /* Migrate settings written by releases that exposed a DarkMode toggle. */
+        GetPrivateProfileStringW(L"Preview", L"DarkMode", L"0", value, 32, path);
+        g_previewDarkMode = (value[0] == L'1' || value[0] == L't' || value[0] == L'T' ||
+                             value[0] == L'y' || value[0] == L'Y');
+    }
     free(path);
 }
 
 static void save_theme_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WritePrivateProfileStringW(L"Preview", L"DarkMode", g_previewDarkMode ? L"1" : L"0", path);
+    WritePrivateProfileStringW(L"Preview", L"Theme",
+                               g_previewDarkMode ? L"github-dark" : L"github-light", path);
+    WritePrivateProfileStringW(L"Preview", L"DarkMode", NULL, path);
     free(path);
 }
 
@@ -1573,7 +1583,13 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_STRING | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEPREVIEW, "Show &Preview\tCtrl+Shift+V");
     AppendMenuA(hView, MF_STRING | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEEDITOR, "Show &Editor\tCtrl+Shift+E");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hView, MF_STRING | (g_previewDarkMode ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLETHEME, "Use &Dark Mode");
+    HMENU hTheme = CreatePopupMenu();
+    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_LIGHT, "GitHub &Light");
+    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_DARK, "GitHub &Dark");
+    CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
+                       g_previewDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
+                       MF_BYCOMMAND);
+    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hTheme, "&Theme");
     AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hView, "&View");
 
     HMENU hHelp = CreatePopupMenu();
@@ -1643,7 +1659,12 @@ static void update_view_menu(HWND hwnd) {
     HMENU hView = GetSubMenu(hMenuBar, 3); /* File, Edit, Format, View */
     CheckMenuItem(hView, IDM_VIEW_TOGGLEPREVIEW, MF_BYCOMMAND | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLEEDITOR, MF_BYCOMMAND | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(hView, IDM_VIEW_TOGGLETHEME, MF_BYCOMMAND | (g_previewDarkMode ? MF_CHECKED : MF_UNCHECKED));
+    HMENU hTheme = GetSubMenu(hView, 3);
+    if (hTheme) {
+        CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
+                           g_previewDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
+                           MF_BYCOMMAND);
+    }
 }
 
 static void toggle_preview(HWND hwnd) {
@@ -1814,8 +1835,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDM_FORMAT_FONT: do_choose_font(); break;
                 case IDM_VIEW_TOGGLEPREVIEW: toggle_preview(hwnd); break;
                 case IDM_VIEW_TOGGLEEDITOR: toggle_editor(hwnd); break;
-                case IDM_VIEW_TOGGLETHEME:
-                    g_previewDarkMode = !g_previewDarkMode;
+                case IDM_VIEW_THEME_GITHUB_LIGHT:
+                case IDM_VIEW_THEME_GITHUB_DARK:
+                    g_previewDarkMode = (cmd == IDM_VIEW_THEME_GITHUB_DARK);
                     save_theme_settings();
                     apply_preview_theme();
                     apply_editor_theme(g_hEdit);
