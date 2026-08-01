@@ -49,3 +49,13 @@ three-clause BSD-style licence published with that package; a copy is at
 Scintilla headers and `Scintilla.dll` are copyright 1998–2021 by Neil Hodgson
 and contributors and are distributed under Scintilla's permissive licence.
 A copy is at `third_party/scintilla/License.txt`.
+
+## Lexilla 5.5.1
+
+Markdown source-editor syntax highlighting uses the Markdown lexer from
+[Lexilla](https://github.com/ScintillaOrg/lexilla), copyright 1998–2021 by
+Neil Hodgson and contributors, distributed under the same permissive licence
+as Scintilla. `Lexilla.dll` is built from a trimmed copy of the upstream
+source (only the Markdown lexer and its required support code) under
+`third_party/lexilla`; a copy of the licence is at
+`third_party/lexilla/License.txt`.

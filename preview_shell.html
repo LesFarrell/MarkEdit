@@ -1,3 +1,13 @@
+<!--
+  If you change the CSP, or the base/dark-theme CSS below, also update the
+  HTML_SHELL fallback string in markedit.c (used on WebView2 Runtimes too old
+  to support ICoreWebView2_3 / virtual-host folder mapping, so this file can't
+  be served to them directly). HTML_SHELL intentionally omits KaTeX,
+  highlight.js, and Mermaid script tags -- see the comment above its
+  definition for why. The fallback retains some shared feature styling to
+  keep the two shells easy to compare, although those features are inactive;
+  its base styling and CSP should otherwise track this file.
+-->
 <!doctype html>
 <html>
 <head>
@@ -12,7 +22,7 @@ h2{font-size:1.5em;font-weight:700;margin:0.5em 0 0.3em 0;}
 h3{font-size:1.2em;font-weight:700;margin:0.5em 0 0.3em 0;}
 p{margin:0.4em 0;line-height:1.5;}
 code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-family:Consolas,monospace;font-size:0.95em;}
-pre.codeblock{background:#f5f5f5;padding:8px 10px;border-radius:4px;overflow-x:auto;}
+pre.codeblock{background:#eaeaea;padding:8px 10px;border-radius:4px;overflow-x:auto;}
 pre.codeblock code{background:none;padding:0;}
 blockquote{border-left:3px solid #ccc;margin:0.4em 0;padding:0.1em 1em;color:#5a5a5a;font-style:italic;}
 hr{border:none;border-top:1px solid #bbb;margin:1em 0;}
@@ -33,7 +43,7 @@ img{max-width:100%;}
 .mermaid-inner{transform-origin:0 0;display:inline-block;padding:12px;}
 .mermaid-toolbar{position:sticky;top:0;left:0;display:flex;gap:4px;justify-content:flex-end;padding:4px;background:rgba(255,255,255,0.9);border-bottom:1px solid #eee;z-index:5;}
 .mermaid-toolbar button{cursor:pointer;border:1px solid #ccc;background:#fafafa;border-radius:4px;width:26px;height:24px;font-size:14px;line-height:1;}
-.mermaid-toolbar .zoom-readout{width:52px;font-variant-numeric:tabular-nums;}
+.mermaid-toolbar .zoom-readout{width:68px;font-variant-numeric:tabular-nums;}
 .mermaid-toolbar button:hover{background:#eee;}
 .markdown-body blockquote.markdown-alert{--alert-color:#0969da;margin:1rem 0;padding:.5rem 1rem;border-left:.25em solid var(--alert-color);color:inherit;font-style:normal;}
 .markdown-alert>:first-child{margin-top:0;}
@@ -74,10 +84,10 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
 .theme-dark .document-outline a{color:#58a6ff;}
 .theme-dark .markdown-body blockquote.markdown-alert{border-left-color:var(--alert-color);color:inherit;}
 </style>
-<link id="gh-css-local" rel="stylesheet" href="github-markdown.css">
-<link id="hljs-light" rel="stylesheet" href="highlight-github.min.css">
-<link id="hljs-dark" rel="stylesheet" href="highlight-github-dark.min.css" disabled>
-<link rel="stylesheet" href="katex/katex.min.css">
+<link id="gh-css-local" rel="stylesheet" href="https://markedit.local/github-markdown.css">
+<link id="hljs-light" rel="stylesheet" href="https://markedit.local/highlight-github.min.css">
+<link id="hljs-dark" rel="stylesheet" href="https://markedit.local/highlight-github-dark.min.css" disabled>
+<link rel="stylesheet" href="https://markedit.local/katex/katex.min.css">
 <script>
 (function(){
   function applyTheme(theme) {
@@ -166,6 +176,20 @@ function navigateToHeading(event, heading, id) {
   const url = new URL(window.location.href);
   url.hash = id;
   history.replaceState(null, '', url.href);
+}
+
+function enhanceFragmentLinks(root) {
+  root.querySelectorAll('a[href^="#"]').forEach((link) => {
+    const raw = link.getAttribute('href');
+    if (!raw || raw.length < 2) return;
+    link.addEventListener('click', (event) => {
+      let id;
+      try { id = decodeURIComponent(raw.slice(1)); }
+      catch (_) { return; }
+      const target = document.getElementById(id);
+      if (target) navigateToHeading(event, target, id);
+    });
+  });
 }
 
 function enhanceHeadings(root) {
@@ -277,7 +301,7 @@ function wrapMermaidBlocks() {
       const act = e.target.getAttribute('data-act');
       if (!act) return;
       let scale = parseFloat(inner.dataset.scale || '1');
-      if (act === 'in') scale = Math.min(scale * 1.2, 6);
+      if (act === 'in') scale = Math.min(scale * 1.2, 50);
       else if (act === 'out') scale = Math.max(scale / 1.2, 0.15);
       else scale = 1;
       applyScale(scale);
@@ -288,7 +312,7 @@ function wrapMermaidBlocks() {
       e.preventDefault();
       let scale = parseFloat(inner.dataset.scale || '1');
       scale *= (e.deltaY < 0) ? 1.1 : (1 / 1.1);
-      scale = Math.min(Math.max(scale, 0.15), 6);
+      scale = Math.min(Math.max(scale, 0.15), 50);
       applyScale(scale);
     }, { passive: false });
 
@@ -296,11 +320,12 @@ function wrapMermaidBlocks() {
     let startX = 0, startY = 0, startScrollLeft = 0, startScrollTop = 0;
     let moved = false;
 
-    wrap.addEventListener('mousedown', (e) => {
+    wrap.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       if (e.target.closest('.mermaid-toolbar')) return;
       panning = true;
       moved = false;
+      wrap.setPointerCapture(e.pointerId);
       startX = e.clientX;
       startY = e.clientY;
       startScrollLeft = wrap.scrollLeft;
@@ -309,7 +334,7 @@ function wrapMermaidBlocks() {
       e.preventDefault();
     });
 
-    window.addEventListener('mousemove', (e) => {
+    wrap.addEventListener('pointermove', (e) => {
       if (!panning) return;
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
@@ -318,13 +343,15 @@ function wrapMermaidBlocks() {
       wrap.scrollTop = startScrollTop - dy;
     });
 
-    function endPan() {
+    function endPan(e) {
       if (!panning) return;
       panning = false;
       wrap.classList.remove('panning');
+      if (wrap.hasPointerCapture(e.pointerId)) wrap.releasePointerCapture(e.pointerId);
     }
-    window.addEventListener('mouseup', endPan);
-    window.addEventListener('mouseleave', endPan);
+    wrap.addEventListener('pointerup', endPan);
+    wrap.addEventListener('pointercancel', endPan);
+    wrap.addEventListener('lostpointercapture', endPan);
 
     wrap.addEventListener('click', (e) => {
       if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; }
@@ -349,6 +376,7 @@ function setContent(html) {
   document.getElementById('content').innerHTML = '<article class="markdown-body">' + html + '</article>';
   const article = document.querySelector('#content > .markdown-body');
   enhanceAlerts(article);
+  enhanceFragmentLinks(article);
   enhanceHeadings(article);
   renderMath(article);
   highlightCodeBlocks(article);

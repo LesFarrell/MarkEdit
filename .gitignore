@@ -3,9 +3,21 @@ markedit.exe
 markedit.pdb
 markedit.res
 tests/test_parser.exe
+tests/test_parser.pdb
 /dist/
+/dest/
 /Scintilla.dll
 /WebView2Loader.dll
+/Lexilla.dll
+/Lexilla.lib
+/Lexilla.pdb
+/libLexilla.dll.a
+
+# premake5-generated Makefiles (premake5.lua is the checked-in source)
+/build/
+
+# Inno Setup's default output directory (markedit.iss is the checked-in source)
+/Output/
 
 # Runtime-generated WebView2 browser profile/cache
 webview2_data/

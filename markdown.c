@@ -42,7 +42,10 @@ static const char *skip_yaml_front_matter(const char *text) {
         size_t length;
         line_end = strpbrk(start, "\r\n");
         length = line_end ? (size_t)(line_end - start) : strlen(start);
-        if (length == 3 &&
+        size_t trimmed = length;
+        while (trimmed > 0 && (start[trimmed - 1] == ' ' || start[trimmed - 1] == '\t'))
+            trimmed--;
+        if (trimmed == 3 &&
             (memcmp(start, "---", 3) == 0 || memcmp(start, "...", 3) == 0)) {
             return line_end ? next_line(line_end) : start + length;
         }

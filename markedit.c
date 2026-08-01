@@ -22,10 +22,14 @@
 
 #include <WebView2.h>
 #include "third_party/scintilla/include/Scintilla.h"
+#include "third_party/lexilla/include/Lexilla.h"
+#include "third_party/lexilla/include/SciLexer.h"
 
 #define ID_EDIT    101
 #define ID_PREVIEW 102
 #define IDT_PREVIEW_UPDATE 1
+#define SPLITTER_WIDTH 6
+#define TOOLBAR_HEIGHT 32
 
 #define IDM_FILE_NEW      201
 #define IDM_FILE_OPEN     202
@@ -49,7 +53,24 @@
 #define IDM_VIEW_TOGGLEEDITOR  231
 #define IDM_VIEW_THEME_GITHUB_LIGHT 232
 #define IDM_VIEW_THEME_GITHUB_DARK  233
+#define IDM_VIEW_PREVIEW_ON_LEFT 234
 #define IDM_HELP_REFERENCE 240
+
+#define IDM_FMT_BOLD          260
+#define IDM_FMT_ITALIC        261
+#define IDM_FMT_STRIKETHROUGH 262
+#define IDM_FMT_CODE          263
+#define IDM_FMT_H1            264
+#define IDM_FMT_H2            265
+#define IDM_FMT_H3            266
+#define IDM_FMT_QUOTE         267
+#define IDM_FMT_BULLETLIST    268
+#define IDM_FMT_NUMBERLIST    269
+#define IDM_FMT_TASKLIST      270
+#define IDM_FMT_LINK          271
+#define IDM_FMT_IMAGE         272
+#define IDM_FMT_TABLE         273
+#define IDM_FMT_CODEBLOCK     274
 
 #define IDI_APPICON 1
 
@@ -66,8 +87,10 @@ static ICoreWebView2_3 *g_webview3 = NULL;
 static int g_webviewReady = 0;
 static HBRUSH g_previewBkBrush = NULL; /* matches the preview host's WM_CTLCOLORSTATIC background to the theme, so it doesn't flash white before WebView2 paints */
 static HBRUSH g_helpBkBrush = NULL;
+static HBRUSH g_mainBkBrush = NULL; /* fills the toolbar strip and splitter gap in the main window, matching the theme instead of the system COLOR_WINDOW default */
 static char *g_pendingHtmlBody = NULL; /* set if update requested before webview ready */
 static int g_previewDarkMode = 0;
+static int g_hasBom = 0;
 
 /* Help window: a second top-level window with a read-only textbox showing a
    plain-text Markdown-syntax reference. Created on demand. */
@@ -76,8 +99,15 @@ static HWND g_hHelpEdit = NULL;
 
 static WCHAR *g_currentFile = NULL;
 static int g_dirty = 0;
-static int g_previewVisible = 1;
+static int g_previewVisible = 0;
 static int g_editorVisible = 1;
+static int g_previewOnLeft = 0;
+static int g_splitterRatio = 500; /* left pane width as thousandths of the available split width */
+static int g_splitterPos = -1; /* pixel x of splitter, initialized from g_splitterRatio */
+static int g_commandLinePreviewMode = 0;
+static RECT g_savedWindowRect;
+static int g_haveSavedWindowRect = 0;
+static int g_startMaximized = 0;
 
 #define MAX_RECENT_FILES 10
 static WCHAR *g_recentFiles[MAX_RECENT_FILES];
@@ -94,12 +124,14 @@ static void update_preview(void);
 void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
+static void apply_markdown_lexer_styles(HWND hEdit);
 static void apply_preview_host_theme(void);
 static void apply_help_theme(void);
 static void refresh_menu(HWND hwnd);
 static void update_document_mapping(void);
 
 static WCHAR *wcsdup_heap(const WCHAR *value) {
+    if (!value) return NULL;
     size_t bytes = (wcslen(value) + 1) * sizeof(WCHAR);
     WCHAR *copy = (WCHAR *)malloc(bytes);
     if (copy) memcpy(copy, value, bytes);
@@ -187,18 +219,363 @@ static char *get_edit_text(HWND hEdit, int *outLen) {
     return buf;
 }
 
+static const char *editor_eol_sequence(void) {
+    switch ((int)SendMessageA(g_hEdit, SCI_GETEOLMODE, 0, 0)) {
+        case SC_EOL_CR: return "\r";
+        case SC_EOL_LF: return "\n";
+        default: return "\r\n";
+    }
+}
+
+static int position_needs_leading_eol(int position) {
+    if (position <= 0) return 0;
+    int previous = (int)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(position - 1), 0);
+    return previous != '\r' && previous != '\n';
+}
+
+/* ================= formatting toolbar actions (operate on g_hEdit) ================= */
+
+/* Wrap the current selection in a symmetric Markdown marker (e.g. "**" for
+   bold), toggling it off if the selection is already wrapped in exactly that
+   marker. With no selection, insert an empty marker pair and place the caret
+   between them so typing continues inside it. */
+static void toolbar_wrap_inline(const char *marker) {
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    int markerLen = (int)strlen(marker);
+
+    if (selEnd == selStart) {
+        char pair[16];
+        snprintf(pair, sizeof(pair), "%s%s", marker, marker);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)pair);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + markerLen), (LPARAM)(selStart + markerLen));
+        SetFocus(g_hEdit);
+        return;
+    }
+
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    int innerStart = selStart + markerLen, innerEnd = selEnd - markerLen;
+    int alreadyWrapped = selEnd - selStart >= markerLen * 2 &&
+        memcmp(text + selStart, marker, (size_t)markerLen) == 0 &&
+        memcmp(text + innerEnd, marker, (size_t)markerLen) == 0;
+
+    if (alreadyWrapped) {
+        char *inner = (char *)malloc((size_t)(innerEnd - innerStart) + 1);
+        if (inner) {
+            memcpy(inner, text + innerStart, (size_t)(innerEnd - innerStart));
+            inner[innerEnd - innerStart] = 0;
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)selEnd);
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)inner);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)(selStart + (innerEnd - innerStart)));
+            free(inner);
+        }
+    } else {
+        size_t selLen = (size_t)(selEnd - selStart);
+        char *wrapped = (char *)malloc(selLen + (size_t)markerLen * 2 + 1);
+        if (wrapped) {
+            memcpy(wrapped, marker, (size_t)markerLen);
+            memcpy(wrapped + markerLen, text + selStart, selLen);
+            memcpy(wrapped + markerLen + selLen, marker, (size_t)markerLen);
+            wrapped[markerLen * 2 + selLen] = 0;
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + markerLen), (LPARAM)(selStart + markerLen + (int)selLen));
+            free(wrapped);
+        }
+    }
+    free(text);
+    SetFocus(g_hEdit);
+}
+
+/* Returns the 0-based [firstLine, lastLine] range touched by the current
+   selection (a single line if there is no selection). */
+static void toolbar_selected_line_range(int *firstLine, int *lastLine) {
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    *firstLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)selStart, 0);
+    *lastLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)selEnd, 0);
+    /* A selection ending exactly at the start of a line (e.g. after pressing
+       Home then Shift+Down once) shouldn't pull that line into the range. */
+    if (*lastLine > *firstLine && selEnd == (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)*lastLine, 0))
+        (*lastLine)--;
+}
+
+/* How many bytes of `line` (of length lineLen) are one of the recognized
+   line-prefix markers this toolbar manages (heading, quote, bullet, numbered,
+   task). Returns 0 if none match. Used so re-clicking a different button on
+   an already-prefixed line replaces the old prefix instead of stacking. */
+static int toolbar_prefix_length(const char *line, int lineLen) {
+    int i = 0;
+    while (i < lineLen && (line[i] == ' ') && i < 3) i++; /* tolerate up to 3 leading spaces, like CommonMark */
+    if (i < lineLen && line[i] == '>' ) {
+        int n = i + 1;
+        if (n < lineLen && (line[n] == ' ' || line[n] == '\t')) n++;
+        return n;
+    }
+    if (i < lineLen && line[i] == '#') {
+        int n = i;
+        while (n < lineLen && line[n] == '#' && n - i < 6) n++;
+        if (n < lineLen && line[n] != ' ' && line[n] != '\t') return 0;
+        if (n < lineLen) n++;
+        return n;
+    }
+    if (i < lineLen && (line[i] == '-' || line[i] == '*') ) {
+        int n = i + 1;
+        if (n == lineLen) return n;
+        if (line[n] != ' ' && line[n] != '\t') return 0;
+        if (line[n] == ' ' && n + 3 < lineLen && line[n + 1] == '[' &&
+            (line[n + 2] == ' ' || line[n + 2] == 'x' || line[n + 2] == 'X') &&
+            line[n + 3] == ']' &&
+            (n + 4 == lineLen || line[n + 4] == ' ' || line[n + 4] == '\t')) {
+            n += 4;
+            if (n < lineLen) n++;
+            return n;
+        }
+        return n + 1;
+    }
+    if (i < lineLen && line[i] >= '0' && line[i] <= '9') {
+        int n = i;
+        while (n < lineLen && line[n] >= '0' && line[n] <= '9') n++;
+        if (n < lineLen && line[n] == '.') {
+            n++;
+            if (n < lineLen && line[n] != ' ' && line[n] != '\t') return 0;
+            if (n < lineLen) n++;
+            return n;
+        }
+    }
+    return 0;
+}
+
+/* Apply `prefix` to every line in [firstLine, lastLine], replacing any
+   existing recognized prefix on each line first (so switching from, say,
+   H1 to H2, or bullet to numbered, doesn't leave the old marker behind).
+   `numbered` renumbers sequential lines 1., 2., 3., etc.; when true, `prefix`
+   is ignored and "N. " is generated per line instead. */
+static void toolbar_apply_line_prefix(const char *prefix, int numbered) {
+    int firstLine, lastLine;
+    toolbar_selected_line_range(&firstLine, &lastLine);
+
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    /* Build the replacement text for the whole line range in one pass, then
+       replace it in a single SCI_REPLACESEL so this is one undo step. */
+    size_t cap = (size_t)len + (size_t)(lastLine - firstLine + 1) * 16 + 1;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(text); return; }
+    size_t o = 0;
+    int number = 1;
+
+    int rangeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    int rangeEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+
+    /* For the numbered-list case, toggle the whole range off only if every
+       line in it is already numbered (so clicking again removes numbering). */
+    int allNumbered = 1;
+    if (numbered) {
+        for (int line = firstLine; line <= lastLine && allNumbered; line++) {
+            int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+            int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+            const char *lineText = text + lineStart;
+            int lineLen = lineEnd - lineStart;
+            int indentLen = 0;
+            while (indentLen < lineLen && lineText[indentLen] == ' ' && indentLen < 3) indentLen++;
+            int prefixLen = toolbar_prefix_length(lineText, lineLen);
+            int isNumeric = prefixLen > indentLen &&
+                lineText[indentLen] >= '0' && lineText[indentLen] <= '9';
+            if (!isNumeric) allNumbered = 0;
+        }
+    }
+
+    const char *eol = editor_eol_sequence();
+    size_t eolLen = strlen(eol);
+    for (int line = firstLine; line <= lastLine; line++) {
+        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        int lineLen = lineEnd - lineStart;
+        const char *lineText = text + lineStart;
+
+        int indentLen = 0;
+        while (indentLen < lineLen && lineText[indentLen] == ' ' && indentLen < 3) indentLen++;
+        int existingLen = toolbar_prefix_length(lineText, lineLen);
+        int markerLen = existingLen > 0 ? existingLen - indentLen : 0;
+        int hasExactPrefix = !numbered && prefix && markerLen == (int)strlen(prefix) &&
+            memcmp(lineText + indentLen, prefix, (size_t)markerLen) == 0;
+
+        char newPrefix[16];
+        int newPrefixLen;
+        if (hasExactPrefix || (numbered && allNumbered)) {
+            newPrefixLen = 0; /* toggle off */
+        } else if (numbered) {
+            newPrefixLen = snprintf(newPrefix, sizeof(newPrefix), "%d. ", number++);
+        } else {
+            newPrefixLen = snprintf(newPrefix, sizeof(newPrefix), "%s", prefix);
+        }
+
+        memcpy(out + o, lineText, (size_t)indentLen);
+        o += (size_t)indentLen;
+        if (newPrefixLen > 0) {
+            memcpy(out + o, newPrefix, (size_t)newPrefixLen);
+            o += (size_t)newPrefixLen;
+        }
+        int contentStart = existingLen > 0 ? existingLen : indentLen;
+        memcpy(out + o, lineText + contentStart, (size_t)(lineLen - contentStart));
+        o += (size_t)(lineLen - contentStart);
+        if (line < lastLine) {
+            memcpy(out + o, eol, eolLen);
+            o += eolLen;
+        }
+    }
+    out[o] = 0;
+
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)rangeStart, (LPARAM)rangeEnd);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
+    free(out);
+    free(text);
+    SetFocus(g_hEdit);
+}
+
+/* Insert `before` + selection (or `placeholder` if empty) + `after`, then
+   select the literal substring "url" inside `after` (both current callers'
+   `after` is "](url)") so the user can immediately type the destination.
+   Used for link/image inserts. */
+static void toolbar_insert_template(const char *before, const char *placeholder, const char *after) {
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    int hasSelection = selEnd > selStart;
+    const char *middle = hasSelection ? text + selStart : placeholder;
+    int middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
+
+    size_t beforeLen = strlen(before), afterLen = strlen(after);
+    char *whole = (char *)malloc(beforeLen + (size_t)middleLen + afterLen + 1);
+    if (whole) {
+        memcpy(whole, before, beforeLen);
+        memcpy(whole + beforeLen, middle, (size_t)middleLen);
+        memcpy(whole + beforeLen + (size_t)middleLen, after, afterLen);
+        whole[beforeLen + (size_t)middleLen + afterLen] = 0;
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)whole);
+
+        const char *urlPlaceholder = strstr(after, "url");
+        if (urlPlaceholder) {
+            int urlStart = selStart + (int)beforeLen + middleLen + (int)(urlPlaceholder - after);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)urlStart, (LPARAM)(urlStart + 3));
+        } else if (!hasSelection) {
+            int caret = selStart + (int)beforeLen + middleLen + (int)afterLen;
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
+        }
+        free(whole);
+    }
+    free(text);
+    SetFocus(g_hEdit);
+}
+
+static void toolbar_insert_table(void) {
+    const char *eol = editor_eol_sequence();
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+
+    const char *leading = position_needs_leading_eol(selStart) ? eol : "";
+    char table[168];
+    snprintf(table, sizeof(table),
+        "%s| Column 1 | Column 2 | Column 3 |%s"
+        "| --- | --- | --- |%s"
+        "| Cell | Cell | Cell |%s", leading, eol, eol, eol);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)table);
+    SetFocus(g_hEdit);
+}
+
+/* Wrap the current selection in a fenced code block (``` on its own line
+   before and after). With no selection, insert an empty fence pair and
+   place the caret right after the opening "```" so a language hint (e.g.
+   "c") can be typed immediately. */
+static void toolbar_insert_codeblock(void) {
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    const char *eol = editor_eol_sequence();
+    size_t eolLen = strlen(eol);
+    const char *leading = position_needs_leading_eol(selStart) ? eol : "";
+    size_t leadingLen = strlen(leading);
+
+    if (selEnd == selStart) {
+        char empty[36];
+        snprintf(empty, sizeof(empty), "%s```%s%s```%s", leading, eol, eol, eol);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)empty);
+        int caret = selStart + (int)leadingLen + 3;
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
+        SetFocus(g_hEdit);
+        return;
+    }
+
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+    size_t selLen = (size_t)(selEnd - selStart);
+    size_t openLen = leadingLen + 3 + eolLen, closeLen = eolLen + 3 + eolLen;
+    char *wrapped = (char *)malloc(openLen + selLen + closeLen + 1);
+    if (wrapped) {
+        memcpy(wrapped, leading, leadingLen);
+        memcpy(wrapped + leadingLen, "```", 3);
+        memcpy(wrapped + leadingLen + 3, eol, eolLen);
+        memcpy(wrapped + openLen, text + selStart, selLen);
+        memcpy(wrapped + openLen + selLen, eol, eolLen);
+        memcpy(wrapped + openLen + selLen + eolLen, "```", 3);
+        memcpy(wrapped + openLen + selLen + eolLen + 3, eol, eolLen);
+        wrapped[openLen + selLen + closeLen] = 0;
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + (int)openLen), (LPARAM)(selStart + (int)openLen + (int)selLen));
+        free(wrapped);
+    }
+    free(text);
+    SetFocus(g_hEdit);
+}
+
+static void toolbar_command(WORD cmd) {
+    switch (cmd) {
+        case IDM_FMT_BOLD: toolbar_wrap_inline("**"); break;
+        case IDM_FMT_ITALIC: toolbar_wrap_inline("*"); break;
+        case IDM_FMT_STRIKETHROUGH: toolbar_wrap_inline("~~"); break;
+        case IDM_FMT_CODE: toolbar_wrap_inline("`"); break;
+        case IDM_FMT_H1: toolbar_apply_line_prefix("# ", 0); break;
+        case IDM_FMT_H2: toolbar_apply_line_prefix("## ", 0); break;
+        case IDM_FMT_H3: toolbar_apply_line_prefix("### ", 0); break;
+        case IDM_FMT_QUOTE: toolbar_apply_line_prefix("> ", 0); break;
+        case IDM_FMT_BULLETLIST: toolbar_apply_line_prefix("- ", 0); break;
+        case IDM_FMT_NUMBERLIST: toolbar_apply_line_prefix(NULL, 1); break;
+        case IDM_FMT_TASKLIST: toolbar_apply_line_prefix("- [ ] ", 0); break;
+        case IDM_FMT_LINK: toolbar_insert_template("[", "link text", "](url)"); break;
+        case IDM_FMT_IMAGE: toolbar_insert_template("![", "alt text", "](url)"); break;
+        case IDM_FMT_TABLE: toolbar_insert_table(); break;
+        case IDM_FMT_CODEBLOCK: toolbar_insert_codeblock(); break;
+    }
+}
+
 /* Replace the Scintilla control's entire contents. Note SCI_SETTEXT is itself
    undoable (a delete-all + insert wrapped in one undo group); callers loading
    a fresh document (New/Open) should follow up with SCI_EMPTYUNDOBUFFER so the
    previous document's content isn't reachable via Undo. */
 static void set_edit_text(HWND hEdit, const char *text) {
+    int eolMode = SC_EOL_CRLF;
+    const char *firstCr = strchr(text, '\r');
+    const char *firstLf = strchr(text, '\n');
+    if (firstLf && (!firstCr || firstLf < firstCr)) {
+        eolMode = SC_EOL_LF;
+    } else if (firstCr) {
+        eolMode = firstCr[1] == '\n' ? SC_EOL_CRLF : SC_EOL_CR;
+    }
+    SendMessageA(hEdit, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
     SendMessageA(hEdit, SCI_SETTEXT, 0, (LPARAM)text);
 }
 
-/* Configure the Scintilla control as a plain Markdown source editor: no lexer
-   (so it never applies its own styling/highlighting rules that could color or
-   otherwise transform text unexpectedly), real tab characters at a width of 4,
-   CRLF line endings to match the rest of the app's file I/O, and only the
+/* Configure the Scintilla control as a Markdown source editor: Lexilla's
+   Markdown lexer for syntax highlighting (a passive read-only colorizer -
+   it never edits the buffer), real tab characters at a width of 4, CRLF
+   line endings to match the rest of the app's file I/O, and only the
    change-notifications we actually act on. Nothing here is auto-triggered by
    typing (autocomplete/call tips are entirely opt-in in Scintilla and are
    simply never invoked), so no unexpected characters get inserted. */
@@ -243,7 +620,53 @@ static void apply_editor_theme(HWND hEdit) {
         SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0xB6, 0xD7, 0xFF));
         SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0x1F, 0x23, 0x28));
     }
+    apply_markdown_lexer_styles(hEdit);
     InvalidateRect(hEdit, NULL, TRUE);
+}
+
+/* Color the Markdown lexer's styles (see third_party/lexilla/include/
+   SciLexer.h, SCE_MARKDOWN_*) to match the GitHub light/dark palette used
+   everywhere else in the app. Called from apply_editor_theme() after every
+   SCI_STYLECLEARALL, since that resets every style back to STYLE_DEFAULT. */
+static void apply_markdown_lexer_styles(HWND hEdit) {
+    COLORREF text = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF heading = g_previewDarkMode ? RGB(0x79, 0xC0, 0xFF) : RGB(0x09, 0x69, 0xDA);
+    COLORREF link = g_previewDarkMode ? RGB(0x58, 0xA6, 0xFF) : RGB(0x09, 0x69, 0xDA);
+    COLORREF code = g_previewDarkMode ? RGB(0xFF, 0xA6, 0x57) : RGB(0xB3, 0x53, 0x00);
+    COLORREF quote = g_previewDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
+    COLORREF list = g_previewDarkMode ? RGB(0xD2, 0xA8, 0xFF) : RGB(0x82, 0x50, 0xDF);
+    COLORREF strike = g_previewDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
+    COLORREF rule = g_previewDarkMode ? RGB(0x7D, 0x85, 0x90) : RGB(0x65, 0x6D, 0x76);
+
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRONG1, text);
+    SendMessageA(hEdit, SCI_STYLESETBOLD, SCE_MARKDOWN_STRONG1, TRUE);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRONG2, text);
+    SendMessageA(hEdit, SCI_STYLESETBOLD, SCE_MARKDOWN_STRONG2, TRUE);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_EM1, text);
+    SendMessageA(hEdit, SCI_STYLESETITALIC, SCE_MARKDOWN_EM1, TRUE);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_EM2, text);
+    SendMessageA(hEdit, SCI_STYLESETITALIC, SCE_MARKDOWN_EM2, TRUE);
+
+    int headerStyles[6] = { SCE_MARKDOWN_HEADER1, SCE_MARKDOWN_HEADER2, SCE_MARKDOWN_HEADER3,
+                             SCE_MARKDOWN_HEADER4, SCE_MARKDOWN_HEADER5, SCE_MARKDOWN_HEADER6 };
+    for (int i = 0; i < 6; i++) {
+        SendMessageA(hEdit, SCI_STYLESETFORE, headerStyles[i], heading);
+        SendMessageA(hEdit, SCI_STYLESETBOLD, headerStyles[i], TRUE);
+    }
+
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_ULIST_ITEM, list);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_OLIST_ITEM, list);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_BLOCKQUOTE, quote);
+    SendMessageA(hEdit, SCI_STYLESETITALIC, SCE_MARKDOWN_BLOCKQUOTE, TRUE);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRIKEOUT, strike);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_HRULE, rule);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_LINK, link);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_CODE, code);
+    SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODE, (LPARAM)"Consolas");
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_CODE2, code);
+    SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODE2, (LPARAM)"Consolas");
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_CODEBK, code);
+    SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODEBK, (LPARAM)"Consolas");
 }
 
 /* (Re)creates g_previewBkBrush to match g_previewDarkMode, so the preview
@@ -254,6 +677,15 @@ static void apply_preview_host_theme(void) {
     if (g_previewBkBrush) DeleteObject(g_previewBkBrush);
     g_previewBkBrush = CreateSolidBrush(g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
     if (g_hPreview) InvalidateRect(g_hPreview, NULL, TRUE);
+}
+
+/* (Re)creates g_mainBkBrush to match g_previewDarkMode, and repaints the
+   parts of the main window's own background it's used for (the toolbar
+   strip and the splitter gap - everywhere else is covered by child windows). */
+static void apply_main_theme(HWND hwnd) {
+    if (g_mainBkBrush) DeleteObject(g_mainBkBrush);
+    g_mainBkBrush = CreateSolidBrush(g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+    if (hwnd) InvalidateRect(hwnd, NULL, FALSE);
 }
 
 static void apply_help_theme(void) {
@@ -281,9 +713,16 @@ static void configure_scintilla(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_LINENUMBERS, SC_MARGIN_NUMBER);
     update_linenumber_margin_width(hEdit);
 
+    /* Syntax-highlight the Markdown source using Lexilla's bundled lexer
+       (vendored trimmed to just this one language - see third_party/lexilla).
+       ILexer5* ownership passes to Scintilla once handed to SCI_SETILEXER. */
+    void *lexer = CreateLexer("markdown");
+    if (lexer) SendMessageA(hEdit, SCI_SETILEXER, 0, (LPARAM)lexer);
+
     /* Explicit text colors, rather than relying on Scintilla's own defaults,
        so the caret-line highlight below is guaranteed to contrast with them.
-       apply_editor_theme() sets the actual color values (light or dark). */
+       apply_editor_theme() sets the actual color values (light or dark),
+       including the Markdown lexer's per-construct colors set above. */
     apply_editor_theme(hEdit);
 
     /* Highlight the line the caret is on. SC_ALPHA_NOALPHA (rather than
@@ -298,7 +737,9 @@ static void configure_scintilla(HWND hEdit) {
 
 /* Apply a font face/point size to the Scintilla control by setting the
    default style (Scintilla styles text via numeric style IDs rather than an
-   HFONT; with no lexer active, everything uses STYLE_DEFAULT). */
+   HFONT). SCI_STYLECLEARALL below resets every style - including the
+   Markdown lexer's per-construct styles - back to STYLE_DEFAULT's font, so
+   apply_editor_theme() must run afterwards to reapply them. */
 static void apply_editor_font(const char *faceName, int pointSize) {
     SendMessageA(g_hEdit, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceName);
     SendMessageA(g_hEdit, SCI_STYLESETSIZE, STYLE_DEFAULT, pointSize);
@@ -363,6 +804,85 @@ static void save_theme_settings(void) {
     WritePrivateProfileStringW(L"Preview", L"Theme",
                                g_previewDarkMode ? L"github-dark" : L"github-light", path);
     WritePrivateProfileStringW(L"Preview", L"DarkMode", NULL, path);
+    free(path);
+}
+
+static int read_profile_int(const WCHAR *section, const WCHAR *key, int defaultValue,
+                            const WCHAR *path) {
+    WCHAR fallback[32], value[32], *end = NULL;
+    swprintf(fallback, 32, L"%d", defaultValue);
+    GetPrivateProfileStringW(section, key, fallback, value, 32, path);
+    long parsed = wcstol(value, &end, 10);
+    return end && end != value && *end == 0 ? (int)parsed : defaultValue;
+}
+
+static void write_profile_int(const WCHAR *section, const WCHAR *key, int value,
+                              const WCHAR *path) {
+    WCHAR buffer[32];
+    swprintf(buffer, 32, L"%d", value);
+    WritePrivateProfileStringW(section, key, buffer, path);
+}
+
+static void load_layout_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    g_previewOnLeft = read_profile_int(L"View", L"PreviewOnLeft", 0, path) != 0;
+    g_previewVisible = read_profile_int(L"View", L"PreviewVisible", g_previewVisible, path) != 0;
+    g_editorVisible = read_profile_int(L"View", L"EditorVisible", g_editorVisible, path) != 0;
+    if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
+
+    g_splitterRatio = read_profile_int(L"View", L"SplitterRatio", 500, path);
+    if (g_splitterRatio < 50) g_splitterRatio = 50;
+    if (g_splitterRatio > 950) g_splitterRatio = 950;
+
+    int left = read_profile_int(L"Window", L"Left", 0, path);
+    int top = read_profile_int(L"Window", L"Top", 0, path);
+    int width = read_profile_int(L"Window", L"Width", 0, path);
+    int height = read_profile_int(L"Window", L"Height", 0, path);
+    RECT candidate = { left, top, left + width, top + height };
+    if (width >= 400 && height >= 300 &&
+        MonitorFromRect(&candidate, MONITOR_DEFAULTTONULL) != NULL) {
+        g_savedWindowRect = candidate;
+        g_haveSavedWindowRect = 1;
+    }
+    g_startMaximized = read_profile_int(L"Window", L"Maximized", 0, path) != 0;
+    free(path);
+}
+
+static void save_layout_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    write_profile_int(L"View", L"PreviewOnLeft", g_previewOnLeft, path);
+    if (!g_commandLinePreviewMode) {
+        write_profile_int(L"View", L"PreviewVisible", g_previewVisible, path);
+        write_profile_int(L"View", L"EditorVisible", g_editorVisible, path);
+    }
+
+    if (g_hMainWnd && g_splitterPos >= 0) {
+        RECT client;
+        GetClientRect(g_hMainWnd, &client);
+        int available = client.right - SPLITTER_WIDTH;
+        if (available > 0) {
+            g_splitterRatio = MulDiv(g_splitterPos, 1000, available);
+            if (g_splitterRatio < 50) g_splitterRatio = 50;
+            if (g_splitterRatio > 950) g_splitterRatio = 950;
+        }
+    }
+    write_profile_int(L"View", L"SplitterRatio", g_splitterRatio, path);
+
+    WINDOWPLACEMENT placement = {0};
+    placement.length = sizeof(placement);
+    if (g_hMainWnd && GetWindowPlacement(g_hMainWnd, &placement)) {
+        RECT normal = placement.rcNormalPosition;
+        int maximized = placement.showCmd == SW_SHOWMAXIMIZED ||
+            (placement.showCmd == SW_SHOWMINIMIZED &&
+             (placement.flags & WPF_RESTORETOMAXIMIZED) != 0);
+        write_profile_int(L"Window", L"Left", normal.left, path);
+        write_profile_int(L"Window", L"Top", normal.top, path);
+        write_profile_int(L"Window", L"Width", normal.right - normal.left, path);
+        write_profile_int(L"Window", L"Height", normal.bottom - normal.top, path);
+        write_profile_int(L"Window", L"Maximized", maximized, path);
+    }
     free(path);
 }
 
@@ -483,18 +1003,25 @@ static void prune_missing_recent_files(void) {
 
 /* ================= WebView2 host page ================= */
 
+/* Used only when the WebView2 Runtime lacks ICoreWebView2_3 (no virtual-host
+   folder mapping), so NavigateToString() gives this page an opaque origin
+   that cannot resolve relative script/stylesheet URLs. mermaid.min.js, KaTeX,
+   and highlight.js are therefore left out entirely rather than added as
+   broken references. Some shared feature styling remains for parity with
+   preview_shell.html, although those features are inactive in this fallback. */
 static const char *HTML_SHELL =
 "<!doctype html><html><head><meta charset=\"utf-8\">"
+"<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src https: http: data:; font-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'\">"
 "<style>"
-"html,body{margin:0;padding:0;background:#ffffff;font-family:'Segoe UI',sans-serif;color:#141414;height:100%;}"
+"html,body{margin:0;padding:0;background:#ffffff;font-family:'Segoe UI',sans-serif;color:#141414;height:100%;color-scheme:light;}"
 "#content{padding:12px 20px 60px 20px;min-height:calc(100% - 72px);display:flex;flex-direction:column;}"
-"#content.solo-diagram{padding:12px 20px;height:calc(100vh - 24px);min-height:calc(100vh - 24px);overflow:hidden;}"
+"#content.solo-diagram{padding:12px 20px;height:calc(100vh - 24px);min-height:calc(100vh - 24px);}"
 "h1{font-size:1.9em;font-weight:700;margin:0.5em 0 0.3em 0;}"
 "h2{font-size:1.5em;font-weight:700;margin:0.5em 0 0.3em 0;}"
 "h3{font-size:1.2em;font-weight:700;margin:0.5em 0 0.3em 0;}"
 "p{margin:0.4em 0;line-height:1.5;}"
 "code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-family:Consolas,monospace;font-size:0.95em;}"
-"pre.codeblock{background:#f5f5f5;padding:8px 10px;border-radius:4px;overflow-x:auto;}"
+"pre.codeblock{background:#eaeaea;padding:8px 10px;border-radius:4px;overflow-x:auto;}"
 "pre.codeblock code{background:none;padding:0;}"
 "blockquote{border-left:3px solid #ccc;margin:0.4em 0;padding:0.1em 1em;color:#5a5a5a;font-style:italic;}"
 "hr{border:none;border-top:1px solid #bbb;margin:1em 0;}"
@@ -507,28 +1034,64 @@ static const char *HTML_SHELL =
 "th{background:#f0f0f0;font-weight:700;}"
 "a{color:#0969da;}"
 "img{max-width:100%;}"
-".mermaid-wrap{position:relative;border:1px solid #e0e0e0;border-radius:6px;margin:0.6em 0;overflow:auto;background:#fff;max-height:70vh;}"
-"#content.solo-diagram .mermaid-wrap{flex:1 1 auto;max-height:none;margin:0;min-height:0;}"
+".mermaid-wrap{position:relative;border:1px solid #e0e0e0;border-radius:6px;margin:0.6em 0;overflow:auto;background:#fff;max-height:70vh;cursor:grab;}"
+".mermaid-wrap.panning{cursor:grabbing;user-select:none;}"
 ".mermaid-inner{transform-origin:0 0;display:inline-block;padding:12px;}"
 ".mermaid-toolbar{position:sticky;top:0;left:0;display:flex;gap:4px;justify-content:flex-end;padding:4px;background:rgba(255,255,255,0.9);border-bottom:1px solid #eee;z-index:5;}"
 ".mermaid-toolbar button{cursor:pointer;border:1px solid #ccc;background:#fafafa;border-radius:4px;width:26px;height:24px;font-size:14px;line-height:1;}"
 ".mermaid-toolbar .zoom-readout{width:52px;font-variant-numeric:tabular-nums;}"
 ".mermaid-toolbar button:hover{background:#eee;}"
-"blockquote.markdown-alert{--alert-color:#0969da;margin:1rem 0;padding:.5rem 1rem;border-left:.25em solid var(--alert-color);color:inherit;font-style:normal;}"
-".markdown-alert-title{margin:0 0 .35rem;color:var(--alert-color);font-weight:600;}"
-".markdown-alert-tip{--alert-color:#1a7f37;}.markdown-alert-important{--alert-color:#8250df;}.markdown-alert-warning{--alert-color:#9a6700;}.markdown-alert-caution{--alert-color:#cf222e;}"
-".heading-anchor{margin-left:.35em;color:inherit;text-decoration:none;opacity:0;}"
+".markdown-body blockquote.markdown-alert{--alert-color:#0969da;margin:1rem 0;padding:.5rem 1rem;border-left:.25em solid var(--alert-color);color:inherit;font-style:normal;}"
+".markdown-alert>:first-child{margin-top:0;}"
+".markdown-alert>:last-child{margin-bottom:0;}"
+".markdown-alert-title{margin:0 0 .35rem!important;color:var(--alert-color);font-weight:600;line-height:1.5;}"
+".markdown-alert-note{--alert-color:#0969da;}"
+".markdown-alert-tip{--alert-color:#1a7f37;}"
+".markdown-alert-important{--alert-color:#8250df;}"
+".markdown-alert-warning{--alert-color:#9a6700;}"
+".markdown-alert-caution{--alert-color:#cf222e;}"
+".heading-anchor{margin-left:.35em;color:inherit!important;text-decoration:none!important;opacity:0;}"
 "h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:hover>.heading-anchor,h5:hover>.heading-anchor,h6:hover>.heading-anchor,.heading-anchor:focus{opacity:.55;}"
-".document-outline{position:fixed;top:8px;right:12px;z-index:20;max-width:70vw;border:1px solid #d0d7de;border-radius:6px;background:rgba(255,255,255,.96);font-size:13px;}"
-".document-outline[hidden]{display:none;}.document-outline summary{cursor:pointer;padding:5px 9px;font-weight:600;}.document-outline nav{max-height:60vh;overflow:auto;border-top:1px solid #d8dee4;padding:6px 8px 8px;}.document-outline ol{margin:0;padding:0;list-style:none;}"
+".document-outline{position:fixed;top:8px;right:12px;z-index:20;max-width:min(300px,70vw);border:1px solid #d0d7de;border-radius:6px;background:rgba(255,255,255,.96);box-shadow:0 3px 12px rgba(31,35,40,.15);font-size:13px;}"
+".document-outline[hidden]{display:none;}"
+".document-outline summary{cursor:pointer;padding:5px 9px;font-weight:600;user-select:none;}"
+".document-outline nav{max-height:60vh;overflow:auto;border-top:1px solid #d8dee4;padding:6px 8px 8px;}"
+".document-outline ol{margin:0;padding:0;list-style:none;}"
+".document-outline li{margin:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
+".document-outline a{color:#0969da;text-decoration:none;}"
+".document-outline a:hover{text-decoration:underline;}"
+".math-display{margin:1em 0;overflow-x:auto;overflow-y:hidden;text-align:center;}"
+".math-display>.katex-display{margin:0;padding:.2em 0;}"
+".theme-dark,.theme-dark body{background:#0d1117;color:#e6edf3;color-scheme:dark;}"
+".theme-dark code{background:#161b22;color:#e6edf3;}"
+".theme-dark pre.codeblock{background:#161b22;}"
+".theme-dark blockquote{border-left-color:#30363d;color:#8b949e;}"
+".theme-dark hr{border-top-color:#30363d;}"
+".theme-dark th,.theme-dark td{border-color:#30363d;}"
+".theme-dark th{background:#161b22;}"
+".theme-dark a{color:#58a6ff;}"
+".theme-dark .mermaid-wrap{border-color:#30363d;background:#0d1117;}"
+".theme-dark .mermaid-toolbar{background:rgba(13,17,23,0.9);border-color:#30363d;}"
+".theme-dark .mermaid-toolbar button{background:#161b22;color:#e6edf3;border-color:#30363d;}"
+".theme-dark .mermaid-toolbar button:hover{background:#21262d;}"
+".theme-dark .document-outline{border-color:#30363d;background:rgba(13,17,23,.96);box-shadow:0 3px 12px rgba(0,0,0,.45);}"
+".theme-dark .document-outline nav{border-color:#30363d;}"
+".theme-dark .document-outline a{color:#58a6ff;}"
+".theme-dark .markdown-body blockquote.markdown-alert{border-left-color:var(--alert-color);color:inherit;}"
 "</style>"
 "</head><body>"
 "<details id=\"document-outline\" class=\"document-outline\" hidden><summary>Outline</summary><nav aria-label=\"Document outline\"><ol></ol></nav></details>"
 "<div id=\"content\"></div>"
-"<script src=\"mermaid.min.js\"></script>"
 "<script>"
-"mermaid.initialize({startOnLoad:false, securityLevel:'strict'});"
-"let zoomSeq = 0;"
+/* mermaid.min.js is intentionally not <script src>'d here: this shell is
+   only used via NavigateToString(), whose opaque origin cannot resolve a
+   relative script URL. Diagrams render as plain fenced code on this path. */
+"function applyTheme(theme){"
+"  const isDark = theme === 'dark';"
+"  document.documentElement.classList.toggle('theme-dark', isDark);"
+"  document.body.classList.toggle('theme-dark', isDark);"
+"}"
+"window.setTheme = function(theme){ applyTheme(theme === 'dark' ? 'dark' : 'light'); };"
 "function enhanceAlerts(root){"
 "  const names={NOTE:'Note',TIP:'Tip',IMPORTANT:'Important',WARNING:'Warning',CAUTION:'Caution'};"
 "  root.querySelectorAll('blockquote').forEach((quote)=>{"
@@ -543,71 +1106,21 @@ static const char *HTML_SHELL =
 "}"
 "function headingSlug(text){return text.toLowerCase().normalize('NFKD').replace(/[\\u0300-\\u036f]/g,'').replace(/['’]/g,'').replace(/[^a-z0-9\\u00c0-\\uffff]+/g,'-').replace(/^-+|-+$/g,'')||'section';}"
 "function navigateToHeading(e,heading,id){e.preventDefault();heading.scrollIntoView({behavior:'smooth',block:'start'});const url=new URL(window.location.href);url.hash=id;history.replaceState(null,'',url.href);}"
+"function enhanceFragmentLinks(root){"
+"  root.querySelectorAll('a[href^=\"#\"]').forEach((link)=>{const raw=link.getAttribute('href');if(!raw||raw.length<2)return;"
+"    link.addEventListener('click',(e)=>{let id;try{id=decodeURIComponent(raw.slice(1));}catch(_){return;}const target=document.getElementById(id);if(target)navigateToHeading(e,target,id);});"
+"  });"
+"}"
 "function enhanceHeadings(root){"
 "  const headings=Array.from(root.querySelectorAll('h1,h2,h3,h4,h5,h6'));const outline=document.getElementById('document-outline');const list=outline.querySelector('ol');const used=new Map();list.replaceChildren();"
 "  headings.forEach((heading)=>{const label=heading.textContent.trim();const base=headingSlug(label);const duplicate=used.get(base)||0;used.set(base,duplicate+1);const id=duplicate?base+'-'+duplicate:base;heading.id=id;"
-"    const anchor=document.createElement('a');anchor.className='heading-anchor';anchor.href='#'+id;anchor.textContent='#';anchor.addEventListener('click',(e)=>navigateToHeading(e,heading,id));heading.appendChild(anchor);"
+"    const anchor=document.createElement('a');anchor.className='heading-anchor';anchor.href='#'+id;anchor.textContent='#';anchor.setAttribute('aria-label','Permalink to '+label);anchor.addEventListener('click',(e)=>navigateToHeading(e,heading,id));heading.appendChild(anchor);"
 "    const item=document.createElement('li');item.style.marginLeft=((Number(heading.tagName.slice(1))-1)*10)+'px';const link=document.createElement('a');link.href='#'+id;link.textContent=label;link.addEventListener('click',(e)=>navigateToHeading(e,heading,id));item.appendChild(link);list.appendChild(item);"
 "  });outline.hidden=headings.length<2;if(outline.hidden)outline.open=false;"
 "}"
-"function wrapMermaidBlocks(){"
-"  const blocks = document.querySelectorAll('pre.mermaid:not([data-wrapped]), pre > code.language-mermaid');"
-"  blocks.forEach((block) => {"
-"    const el = block.matches('code') ? block.parentElement : block;"
-"    if (!el || el.hasAttribute('data-wrapped')) return;"
-"    el.setAttribute('data-wrapped','1');"
-"    const src = el.textContent;"
-"    const id = 'mmd-' + (zoomSeq++);"
-"    const wrap = document.createElement('div');"
-"    wrap.className = 'mermaid-wrap';"
-"    const toolbar = document.createElement('div');"
-"    toolbar.className = 'mermaid-toolbar';"
-"    toolbar.innerHTML = '<button data-act=\"out\">-</button><button class=\"zoom-readout\" data-act=\"reset\">100%</button><button data-act=\"in\">+</button>';"
-"    const readout = toolbar.querySelector('.zoom-readout');"
-"    const inner = document.createElement('div');"
-"    inner.className = 'mermaid-inner';"
-"    inner.id = id;"
-"    inner.textContent = src;"
-"    inner.dataset.scale = '1';"
-"    wrap.appendChild(toolbar);"
-"    wrap.appendChild(inner);"
-"    el.replaceWith(wrap);"
-"    function applyScale(scale) {"
-"      inner.dataset.scale = String(scale);"
-"      inner.style.transform = 'scale(' + scale + ')';"
-"      readout.textContent = Math.round(scale * 100) + '%';"
-"    }"
-"    toolbar.addEventListener('click', (e) => {"
-"      const act = e.target.getAttribute('data-act');"
-"      if (!act) return;"
-"      let scale = parseFloat(inner.dataset.scale || '1');"
-"      if (act === 'in') scale = Math.min(scale * 1.2, 6);"
-"      else if (act === 'out') scale = Math.max(scale / 1.2, 0.15);"
-"      else scale = 1;"
-"      applyScale(scale);"
-"    });"
-"    wrap.addEventListener('wheel', (e) => {"
-"      if (!e.ctrlKey) return;"
-"      e.preventDefault();"
-"      let scale = parseFloat(inner.dataset.scale || '1');"
-"      scale *= (e.deltaY < 0) ? 1.1 : (1/1.1);"
-"      scale = Math.min(Math.max(scale, 0.15), 6);"
-"      applyScale(scale);"
-"    }, { passive: false });"
-"  });"
-"}"
-"function updateSoloDiagramLayout(){"
-"  const content = document.getElementById('content');"
-"  const children = Array.from(content.children).filter((el) => !(el.tagName === 'P' && el.textContent.trim() === ''));"
-"  const solo = children.length === 1 && children[0].classList.contains('mermaid-wrap');"
-"  content.classList.toggle('solo-diagram', solo);"
-"}"
 "function setContent(html){"
-"  document.getElementById('content').innerHTML = html;"
-"  const content=document.getElementById('content');enhanceAlerts(content);enhanceHeadings(content);"
-"  wrapMermaidBlocks();"
-"  mermaid.run({querySelector: '.mermaid-inner'}).catch(()=>{}).then(()=>updateSoloDiagramLayout());"
-"  updateSoloDiagramLayout();"
+"  document.getElementById('content').innerHTML = '<article class=\"markdown-body\">' + html + '</article>';"
+"  const article=document.querySelector('#content > .markdown-body');enhanceAlerts(article);enhanceFragmentLinks(article);enhanceHeadings(article);"
 "}"
 "window.setContent = setContent;"
 "</script>"
@@ -637,6 +1150,7 @@ static char *json_escape(const char *s) {
         switch (c) {
             case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
             case '\'': out[o++] = '\\'; out[o++] = '\''; break;
+            case '<': memcpy(out + o, "\\u003C", 6); o += 6; break;
             case '\n': out[o++] = '\\'; out[o++] = 'n'; break;
             case '\r': out[o++] = '\\'; out[o++] = 'r'; break;
             case '\t': out[o++] = '\\'; out[o++] = 't'; break;
@@ -662,29 +1176,57 @@ static char *json_escape(const char *s) {
 
 /* ---- generic single-use COM completion handler (QueryInterface/AddRef/Release are no-ops) ---- */
 
-typedef HRESULT (STDMETHODCALLTYPE *EnvInvokeFn)(void *self, HRESULT errorCode, ICoreWebView2Environment *env);
-typedef HRESULT (STDMETHODCALLTYPE *CtrlInvokeFn)(void *self, HRESULT errorCode, ICoreWebView2Controller *ctrl);
-typedef HRESULT (STDMETHODCALLTYPE *ScriptInvokeFn)(void *self, HRESULT errorCode, LPCWSTR result);
-
 static ULONG STDMETHODCALLTYPE Handler_AddRef(void *this_) { (void)this_; return 1; }
 static ULONG STDMETHODCALLTYPE Handler_Release(void *this_) { (void)this_; return 1; }
-static HRESULT STDMETHODCALLTYPE Handler_QI(void *this_, REFIID riid, void **out) {
-    (void)this_; (void)riid;
+static const IID MARKEDIT_IID_IUNKNOWN =
+    {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static HRESULT Handler_QueryInterface(void *this_, REFIID riid, void **out, REFIID handlerIid) {
+    if (!out) return E_POINTER;
     *out = NULL;
+    if (IsEqualIID(riid, &MARKEDIT_IID_IUNKNOWN) || IsEqualIID(riid, handlerIid)) {
+        *out = this_;
+        Handler_AddRef(this_);
+        return S_OK;
+    }
     return E_NOINTERFACE;
+}
+
+static HRESULT STDMETHODCALLTYPE EnvHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out,
+        &IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler);
+}
+
+static HRESULT STDMETHODCALLTYPE CtrlHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out,
+        &IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler);
+}
+
+static HRESULT STDMETHODCALLTYPE ScriptHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out,
+        &IID_ICoreWebView2ExecuteScriptCompletedHandler);
+}
+
+static HRESULT STDMETHODCALLTYPE NavHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out,
+        &IID_ICoreWebView2NavigationCompletedEventHandler);
+}
+
+static HRESULT STDMETHODCALLTYPE NavStartHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out,
+        &IID_ICoreWebView2NavigationStartingEventHandler);
 }
 
 /* Environment created handler */
 static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *this_, HRESULT errorCode, ICoreWebView2Environment *env);
 static ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandlerVtbl g_envVtbl = {
-    (void*)Handler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)EnvCreated_Invoke
+    (void*)EnvHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)EnvCreated_Invoke
 };
 static ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler g_envHandler = { &g_envVtbl };
 
 /* Controller created handler */
 static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *this_, HRESULT errorCode, ICoreWebView2Controller *ctrl);
 static ICoreWebView2CreateCoreWebView2ControllerCompletedHandlerVtbl g_ctrlVtbl = {
-    (void*)Handler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)CtrlCreated_Invoke
+    (void*)CtrlHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)CtrlCreated_Invoke
 };
 static ICoreWebView2CreateCoreWebView2ControllerCompletedHandler g_ctrlHandler = { &g_ctrlVtbl };
 
@@ -694,7 +1236,7 @@ static HRESULT STDMETHODCALLTYPE ScriptDone_Invoke(ICoreWebView2ExecuteScriptCom
     return S_OK;
 }
 static ICoreWebView2ExecuteScriptCompletedHandlerVtbl g_scriptVtbl = {
-    (void*)Handler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)ScriptDone_Invoke
+    (void*)ScriptHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)ScriptDone_Invoke
 };
 static ICoreWebView2ExecuteScriptCompletedHandler g_scriptHandler = { &g_scriptVtbl };
 
@@ -712,9 +1254,25 @@ static HRESULT STDMETHODCALLTYPE NavDone_Invoke(ICoreWebView2NavigationCompleted
     return S_OK;
 }
 static ICoreWebView2NavigationCompletedEventHandlerVtbl g_navVtbl = {
-    (void*)Handler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)NavDone_Invoke
+    (void*)NavHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)NavDone_Invoke
 };
 static ICoreWebView2NavigationCompletedEventHandler g_navHandler = { &g_navVtbl };
+
+/* True if the backslash-separated relative path escapes its base directory
+   via a ".." segment, or is itself rooted (drive letter or UNC share) rather
+   than relative. Used to keep clicked document-relative links confined to
+   the folder the open Markdown file lives in. */
+static int path_escapes_base(const WCHAR *relative) {
+    if (relative[0] == L'\\' || (relative[0] && relative[1] == L':')) return 1;
+    const WCHAR *segment = relative;
+    for (;;) {
+        size_t len = wcscspn(segment, L"\\");
+        if (len == 2 && segment[0] == L'.' && segment[1] == L'.') return 1;
+        if (segment[len] == 0) break;
+        segment += len + 1;
+    }
+    return 0;
+}
 
 static WCHAR *decode_document_url(const WCHAR *uri) {
     static const WCHAR prefix[] = L"https://document.local/";
@@ -751,6 +1309,7 @@ static WCHAR *decode_document_url(const WCHAR *uri) {
     relative[wideLen] = 0;
     free(bytes);
     for (int i = 0; i < wideLen; i++) if (relative[i] == L'/') relative[i] = L'\\';
+    if (path_escapes_base(relative)) { free(relative); return NULL; }
     WCHAR *directory = g_currentFile ? path_directory(g_currentFile) : NULL;
     if (!directory) {
         WCHAR *module = get_module_path();
@@ -799,7 +1358,7 @@ static HRESULT STDMETHODCALLTYPE NavStarting_Invoke(ICoreWebView2NavigationStart
     return S_OK;
 }
 static ICoreWebView2NavigationStartingEventHandlerVtbl g_navStartVtbl = {
-    (void*)Handler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)NavStarting_Invoke
+    (void*)NavStartHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)NavStarting_Invoke
 };
 static ICoreWebView2NavigationStartingEventHandler g_navStartHandler = { &g_navStartVtbl };
 
@@ -828,6 +1387,7 @@ static void apply_preview_theme(void) {
 }
 
 void push_html_to_webview(const char *htmlFragment) {
+    if (!htmlFragment) return;
     if (!g_webviewReady || !g_webview) {
         free(g_pendingHtmlBody);
         g_pendingHtmlBody = _strdup(htmlFragment);
@@ -840,6 +1400,10 @@ void push_html_to_webview(const char *htmlFragment) {
     const char *suffix = "')";
     size_t scriptLen = strlen(prefix) + escapedLen + strlen(suffix);
     char *script = (char *)malloc(scriptLen + 1);
+    if (!script) {
+        free(escaped);
+        return;
+    }
     memcpy(script, prefix, strlen(prefix));
     memcpy(script + strlen(prefix), escaped, escapedLen);
     memcpy(script + strlen(prefix) + escapedLen, suffix, strlen(suffix) + 1);
@@ -877,7 +1441,8 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
     ICoreWebView2Controller_put_IsVisible(ctrl, TRUE);
 
     ICoreWebView2 *webview = NULL;
-    ICoreWebView2Controller_get_CoreWebView2(ctrl, &webview);
+    HRESULT webviewResult = ICoreWebView2Controller_get_CoreWebView2(ctrl, &webview);
+    if (FAILED(webviewResult) || !webview) return S_OK;
     g_webview = webview;
 
     ICoreWebView2Settings *settings = NULL;
@@ -914,7 +1479,7 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
         ICoreWebView2_Navigate(webview, shellUrl);
     } else {
         WCHAR *wHtml = to_wide(HTML_SHELL);
-        ICoreWebView2_NavigateToString(webview, wHtml);
+        if (wHtml) ICoreWebView2_NavigateToString(webview, wHtml);
         free(wHtml);
     }
 
@@ -933,7 +1498,7 @@ static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebVie
     return S_OK;
 }
 
-static void init_webview(HWND hostWnd) {
+static void init_webview(void) {
     WCHAR *module = get_module_path();
     WCHAR *exeDir = module ? path_directory(module) : NULL;
     WCHAR *userDataDir = exeDir ? path_join(exeDir, L"webview2_data") : NULL;
@@ -946,16 +1511,27 @@ static void init_webview(HWND hostWnd) {
         wsprintfA(msg, "CreateCoreWebView2EnvironmentWithOptions call failed (hr=0x%08lX).", (unsigned long)hr);
         MessageBoxA(g_hMainWnd, msg, "MarkEdit", MB_OK | MB_ICONERROR);
     }
-    (void)hostWnd;
 }
+
+/* Documents below this size render in well under a frame, so skipping the
+   cursor change for them avoids an hourglass flicker on every keystroke
+   pause; above it, rendering can take long enough to be worth signaling. */
+#define PREVIEW_SLOW_RENDER_THRESHOLD (256 * 1024)
 
 static void update_preview(void) {
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_PREVIEW_UPDATE);
     int len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
+
+    int showWaitCursor = len >= PREVIEW_SLOW_RENDER_THRESHOLD;
+    HCURSOR oldCursor = showWaitCursor ? SetCursor(LoadCursorA(NULL, IDC_WAIT)) : NULL;
+
     char *html = markdown_to_html(text);
     free(text);
+
+    if (showWaitCursor) SetCursor(oldCursor);
+
     if (!html) return;
     push_html_to_webview(html);
     free(html);
@@ -990,6 +1566,7 @@ static void do_new(void) {
     set_edit_text(g_hEdit, "");
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    g_hasBom = 0;
     replace_wstring(&g_currentFile, NULL);
     update_document_mapping();
     update_preview();
@@ -1030,8 +1607,12 @@ static int load_file(const WCHAR *path) {
     if (buf && total == length) {
         buf[length] = 0;
         const char *content = buf;
-        if (length >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF)
+        if (length >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
             content += 3;
+            g_hasBom = 1;
+        } else {
+            g_hasBom = 0;
+        }
         set_edit_text(g_hEdit, content);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
@@ -1133,9 +1714,14 @@ static int save_to_path(const WCHAR *path) {
         MessageBoxW(g_hMainWnd, L"Could not create a temporary file for saving.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
+    static const char bom[3] = { (char)0xEF, (char)0xBB, (char)0xBF };
     size_t total = 0;
     BOOL ok = TRUE;
-    while (total < (size_t)len) {
+    if (g_hasBom) {
+        DWORD written = 0;
+        if (!WriteFile(hFile, bom, 3, &written, NULL) || written != 3) ok = FALSE;
+    }
+    while (ok && total < (size_t)len) {
         DWORD chunk = (DWORD)(((size_t)len - total) > 1024 * 1024 ? 1024 * 1024 : ((size_t)len - total));
         DWORD written = 0;
         if (!WriteFile(hFile, text + total, chunk, &written, NULL) || written != chunk) { ok = FALSE; break; }
@@ -1160,12 +1746,14 @@ static int save_to_path(const WCHAR *path) {
         return 0;
     }
     free(temporary);
+    /* Record the path before replace_wstring(): when saving the current file,
+       `path` may alias g_currentFile, which replace_wstring() can free. */
+    add_recent_file(displayPath ? displayPath : path);
     replace_wstring(&g_currentFile, displayPath ? displayPath : path);
     free(ioPath);
     update_document_mapping();
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
     set_dirty(0);
-    add_recent_file(displayPath ? displayPath : path);
     free(displayPath);
     refresh_menu(g_hMainWnd);
     return 1;
@@ -1206,6 +1794,7 @@ static void do_exit(void) {
             if (g_dirty) return;
         }
     }
+    save_layout_settings();
     DestroyWindow(g_hMainWnd);
 }
 
@@ -1651,6 +2240,9 @@ static HMENU build_menu(void) {
                        g_previewDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
                        MF_BYCOMMAND);
     AppendMenuA(hView, MF_POPUP, (UINT_PTR)hTheme, "&Theme");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_PREVIEW_ON_LEFT, "Preview on &Left");
     AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hView, "&View");
 
     HMENU hHelp = CreatePopupMenu();
@@ -1669,8 +2261,6 @@ static void refresh_menu(HWND hwnd) {
     if (oldMenu) DestroyMenu(oldMenu);
 }
 
-#define SPLITTER_WIDTH 6
-static int g_splitterPos = -1; /* pixel x of splitter, -1 = uninitialized (use 50%) */
 static int g_dragging = 0;
 
 static void set_webview_bounds(RECT wvRc, BOOL visible) {
@@ -1679,13 +2269,453 @@ static void set_webview_bounds(RECT wvRc, BOOL visible) {
     ICoreWebView2Controller_put_IsVisible(g_webviewController, visible);
 }
 
+/* ---- formatting toolbar: a strip of owner-drawn BUTTON children of the
+   main window, reserved space in layout() above the editor/preview panes.
+   Icons are drawn on the fly with GDI (lines/shapes/text), not loaded from
+   image resources, so they redraw crisply at any DPI and recolor for free
+   when the theme changes. A NULL draw function marks a separator (a small
+   gap, no button). ---- */
+typedef void (*ToolbarIconPaintFn)(HDC hdc, const RECT *rc, COLORREF fg);
+
+static void toolbar_icon_bold(HDC hdc, const RECT *rc, COLORREF fg) {
+    HFONT font = CreateFontA(-(rc->bottom - rc->top) * 6 / 10, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, "Georgia");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    SetTextColor(hdc, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    DrawTextA(hdc, "B", -1, (RECT *)rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+static void toolbar_icon_italic(HDC hdc, const RECT *rc, COLORREF fg) {
+    HFONT font = CreateFontA(-(rc->bottom - rc->top) * 6 / 10, 0, 0, 0, FW_NORMAL, TRUE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, "Georgia");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    SetTextColor(hdc, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    DrawTextA(hdc, "I", -1, (RECT *)rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+static void toolbar_icon_strikethrough(HDC hdc, const RECT *rc, COLORREF fg) {
+    HFONT font = CreateFontA(-(rc->bottom - rc->top) * 6 / 10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    SetTextColor(hdc, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    RECT textRc = *rc;
+    DrawTextA(hdc, "S", -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_CALCRECT);
+    OffsetRect(&textRc, ((rc->right - rc->left) - (textRc.right - textRc.left)) / 2,
+               ((rc->bottom - rc->top) - (textRc.bottom - textRc.top)) / 2);
+    DrawTextA(hdc, "S", -1, (RECT *)rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    int midY = (textRc.top + textRc.bottom) / 2;
+    MoveToEx(hdc, textRc.left, midY, NULL);
+    LineTo(hdc, textRc.right, midY);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+static void toolbar_icon_code(HDC hdc, const RECT *rc, COLORREF fg) {
+    HFONT font = CreateFontA(-(rc->bottom - rc->top) * 5 / 10, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH, "Consolas");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    SetTextColor(hdc, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    DrawTextA(hdc, "</>", -1, (RECT *)rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+static void toolbar_icon_heading(HDC hdc, const RECT *rc, COLORREF fg, const char *label) {
+    HFONT font = CreateFontA(-(rc->bottom - rc->top) * 55 / 100, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    SetTextColor(hdc, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    DrawTextA(hdc, label, -1, (RECT *)rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+static void toolbar_icon_h1(HDC hdc, const RECT *rc, COLORREF fg) { toolbar_icon_heading(hdc, rc, fg, "H1"); }
+static void toolbar_icon_h2(HDC hdc, const RECT *rc, COLORREF fg) { toolbar_icon_heading(hdc, rc, fg, "H2"); }
+static void toolbar_icon_h3(HDC hdc, const RECT *rc, COLORREF fg) { toolbar_icon_heading(hdc, rc, fg, "H3"); }
+
+static void toolbar_icon_quote(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    int barX = rc->left + w * 3 / 10;
+    HPEN pen = CreatePen(PS_SOLID, (h + 15) / 16 > 1 ? (h + 15) / 16 : 2, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    MoveToEx(hdc, barX, rc->top + h * 2 / 10, NULL);
+    LineTo(hdc, barX, rc->bottom - h * 2 / 10);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+
+    int lineX0 = barX + w / 8, lineX1 = rc->right - w * 2 / 10;
+    HPEN thin = CreatePen(PS_SOLID, 1, fg);
+    oldPen = (HPEN)SelectObject(hdc, thin);
+    for (int i = 0; i < 3; i++) {
+        int y = rc->top + h * 3 / 10 + i * (h * 4 / 10) / 2;
+        MoveToEx(hdc, lineX0, y, NULL);
+        LineTo(hdc, lineX1, y);
+    }
+    SelectObject(hdc, oldPen);
+    DeleteObject(thin);
+}
+
+static void toolbar_icon_bullet_list(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    HBRUSH brush = CreateSolidBrush(fg);
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, brush);
+    int dotR = h / 10 > 1 ? h / 10 : 1;
+    int lineX0 = rc->left + w * 4 / 10, lineX1 = rc->right - w * 2 / 10;
+    for (int i = 0; i < 3; i++) {
+        int y = rc->top + h * 22 / 100 + i * (h * 28 / 100);
+        Ellipse(hdc, rc->left + w * 2 / 10 - dotR, y - dotR, rc->left + w * 2 / 10 + dotR, y + dotR);
+        MoveToEx(hdc, lineX0, y, NULL);
+        LineTo(hdc, lineX1, y);
+    }
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+static void toolbar_icon_number_list(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    HFONT font = CreateFontA(-h * 32 / 100, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    SetTextColor(hdc, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    int lineX0 = rc->left + w * 4 / 10, lineX1 = rc->right - w * 2 / 10;
+    const char *digits[3] = { "1", "2", "3" };
+    for (int i = 0; i < 3; i++) {
+        int y = rc->top + h * 22 / 100 + i * (h * 28 / 100);
+        RECT digitRc = { rc->left, y - h / 6, rc->left + w * 3 / 10, y + h / 6 };
+        DrawTextA(hdc, digits[i], -1, &digitRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        MoveToEx(hdc, lineX0, y, NULL);
+        LineTo(hdc, lineX1, y);
+    }
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+static void toolbar_icon_task_list(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    int boxSize = h * 4 / 10;
+    RECT box = { rc->left + w * 15 / 100, rc->top + (h - boxSize) / 2,
+                 rc->left + w * 15 / 100 + boxSize, rc->top + (h - boxSize) / 2 + boxSize };
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, box.left, box.top, box.right, box.bottom);
+    MoveToEx(hdc, box.left + boxSize / 6, box.top + boxSize / 2, NULL);
+    LineTo(hdc, box.left + boxSize * 2 / 5, box.bottom - boxSize / 8);
+    LineTo(hdc, box.right - boxSize / 8, box.top + boxSize / 6);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+
+    HPEN thin = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen2 = (HPEN)SelectObject(hdc, thin);
+    int lineX0 = box.right + w / 10, lineX1 = rc->right - w * 15 / 100;
+    int y = (box.top + box.bottom) / 2;
+    MoveToEx(hdc, lineX0, y, NULL);
+    LineTo(hdc, lineX1, y);
+    SelectObject(hdc, oldPen2);
+    DeleteObject(thin);
+}
+
+static void toolbar_icon_link(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    int linkW = w * 45 / 100, linkH = h * 45 / 100;
+    HPEN pen = CreatePen(PS_SOLID, (h + 11) / 12 > 1 ? (h + 11) / 12 : 2, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    RECT r1 = { rc->left + w * 12 / 100, rc->top + h * 12 / 100,
+                rc->left + w * 12 / 100 + linkW, rc->top + h * 12 / 100 + linkH };
+    RoundRect(hdc, r1.left, r1.top, r1.right, r1.bottom, linkH / 2, linkH / 2);
+
+    RECT r2 = { rc->right - w * 12 / 100 - linkW, rc->bottom - h * 12 / 100 - linkH,
+                rc->right - w * 12 / 100, rc->bottom - h * 12 / 100 };
+    RoundRect(hdc, r2.left, r2.top, r2.right, r2.bottom, linkH / 2, linkH / 2);
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+}
+
+static void toolbar_icon_image(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    RECT frame = { rc->left + w * 12 / 100, rc->top + h * 18 / 100, rc->right - w * 12 / 100, rc->bottom - h * 18 / 100 };
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, frame.left, frame.top, frame.right, frame.bottom);
+
+    HBRUSH sunBrush = CreateSolidBrush(fg);
+    HBRUSH oldB2 = (HBRUSH)SelectObject(hdc, sunBrush);
+    int sunR = (frame.bottom - frame.top) / 6;
+    int sunCx = frame.left + (frame.right - frame.left) * 3 / 10, sunCy = frame.top + (frame.bottom - frame.top) * 3 / 10;
+    Ellipse(hdc, sunCx - sunR, sunCy - sunR, sunCx + sunR, sunCy + sunR);
+    SelectObject(hdc, oldB2);
+    DeleteObject(sunBrush);
+
+    POINT mountain[4] = {
+        { frame.left + 1, frame.bottom - 1 },
+        { frame.left + (frame.right - frame.left) * 4 / 10, frame.top + (frame.bottom - frame.top) * 4 / 10 },
+        { frame.left + (frame.right - frame.left) * 7 / 10, frame.bottom - (frame.bottom - frame.top) * 35 / 100 },
+        { frame.right - 1, frame.bottom - 1 },
+    };
+    HBRUSH mountainBrush = CreateSolidBrush(fg);
+    HBRUSH oldB3 = (HBRUSH)SelectObject(hdc, mountainBrush);
+    Polygon(hdc, mountain, 4);
+    SelectObject(hdc, oldB3);
+    DeleteObject(mountainBrush);
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+}
+
+static void toolbar_icon_table(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    RECT grid = { rc->left + w * 12 / 100, rc->top + h * 15 / 100, rc->right - w * 12 / 100, rc->bottom - h * 15 / 100 };
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, grid.left, grid.top, grid.right, grid.bottom);
+    int colW = (grid.right - grid.left) / 3;
+    for (int i = 1; i < 3; i++) {
+        MoveToEx(hdc, grid.left + colW * i, grid.top, NULL);
+        LineTo(hdc, grid.left + colW * i, grid.bottom);
+    }
+    int rowH = (grid.bottom - grid.top) / 2;
+    MoveToEx(hdc, grid.left, grid.top + rowH, NULL);
+    LineTo(hdc, grid.right, grid.top + rowH);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+}
+
+/* A bordered box (the code fence) with a couple of short interior strokes
+   standing in for lines of code - distinct from toolbar_icon_code's inline
+   "</>" glyph, which has no border. */
+static void toolbar_icon_codeblock(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    RECT box = { rc->left + w * 8 / 100, rc->top + h * 12 / 100, rc->right - w * 8 / 100, rc->bottom - h * 12 / 100 };
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, box.left, box.top, box.right, box.bottom);
+
+    int lineH = (box.bottom - box.top) / 4;
+    int inset = (box.right - box.left) * 15 / 100;
+    MoveToEx(hdc, box.left + inset, box.top + lineH, NULL);
+    LineTo(hdc, box.right - inset * 2, box.top + lineH);
+    MoveToEx(hdc, box.left + inset, box.top + lineH * 2, NULL);
+    LineTo(hdc, box.right - inset, box.top + lineH * 2);
+    MoveToEx(hdc, box.left + inset, box.top + lineH * 3, NULL);
+    LineTo(hdc, box.right - inset * 3, box.top + lineH * 3);
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+}
+
+/* A bordered box split into two panes, the right one filled - standing in
+   for the editor/preview split with the preview pane highlighted. Used for
+   the toolbar's preview-toggle button, mirroring the View menu's "Show
+   Preview" command (IDM_VIEW_TOGGLEPREVIEW). */
+static void toolbar_icon_togglepreview(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    RECT box = { rc->left + w * 8 / 100, rc->top + h * 12 / 100, rc->right - w * 8 / 100, rc->bottom - h * 12 / 100 };
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, box.left, box.top, box.right, box.bottom);
+
+    int midX = box.left + (box.right - box.left) / 2;
+    MoveToEx(hdc, midX, box.top, NULL);
+    LineTo(hdc, midX, box.bottom);
+
+    RECT rightPane = { midX + 1, box.top + 1, box.right, box.bottom - 1 };
+    HBRUSH fillBrush = CreateSolidBrush(fg);
+    FillRect(hdc, &rightPane, fillBrush);
+    DeleteObject(fillBrush);
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+}
+
+/* Two opposing arrows represent exchanging the left and right panes. */
+static void toolbar_icon_swappanels(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    int left = rc->left + w * 18 / 100;
+    int right = rc->right - w * 18 / 100;
+    int topY = rc->top + h * 35 / 100;
+    int bottomY = rc->top + h * 65 / 100;
+    int arrow = h * 14 / 100;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+
+    MoveToEx(hdc, left, topY, NULL);
+    LineTo(hdc, right, topY);
+    MoveToEx(hdc, right, topY, NULL);
+    LineTo(hdc, right - arrow, topY - arrow);
+    MoveToEx(hdc, right, topY, NULL);
+    LineTo(hdc, right - arrow, topY + arrow);
+
+    MoveToEx(hdc, right, bottomY, NULL);
+    LineTo(hdc, left, bottomY);
+    MoveToEx(hdc, left, bottomY, NULL);
+    LineTo(hdc, left + arrow, bottomY - arrow);
+    MoveToEx(hdc, left, bottomY, NULL);
+    LineTo(hdc, left + arrow, bottomY + arrow);
+
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+struct ToolbarButtonDef {
+    WORD id;
+    ToolbarIconPaintFn paint; /* NULL marks a separator (a small gap, no button) */
+    const char *tip;
+};
+static const struct ToolbarButtonDef TOOLBAR_BUTTONS[] = {
+    { IDM_FMT_BOLD, toolbar_icon_bold, "Bold" },
+    { IDM_FMT_ITALIC, toolbar_icon_italic, "Italic" },
+    { IDM_FMT_STRIKETHROUGH, toolbar_icon_strikethrough, "Strikethrough" },
+    { IDM_FMT_CODE, toolbar_icon_code, "Inline code" },
+    { 0, NULL, NULL },
+    { IDM_FMT_H1, toolbar_icon_h1, "Heading 1" },
+    { IDM_FMT_H2, toolbar_icon_h2, "Heading 2" },
+    { IDM_FMT_H3, toolbar_icon_h3, "Heading 3" },
+    { IDM_FMT_QUOTE, toolbar_icon_quote, "Blockquote" },
+    { 0, NULL, NULL },
+    { IDM_FMT_BULLETLIST, toolbar_icon_bullet_list, "Bullet list" },
+    { IDM_FMT_NUMBERLIST, toolbar_icon_number_list, "Numbered list" },
+    { IDM_FMT_TASKLIST, toolbar_icon_task_list, "Task list" },
+    { 0, NULL, NULL },
+    { IDM_FMT_LINK, toolbar_icon_link, "Insert link" },
+    { IDM_FMT_IMAGE, toolbar_icon_image, "Insert image" },
+    { IDM_FMT_TABLE, toolbar_icon_table, "Insert table" },
+    { IDM_FMT_CODEBLOCK, toolbar_icon_codeblock, "Insert code block" },
+    { 0, NULL, NULL },
+    { IDM_VIEW_TOGGLEPREVIEW, toolbar_icon_togglepreview, "Toggle preview" },
+    { IDM_VIEW_PREVIEW_ON_LEFT, toolbar_icon_swappanels, "Swap panel sides" },
+};
+#define TOOLBAR_BUTTON_COUNT (int)(sizeof(TOOLBAR_BUTTONS) / sizeof(TOOLBAR_BUTTONS[0]))
+#define TOOLBAR_BUTTON_SIZE (TOOLBAR_HEIGHT - 6)
+static HWND g_hToolbarButtons[TOOLBAR_BUTTON_COUNT];
+
+static void create_toolbar(HWND hwnd) {
+    for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
+        if (!TOOLBAR_BUTTONS[i].paint) continue;
+        WCHAR *tip = to_wide(TOOLBAR_BUTTONS[i].tip);
+        g_hToolbarButtons[i] = CreateWindowExW(0, L"BUTTON", tip ? tip : L"",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)TOOLBAR_BUTTONS[i].id, GetModuleHandleA(NULL), NULL);
+        /* The window text isn't displayed (owner-drawn), but is kept as the
+           accessible name / tooltip-eligible text for the button. */
+        free(tip);
+    }
+}
+
+/* Paint one owner-drawn toolbar button: a flat/pressed frame around the
+   button's icon, drawn via the icon's paint function. Called from
+   WM_DRAWITEM in WndProc. Windows reports ODS_SELECTED automatically for
+   owner-draw buttons while the mouse is held down over them; true hover
+   highlighting would need per-button subclassing to track WM_MOUSEMOVE/
+   WM_MOUSELEAVE, which isn't worth the complexity for this toolbar. */
+static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
+    int index = -1;
+    for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
+        if (g_hToolbarButtons[i] == dis->hwndItem) { index = i; break; }
+    }
+    if (index < 0 || !TOOLBAR_BUTTONS[index].paint) return;
+
+    COLORREF bg = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
+    COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF pressedBg = g_previewDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xE1, 0xE7, 0xEC);
+
+    int pressed = (dis->itemState & ODS_SELECTED) != 0;
+    COLORREF fillColor = pressed ? pressedBg : bg;
+
+    HBRUSH fillBrush = CreateSolidBrush(fillColor);
+    FillRect(dis->hDC, &dis->rcItem, fillBrush);
+    DeleteObject(fillBrush);
+
+    if (dis->itemState & ODS_FOCUS) {
+        HPEN focusPen = CreatePen(PS_SOLID, 1, fg);
+        HPEN oldPen = (HPEN)SelectObject(dis->hDC, focusPen);
+        HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+        Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
+        SelectObject(dis->hDC, oldPen);
+        SelectObject(dis->hDC, oldBrush);
+        DeleteObject(focusPen);
+    }
+
+    RECT iconRc = dis->rcItem;
+    InflateRect(&iconRc, -2, -2);
+    TOOLBAR_BUTTONS[index].paint(dis->hDC, &iconRc, fg);
+}
+
+/* Lay the toolbar buttons out left-to-right along the reserved top strip,
+   with a wider gap standing in for a separator between groups. All buttons
+   are the same size, sized to the toolbar's height. */
+static int layout_toolbar(int width) {
+    int x = 4, y = 3;
+    for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
+        if (!TOOLBAR_BUTTONS[i].paint) {
+            if (x > 4) x += 10;
+            continue;
+        }
+        HWND hBtn = g_hToolbarButtons[i];
+        if (!hBtn) continue;
+        if (x > 4 && x + TOOLBAR_BUTTON_SIZE > width - 4) {
+            x = 4;
+            y += TOOLBAR_BUTTON_SIZE + 4;
+        }
+        MoveWindow(hBtn, x, y, TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE, TRUE);
+        x += TOOLBAR_BUTTON_SIZE + 4;
+    }
+    return y + TOOLBAR_BUTTON_SIZE + 3;
+}
+
 static void layout(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
     int w = rc.right, h = rc.bottom;
 
+    /* The formatting toolbar edits Markdown source, so it's only useful (and
+       only shown) while the editor pane is visible. */
+    int toolbarHeight = 0;
+    for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
+        if (g_hToolbarButtons[i]) ShowWindow(g_hToolbarButtons[i], g_editorVisible ? SW_SHOW : SW_HIDE);
+    }
+    if (g_editorVisible) toolbarHeight = layout_toolbar(w);
+    int y = toolbarHeight;
+    h -= toolbarHeight;
+    if (h < 0) h = 0;
+
     if (g_editorVisible && !g_previewVisible) {
-        MoveWindow(g_hEdit, 0, 0, w, h, TRUE);
+        MoveWindow(g_hEdit, 0, y, w, h, TRUE);
         ShowWindow(g_hEdit, SW_SHOW);
         ShowWindow(g_hPreview, SW_HIDE);
         RECT zero = { 0, 0, 0, 0 };
@@ -1696,22 +2726,33 @@ static void layout(HWND hwnd) {
     if (!g_editorVisible && g_previewVisible) {
         ShowWindow(g_hEdit, SW_HIDE);
         ShowWindow(g_hPreview, SW_SHOW);
-        MoveWindow(g_hPreview, 0, 0, w, h, TRUE);
+        MoveWindow(g_hPreview, 0, y, w, h, TRUE);
+        /* WebView2 controller bounds are relative to g_hPreview's own client
+           origin (which MoveWindow already positioned), not the main window. */
         RECT wvRc = { 0, 0, w, h };
         set_webview_bounds(wvRc, TRUE);
         return;
     }
 
     /* both visible (the !g_editorVisible && !g_previewVisible case is prevented by the toggle handlers) */
-    if (g_splitterPos < 0) g_splitterPos = w / 2;
+    if (g_splitterPos < 0)
+        g_splitterPos = MulDiv(w - SPLITTER_WIDTH, g_splitterRatio, 1000);
     if (g_splitterPos < 100) g_splitterPos = 100;
     if (g_splitterPos > w - 100) g_splitterPos = (w - 100 > 100) ? w - 100 : 100;
 
     ShowWindow(g_hEdit, SW_SHOW);
     ShowWindow(g_hPreview, SW_SHOW);
-    MoveWindow(g_hEdit, 0, 0, g_splitterPos, h, TRUE);
-    MoveWindow(g_hPreview, g_splitterPos + SPLITTER_WIDTH, 0, w - g_splitterPos - SPLITTER_WIDTH, h, TRUE);
-    RECT wvRc = { 0, 0, w - g_splitterPos - SPLITTER_WIDTH, h };
+    int rightWidth = w - g_splitterPos - SPLITTER_WIDTH;
+    RECT wvRc;
+    if (g_previewOnLeft) {
+        MoveWindow(g_hPreview, 0, y, g_splitterPos, h, TRUE);
+        MoveWindow(g_hEdit, g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
+        wvRc = (RECT){ 0, 0, g_splitterPos, h };
+    } else {
+        MoveWindow(g_hEdit, 0, y, g_splitterPos, h, TRUE);
+        MoveWindow(g_hPreview, g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
+        wvRc = (RECT){ 0, 0, rightWidth, h };
+    }
     set_webview_bounds(wvRc, TRUE);
 }
 
@@ -1720,6 +2761,7 @@ static void update_view_menu(HWND hwnd) {
     HMENU hView = GetSubMenu(hMenuBar, 3); /* File, Edit, Format, View */
     CheckMenuItem(hView, IDM_VIEW_TOGGLEPREVIEW, MF_BYCOMMAND | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLEEDITOR, MF_BYCOMMAND | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_PREVIEW_ON_LEFT, MF_BYCOMMAND | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED));
     HMENU hTheme = GetSubMenu(hView, 3);
     if (hTheme) {
         CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
@@ -1733,6 +2775,7 @@ static void toggle_preview(HWND hwnd) {
     g_previewVisible = !g_previewVisible;
     update_view_menu(hwnd);
     layout(hwnd);
+    save_layout_settings();
 }
 
 static void toggle_editor(HWND hwnd) {
@@ -1740,6 +2783,147 @@ static void toggle_editor(HWND hwnd) {
     g_editorVisible = !g_editorVisible;
     update_view_menu(hwnd);
     layout(hwnd);
+    save_layout_settings();
+}
+
+static void toggle_panel_sides(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    if (g_splitterPos >= 0 && rc.right > SPLITTER_WIDTH) {
+        g_splitterPos = rc.right - SPLITTER_WIDTH - g_splitterPos;
+    }
+    g_previewOnLeft = !g_previewOnLeft;
+    save_layout_settings();
+    update_view_menu(hwnd);
+    layout(hwnd);
+}
+
+static int splitter_contains_x(int x) {
+    return g_previewVisible && g_editorVisible &&
+           x >= g_splitterPos && x <= g_splitterPos + SPLITTER_WIDTH;
+}
+
+static void select_theme(HWND hwnd, int darkMode) {
+    g_previewDarkMode = darkMode;
+    save_theme_settings();
+    apply_preview_theme();
+    apply_editor_theme(g_hEdit);
+    apply_preview_host_theme();
+    apply_help_theme();
+    apply_main_theme(hwnd);
+    for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
+        if (g_hToolbarButtons[i]) InvalidateRect(g_hToolbarButtons[i], NULL, TRUE);
+    }
+    refresh_menu(hwnd);
+}
+
+static void handle_main_command(HWND hwnd, WORD cmd) {
+    if (cmd >= IDM_FILE_RECENT_0 && cmd < IDM_FILE_RECENT_0 + MAX_RECENT_FILES) {
+        do_open_recent(cmd - IDM_FILE_RECENT_0);
+        return;
+    }
+    if (cmd >= IDM_FMT_BOLD && cmd <= IDM_FMT_CODEBLOCK) {
+        toolbar_command(cmd);
+        return;
+    }
+
+    switch (cmd) {
+        case IDM_FILE_NEW: do_new(); break;
+        case IDM_FILE_OPEN: do_open(); break;
+        case IDM_FILE_SAVE: do_save(); break;
+        case IDM_FILE_SAVEAS: do_saveas(); break;
+        case IDM_FILE_RECENT_CLEAR:
+            clear_recent_files();
+            refresh_menu(hwnd);
+            break;
+        case IDM_FILE_EXIT: do_exit(); break;
+        case IDM_EDIT_UNDO: SendMessageA(g_hEdit, SCI_UNDO, 0, 0); break;
+        case IDM_EDIT_REDO: SendMessageA(g_hEdit, SCI_REDO, 0, 0); break;
+        case IDM_EDIT_CUT: SendMessageA(g_hEdit, SCI_CUT, 0, 0); break;
+        case IDM_EDIT_COPY: SendMessageA(g_hEdit, SCI_COPY, 0, 0); break;
+        case IDM_EDIT_PASTE: SendMessageA(g_hEdit, SCI_PASTE, 0, 0); break;
+        case IDM_EDIT_DELETE: SendMessageA(g_hEdit, SCI_CLEAR, 0, 0); break;
+        case IDM_EDIT_SELECTALL: SendMessageA(g_hEdit, SCI_SELECTALL, 0, 0); break;
+        case IDM_EDIT_FIND: show_find_dialog(0); break;
+        case IDM_EDIT_REPLACE: show_find_dialog(1); break;
+        case IDM_EDIT_FINDNEXT:
+            if (g_findWhat[0]) find_in_edit(g_findWhat, (g_fr.Flags & FR_MATCHCASE) ? 1 : 0, 1);
+            else show_find_dialog(0);
+            break;
+        case IDM_FORMAT_FONT: do_choose_font(); break;
+        case IDM_VIEW_TOGGLEPREVIEW: toggle_preview(hwnd); break;
+        case IDM_VIEW_TOGGLEEDITOR: toggle_editor(hwnd); break;
+        case IDM_VIEW_PREVIEW_ON_LEFT: toggle_panel_sides(hwnd); break;
+        case IDM_VIEW_THEME_GITHUB_LIGHT:
+        case IDM_VIEW_THEME_GITHUB_DARK:
+            select_theme(hwnd, cmd == IDM_VIEW_THEME_GITHUB_DARK);
+            break;
+        case IDM_HELP_REFERENCE: show_help_reference(); break;
+    }
+}
+
+static void initialize_main_window(HWND hwnd) {
+    g_hMainWnd = hwnd;
+
+    HDC hdc = GetDC(hwnd);
+    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+    g_fontMono = CreateFontA(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH, "Consolas");
+    ReleaseDC(hwnd, hdc);
+
+    SetMenu(hwnd, build_menu());
+    create_toolbar(hwnd);
+
+    g_hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "Scintilla", "",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
+        0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, GetModuleHandleA(NULL), NULL);
+    configure_scintilla(g_hEdit);
+    apply_editor_font(g_fontFaceName, g_fontPointSize);
+
+    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    /* Establish a clean initial document state before the window is shown;
+       New/Open perform the same reset after replacing text. */
+    set_dirty(0);
+    update_preview();
+
+    apply_preview_host_theme();
+    apply_main_theme(hwnd);
+    g_hPreview = CreateWindowExA(WS_EX_CLIENTEDGE, "STATIC", "",
+        WS_CHILD | WS_VISIBLE,
+        0, 0, 0, 0, hwnd, (HMENU)ID_PREVIEW, GetModuleHandleA(NULL), NULL);
+
+    init_webview();
+    layout(hwnd);
+}
+
+static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
+    if (notification->hwndFrom != g_hEdit || notification->code != SCN_MODIFIED) return;
+
+    struct SCNotification *scn = (struct SCNotification *)notification;
+    if (!(scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT))) return;
+
+    set_dirty(1);
+    SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
+    if (scn->linesAdded != 0) update_linenumber_margin_width(g_hEdit);
+}
+
+static void destroy_main_window(HWND hwnd) {
+    save_layout_settings();
+    KillTimer(hwnd, IDT_PREVIEW_UPDATE);
+    if (g_webviewController) ICoreWebView2Controller_Close(g_webviewController);
+    if (g_webview3) { ICoreWebView2_3_Release(g_webview3); g_webview3 = NULL; }
+    if (g_webview) { ICoreWebView2_Release(g_webview); g_webview = NULL; }
+    if (g_webviewController) { ICoreWebView2Controller_Release(g_webviewController); g_webviewController = NULL; }
+    free(g_pendingHtmlBody);
+    g_pendingHtmlBody = NULL;
+    if (g_previewBkBrush) { DeleteObject(g_previewBkBrush); g_previewBkBrush = NULL; }
+    if (g_helpBkBrush) { DeleteObject(g_helpBkBrush); g_helpBkBrush = NULL; }
+    if (g_mainBkBrush) { DeleteObject(g_mainBkBrush); g_mainBkBrush = NULL; }
+    if (g_fontMono) { DeleteObject(g_fontMono); g_fontMono = NULL; }
+    for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
+    free(g_currentFile);
+    PostQuitMessage(0);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1748,61 +2932,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
     switch (msg) {
-        case WM_CREATE: {
-            g_hMainWnd = hwnd;
-
-            HDC hdc = GetDC(hwnd);
-            int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-            g_fontMono = CreateFontA(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH, "Consolas");
-            ReleaseDC(hwnd, hdc);
-
-            SetMenu(hwnd, build_menu());
-
-            g_hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "Scintilla", "",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
-                0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, GetModuleHandleA(NULL), NULL);
-            configure_scintilla(g_hEdit);
-            apply_editor_font(g_fontFaceName, g_fontPointSize);
-
-            // static const char *welcome =
-            //     "# Welcome to MarkEdit\r\n\r\n"
-            //     "Type **Markdown** on the left, see the *live preview* on the right.\r\n\r\n"
-            //     "## Features\r\n"
-            //     "- Headings (# ## ###)\r\n"
-            //     "- **Bold**, *italic*, ***both***\r\n"
-            //     "- `inline code` and indented code blocks\r\n"
-            //     "- Bullet and numbered lists\r\n"
-            //     "- > blockquotes\r\n"
-            //     "- Horizontal rules with ---\r\n"
-            //     "- Mermaid diagrams, with zoom (buttons or Ctrl+wheel) and scroll\r\n\r\n"
-            //     "```mermaid\r\n"
-            //     "graph TD\r\n"
-            //     "  A[Type Markdown] --> B[Live HTML preview]\r\n"
-            //     "  B --> C{Contains mermaid fence?}\r\n"
-            //     "  C -- yes --> D[Render diagram]\r\n"
-            //     "  C -- no --> E[Render text]\r\n"
-            //     "```\r\n\r\n"
-            //     "> Edits render instantly in the preview window.\r\n";
-            // set_edit_text(g_hEdit, welcome);
-            SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-            SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-            /* SCI_SETTEXT above fires SCN_MODIFIED notifications like any other edit,
-               which flip g_dirty on via WM_NOTIFY; put the fresh document back to a
-               clean/untitled state before the window is shown. */
-            set_dirty(0);
-            update_preview();
-
-            apply_preview_host_theme();
-            g_hPreview = CreateWindowExA(WS_EX_CLIENTEDGE, "STATIC", "",
-                WS_CHILD | WS_VISIBLE,
-                0, 0, 0, 0, hwnd, (HMENU)ID_PREVIEW, GetModuleHandleA(NULL), NULL);
-
-            init_webview(hwnd);
-
-            layout(hwnd);
+        case WM_CREATE:
+            initialize_main_window(hwnd);
             return 0;
-        }
         case WM_CTLCOLORSTATIC: {
             if ((HWND)lParam == g_hPreview && g_previewBkBrush) {
                 HDC hdcStatic = (HDC)wParam;
@@ -1814,6 +2946,33 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             break;
         }
+        case WM_DRAWITEM: {
+            const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+            if (dis->CtlType == ODT_BUTTON) {
+                draw_toolbar_button(dis);
+                return TRUE;
+            }
+            break;
+        }
+        /* g_hEdit/g_hPreview/the toolbar buttons cover the rest of the client
+           area themselves; this only ever paints the toolbar strip's margins
+           and the splitter gap, so filling the whole client rect is fine -
+           there's nothing else left for DefWindowProc's COLOR_WINDOW brush to
+           paint that isn't about to be covered by a child window anyway. */
+        case WM_ERASEBKGND:
+            if (g_mainBkBrush) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                FillRect((HDC)wParam, &rc, g_mainBkBrush);
+                return 1;
+            }
+            break;
+        case WM_TIMER:
+            if (wParam == IDT_PREVIEW_UPDATE) {
+                update_preview();
+                return 0;
+            }
+            break;
         case WM_SIZE:
             layout(hwnd);
             return 0;
@@ -1821,7 +2980,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
-            if (g_previewVisible && g_editorVisible && pt.x >= g_splitterPos && pt.x <= g_splitterPos + SPLITTER_WIDTH) {
+            if (splitter_contains_x(pt.x)) {
                 SetCursor(LoadCursorA(NULL, (LPCSTR)IDC_SIZEWE));
                 return TRUE;
             }
@@ -1829,7 +2988,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         case WM_LBUTTONDOWN: {
             int x = GET_X_LPARAM(lParam);
-            if (g_previewVisible && g_editorVisible && x >= g_splitterPos && x <= g_splitterPos + SPLITTER_WIDTH) {
+            if (splitter_contains_x(x)) {
                 g_dragging = 1;
                 SetCapture(hwnd);
             }
@@ -1846,82 +3005,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_dragging) {
                 g_dragging = 0;
                 ReleaseCapture();
+                save_layout_settings();
             }
             return 0;
         }
         case WM_DROPFILES:
             handle_dropfiles((HDROP)wParam);
             return 0;
-        case WM_NOTIFY: {
-            NMHDR *nm = (NMHDR *)lParam;
-            if (nm->hwndFrom == g_hEdit && nm->code == SCN_MODIFIED) {
-                struct SCNotification *scn = (struct SCNotification *)lParam;
-                if (scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT)) {
-                    set_dirty(1);
-                    SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
-                    if (scn->linesAdded != 0) update_linenumber_margin_width(g_hEdit);
-                }
-            }
+        case WM_NOTIFY:
+            handle_editor_notification(hwnd, (NMHDR *)lParam);
             return 0;
-        }
-        case WM_COMMAND: {
-            WORD cmd = LOWORD(wParam);
-            if (cmd >= IDM_FILE_RECENT_0 && cmd < IDM_FILE_RECENT_0 + MAX_RECENT_FILES) {
-                do_open_recent(cmd - IDM_FILE_RECENT_0);
-                return 0;
-            }
-            switch (cmd) {
-                case IDM_FILE_NEW: do_new(); break;
-                case IDM_FILE_OPEN: do_open(); break;
-                case IDM_FILE_SAVE: do_save(); break;
-                case IDM_FILE_SAVEAS: do_saveas(); break;
-                case IDM_FILE_RECENT_CLEAR:
-                    clear_recent_files();
-                    refresh_menu(hwnd);
-                    break;
-                case IDM_FILE_EXIT: do_exit(); break;
-                case IDM_EDIT_UNDO: SendMessageA(g_hEdit, SCI_UNDO, 0, 0); break;
-                case IDM_EDIT_REDO: SendMessageA(g_hEdit, SCI_REDO, 0, 0); break;
-                case IDM_EDIT_CUT: SendMessageA(g_hEdit, SCI_CUT, 0, 0); break;
-                case IDM_EDIT_COPY: SendMessageA(g_hEdit, SCI_COPY, 0, 0); break;
-                case IDM_EDIT_PASTE: SendMessageA(g_hEdit, SCI_PASTE, 0, 0); break;
-                case IDM_EDIT_DELETE: SendMessageA(g_hEdit, SCI_CLEAR, 0, 0); break;
-                case IDM_EDIT_SELECTALL: SendMessageA(g_hEdit, SCI_SELECTALL, 0, 0); break;
-                case IDM_EDIT_FIND: show_find_dialog(0); break;
-                case IDM_EDIT_REPLACE: show_find_dialog(1); break;
-                case IDM_EDIT_FINDNEXT:
-                    if (g_findWhat[0]) find_in_edit(g_findWhat, (g_fr.Flags & FR_MATCHCASE) ? 1 : 0, 1);
-                    else show_find_dialog(0);
-                    break;
-                case IDM_FORMAT_FONT: do_choose_font(); break;
-                case IDM_VIEW_TOGGLEPREVIEW: toggle_preview(hwnd); break;
-                case IDM_VIEW_TOGGLEEDITOR: toggle_editor(hwnd); break;
-                case IDM_VIEW_THEME_GITHUB_LIGHT:
-                case IDM_VIEW_THEME_GITHUB_DARK:
-                    g_previewDarkMode = (cmd == IDM_VIEW_THEME_GITHUB_DARK);
-                    save_theme_settings();
-                    apply_preview_theme();
-                    apply_editor_theme(g_hEdit);
-                    apply_preview_host_theme();
-                    apply_help_theme();
-                    refresh_menu(hwnd);
-                    break;
-                case IDM_HELP_REFERENCE: show_help_reference(); break;
-            }
+        case WM_COMMAND:
+            handle_main_command(hwnd, LOWORD(wParam));
             return 0;
-        }
         case WM_CLOSE:
             do_exit();
             return 0;
+        case WM_QUERYENDSESSION:
+            save_layout_settings();
+            return TRUE;
         case WM_DESTROY:
-            KillTimer(hwnd, IDT_PREVIEW_UPDATE);
-            if (g_webview3) { ICoreWebView2_3_Release(g_webview3); g_webview3 = NULL; }
-            if (g_webview) { ICoreWebView2_Release(g_webview); g_webview = NULL; }
-            if (g_webviewController) { ICoreWebView2Controller_Release(g_webviewController); g_webviewController = NULL; }
-            if (g_helpBkBrush) { DeleteObject(g_helpBkBrush); g_helpBkBrush = NULL; }
-            for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
-            free(g_currentFile);
-            PostQuitMessage(0);
+            destroy_main_window(hwnd);
             return 0;
     }
     return DefWindowProcA(hwnd, msg, wParam, lParam);
@@ -1935,6 +3039,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     WCHAR *cliFile = (argv && argc > 1) ? wcsdup_heap(argv[1]) : NULL;
     if (argv) LocalFree(argv);
+    g_commandLinePreviewMode = cliFile != NULL;
     if (cliFile) {
         /* command-line launch to view a file: show just the rendered preview */
         g_previewVisible = 1;
@@ -1945,7 +3050,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_editorVisible = 1;
     }
 
-    if (!LoadLibraryW(L"Scintilla.dll")) {
+    HMODULE scintillaModule = LoadLibraryW(L"Scintilla.dll");
+    if (!scintillaModule) {
         MessageBoxW(NULL, L"Could not load Scintilla.dll (expected next to markedit.exe).", L"MarkEdit", MB_OK | MB_ICONERROR);
         free(cliFile);
         return 1;
@@ -1953,10 +3059,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     load_font_settings();
     load_theme_settings();
+    load_layout_settings();
+    if (g_commandLinePreviewMode) {
+        /* File-association/command-line launches are preview-only for this
+           session, without overwriting the user's normal panel visibility. */
+        g_previewVisible = 1;
+        g_editorVisible = 0;
+    }
     load_recent_files();
     prune_missing_recent_files();
 
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    HRESULT comResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     g_msgFindReplace = RegisterWindowMessageA(FINDMSGSTRINGA);
 
@@ -1975,9 +3088,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.hIconSm = hIconSmall;
     RegisterClassExA(&wc);
 
+    int windowX = g_haveSavedWindowRect ? g_savedWindowRect.left : CW_USEDEFAULT;
+    int windowY = g_haveSavedWindowRect ? g_savedWindowRect.top : CW_USEDEFAULT;
+    int windowWidth = g_haveSavedWindowRect
+        ? g_savedWindowRect.right - g_savedWindowRect.left : 1100;
+    int windowHeight = g_haveSavedWindowRect
+        ? g_savedWindowRect.bottom - g_savedWindowRect.top : 750;
     HWND hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, "MarkEditWndClass", "Untitled - MarkEdit",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 750,
+        windowX, windowY, windowWidth, windowHeight,
         NULL, NULL, hInstance, NULL);
 
     if (hIconBig) SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
@@ -2003,16 +3122,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     };
     HACCEL hAccel = CreateAcceleratorTableA(accels, sizeof(accels) / sizeof(accels[0]));
 
-    ShowWindow(hwnd, nCmdShow);
+    ShowWindow(hwnd, g_startMaximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(hwnd);
 
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    int messageResult;
+    while ((messageResult = GetMessage(&msg, NULL, 0, 0)) > 0) {
         if (g_hFindDlg && IsDialogMessage(g_hFindDlg, &msg)) continue;
         if (TranslateAcceleratorA(hwnd, hAccel, &msg)) continue;
         if (IsDialogMessage(hwnd, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    return 0;
+    if (hAccel) DestroyAcceleratorTable(hAccel);
+    if (SUCCEEDED(comResult)) CoUninitialize();
+    FreeLibrary(scintillaModule);
+    return messageResult < 0 ? 1 : 0;
 }
