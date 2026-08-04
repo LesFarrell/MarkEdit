@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,9 +28,14 @@
 
 #define ID_EDIT    101
 #define ID_PREVIEW 102
+#define ID_TABS    103
 #define IDT_PREVIEW_UPDATE 1
+#define IDT_FILE_WATCH 2
+#define IDT_SCROLL_SYNC 3
+#define WM_APP_CLOSE_TAB (WM_APP + 1)
 #define SPLITTER_WIDTH 6
 #define TOOLBAR_HEIGHT 32
+#define TAB_HEIGHT 28
 
 #define IDM_FILE_NEW      201
 #define IDM_FILE_OPEN     202
@@ -37,6 +43,9 @@
 #define IDM_FILE_SAVEAS   204
 #define IDM_FILE_EXIT     205
 #define IDM_FILE_RECENT_CLEAR 206
+#define IDM_FILE_EXPORT_HTML 207
+#define IDM_FILE_CLOSE     208
+#define IDM_FILE_REOPEN_CLOSED 241
 #define IDM_FILE_RECENT_0 250 /* IDM_FILE_RECENT_0 .. IDM_FILE_RECENT_0+MAX_RECENT_FILES-1 */
 #define IDM_EDIT_UNDO     210
 #define IDM_EDIT_REDO     219
@@ -48,12 +57,15 @@
 #define IDM_EDIT_FIND     216
 #define IDM_EDIT_REPLACE  217
 #define IDM_EDIT_FINDNEXT 218
+#define IDM_EDIT_GOTOLINE  209
 #define IDM_FORMAT_FONT   220
 #define IDM_VIEW_TOGGLEPREVIEW 230
 #define IDM_VIEW_TOGGLEEDITOR  231
 #define IDM_VIEW_THEME_GITHUB_LIGHT 232
 #define IDM_VIEW_THEME_GITHUB_DARK  233
 #define IDM_VIEW_PREVIEW_ON_LEFT 234
+#define IDM_VIEW_NEXT_TAB        235
+#define IDM_VIEW_PREVIOUS_TAB    236
 #define IDM_HELP_REFERENCE 240
 
 #define IDM_FMT_BOLD          260
@@ -71,34 +83,71 @@
 #define IDM_FMT_IMAGE         272
 #define IDM_FMT_TABLE         273
 #define IDM_FMT_CODEBLOCK     274
+#define IDM_FMT_FOOTNOTE      275
+#define IDM_FMT_HRULE         276
+#define IDM_FMT_ALERT         277
 
 #define IDI_APPICON 1
 
 static HWND g_hEdit; /* Scintilla control */
 static HWND g_hPreview; /* WebView2 host child window */
+static HWND g_hTabs;
 static HWND g_hMainWnd;
 static HFONT g_fontMono; /* used only by the plain-EDIT help-reference window */
-static char g_fontFaceName[LF_FACESIZE] = "Consolas";
+static WCHAR g_fontFaceName[LF_FACESIZE] = L"Consolas";
 static int g_fontPointSize = 10;
 
 static ICoreWebView2 *g_webview = NULL;
 static ICoreWebView2Controller *g_webviewController = NULL;
 static ICoreWebView2_3 *g_webview3 = NULL;
 static int g_webviewReady = 0;
+static int g_ignoreNextEditorScroll = 0;
+static EventRegistrationToken g_webMessageToken;
+static int g_webMessageRegistered = 0;
 static HBRUSH g_previewBkBrush = NULL; /* matches the preview host's WM_CTLCOLORSTATIC background to the theme, so it doesn't flash white before WebView2 paints */
 static HBRUSH g_helpBkBrush = NULL;
 static HBRUSH g_mainBkBrush = NULL; /* fills the toolbar strip and splitter gap in the main window, matching the theme instead of the system COLOR_WINDOW default */
 static char *g_pendingHtmlBody = NULL; /* set if update requested before webview ready */
+static WCHAR *g_exportPath = NULL;
 static int g_previewDarkMode = 0;
-static int g_hasBom = 0;
-
 /* Help window: a second top-level window with a read-only textbox showing a
    plain-text Markdown-syntax reference. Created on demand. */
 static HWND g_hHelpWnd = NULL;
 static HWND g_hHelpEdit = NULL;
 
-static WCHAR *g_currentFile = NULL;
-static int g_dirty = 0;
+#define MAX_DOCUMENTS 32
+typedef struct Document {
+    sptr_t sciDocument;
+    WCHAR *path;
+    int dirty;
+    int hasBom;
+    FILETIME fileTime;
+    int hasFileTime;
+    int externalChanged;
+    int caret;
+    int anchor;
+    int firstVisibleLine;
+    int xOffset;
+    unsigned untitledNumber;
+    int closedIndex;
+} Document;
+
+static Document g_documents[MAX_DOCUMENTS];
+static int g_documentCount = 0;
+static int g_activeDocument = 0;
+static unsigned g_nextUntitledNumber = 1;
+static int g_switchingDocument = 0;
+static char g_tabTooltipAnsi[32768];
+
+#define MAX_CLOSED_DOCUMENTS 10
+static Document g_closedDocuments[MAX_CLOSED_DOCUMENTS];
+static int g_closedDocumentCount = 0;
+
+/* Most editor operations naturally target the selected tab. These aliases
+   keep that code direct while the storage itself remains per-document. */
+#define g_currentFile (g_documents[g_activeDocument].path)
+#define g_dirty       (g_documents[g_activeDocument].dirty)
+#define g_hasBom      (g_documents[g_activeDocument].hasBom)
 static int g_previewVisible = 0;
 static int g_editorVisible = 1;
 static int g_previewOnLeft = 0;
@@ -114,9 +163,9 @@ static WCHAR *g_recentFiles[MAX_RECENT_FILES];
 static int g_recentFileCount = 0;
 
 static HWND g_hFindDlg = NULL;
-static FINDREPLACEA g_fr;
-static char g_findWhat[256] = "";
-static char g_replaceWith[256] = "";
+static FINDREPLACEW g_fr;
+static WCHAR g_findWhat[256] = L"";
+static WCHAR g_replaceWith[256] = L"";
 static UINT g_msgFindReplace;
 
 void do_save(void);
@@ -129,6 +178,17 @@ static void apply_preview_host_theme(void);
 static void apply_help_theme(void);
 static void refresh_menu(HWND hwnd);
 static void update_document_mapping(void);
+static void update_title(void);
+static void update_tab_label(int index);
+static void switch_document(int index);
+static void check_external_file_change(void);
+static void prompt_reload_active_external_change(void);
+static char *to_utf8(const WCHAR *s);
+static void do_close_document_at(int index);
+static void do_reopen_closed_tab(void);
+static void save_session_documents(void);
+static void restore_session_documents(void);
+static void sync_preview_to_editor_scroll(void);
 
 static WCHAR *wcsdup_heap(const WCHAR *value) {
     if (!value) return NULL;
@@ -535,6 +595,94 @@ static void toolbar_insert_codeblock(void) {
     SetFocus(g_hEdit);
 }
 
+static void toolbar_insert_horizontal_rule(void) {
+    int position = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    const char *eol = editor_eol_sequence();
+    const char *leading = position_needs_leading_eol(position) ? eol : "";
+    char block[24];
+    snprintf(block, sizeof(block), "%s---%s", leading, eol);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)block);
+    SetFocus(g_hEdit);
+}
+
+static void toolbar_insert_alert(void) {
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    const char *eol = editor_eol_sequence();
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    const char *body = selEnd > selStart ? text + selStart : "Alert text";
+    int bodyLen = selEnd > selStart ? selEnd - selStart : 10;
+    size_t cap = (size_t)bodyLen * 3 + strlen(eol) * 3 + 32;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(text); return; }
+
+    size_t o = 0;
+    if (position_needs_leading_eol(selStart)) {
+        size_t n = strlen(eol); memcpy(out + o, eol, n); o += n;
+    }
+    memcpy(out + o, "> [!NOTE]", 9); o += 9;
+    size_t eolLen = strlen(eol); memcpy(out + o, eol, eolLen); o += eolLen;
+    int lineStart = 1;
+    for (int i = 0; i < bodyLen; i++) {
+        if (lineStart) { memcpy(out + o, "> ", 2); o += 2; lineStart = 0; }
+        char c = body[i];
+        out[o++] = c;
+        if (c == '\n') lineStart = 1;
+    }
+    if (o < 1 || (out[o - 1] != '\r' && out[o - 1] != '\n')) {
+        memcpy(out + o, eol, eolLen); o += eolLen;
+    }
+    out[o] = 0;
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
+    free(out);
+    free(text);
+    SetFocus(g_hEdit);
+}
+
+static void toolbar_insert_footnote(void) {
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+    int next = 1;
+    for (int i = 0; i + 3 < len; i++) {
+        if (text[i] == '[' && text[i + 1] == '^' && text[i + 2] >= '0' && text[i + 2] <= '9') {
+            int value = 0, j = i + 2;
+            while (j < len && text[j] >= '0' && text[j] <= '9') value = value * 10 + (text[j++] - '0');
+            if (j < len && text[j] == ']' && value >= next) next = value + 1;
+        }
+    }
+
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    const char *note = selEnd > selStart ? text + selStart : "Footnote text";
+    int noteLen = selEnd > selStart ? selEnd - selStart : 13;
+    const char *eol = editor_eol_sequence();
+    char reference[32], prefix[48];
+    snprintf(reference, sizeof(reference), "[^%d]", next);
+    snprintf(prefix, sizeof(prefix), "%s%s[^%d]: ", eol, eol, next);
+
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)reference);
+    int newLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)newLength, (LPARAM)newLength);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)prefix);
+    int noteStart = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    char *noteCopy = (char *)malloc((size_t)noteLen + 1);
+    if (noteCopy) {
+        memcpy(noteCopy, note, (size_t)noteLen); noteCopy[noteLen] = 0;
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)noteCopy);
+        free(noteCopy);
+    }
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)eol);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)noteStart, (LPARAM)(noteStart + noteLen));
+    free(text);
+    SetFocus(g_hEdit);
+}
+
 static void toolbar_command(WORD cmd) {
     switch (cmd) {
         case IDM_FMT_BOLD: toolbar_wrap_inline("**"); break;
@@ -552,6 +700,9 @@ static void toolbar_command(WORD cmd) {
         case IDM_FMT_IMAGE: toolbar_insert_template("![", "alt text", "](url)"); break;
         case IDM_FMT_TABLE: toolbar_insert_table(); break;
         case IDM_FMT_CODEBLOCK: toolbar_insert_codeblock(); break;
+        case IDM_FMT_FOOTNOTE: toolbar_insert_footnote(); break;
+        case IDM_FMT_HRULE: toolbar_insert_horizontal_rule(); break;
+        case IDM_FMT_ALERT: toolbar_insert_alert(); break;
     }
 }
 
@@ -740,8 +891,11 @@ static void configure_scintilla(HWND hEdit) {
    HFONT). SCI_STYLECLEARALL below resets every style - including the
    Markdown lexer's per-construct styles - back to STYLE_DEFAULT's font, so
    apply_editor_theme() must run afterwards to reapply them. */
-static void apply_editor_font(const char *faceName, int pointSize) {
-    SendMessageA(g_hEdit, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceName);
+static void apply_editor_font(const WCHAR *faceName, int pointSize) {
+    char *faceUtf8 = to_utf8(faceName);
+    if (!faceUtf8) faceUtf8 = _strdup("Consolas");
+    if (!faceUtf8) return;
+    SendMessageA(g_hEdit, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
     SendMessageA(g_hEdit, SCI_STYLESETSIZE, STYLE_DEFAULT, pointSize);
     SendMessageA(g_hEdit, SCI_STYLECLEARALL, 0, 0); /* copies STYLE_DEFAULT (fore/back included) to all other styles, including STYLE_LINENUMBER */
 
@@ -752,9 +906,10 @@ static void apply_editor_font(const char *faceName, int pointSize) {
     apply_editor_theme(g_hEdit);
 
     /* The margin's digit width depends on the font, so keep both in sync. */
-    SendMessageA(g_hEdit, SCI_STYLESETFONT, STYLE_LINENUMBER, (LPARAM)faceName);
+    SendMessageA(g_hEdit, SCI_STYLESETFONT, STYLE_LINENUMBER, (LPARAM)faceUtf8);
     SendMessageA(g_hEdit, SCI_STYLESETSIZE, STYLE_LINENUMBER, pointSize);
     update_linenumber_margin_width(g_hEdit);
+    free(faceUtf8);
 }
 
 /* ---- persisted settings, stored in markedit.ini next to the executable ---- */
@@ -772,9 +927,8 @@ static WCHAR *get_settings_path(void) {
 static void load_font_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WCHAR face[LF_FACESIZE] = L"Consolas";
-    GetPrivateProfileStringW(L"Font", L"FaceName", face, face, LF_FACESIZE, path);
-    WideCharToMultiByte(CP_UTF8, 0, face, -1, g_fontFaceName, LF_FACESIZE, NULL, NULL);
+    GetPrivateProfileStringW(L"Font", L"FaceName", L"Consolas",
+                             g_fontFaceName, LF_FACESIZE, path);
     g_fontPointSize = GetPrivateProfileIntW(L"Font", L"PointSize", g_fontPointSize, path);
     if (g_fontPointSize < 1) g_fontPointSize = 1;
     free(path);
@@ -889,9 +1043,7 @@ static void save_layout_settings(void) {
 static void save_font_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WCHAR face[LF_FACESIZE];
-    MultiByteToWideChar(CP_UTF8, 0, g_fontFaceName, -1, face, LF_FACESIZE);
-    WritePrivateProfileStringW(L"Font", L"FaceName", face, path);
+    WritePrivateProfileStringW(L"Font", L"FaceName", g_fontFaceName, path);
     WCHAR sizeBuf[16];
     swprintf(sizeBuf, 16, L"%d", g_fontPointSize);
     WritePrivateProfileStringW(L"Font", L"PointSize", sizeBuf, path);
@@ -1023,6 +1175,8 @@ static const char *HTML_SHELL =
 "code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-family:Consolas,monospace;font-size:0.95em;}"
 "pre.codeblock{background:#eaeaea;padding:8px 10px;border-radius:4px;overflow-x:auto;}"
 "pre.codeblock code{background:none;padding:0;}"
+".markdown-body pre{position:relative;}"
+".code-copy-button{position:absolute;top:6px;right:6px;border:1px solid #d0d7de;border-radius:5px;background:#f6f8fa;color:#1f2328;padding:3px 8px;cursor:pointer;}"
 "blockquote{border-left:3px solid #ccc;margin:0.4em 0;padding:0.1em 1em;color:#5a5a5a;font-style:italic;}"
 "hr{border:none;border-top:1px solid #bbb;margin:1em 0;}"
 "ul,ol{margin:0.3em 0;padding-left:1.6em;}"
@@ -1065,6 +1219,7 @@ static const char *HTML_SHELL =
 ".theme-dark,.theme-dark body{background:#0d1117;color:#e6edf3;color-scheme:dark;}"
 ".theme-dark code{background:#161b22;color:#e6edf3;}"
 ".theme-dark pre.codeblock{background:#161b22;}"
+".theme-dark .code-copy-button{border-color:#30363d;background:#21262d;color:#e6edf3;}"
 ".theme-dark blockquote{border-left-color:#30363d;color:#8b949e;}"
 ".theme-dark hr{border-top-color:#30363d;}"
 ".theme-dark th,.theme-dark td{border-color:#30363d;}"
@@ -1092,6 +1247,12 @@ static const char *HTML_SHELL =
 "  document.body.classList.toggle('theme-dark', isDark);"
 "}"
 "window.setTheme = function(theme){ applyTheme(theme === 'dark' ? 'dark' : 'light'); };"
+"let suppressScrollPost=false,scrollPostPending=false;"
+"function sourceLine(el){const m=el&&el.getAttribute('data-sourcepos')?.match(/^(\\d+):/);return m?Number(m[1]):0;}"
+"function sourceBlocks(){return Array.from(document.querySelectorAll('#content [data-sourcepos]')).filter((el)=>sourceLine(el)>0&&el.offsetParent!==null);}"
+"function sourceTop(el){return el.getBoundingClientRect().top+window.scrollY;}"
+"window.scrollToSourceLine=function(line){const blocks=sourceBlocks();if(!blocks.length)return;let current=blocks[0],next=null;for(let i=0;i<blocks.length;i++){if(sourceLine(blocks[i])>line){next=blocks[i];break;}current=blocks[i];}let top=sourceTop(current);if(next){const first=sourceLine(current),last=sourceLine(next),ratio=last>first?Math.max(0,Math.min(1,(line-first)/(last-first))):0;top+=(sourceTop(next)-sourceTop(current))*ratio;}suppressScrollPost=true;window.scrollTo(0,Math.max(0,top-12));setTimeout(()=>suppressScrollPost=false,80);};"
+"window.addEventListener('scroll',()=>{if(suppressScrollPost||scrollPostPending)return;scrollPostPending=true;requestAnimationFrame(()=>{scrollPostPending=false;if(suppressScrollPost||!window.chrome?.webview)return;const blocks=sourceBlocks();if(!blocks.length)return;const top=window.scrollY+18;let current=blocks[0];for(const block of blocks){if(sourceTop(block)>top)break;current=block;}const line=sourceLine(current);if(line)window.chrome.webview.postMessage('scroll:'+line);});},{passive:true});"
 "function enhanceAlerts(root){"
 "  const names={NOTE:'Note',TIP:'Tip',IMPORTANT:'Important',WARNING:'Warning',CAUTION:'Caution'};"
 "  root.querySelectorAll('blockquote').forEach((quote)=>{"
@@ -1118,11 +1279,18 @@ static const char *HTML_SHELL =
 "    const item=document.createElement('li');item.style.marginLeft=((Number(heading.tagName.slice(1))-1)*10)+'px';const link=document.createElement('a');link.href='#'+id;link.textContent=label;link.addEventListener('click',(e)=>navigateToHeading(e,heading,id));item.appendChild(link);list.appendChild(item);"
 "  });outline.hidden=headings.length<2;if(outline.hidden)outline.open=false;"
 "}"
+"function enhanceCodeCopy(root){root.querySelectorAll('pre > code').forEach((code)=>{const pre=code.parentElement;if(!pre||pre.querySelector('.code-copy-button'))return;"
+"  const button=document.createElement('button');button.type='button';button.className='code-copy-button';button.textContent='Copy';button.onclick=()=>{"
+"    const area=document.createElement('textarea');area.value=code.textContent;area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();button.textContent='Copied';setTimeout(()=>button.textContent='Copy',1200);};pre.appendChild(button);});}"
 "function setContent(html){"
 "  document.getElementById('content').innerHTML = '<article class=\"markdown-body\">' + html + '</article>';"
-"  const article=document.querySelector('#content > .markdown-body');enhanceAlerts(article);enhanceFragmentLinks(article);enhanceHeadings(article);"
+"  const article=document.querySelector('#content > .markdown-body');enhanceAlerts(article);enhanceFragmentLinks(article);enhanceHeadings(article);enhanceCodeCopy(article);"
 "}"
 "window.setContent = setContent;"
+"window.exportRenderedHTML=function(baseHref,title){const source=document.querySelector('#content > .markdown-body');if(!source)return '';const article=source.cloneNode(true);article.querySelectorAll('.code-copy-button,.heading-anchor').forEach((el)=>el.remove());"
+"let css='';Array.from(document.styleSheets).forEach((sheet)=>{try{css+=Array.from(sheet.cssRules).map((rule)=>rule.cssText).join('\\n');}catch(_){}});"
+"const esc=(v)=>String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');const attr=(v)=>esc(v).replace(/\"/g,'&quot;');"
+"return '<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>'+esc(title)+'</title><base href=\"'+attr(baseHref)+'\"><style>'+css+'</style></head><body><main style=\"max-width:980px;margin:0 auto;padding:24px\">'+article.outerHTML+'</main></body></html>';};"
 "</script>"
 "</body></html>";
 
@@ -1137,6 +1305,59 @@ static WCHAR *to_wide(const char *s) {
         return NULL;
     }
     return w;
+}
+
+static char *to_utf8(const WCHAR *s) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return NULL;
+    char *utf8 = (char *)malloc((size_t)n);
+    if (!utf8) return NULL;
+    if (!WideCharToMultiByte(CP_UTF8, 0, s, -1, utf8, n, NULL, NULL)) {
+        free(utf8);
+        return NULL;
+    }
+    return utf8;
+}
+
+static int json_hex_digit(WCHAR c) {
+    if (c >= L'0' && c <= L'9') return c - L'0';
+    if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+    if (c >= L'A' && c <= L'F') return c - L'A' + 10;
+    return -1;
+}
+
+/* WebView2 returns ExecuteScript values as JSON. Decode its string result
+   without involving a second scripting engine so exported Unicode remains
+   byte-for-byte UTF-8. */
+static WCHAR *decode_json_string(const WCHAR *json) {
+    if (!json || json[0] != L'"') return NULL;
+    size_t n = wcslen(json);
+    WCHAR *out = (WCHAR *)malloc((n + 1) * sizeof(WCHAR));
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 1; i < n && json[i] != L'"'; i++) {
+        WCHAR c = json[i];
+        if (c != L'\\') { out[o++] = c; continue; }
+        if (++i >= n) { free(out); return NULL; }
+        c = json[i];
+        if (c == L'"' || c == L'\\' || c == L'/') out[o++] = c;
+        else if (c == L'b') out[o++] = L'\b';
+        else if (c == L'f') out[o++] = L'\f';
+        else if (c == L'n') out[o++] = L'\n';
+        else if (c == L'r') out[o++] = L'\r';
+        else if (c == L't') out[o++] = L'\t';
+        else if (c == L'u' && i + 4 < n) {
+            int value = 0;
+            for (int j = 0; j < 4; j++) {
+                int digit = json_hex_digit(json[++i]);
+                if (digit < 0) { free(out); return NULL; }
+                value = value * 16 + digit;
+            }
+            out[o++] = (WCHAR)value;
+        } else { free(out); return NULL; }
+    }
+    out[o] = 0;
+    return out;
 }
 
 /* JSON-escape a UTF-8 string for embedding inside a JS string literal (single-quoted). */
@@ -1216,6 +1437,11 @@ static HRESULT STDMETHODCALLTYPE NavStartHandler_QI(void *this_, REFIID riid, vo
         &IID_ICoreWebView2NavigationStartingEventHandler);
 }
 
+static HRESULT STDMETHODCALLTYPE WebMessageHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out,
+        &IID_ICoreWebView2WebMessageReceivedEventHandler);
+}
+
 /* Environment created handler */
 static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *this_, HRESULT errorCode, ICoreWebView2Environment *env);
 static ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandlerVtbl g_envVtbl = {
@@ -1239,6 +1465,69 @@ static ICoreWebView2ExecuteScriptCompletedHandlerVtbl g_scriptVtbl = {
     (void*)ScriptHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)ScriptDone_Invoke
 };
 static ICoreWebView2ExecuteScriptCompletedHandler g_scriptHandler = { &g_scriptVtbl };
+
+static HRESULT STDMETHODCALLTYPE ExportDone_Invoke(ICoreWebView2ExecuteScriptCompletedHandler *this_, HRESULT errorCode, LPCWSTR result) {
+    (void)this_;
+    WCHAR *html = SUCCEEDED(errorCode) ? decode_json_string(result) : NULL;
+    char *utf8 = html ? to_utf8(html) : NULL;
+    int ok = 0;
+    if (utf8 && g_exportPath) {
+        WCHAR *ioPath = extended_path(g_exportPath);
+        HANDLE file = CreateFileW(ioPath ? ioPath : g_exportPath, GENERIC_WRITE, 0, NULL,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        free(ioPath);
+        if (file != INVALID_HANDLE_VALUE) {
+            size_t length = strlen(utf8), total = 0;
+            ok = 1;
+            while (total < length) {
+                DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : length - total);
+                DWORD written = 0;
+                if (!WriteFile(file, utf8 + total, chunk, &written, NULL) || written != chunk) {
+                    ok = 0;
+                    break;
+                }
+                total += written;
+            }
+            if (!CloseHandle(file)) ok = 0;
+        }
+    }
+    if (!ok) MessageBoxW(g_hMainWnd, L"Could not export the rendered HTML.", L"MarkEdit", MB_OK | MB_ICONERROR);
+    free(utf8);
+    free(html);
+    free(g_exportPath);
+    g_exportPath = NULL;
+    return S_OK;
+}
+static ICoreWebView2ExecuteScriptCompletedHandlerVtbl g_exportScriptVtbl = {
+    (void*)ScriptHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)ExportDone_Invoke
+};
+static ICoreWebView2ExecuteScriptCompletedHandler g_exportScriptHandler = { &g_exportScriptVtbl };
+
+static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceivedEventHandler *this_,
+                                                     ICoreWebView2 *sender,
+                                                     ICoreWebView2WebMessageReceivedEventArgs *args) {
+    (void)this_; (void)sender;
+    LPWSTR message = NULL;
+    if (!g_editorVisible || !g_previewVisible ||
+        FAILED(ICoreWebView2WebMessageReceivedEventArgs_TryGetWebMessageAsString(args, &message)) ||
+        !message) return S_OK;
+    if (wcsncmp(message, L"scroll:", 7) == 0) {
+        WCHAR *end = NULL;
+        long line = wcstol(message + 7, &end, 10);
+        int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+        if (end && *end == 0 && line >= 1 && line <= lineCount) {
+            g_ignoreNextEditorScroll = 1;
+            KillTimer(g_hMainWnd, IDT_SCROLL_SYNC);
+            SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)(line - 1), 0);
+        }
+    }
+    CoTaskMemFree(message);
+    return S_OK;
+}
+static ICoreWebView2WebMessageReceivedEventHandlerVtbl g_webMessageVtbl = {
+    (void*)WebMessageHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)WebMessage_Invoke
+};
+static ICoreWebView2WebMessageReceivedEventHandler g_webMessageHandler = { &g_webMessageVtbl };
 
 /* NavigationCompleted handler: the initial shell page is ready, flush any pending content */
 static HRESULT STDMETHODCALLTYPE NavDone_Invoke(ICoreWebView2NavigationCompletedEventHandler *this_, ICoreWebView2 *sender, ICoreWebView2NavigationCompletedEventArgs *args) {
@@ -1297,8 +1586,14 @@ static WCHAR *decode_document_url(const WCHAR *uri) {
                 continue;
             }
         }
-        WCHAR one[2] = { *p++, 0 };
-        o += (size_t)WideCharToMultiByte(CP_UTF8, 0, one, 1, bytes + o, (int)(byteCap - o), NULL, NULL);
+        int units = 1;
+        if (*p >= 0xD800 && *p <= 0xDBFF && p + 1 < end &&
+            p[1] >= 0xDC00 && p[1] <= 0xDFFF) units = 2;
+        int written = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, p, units,
+                                           bytes + o, (int)(byteCap - o), NULL, NULL);
+        if (written <= 0) { free(bytes); return NULL; }
+        o += (size_t)written;
+        p += units;
     }
     bytes[o] = 0;
     int wideLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes, (int)o, NULL, 0);
@@ -1449,7 +1744,7 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
     if (SUCCEEDED(ICoreWebView2_get_Settings(webview, &settings)) && settings) {
         ICoreWebView2Settings_put_AreDevToolsEnabled(settings, FALSE);
         ICoreWebView2Settings_put_AreDefaultScriptDialogsEnabled(settings, FALSE);
-        ICoreWebView2Settings_put_IsWebMessageEnabled(settings, FALSE);
+        ICoreWebView2Settings_put_IsWebMessageEnabled(settings, TRUE);
         ICoreWebView2Settings_Release(settings);
     }
 
@@ -1457,6 +1752,9 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
     ICoreWebView2_add_NavigationCompleted(webview, &g_navHandler, &token);
     EventRegistrationToken navStartToken;
     ICoreWebView2_add_NavigationStarting(webview, &g_navStartHandler, &navStartToken);
+    if (SUCCEEDED(ICoreWebView2_add_WebMessageReceived(webview, &g_webMessageHandler,
+                                                       &g_webMessageToken)))
+        g_webMessageRegistered = 1;
 
     /* Serve the shell + mermaid.min.js from the exe's folder via a virtual host,
        so the page has a real origin and can load mermaid.min.js by relative URL. */
@@ -1535,9 +1833,125 @@ static void update_preview(void) {
     if (!html) return;
     push_html_to_webview(html);
     free(html);
+    if (g_hMainWnd) SetTimer(g_hMainWnd, IDT_SCROLL_SYNC, 40, NULL);
+}
+
+static void sync_preview_to_editor_scroll(void) {
+    if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SCROLL_SYNC);
+    if (!g_webviewReady || !g_webview || !g_editorVisible || !g_previewVisible) return;
+    int line = (int)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0) + 1;
+    char script[96];
+    snprintf(script, sizeof(script),
+             "if(window.scrollToSourceLine)window.scrollToSourceLine(%d);", line);
+    WCHAR *wide = to_wide(script);
+    if (wide) ICoreWebView2_ExecuteScript(g_webview, wide, &g_scriptHandler);
+    free(wide);
 }
 
 /* ================= rest of the app (menus, file I/O, find/replace, font) ================= */
+
+static const WCHAR *document_short_name(const Document *doc) {
+    return doc->path ? PathFindFileNameW(doc->path) : NULL;
+}
+
+static void format_document_label(const Document *doc, WCHAR *label, size_t capacity) {
+    const WCHAR *shortName = document_short_name(doc);
+    if (shortName && shortName[0]) {
+        swprintf(label, capacity, L"%ls%ls", shortName, doc->dirty ? L" *" : L"");
+    } else {
+        swprintf(label, capacity, L"Untitled %u%ls",
+                 doc->untitledNumber, doc->dirty ? L" *" : L"");
+    }
+}
+
+static void update_tab_label(int index) {
+    if (!g_hTabs || index < 0 || index >= g_documentCount) return;
+    Document *doc = &g_documents[index];
+    WCHAR label[MAX_PATH + 32];
+    format_document_label(doc, label, sizeof(label) / sizeof(label[0]));
+    TCITEMW item = {0};
+    item.mask = TCIF_TEXT;
+    item.pszText = label;
+    SendMessageW(g_hTabs, TCM_SETITEMW, (WPARAM)index, (LPARAM)&item);
+    InvalidateRect(g_hTabs, NULL, FALSE);
+}
+
+static void save_active_document_view(void) {
+    if (!g_hEdit || g_documentCount <= 0) return;
+    Document *doc = &g_documents[g_activeDocument];
+    doc->caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    doc->anchor = (int)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
+    doc->firstVisibleLine = (int)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    doc->xOffset = (int)SendMessageA(g_hEdit, SCI_GETXOFFSET, 0, 0);
+}
+
+static void record_document_file_time(int index) {
+    if (index < 0 || index >= g_documentCount) return;
+    Document *doc = &g_documents[index];
+    doc->hasFileTime = 0;
+    if (!doc->path) return;
+    WCHAR *ioPath = extended_path(doc->path);
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (ioPath && GetFileAttributesExW(ioPath, GetFileExInfoStandard, &data)) {
+        doc->fileTime = data.ftLastWriteTime;
+        doc->hasFileTime = 1;
+    }
+    doc->externalChanged = 0;
+    if (g_hTabs) InvalidateRect(g_hTabs, NULL, FALSE);
+    free(ioPath);
+}
+
+static void switch_document(int index) {
+    if (!g_hEdit || index < 0 || index >= g_documentCount || index == g_activeDocument) return;
+    save_active_document_view();
+    g_switchingDocument = 1;
+    g_activeDocument = index;
+    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    apply_editor_font(g_fontFaceName, g_fontPointSize);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[index].anchor, (LPARAM)g_documents[index].caret);
+    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)g_documents[index].firstVisibleLine, 0);
+    SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)g_documents[index].xOffset, 0);
+    update_linenumber_margin_width(g_hEdit);
+    g_switchingDocument = 0;
+    if (g_hTabs) TabCtrl_SetCurSel(g_hTabs, index);
+    update_document_mapping();
+    update_preview();
+    update_title();
+    prompt_reload_active_external_change();
+    SetFocus(g_hEdit);
+}
+
+static int create_document_tab(void) {
+    if (g_documentCount >= MAX_DOCUMENTS) {
+        MessageBoxW(g_hMainWnd, L"MarkEdit can keep up to 32 documents open at once.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+    if (g_documentCount > 0) save_active_document_view();
+    sptr_t sciDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
+    if (!sciDoc) return 0;
+    int index = g_documentCount++;
+    memset(&g_documents[index], 0, sizeof(g_documents[index]));
+    g_documents[index].sciDocument = sciDoc;
+    g_documents[index].untitledNumber = g_nextUntitledNumber++;
+    g_activeDocument = index;
+    g_switchingDocument = 1;
+    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)sciDoc);
+    configure_scintilla(g_hEdit);
+    apply_editor_font(g_fontFaceName, g_fontPointSize);
+    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    g_switchingDocument = 0;
+    TCITEMW item = {0};
+    item.mask = TCIF_TEXT;
+    item.pszText = L"";
+    SendMessageW(g_hTabs, TCM_INSERTITEMW, (WPARAM)index, (LPARAM)&item);
+    TabCtrl_SetCurSel(g_hTabs, index);
+    update_tab_label(index);
+    update_document_mapping();
+    update_preview();
+    update_title();
+    return 1;
+}
 
 static void update_title(void) {
     const WCHAR *name = g_currentFile ? g_currentFile : L"Untitled";
@@ -1551,26 +1965,12 @@ static void update_title(void) {
 
 static void set_dirty(int dirty) {
     g_dirty = dirty;
+    update_tab_label(g_activeDocument);
     update_title();
 }
 
 static void do_new(void) {
-    if (g_dirty) {
-        int r = MessageBoxW(g_hMainWnd, L"Save changes to the current document?", L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
-        if (r == IDCANCEL) return;
-        if (r == IDYES) {
-            do_save();
-            if (g_dirty) return; /* save was cancelled */
-        }
-    }
-    set_edit_text(g_hEdit, "");
-    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-    g_hasBom = 0;
-    replace_wstring(&g_currentFile, NULL);
-    update_document_mapping();
-    update_preview();
-    set_dirty(0);
+    create_document_tab();
 }
 
 static int load_file(const WCHAR *path) {
@@ -1613,10 +2013,13 @@ static int load_file(const WCHAR *path) {
         } else {
             g_hasBom = 0;
         }
+        g_switchingDocument = 1;
         set_edit_text(g_hEdit, content);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+        g_switchingDocument = 0;
         replace_wstring(&g_currentFile, displayPath ? displayPath : path);
+        record_document_file_time(g_activeDocument);
         update_document_mapping();
         update_preview();
         set_dirty(0);
@@ -1632,8 +2035,101 @@ static int load_file(const WCHAR *path) {
     return ok;
 }
 
-/* Shared "is it OK to replace the current document" prompt used by New/Open/
-   opening a recent file. Returns 0 if the caller should abort. */
+static int active_document_is_reusable(void) {
+    return !g_currentFile && !g_dirty &&
+           (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) == 0;
+}
+
+static int open_file_in_tab(const WCHAR *path) {
+    WCHAR *full = absolute_path(path);
+    if (full) {
+        for (int i = 0; i < g_documentCount; i++) {
+            if (g_documents[i].path && _wcsicmp(g_documents[i].path, full) == 0) {
+                switch_document(i);
+                free(full);
+                return 1;
+            }
+        }
+    }
+    free(full);
+    int created = 0;
+    if (!active_document_is_reusable()) {
+        if (!create_document_tab()) return 0;
+        created = 1;
+    }
+    if (load_file(path)) return 1;
+    if (created && g_documentCount > 1) {
+        sptr_t failedDoc = g_documents[g_activeDocument].sciDocument;
+        int removeIndex = g_activeDocument;
+        int target = removeIndex > 0 ? removeIndex - 1 : 0;
+        TabCtrl_DeleteItem(g_hTabs, removeIndex);
+        g_documentCount--;
+        g_activeDocument = target;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[target].sciDocument);
+        apply_editor_font(g_fontFaceName, g_fontPointSize);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[target].anchor, (LPARAM)g_documents[target].caret);
+        SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)failedDoc);
+        TabCtrl_SetCurSel(g_hTabs, target);
+        update_document_mapping();
+        update_preview();
+        update_title();
+    }
+    return 0;
+}
+
+static void save_session_documents(void) {
+    if (g_commandLinePreviewMode) return;
+    WCHAR *settings = get_settings_path();
+    if (!settings) return;
+    int savedCount = 0;
+    for (int i = 0; i < g_documentCount; i++) {
+        if (!g_documents[i].path) continue;
+        WCHAR key[24];
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", savedCount++);
+        WritePrivateProfileStringW(L"Session", key, g_documents[i].path, settings);
+    }
+    for (int i = savedCount; i < MAX_DOCUMENTS; i++) {
+        WCHAR key[24];
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", i);
+        WritePrivateProfileStringW(L"Session", key, NULL, settings);
+    }
+    WCHAR count[24];
+    swprintf(count, sizeof(count) / sizeof(count[0]), L"%d", savedCount);
+    WritePrivateProfileStringW(L"Session", L"Count", count, settings);
+    WritePrivateProfileStringW(L"Session", L"ActiveFile",
+        g_currentFile ? g_currentFile : L"", settings);
+    free(settings);
+}
+
+static void restore_session_documents(void) {
+    WCHAR *settings = get_settings_path();
+    if (!settings) return;
+    int count = GetPrivateProfileIntW(L"Session", L"Count", 0, settings);
+    if (count < 0) count = 0;
+    if (count > MAX_DOCUMENTS) count = MAX_DOCUMENTS;
+    WCHAR activeFile[32768];
+    GetPrivateProfileStringW(L"Session", L"ActiveFile", L"", activeFile,
+                             sizeof(activeFile) / sizeof(activeFile[0]), settings);
+    for (int i = 0; i < count; i++) {
+        WCHAR key[24], file[32768];
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", i);
+        GetPrivateProfileStringW(L"Session", key, L"", file,
+                                 sizeof(file) / sizeof(file[0]), settings);
+        if (file[0]) open_file_in_tab(file);
+    }
+    if (activeFile[0]) {
+        for (int i = 0; i < g_documentCount; i++) {
+            if (g_documents[i].path && _wcsicmp(g_documents[i].path, activeFile) == 0) {
+                switch_document(i);
+                break;
+            }
+        }
+    }
+    free(settings);
+}
+
+/* Prompt used when closing a dirty tab or exiting with dirty documents.
+   Returns 0 if the caller should abort. */
 static int confirm_discard_if_dirty(void) {
     if (!g_dirty) return 1;
     int r = MessageBoxW(g_hMainWnd, L"Save changes to the current document?", L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
@@ -1647,14 +2143,12 @@ static int confirm_discard_if_dirty(void) {
 
 static void do_open_recent(int index) {
     if (index < 0 || index >= g_recentFileCount) return;
-    if (!confirm_discard_if_dirty()) return;
     WCHAR *path = wcsdup_heap(g_recentFiles[index]);
-    if (path) load_file(path); /* load_file() may mutate the recent-files array */
+    if (path) open_file_in_tab(path); /* opening may mutate the recent-files array */
     free(path);
 }
 
 static void do_open(void) {
-    if (!confirm_discard_if_dirty()) return;
     DWORD cap = 32768;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return;
@@ -1664,24 +2158,37 @@ static void do_open(void) {
     ofn.lpstrFilter = L"Markdown Files (*.md;*.markdown)\0*.md;*.markdown\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = cap;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
     ofn.lpstrDefExt = L"md";
-    if (GetOpenFileNameW(&ofn)) load_file(path);
+    if (GetOpenFileNameW(&ofn)) {
+        WCHAR *next = path + wcslen(path) + 1;
+        if (!*next) {
+            open_file_in_tab(path);
+        } else {
+            while (*next) {
+                WCHAR *full = path_join(path, next);
+                if (full) open_file_in_tab(full);
+                free(full);
+                next += wcslen(next) + 1;
+            }
+        }
+    }
     free(path);
 }
 
-/* Opens a file dropped onto the main window, prompting to save any dirty
-   document first, same as File > Open. */
+/* Opens a dropped file in its own document tab. */
 static void do_open_dropped_file(const WCHAR *path) {
-    if (!confirm_discard_if_dirty()) return;
-    load_file(path);
+    open_file_in_tab(path);
 }
 
 static void handle_dropfiles(HDROP hDrop) {
-    UINT cap = DragQueryFileW(hDrop, 0, NULL, 0) + 1;
-    WCHAR *path = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
-    if (path && DragQueryFileW(hDrop, 0, path, cap)) do_open_dropped_file(path);
-    free(path);
+    UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
+    for (UINT i = 0; i < count; i++) {
+        UINT cap = DragQueryFileW(hDrop, i, NULL, 0) + 1;
+        WCHAR *path = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
+        if (path && DragQueryFileW(hDrop, i, path, cap)) do_open_dropped_file(path);
+        free(path);
+    }
     DragFinish(hDrop);
 }
 
@@ -1751,6 +2258,7 @@ static int save_to_path(const WCHAR *path) {
     add_recent_file(displayPath ? displayPath : path);
     replace_wstring(&g_currentFile, displayPath ? displayPath : path);
     free(ioPath);
+    record_document_file_time(g_activeDocument);
     update_document_mapping();
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
     set_dirty(0);
@@ -1785,89 +2293,428 @@ void do_save(void) {
     }
 }
 
-static void do_exit(void) {
-    if (g_dirty) {
-        int r = MessageBoxW(g_hMainWnd, L"Save changes before exiting?", L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
-        if (r == IDCANCEL) return;
-        if (r == IDYES) {
-            do_save();
-            if (g_dirty) return;
+static void do_export_html(void) {
+    if (!g_webview || !g_webviewReady) {
+        MessageBoxW(g_hMainWnd, L"The preview is not ready yet.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g_exportPath) {
+        MessageBoxW(g_hMainWnd, L"An HTML export is already in progress.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    DWORD cap = 32768;
+    WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
+    if (!path) return;
+    if (g_currentFile) {
+        wcsncpy(path, g_currentFile, cap - 1);
+        PathRenameExtensionW(path, L".html");
+    } else {
+        wcsncpy(path, L"Untitled.html", cap - 1);
+    }
+    OPENFILENAMEW ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hMainWnd;
+    ofn.lpstrFilter = L"HTML Files (*.html;*.htm)\0*.html;*.htm\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = cap;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    ofn.lpstrDefExt = L"html";
+    if (!GetSaveFileNameW(&ofn)) { free(path); return; }
+
+    WCHAR *directory = g_currentFile ? path_directory(g_currentFile) : NULL;
+    if (!directory) {
+        WCHAR *module = get_module_path();
+        directory = module ? path_directory(module) : NULL;
+        free(module);
+    }
+    WCHAR *directorySlash = NULL;
+    if (directory) {
+        size_t n = wcslen(directory);
+        directorySlash = (WCHAR *)malloc((n + 2) * sizeof(WCHAR));
+        if (directorySlash) {
+            memcpy(directorySlash, directory, n * sizeof(WCHAR));
+            if (n == 0 || (directory[n - 1] != L'\\' && directory[n - 1] != L'/')) directorySlash[n++] = L'\\';
+            directorySlash[n] = 0;
         }
     }
+    WCHAR url[32768];
+    DWORD urlLength = sizeof(url) / sizeof(url[0]);
+    if (!directorySlash || FAILED(UrlCreateFromPathW(directorySlash, url, &urlLength, 0))) wcscpy(url, L"");
+    free(directorySlash);
+    free(directory);
+
+    const WCHAR *titleWide = document_short_name(&g_documents[g_activeDocument]);
+    if (!titleWide) titleWide = L"Untitled";
+    char *baseUtf8 = to_utf8(url);
+    char *titleUtf8 = to_utf8(titleWide);
+    char *baseEscaped = baseUtf8 ? json_escape(baseUtf8) : NULL;
+    char *titleEscaped = titleUtf8 ? json_escape(titleUtf8) : NULL;
+    if (!baseEscaped || !titleEscaped) {
+        free(path); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
+        return;
+    }
+    size_t scriptCap = strlen(baseEscaped) + strlen(titleEscaped) + 128;
+    char *script = (char *)malloc(scriptCap);
+    if (!script) {
+        free(path); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
+        return;
+    }
+    snprintf(script, scriptCap,
+        "window.exportRenderedHTML ? window.exportRenderedHTML('%s','%s') : ''",
+        baseEscaped, titleEscaped);
+    WCHAR *wideScript = to_wide(script);
+    g_exportPath = path;
+    update_preview();
+    HRESULT hr = wideScript
+        ? ICoreWebView2_ExecuteScript(g_webview, wideScript, &g_exportScriptHandler)
+        : E_OUTOFMEMORY;
+    if (FAILED(hr)) {
+        free(g_exportPath);
+        g_exportPath = NULL;
+        MessageBoxW(g_hMainWnd, L"Could not start the HTML export.", L"MarkEdit", MB_OK | MB_ICONERROR);
+    }
+    free(wideScript); free(script); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
+}
+
+static void release_document_reference(Document *doc) {
+    if (doc->sciDocument && g_hEdit)
+        SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)doc->sciDocument);
+    free(doc->path);
+    memset(doc, 0, sizeof(*doc));
+}
+
+static void push_closed_document(Document removed, int index) {
+    removed.closedIndex = index;
+    if (g_closedDocumentCount == MAX_CLOSED_DOCUMENTS) {
+        release_document_reference(&g_closedDocuments[0]);
+        for (int i = 0; i + 1 < g_closedDocumentCount; i++)
+            g_closedDocuments[i] = g_closedDocuments[i + 1];
+        g_closedDocumentCount--;
+    }
+    g_closedDocuments[g_closedDocumentCount++] = removed;
+}
+
+static void do_close_document_at(int index) {
+    if (index < 0 || index >= g_documentCount) return;
+    if (index != g_activeDocument) switch_document(index);
+    if (!confirm_discard_if_dirty()) return;
+    save_active_document_view();
+    int removeIndex = g_activeDocument;
+    Document removed = g_documents[removeIndex];
+
+    if (g_documentCount <= 1) {
+        sptr_t newDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
+        if (!newDoc) return;
+        memset(&g_documents[0], 0, sizeof(g_documents[0]));
+        g_documents[0].sciDocument = newDoc;
+        g_documents[0].untitledNumber = g_nextUntitledNumber++;
+        g_switchingDocument = 1;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)newDoc);
+        configure_scintilla(g_hEdit);
+        apply_editor_font(g_fontFaceName, g_fontPointSize);
+        SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+        g_switchingDocument = 0;
+        push_closed_document(removed, 0);
+        update_tab_label(0);
+        update_document_mapping();
+        update_preview();
+        update_title();
+        refresh_menu(g_hMainWnd);
+        SetFocus(g_hEdit);
+        return;
+    }
+
+    TabCtrl_DeleteItem(g_hTabs, removeIndex);
+    for (int i = removeIndex; i + 1 < g_documentCount; i++) g_documents[i] = g_documents[i + 1];
+    memset(&g_documents[g_documentCount - 1], 0, sizeof(g_documents[0]));
+    g_documentCount--;
+    g_activeDocument = removeIndex < g_documentCount ? removeIndex : g_documentCount - 1;
+    g_switchingDocument = 1;
+    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[g_activeDocument].sciDocument);
+    apply_editor_font(g_fontFaceName, g_fontPointSize);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[g_activeDocument].anchor,
+                 (LPARAM)g_documents[g_activeDocument].caret);
+    g_switchingDocument = 0;
+    push_closed_document(removed, removeIndex);
+    TabCtrl_SetCurSel(g_hTabs, g_activeDocument);
+    update_linenumber_margin_width(g_hEdit);
+    update_document_mapping();
+    update_preview();
+    update_title();
+    refresh_menu(g_hMainWnd);
+    prompt_reload_active_external_change();
+    SetFocus(g_hEdit);
+}
+
+static void do_close_document(void) {
+    do_close_document_at(g_activeDocument);
+}
+
+static void do_reopen_closed_tab(void) {
+    if (g_closedDocumentCount <= 0) {
+        MessageBeep(MB_ICONASTERISK);
+        return;
+    }
+    Document restored = g_closedDocuments[--g_closedDocumentCount];
+    memset(&g_closedDocuments[g_closedDocumentCount], 0, sizeof(g_closedDocuments[0]));
+    save_active_document_view();
+
+    int replaceBlank = g_documentCount == 1 && active_document_is_reusable();
+    int index = restored.closedIndex;
+    if (index < 0) index = 0;
+    if (index > g_documentCount) index = g_documentCount;
+    if (replaceBlank) {
+        Document blank = g_documents[0];
+        g_documents[0] = restored;
+        index = 0;
+        g_activeDocument = 0;
+        g_switchingDocument = 1;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)restored.sciDocument);
+        g_switchingDocument = 0;
+        release_document_reference(&blank);
+    } else {
+        if (g_documentCount >= MAX_DOCUMENTS) {
+            g_closedDocuments[g_closedDocumentCount++] = restored;
+            MessageBoxW(g_hMainWnd, L"Close a tab before reopening this document.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        for (int i = g_documentCount; i > index; i--) g_documents[i] = g_documents[i - 1];
+        g_documents[index] = restored;
+        g_documentCount++;
+        g_activeDocument = index;
+        g_switchingDocument = 1;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)restored.sciDocument);
+        g_switchingDocument = 0;
+        TCITEMW item = {0};
+        item.mask = TCIF_TEXT;
+        item.pszText = L"";
+        SendMessageW(g_hTabs, TCM_INSERTITEMW, (WPARAM)index, (LPARAM)&item);
+    }
+    apply_editor_font(g_fontFaceName, g_fontPointSize);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)restored.anchor, (LPARAM)restored.caret);
+    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)restored.firstVisibleLine, 0);
+    SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)restored.xOffset, 0);
+    TabCtrl_SetCurSel(g_hTabs, index);
+    update_tab_label(index);
+    update_linenumber_margin_width(g_hEdit);
+    update_document_mapping();
+    update_preview();
+    update_title();
+    refresh_menu(g_hMainWnd);
+    prompt_reload_active_external_change();
+    SetFocus(g_hEdit);
+}
+
+static void prompt_reload_active_external_change(void) {
+    if (g_documentCount <= 0 || !g_currentFile || !g_documents[g_activeDocument].externalChanged) return;
+    Document *doc = &g_documents[g_activeDocument];
+    doc->externalChanged = 0;
+    InvalidateRect(g_hTabs, NULL, FALSE);
+    const WCHAR *message = g_dirty
+        ? L"This file changed on disk. Reload it and discard your unsaved changes?"
+        : L"This file changed on disk. Reload the updated version?";
+    if (MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        WCHAR *path = wcsdup_heap(g_currentFile);
+        if (path) load_file(path);
+        free(path);
+    }
+}
+
+static void check_external_file_change(void) {
+    int changedVisual = 0;
+    for (int i = 0; i < g_documentCount; i++) {
+        Document *doc = &g_documents[i];
+        if (!doc->path) continue;
+        WCHAR *ioPath = extended_path(doc->path);
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        int exists = ioPath && GetFileAttributesExW(ioPath, GetFileExInfoStandard, &data);
+        free(ioPath);
+        if (!exists) {
+            doc->hasFileTime = 0;
+            continue;
+        }
+        if (!doc->hasFileTime) {
+            doc->fileTime = data.ftLastWriteTime;
+            doc->hasFileTime = 1;
+            continue;
+        }
+        if (CompareFileTime(&doc->fileTime, &data.ftLastWriteTime) != 0) {
+            doc->fileTime = data.ftLastWriteTime;
+            if (!doc->externalChanged) changedVisual = 1;
+            doc->externalChanged = 1;
+        }
+    }
+    if (changedVisual) InvalidateRect(g_hTabs, NULL, FALSE);
+    prompt_reload_active_external_change();
+}
+
+static void do_exit(void) {
+    int original = g_activeDocument;
+    for (int i = 0; i < g_documentCount; i++) {
+        if (!g_documents[i].dirty) continue;
+        switch_document(i);
+        if (!confirm_discard_if_dirty()) {
+            if (original < g_documentCount) switch_document(original);
+            return;
+        }
+    }
+    if (original < g_documentCount) switch_document(original);
     save_layout_settings();
+    save_session_documents();
+    for (int i = 0; i < g_documentCount; i++) {
+        SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)g_documents[i].sciDocument);
+        g_documents[i].sciDocument = 0;
+    }
+    for (int i = 0; i < g_closedDocumentCount; i++)
+        release_document_reference(&g_closedDocuments[i]);
+    g_closedDocumentCount = 0;
     DestroyWindow(g_hMainWnd);
 }
 
 /* ---- Find / Replace (operates on the markdown source in g_hEdit) ---- */
+static HWND g_hGotoEdit = NULL;
+
+static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;
+    switch (msg) {
+        case WM_CREATE: {
+            CreateWindowExA(0, "STATIC", "Line number:", WS_CHILD | WS_VISIBLE,
+                12, 14, 90, 20, hwnd, NULL, GetModuleHandleA(NULL), NULL);
+            g_hGotoEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+                104, 11, 105, 24, hwnd, (HMENU)10, GetModuleHandleA(NULL), NULL);
+            CreateWindowExA(0, "BUTTON", "Go to", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                48, 50, 76, 25, hwnd, (HMENU)IDOK, GetModuleHandleA(NULL), NULL);
+            CreateWindowExA(0, "BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                132, 50, 76, 25, hwnd, (HMENU)IDCANCEL, GetModuleHandleA(NULL), NULL);
+            char current[32];
+            int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION,
+                SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0), 0) + 1;
+            snprintf(current, sizeof(current), "%d", line);
+            SetWindowTextA(g_hGotoEdit, current);
+            SendMessageA(g_hGotoEdit, EM_SETSEL, 0, -1);
+            SetFocus(g_hGotoEdit);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK) {
+                char value[32];
+                GetWindowTextA(g_hGotoEdit, value, sizeof(value));
+                long line = strtol(value, NULL, 10);
+                int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+                if (line < 1 || line > lineCount) {
+                    MessageBeep(MB_ICONWARNING);
+                    SendMessageA(g_hGotoEdit, EM_SETSEL, 0, -1);
+                    return 0;
+                }
+                SendMessageA(g_hEdit, SCI_GOTOLINE, (WPARAM)(line - 1), 0);
+                SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            if (LOWORD(wParam) == IDCANCEL) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+static void show_goto_line_dialog(void) {
+    static int classRegistered = 0;
+    if (!classRegistered) {
+        WNDCLASSA wc = {0};
+        wc.lpfnWndProc = GotoLineWndProc;
+        wc.hInstance = GetModuleHandleA(NULL);
+        wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = "MarkEditGotoLine";
+        if (!RegisterClassA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+        classRegistered = 1;
+    }
+    HWND dialog = CreateWindowExA(WS_EX_DLGMODALFRAME, "MarkEditGotoLine", "Go to Line",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 238, 118, g_hMainWnd, NULL, GetModuleHandleA(NULL), NULL);
+    if (!dialog) return;
+    RECT owner, rc;
+    GetWindowRect(g_hMainWnd, &owner);
+    GetWindowRect(dialog, &rc);
+    SetWindowPos(dialog, HWND_TOP,
+        owner.left + ((owner.right - owner.left) - (rc.right - rc.left)) / 2,
+        owner.top + ((owner.bottom - owner.top) - (rc.bottom - rc.top)) / 2,
+        0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    EnableWindow(g_hMainWnd, FALSE);
+    MSG msg = {0};
+    int result = -1;
+    while (IsWindow(dialog) && (result = GetMessage(&msg, NULL, 0, 0)) > 0) {
+        if (!IsDialogMessage(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+    EnableWindow(g_hMainWnd, TRUE);
+    SetForegroundWindow(g_hMainWnd);
+    SetFocus(g_hEdit);
+    if (result == 0) PostQuitMessage((int)msg.wParam);
+}
+
 static void find_in_edit(const char *needle, int matchCase, int down) {
     if (!needle || !needle[0]) return;
-    int len;
-    char *text = get_edit_text(g_hEdit, &len);
-    if (!text) return;
-
+    int len = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
     int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-
     int needleLen = (int)strlen(needle);
     int foundAt = -1;
+    int foundEnd = -1;
+    SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
 
     if (down) {
-        int startFrom = (int)selEnd;
-        for (int i = startFrom; i <= len - needleLen; i++) {
-            int match = matchCase ? (strncmp(text + i, needle, needleLen) == 0)
-                                   : (_strnicmp(text + i, needle, needleLen) == 0);
-            if (match) { foundAt = i; break; }
-        }
+        SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)selEnd, 0);
+        SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)len, 0);
+        foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         if (foundAt < 0) {
-            for (int i = 0; i <= (int)selStart && i <= len - needleLen; i++) {
-                int match = matchCase ? (strncmp(text + i, needle, needleLen) == 0)
-                                       : (_strnicmp(text + i, needle, needleLen) == 0);
-                if (match) { foundAt = i; break; }
-            }
+            SendMessageA(g_hEdit, SCI_SETTARGETSTART, 0, 0);
+            SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)selStart, 0);
+            foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         }
     } else {
-        int startFrom = (int)selStart - 1;
-        for (int i = startFrom; i >= 0; i--) {
-            int match = matchCase ? (strncmp(text + i, needle, needleLen) == 0)
-                                   : (_strnicmp(text + i, needle, needleLen) == 0);
-            if (match) { foundAt = i; break; }
-        }
+        SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)selStart, 0);
+        SendMessageA(g_hEdit, SCI_SETTARGETEND, 0, 0);
+        foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         if (foundAt < 0) {
-            for (int i = len - needleLen; i >= (int)selStart; i--) {
-                int match = matchCase ? (strncmp(text + i, needle, needleLen) == 0)
-                                       : (_strnicmp(text + i, needle, needleLen) == 0);
-                if (match) { foundAt = i; break; }
-            }
+            SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)len, 0);
+            SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)selEnd, 0);
+            foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         }
     }
 
     if (foundAt >= 0) {
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)foundAt, (LPARAM)(foundAt + needleLen));
+        foundEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)foundAt, (LPARAM)foundEnd);
         SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
         SetFocus(g_hEdit);
     } else {
         MessageBeep(MB_ICONASTERISK);
     }
-    free(text);
 }
 
 static void replace_selection_and_find(const char *findWhat, const char *replaceWith, int matchCase) {
     int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
     int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (selEnd > selStart) {
-        int len;
-        char *text = get_edit_text(g_hEdit, &len);
-        if (text) {
-            int selLen = selEnd - selStart;
-            char sel[256];
-            if (selLen >= (int)sizeof(sel)) selLen = (int)sizeof(sel) - 1;
-            memcpy(sel, text + selStart, (size_t)selLen);
-            sel[selLen] = 0;
-            int match = matchCase ? (strcmp(sel, findWhat) == 0) : (_stricmp(sel, findWhat) == 0);
-            if (match) {
-                SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replaceWith);
-            }
-            free(text);
+        int findLen = (int)strlen(findWhat);
+        SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
+        SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)selStart, 0);
+        SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)selEnd, 0);
+        int found = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)findLen, (LPARAM)findWhat);
+        int foundEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        if (found == selStart && foundEnd == selEnd) {
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replaceWith);
         }
     }
     find_in_edit(findWhat, matchCase, 1);
@@ -1879,69 +2726,85 @@ static void show_find_dialog(int replace) {
         return;
     }
     ZeroMemory(&g_fr, sizeof(g_fr));
-    g_fr.lStructSize = sizeof(FINDREPLACEA);
+    g_fr.lStructSize = sizeof(FINDREPLACEW);
     g_fr.hwndOwner = g_hMainWnd;
     g_fr.lpstrFindWhat = g_findWhat;
-    g_fr.wFindWhatLen = sizeof(g_findWhat);
+    g_fr.wFindWhatLen = sizeof(g_findWhat) / sizeof(g_findWhat[0]);
     g_fr.lpstrReplaceWith = g_replaceWith;
-    g_fr.wReplaceWithLen = sizeof(g_replaceWith);
+    g_fr.wReplaceWithLen = sizeof(g_replaceWith) / sizeof(g_replaceWith[0]);
     g_fr.Flags = FR_DOWN;
 
     if (replace) {
-        g_hFindDlg = ReplaceTextA(&g_fr);
+        g_hFindDlg = ReplaceTextW(&g_fr);
     } else {
-        g_hFindDlg = FindTextA(&g_fr);
+        g_hFindDlg = FindTextW(&g_fr);
     }
 }
 
-static void handle_findmsg(FINDREPLACEA *fr) {
+static void handle_findmsg(FINDREPLACEW *fr) {
     if (fr->Flags & FR_DIALOGTERM) {
         g_hFindDlg = NULL;
+        return;
+    }
+    char *findUtf8 = to_utf8(fr->lpstrFindWhat);
+    char *replaceUtf8 = to_utf8(fr->lpstrReplaceWith);
+    if (!findUtf8 || !replaceUtf8) {
+        free(findUtf8);
+        free(replaceUtf8);
         return;
     }
     int matchCase = (fr->Flags & FR_MATCHCASE) ? 1 : 0;
     int down = (fr->Flags & FR_DOWN) ? 1 : 0;
     if (fr->Flags & FR_FINDNEXT) {
-        find_in_edit(fr->lpstrFindWhat, matchCase, down);
+        find_in_edit(findUtf8, matchCase, down);
     } else if (fr->Flags & FR_REPLACE) {
-        replace_selection_and_find(fr->lpstrFindWhat, fr->lpstrReplaceWith, matchCase);
+        replace_selection_and_find(findUtf8, replaceUtf8, matchCase);
     } else if (fr->Flags & FR_REPLACEALL) {
         int count = 0;
-        SendMessageA(g_hEdit, SCI_SETSEL, 0, 0);
-        for (;;) {
-            int before = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-            find_in_edit(fr->lpstrFindWhat, matchCase, 1);
-            int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-            int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-            if (selEnd == selStart) break;
-            if (selStart < before && count > 0) break; /* wrapped around, stop */
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)fr->lpstrReplaceWith);
+        int findLen = (int)strlen(findUtf8);
+        int replaceLen = (int)strlen(replaceUtf8);
+        int position = 0;
+        int documentLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+        SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
+        SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+        while (findLen > 0 && position <= documentLength && count <= 100000) {
+            SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)position, 0);
+            SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)documentLength, 0);
+            int found = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET,
+                                           (WPARAM)findLen, (LPARAM)findUtf8);
+            if (found < 0) break;
+            int oldEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+            SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)replaceLen, (LPARAM)replaceUtf8);
+            documentLength += replaceLen - (oldEnd - found);
+            position = found + replaceLen;
             count++;
-            if (count > 100000) break;
         }
-        char msg[64];
-        wsprintfA(msg, "Replaced %d occurrence(s).", count);
-        MessageBoxA(g_hMainWnd, msg, "MarkEdit", MB_OK | MB_ICONINFORMATION);
+        SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+        WCHAR msg[64];
+        swprintf(msg, sizeof(msg) / sizeof(msg[0]), L"Replaced %d occurrence(s).", count);
+        MessageBoxW(g_hMainWnd, msg, L"MarkEdit", MB_OK | MB_ICONINFORMATION);
     }
+    free(findUtf8);
+    free(replaceUtf8);
 }
 
 static void do_choose_font(void) {
-    LOGFONTA lf;
+    LOGFONTW lf;
     ZeroMemory(&lf, sizeof(lf));
-    snprintf(lf.lfFaceName, sizeof(lf.lfFaceName), "%s", g_fontFaceName);
+    wcsncpy(lf.lfFaceName, g_fontFaceName, LF_FACESIZE - 1);
     HDC hdc = GetDC(g_hEdit);
     lf.lfHeight = -MulDiv(g_fontPointSize, GetDeviceCaps(hdc, LOGPIXELSY), 72);
     ReleaseDC(g_hEdit, hdc);
 
-    CHOOSEFONTA cf;
+    CHOOSEFONTW cf;
     ZeroMemory(&cf, sizeof(cf));
     cf.lStructSize = sizeof(cf);
     cf.hwndOwner = g_hMainWnd;
     cf.lpLogFont = &lf;
     cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOSCRIPTSEL;
 
-    if (ChooseFontA(&cf)) {
-        strncpy(g_fontFaceName, lf.lfFaceName, LF_FACESIZE - 1);
+    if (ChooseFontW(&cf)) {
+        wcsncpy(g_fontFaceName, lf.lfFaceName, LF_FACESIZE - 1);
         g_fontFaceName[LF_FACESIZE - 1] = 0;
         g_fontPointSize = cf.iPointSize / 10;
         if (g_fontPointSize < 1) g_fontPointSize = 1;
@@ -2182,6 +3045,10 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN, "&Open...\tCtrl+O");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVE, "&Save\tCtrl+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVEAS, "Save &As...\tCtrl+Shift+S");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_HTML, "Export Rendered &HTML...");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_CLOSE, "&Close Tab\tCtrl+W");
+    AppendMenuA(hFile, MF_STRING | (g_closedDocumentCount ? 0 : MF_GRAYED),
+                IDM_FILE_REOPEN_CLOSED, "&Reopen Closed Tab\tCtrl+Shift+T");
     AppendMenuA(hFile, MF_SEPARATOR, 0, NULL);
 
     HMENU hRecent = CreatePopupMenu();
@@ -2223,15 +3090,23 @@ static HMENU build_menu(void) {
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_FIND, "&Find...\tCtrl+F");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_FINDNEXT, "Find &Next\tF3");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_REPLACE, "&Replace...\tCtrl+H");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_GOTOLINE, "&Go to Line...\tCtrl+G");
     AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hEditMenu, "&Edit");
 
     HMENU hFormat = CreatePopupMenu();
+    AppendMenuA(hFormat, MF_STRING, IDM_FMT_FOOTNOTE, "Insert &Footnote");
+    AppendMenuA(hFormat, MF_STRING, IDM_FMT_HRULE, "Insert &Horizontal Rule");
+    AppendMenuA(hFormat, MF_STRING, IDM_FMT_ALERT, "Insert &Alert");
+    AppendMenuA(hFormat, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hFormat, MF_STRING, IDM_FORMAT_FONT, "&Font...");
     AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hFormat, "F&ormat");
 
     HMENU hView = CreatePopupMenu();
     AppendMenuA(hView, MF_STRING | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEPREVIEW, "Show &Preview\tCtrl+Shift+V");
     AppendMenuA(hView, MF_STRING | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEEDITOR, "Show &Editor\tCtrl+Shift+E");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_NEXT_TAB, "&Next Tab\tCtrl+Tab");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_PREVIOUS_TAB, "&Previous Tab\tCtrl+Shift+Tab");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     HMENU hTheme = CreatePopupMenu();
     AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_LIGHT, "GitHub &Light");
@@ -2592,6 +3467,37 @@ static void toolbar_icon_swappanels(HDC hdc, const RECT *rc, COLORREF fg) {
     DeleteObject(pen);
 }
 
+static void toolbar_icon_text(HDC hdc, const RECT *rc, COLORREF fg, const char *label, int size) {
+    HFONT font = CreateFontA(-size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH, "Segoe UI");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    RECT textRc = *rc;
+    SetTextColor(hdc, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    DrawTextA(hdc, label, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+static void toolbar_icon_footnote(HDC hdc, const RECT *rc, COLORREF fg) {
+    toolbar_icon_text(hdc, rc, fg, "fn", 14);
+}
+
+static void toolbar_icon_hrule(HDC hdc, const RECT *rc, COLORREF fg) {
+    HPEN pen = CreatePen(PS_SOLID, 2, fg);
+    HPEN old = (HPEN)SelectObject(hdc, pen);
+    int y = (rc->top + rc->bottom) / 2;
+    MoveToEx(hdc, rc->left + 3, y, NULL);
+    LineTo(hdc, rc->right - 3, y);
+    SelectObject(hdc, old);
+    DeleteObject(pen);
+}
+
+static void toolbar_icon_alert(HDC hdc, const RECT *rc, COLORREF fg) {
+    toolbar_icon_text(hdc, rc, fg, "!", 18);
+}
+
 struct ToolbarButtonDef {
     WORD id;
     ToolbarIconPaintFn paint; /* NULL marks a separator (a small gap, no button) */
@@ -2616,6 +3522,9 @@ static const struct ToolbarButtonDef TOOLBAR_BUTTONS[] = {
     { IDM_FMT_IMAGE, toolbar_icon_image, "Insert image" },
     { IDM_FMT_TABLE, toolbar_icon_table, "Insert table" },
     { IDM_FMT_CODEBLOCK, toolbar_icon_codeblock, "Insert code block" },
+    { IDM_FMT_FOOTNOTE, toolbar_icon_footnote, "Insert footnote" },
+    { IDM_FMT_HRULE, toolbar_icon_hrule, "Insert horizontal rule" },
+    { IDM_FMT_ALERT, toolbar_icon_alert, "Insert alert" },
     { 0, NULL, NULL },
     { IDM_VIEW_TOGGLEPREVIEW, toolbar_icon_togglepreview, "Toggle preview" },
     { IDM_VIEW_PREVIEW_ON_LEFT, toolbar_icon_swappanels, "Swap panel sides" },
@@ -2679,8 +3588,8 @@ static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
 /* Lay the toolbar buttons out left-to-right along the reserved top strip,
    with a wider gap standing in for a separator between groups. All buttons
    are the same size, sized to the toolbar's height. */
-static int layout_toolbar(int width) {
-    int x = 4, y = 3;
+static int layout_toolbar(int width, int top) {
+    int x = 4, y = top + 3;
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (!TOOLBAR_BUTTONS[i].paint) {
             if (x > 4) x += 10;
@@ -2705,13 +3614,13 @@ static void layout(HWND hwnd) {
 
     /* The formatting toolbar edits Markdown source, so it's only useful (and
        only shown) while the editor pane is visible. */
-    int toolbarHeight = 0;
+    MoveWindow(g_hTabs, 0, 0, w, TAB_HEIGHT, TRUE);
+    int y = TAB_HEIGHT;
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (g_hToolbarButtons[i]) ShowWindow(g_hToolbarButtons[i], g_editorVisible ? SW_SHOW : SW_HIDE);
     }
-    if (g_editorVisible) toolbarHeight = layout_toolbar(w);
-    int y = toolbarHeight;
-    h -= toolbarHeight;
+    if (g_editorVisible) y = layout_toolbar(w, y);
+    h -= y;
     if (h < 0) h = 0;
 
     if (g_editorVisible && !g_previewVisible) {
@@ -2762,7 +3671,7 @@ static void update_view_menu(HWND hwnd) {
     CheckMenuItem(hView, IDM_VIEW_TOGGLEPREVIEW, MF_BYCOMMAND | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLEEDITOR, MF_BYCOMMAND | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_PREVIEW_ON_LEFT, MF_BYCOMMAND | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED));
-    HMENU hTheme = GetSubMenu(hView, 3);
+    HMENU hTheme = GetSubMenu(hView, 6);
     if (hTheme) {
         CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
                            g_previewDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
@@ -2814,6 +3723,7 @@ static void select_theme(HWND hwnd, int darkMode) {
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (g_hToolbarButtons[i]) InvalidateRect(g_hToolbarButtons[i], NULL, TRUE);
     }
+    if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);
     refresh_menu(hwnd);
 }
 
@@ -2822,7 +3732,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         do_open_recent(cmd - IDM_FILE_RECENT_0);
         return;
     }
-    if (cmd >= IDM_FMT_BOLD && cmd <= IDM_FMT_CODEBLOCK) {
+    if (cmd >= IDM_FMT_BOLD && cmd <= IDM_FMT_ALERT) {
         toolbar_command(cmd);
         return;
     }
@@ -2832,6 +3742,9 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FILE_OPEN: do_open(); break;
         case IDM_FILE_SAVE: do_save(); break;
         case IDM_FILE_SAVEAS: do_saveas(); break;
+        case IDM_FILE_EXPORT_HTML: do_export_html(); break;
+        case IDM_FILE_CLOSE: do_close_document(); break;
+        case IDM_FILE_REOPEN_CLOSED: do_reopen_closed_tab(); break;
         case IDM_FILE_RECENT_CLEAR:
             clear_recent_files();
             refresh_menu(hwnd);
@@ -2846,20 +3759,154 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_EDIT_SELECTALL: SendMessageA(g_hEdit, SCI_SELECTALL, 0, 0); break;
         case IDM_EDIT_FIND: show_find_dialog(0); break;
         case IDM_EDIT_REPLACE: show_find_dialog(1); break;
+        case IDM_EDIT_GOTOLINE: show_goto_line_dialog(); break;
         case IDM_EDIT_FINDNEXT:
-            if (g_findWhat[0]) find_in_edit(g_findWhat, (g_fr.Flags & FR_MATCHCASE) ? 1 : 0, 1);
-            else show_find_dialog(0);
+            if (g_findWhat[0]) {
+                char *findUtf8 = to_utf8(g_findWhat);
+                if (findUtf8) find_in_edit(findUtf8, (g_fr.Flags & FR_MATCHCASE) ? 1 : 0, 1);
+                free(findUtf8);
+            } else show_find_dialog(0);
             break;
         case IDM_FORMAT_FONT: do_choose_font(); break;
         case IDM_VIEW_TOGGLEPREVIEW: toggle_preview(hwnd); break;
         case IDM_VIEW_TOGGLEEDITOR: toggle_editor(hwnd); break;
         case IDM_VIEW_PREVIEW_ON_LEFT: toggle_panel_sides(hwnd); break;
+        case IDM_VIEW_NEXT_TAB:
+            if (g_documentCount > 1) switch_document((g_activeDocument + 1) % g_documentCount);
+            break;
+        case IDM_VIEW_PREVIOUS_TAB:
+            if (g_documentCount > 1) switch_document((g_activeDocument + g_documentCount - 1) % g_documentCount);
+            break;
         case IDM_VIEW_THEME_GITHUB_LIGHT:
         case IDM_VIEW_THEME_GITHUB_DARK:
             select_theme(hwnd, cmd == IDM_VIEW_THEME_GITHUB_DARK);
             break;
         case IDM_HELP_REFERENCE: show_help_reference(); break;
     }
+}
+
+static RECT tab_close_rectangle(const RECT *tabRect) {
+    RECT close = *tabRect;
+    close.left = close.right - 23;
+    close.right -= 5;
+    close.top += 5;
+    close.bottom -= 5;
+    return close;
+}
+
+static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
+    int index = (int)dis->itemID;
+    if (index < 0 || index >= g_documentCount) return;
+    int selected = TabCtrl_GetCurSel(g_hTabs) == index;
+    COLORREF bg = g_previewDarkMode
+        ? (selected ? RGB(0x0D, 0x11, 0x17) : RGB(0x16, 0x1B, 0x22))
+        : (selected ? RGB(0xFF, 0xFF, 0xFF) : RGB(0xF0, 0xF3, 0xF6));
+    COLORREF fg = g_previewDarkMode
+        ? (selected ? RGB(0xF0, 0xF6, 0xFC) : RGB(0xB1, 0xBA, 0xC4))
+        : RGB(0x1F, 0x23, 0x28);
+    COLORREF border = g_previewDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE);
+    HBRUSH brush = CreateSolidBrush(bg);
+    FillRect(dis->hDC, &dis->rcItem, brush);
+    DeleteObject(brush);
+    HPEN borderPen = CreatePen(PS_SOLID, 1, border);
+    HPEN oldPen = (HPEN)SelectObject(dis->hDC, borderPen);
+    MoveToEx(dis->hDC, dis->rcItem.right - 1, dis->rcItem.top + 2, NULL);
+    LineTo(dis->hDC, dis->rcItem.right - 1, dis->rcItem.bottom - 2);
+
+    RECT textRect = dis->rcItem;
+    textRect.left += 9;
+    textRect.right -= 33;
+    WCHAR label[MAX_PATH + 32];
+    format_document_label(&g_documents[index], label, sizeof(label) / sizeof(label[0]));
+    HFONT font = (HFONT)SendMessageW(g_hTabs, WM_GETFONT, 0, 0);
+    HFONT oldFont = font ? (HFONT)SelectObject(dis->hDC, font) : NULL;
+    SetTextColor(dis->hDC, fg);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    DrawTextW(dis->hDC, label, -1, &textRect,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (oldFont) SelectObject(dis->hDC, oldFont);
+
+    RECT close = tab_close_rectangle(&dis->rcItem);
+    int pad = 4;
+    HPEN closePen = CreatePen(PS_SOLID, 1, fg);
+    SelectObject(dis->hDC, closePen);
+    MoveToEx(dis->hDC, close.left + pad, close.top + pad, NULL);
+    LineTo(dis->hDC, close.right - pad, close.bottom - pad);
+    MoveToEx(dis->hDC, close.right - pad, close.top + pad, NULL);
+    LineTo(dis->hDC, close.left + pad, close.bottom - pad);
+    SelectObject(dis->hDC, oldPen);
+    DeleteObject(closePen);
+    DeleteObject(borderPen);
+
+    if (g_documents[index].externalChanged) {
+        COLORREF changedColor = RGB(0xD2, 0x99, 0x22);
+        HBRUSH changed = CreateSolidBrush(changedColor);
+        HPEN changedPen = CreatePen(PS_SOLID, 1, changedColor);
+        HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, changed);
+        HPEN changedOldPen = (HPEN)SelectObject(dis->hDC, changedPen);
+        Ellipse(dis->hDC, close.left - 9, (close.top + close.bottom) / 2 - 3,
+                close.left - 3, (close.top + close.bottom) / 2 + 3);
+        SelectObject(dis->hDC, changedOldPen);
+        SelectObject(dis->hDC, oldBrush);
+        DeleteObject(changedPen);
+        DeleteObject(changed);
+    }
+}
+
+static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                        UINT_PTR subclassId, DWORD_PTR refData) {
+    (void)subclassId; (void)refData;
+    if (msg == WM_ERASEBKGND && g_previewDarkMode) {
+        RECT client;
+        GetClientRect(hwnd, &client);
+        HBRUSH brush = CreateSolidBrush(RGB(0x01, 0x04, 0x09));
+        FillRect((HDC)wParam, &client, brush);
+        DeleteObject(brush);
+        return 1;
+    } else if (msg == WM_PAINT && g_previewDarkMode) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client;
+        GetClientRect(hwnd, &client);
+        HBRUSH brush = CreateSolidBrush(RGB(0x01, 0x04, 0x09));
+        FillRect(dc, &client, brush);
+        DeleteObject(brush);
+        int selected = TabCtrl_GetCurSel(hwnd);
+        for (int i = 0; i < g_documentCount; i++) {
+            RECT itemRect;
+            if (!TabCtrl_GetItemRect(hwnd, i, &itemRect)) continue;
+            DRAWITEMSTRUCT dis = {0};
+            dis.CtlType = ODT_TAB;
+            dis.CtlID = ID_TABS;
+            dis.itemID = (UINT)i;
+            dis.itemAction = ODA_DRAWENTIRE;
+            dis.itemState = i == selected ? ODS_SELECTED : 0;
+            dis.hwndItem = hwnd;
+            dis.hDC = dc;
+            dis.rcItem = itemRect;
+            draw_tab_item(&dis);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    } else if (msg == WM_LBUTTONUP || msg == WM_MBUTTONUP) {
+        TCHITTESTINFO hit = {0};
+        hit.pt.x = GET_X_LPARAM(lParam);
+        hit.pt.y = GET_Y_LPARAM(lParam);
+        int index = TabCtrl_HitTest(hwnd, &hit);
+        if (index >= 0) {
+            RECT tabRect;
+            TabCtrl_GetItemRect(hwnd, index, &tabRect);
+            RECT close = tab_close_rectangle(&tabRect);
+            POINT point = hit.pt;
+            if (msg == WM_MBUTTONUP || PtInRect(&close, point)) {
+                PostMessageW(g_hMainWnd, WM_APP_CLOSE_TAB, (WPARAM)index, 0);
+                return 0;
+            }
+        }
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, TabSubclassProc, 1);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 static void initialize_main_window(HWND hwnd) {
@@ -2874,11 +3921,39 @@ static void initialize_main_window(HWND hwnd) {
     SetMenu(hwnd, build_menu());
     create_toolbar(hwnd);
 
+    g_hTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_TOOLTIPS |
+        TCS_FIXEDWIDTH | TCS_FORCELABELLEFT | TCS_RAGGEDRIGHT | TCS_OWNERDRAWFIXED,
+        0, 0, 0, 0, hwnd, (HMENU)ID_TABS, GetModuleHandleA(NULL), NULL);
+    /* A compact fixed width keeps more documents accessible without making
+       short filenames consume excessive space. The tooltip below supplies
+       the full path whenever the visible label is clipped. */
+    SendMessageW(g_hTabs, TCM_SETITEMSIZE, 0,
+        MAKELPARAM(MulDiv(120, dpi, 96), MulDiv(22, dpi, 96)));
+    HWND tabTooltips = TabCtrl_GetToolTips(g_hTabs);
+    if (tabTooltips) {
+        SendMessageW(tabTooltips, CCM_SETUNICODEFORMAT, TRUE, 0);
+        SendMessageW(tabTooltips, TTM_SETMAXTIPWIDTH, 0, 700);
+    }
+    SetWindowSubclass(g_hTabs, TabSubclassProc, 1, 0);
+
     g_hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "Scintilla", "",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
         0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, GetModuleHandleA(NULL), NULL);
     configure_scintilla(g_hEdit);
     apply_editor_font(g_fontFaceName, g_fontPointSize);
+
+    g_documentCount = 1;
+    g_activeDocument = 0;
+    memset(&g_documents[0], 0, sizeof(g_documents[0]));
+    g_documents[0].sciDocument = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    SendMessageA(g_hEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_documents[0].sciDocument);
+    g_documents[0].untitledNumber = g_nextUntitledNumber++;
+    TCITEMW firstTab = {0};
+    firstTab.mask = TCIF_TEXT;
+    firstTab.pszText = L"";
+    SendMessageW(g_hTabs, TCM_INSERTITEMW, 0, (LPARAM)&firstTab);
+    update_tab_label(0);
 
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
@@ -2894,16 +3969,25 @@ static void initialize_main_window(HWND hwnd) {
         0, 0, 0, 0, hwnd, (HMENU)ID_PREVIEW, GetModuleHandleA(NULL), NULL);
 
     init_webview();
+    SetTimer(hwnd, IDT_FILE_WATCH, 1500, NULL);
     layout(hwnd);
 }
 
 static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
-    if (notification->hwndFrom != g_hEdit || notification->code != SCN_MODIFIED) return;
+    if (notification->hwndFrom != g_hEdit) return;
 
     struct SCNotification *scn = (struct SCNotification *)notification;
+    if (notification->code == SCN_UPDATEUI) {
+        if (scn->updated & SC_UPDATE_V_SCROLL) {
+            if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
+            else SetTimer(hwnd, IDT_SCROLL_SYNC, 35, NULL);
+        }
+        return;
+    }
+    if (notification->code != SCN_MODIFIED) return;
     if (!(scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT))) return;
 
-    set_dirty(1);
+    if (!g_switchingDocument) set_dirty(1);
     SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
     if (scn->linesAdded != 0) update_linenumber_margin_width(g_hEdit);
 }
@@ -2911,24 +3995,33 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
 static void destroy_main_window(HWND hwnd) {
     save_layout_settings();
     KillTimer(hwnd, IDT_PREVIEW_UPDATE);
+    KillTimer(hwnd, IDT_FILE_WATCH);
+    KillTimer(hwnd, IDT_SCROLL_SYNC);
+    if (g_webview && g_webMessageRegistered) {
+        ICoreWebView2_remove_WebMessageReceived(g_webview, g_webMessageToken);
+        g_webMessageRegistered = 0;
+    }
     if (g_webviewController) ICoreWebView2Controller_Close(g_webviewController);
     if (g_webview3) { ICoreWebView2_3_Release(g_webview3); g_webview3 = NULL; }
     if (g_webview) { ICoreWebView2_Release(g_webview); g_webview = NULL; }
     if (g_webviewController) { ICoreWebView2Controller_Release(g_webviewController); g_webviewController = NULL; }
     free(g_pendingHtmlBody);
     g_pendingHtmlBody = NULL;
+    free(g_exportPath);
+    g_exportPath = NULL;
     if (g_previewBkBrush) { DeleteObject(g_previewBkBrush); g_previewBkBrush = NULL; }
     if (g_helpBkBrush) { DeleteObject(g_helpBkBrush); g_helpBkBrush = NULL; }
     if (g_mainBkBrush) { DeleteObject(g_mainBkBrush); g_mainBkBrush = NULL; }
     if (g_fontMono) { DeleteObject(g_fontMono); g_fontMono = NULL; }
     for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
-    free(g_currentFile);
+    for (int i = 0; i < g_documentCount; i++) free(g_documents[i].path);
+    for (int i = 0; i < g_closedDocumentCount; i++) free(g_closedDocuments[i].path);
     PostQuitMessage(0);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == g_msgFindReplace) {
-        handle_findmsg((FINDREPLACEA *)lParam);
+        handle_findmsg((FINDREPLACEW *)lParam);
         return 0;
     }
     switch (msg) {
@@ -2952,6 +4045,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 draw_toolbar_button(dis);
                 return TRUE;
             }
+            if (dis->CtlType == ODT_TAB && dis->hwndItem == g_hTabs) {
+                draw_tab_item(dis);
+                return TRUE;
+            }
             break;
         }
         /* g_hEdit/g_hPreview/the toolbar buttons cover the rest of the client
@@ -2970,6 +4067,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_TIMER:
             if (wParam == IDT_PREVIEW_UPDATE) {
                 update_preview();
+                return 0;
+            }
+            if (wParam == IDT_FILE_WATCH) {
+                check_external_file_change();
+                return 0;
+            }
+            if (wParam == IDT_SCROLL_SYNC) {
+                sync_preview_to_editor_scroll();
                 return 0;
             }
             break;
@@ -3012,28 +4117,54 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_DROPFILES:
             handle_dropfiles((HDROP)wParam);
             return 0;
-        case WM_NOTIFY:
-            handle_editor_notification(hwnd, (NMHDR *)lParam);
+        case WM_NOTIFY: {
+            NMHDR *notification = (NMHDR *)lParam;
+            if (notification->hwndFrom == g_hTabs && notification->code == TCN_SELCHANGE) {
+                switch_document(TabCtrl_GetCurSel(g_hTabs));
+            } else if ((notification->code == TTN_GETDISPINFOW ||
+                        notification->code == TTN_GETDISPINFOA) && g_hTabs &&
+                       notification->hwndFrom == TabCtrl_GetToolTips(g_hTabs)) {
+                int index = (int)notification->idFrom;
+                const WCHAR *wideText = (index >= 0 && index < g_documentCount &&
+                    g_documents[index].path) ? g_documents[index].path : L"Unsaved document";
+                if (notification->code == TTN_GETDISPINFOW) {
+                    ((NMTTDISPINFOW *)notification)->lpszText = (WCHAR *)wideText;
+                } else {
+                    WideCharToMultiByte(CP_ACP, 0, wideText, -1, g_tabTooltipAnsi,
+                        sizeof(g_tabTooltipAnsi), NULL, NULL);
+                    ((NMTTDISPINFOA *)notification)->lpszText = g_tabTooltipAnsi;
+                }
+            } else {
+                handle_editor_notification(hwnd, notification);
+            }
             return 0;
+        }
         case WM_COMMAND:
             handle_main_command(hwnd, LOWORD(wParam));
+            return 0;
+        case WM_APP_CLOSE_TAB:
+            do_close_document_at((int)wParam);
             return 0;
         case WM_CLOSE:
             do_exit();
             return 0;
         case WM_QUERYENDSESSION:
             save_layout_settings();
+            save_session_documents();
             return TRUE;
         case WM_DESTROY:
             destroy_main_window(hwnd);
             return 0;
     }
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     (void)hPrevInstance;
     (void)lpCmdLine;
+
+    INITCOMMONCONTROLSEX commonControls = { sizeof(commonControls), ICC_TAB_CLASSES };
+    InitCommonControlsEx(&commonControls);
 
     int argc = 0;
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -3071,22 +4202,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     HRESULT comResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
-    g_msgFindReplace = RegisterWindowMessageA(FINDMSGSTRINGA);
+    g_msgFindReplace = RegisterWindowMessageW(FINDMSGSTRINGW);
 
-    HICON hIconBig = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_APPICON));
-    HICON hIconSmall = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_APPICON), IMAGE_ICON,
+    HICON hIconBig = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    HICON hIconSmall = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
 
-    WNDCLASSEXA wc = {0};
+    WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = "MarkEditWndClass";
-    wc.hCursor = LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
+    wc.lpszClassName = L"MarkEditWndClass";
+    wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.hIcon = hIconBig;
     wc.hIconSm = hIconSmall;
-    RegisterClassExA(&wc);
+    RegisterClassExW(&wc);
 
     int windowX = g_haveSavedWindowRect ? g_savedWindowRect.left : CW_USEDEFAULT;
     int windowY = g_haveSavedWindowRect ? g_savedWindowRect.top : CW_USEDEFAULT;
@@ -3094,17 +4225,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ? g_savedWindowRect.right - g_savedWindowRect.left : 1100;
     int windowHeight = g_haveSavedWindowRect
         ? g_savedWindowRect.bottom - g_savedWindowRect.top : 750;
-    HWND hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, "MarkEditWndClass", "Untitled - MarkEdit",
+    HWND hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"MarkEditWndClass", L"Untitled - MarkEdit",
         WS_OVERLAPPEDWINDOW,
         windowX, windowY, windowWidth, windowHeight,
         NULL, NULL, hInstance, NULL);
 
-    if (hIconBig) SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
-    if (hIconSmall) SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+    if (hIconBig) SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+    if (hIconSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
 
-    if (cliFile) {
-        load_file(cliFile);
-    }
+    if (cliFile) load_file(cliFile);
+    else restore_session_documents();
     free(cliFile);
 
     ACCEL accels[] = {
@@ -3116,6 +4246,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, 'Y', IDM_EDIT_REDO },
         { FVIRTKEY | FCONTROL, 'F', IDM_EDIT_FIND },
         { FVIRTKEY | FCONTROL, 'H', IDM_EDIT_REPLACE },
+        { FVIRTKEY | FCONTROL, 'G', IDM_EDIT_GOTOLINE },
+        { FVIRTKEY | FCONTROL, 'W', IDM_FILE_CLOSE },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'T', IDM_FILE_REOPEN_CLOSED },
+        { FVIRTKEY | FCONTROL, VK_TAB, IDM_VIEW_NEXT_TAB },
+        { FVIRTKEY | FCONTROL | FSHIFT, VK_TAB, IDM_VIEW_PREVIOUS_TAB },
         { FVIRTKEY, VK_F3, IDM_EDIT_FINDNEXT },
         { FVIRTKEY | FCONTROL | FSHIFT, 'V', IDM_VIEW_TOGGLEPREVIEW },
         { FVIRTKEY | FCONTROL | FSHIFT, 'E', IDM_VIEW_TOGGLEEDITOR },

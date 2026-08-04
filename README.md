@@ -4,7 +4,7 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 
 - **Left pane** — a [Scintilla](https://www.scintilla.org/) source editor for your Markdown, with line numbers, current-line highlighting, real Tab/Shift+Tab block indent, and Markdown syntax highlighting via a vendored [Lexilla](https://github.com/ScintillaOrg/lexilla) lexer.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library.
-- A formatting toolbar above the editor for bold, italic, strikethrough, inline code, fenced code blocks, headings, blockquotes, bullet/numbered/task lists, links, images, tables, toggling the preview pane, and swapping the panel sides.
+- A formatting toolbar above the editor for bold, italic, strikethrough, inline code, fenced code blocks, headings, blockquotes, bullet/numbered/task lists, links, images, tables, footnotes, horizontal rules, alerts, toggling the preview pane, and swapping the panel sides.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
 - GitHub Light and GitHub Dark themes (View → Theme) apply to the editor, preview, and Markdown Reference window, are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
 
@@ -15,16 +15,21 @@ Launching with no arguments shows just the editor; launching with a file path sh
 - CommonMark plus GFM tables, task lists, strikethrough, bare-URL autolinks, and footnotes, along with code-fence language classes used by syntax-aware preview features.
 - GitHub-style note, tip, important, warning, and caution alerts.
 - Local syntax highlighting for named code fences in the preview, and for Markdown source in the editor, with matching light and dark themes.
-- A formatting toolbar (Bold, Italic, Strikethrough, Inline code, Code block, Headings, Blockquote, Lists, Link, Image, Table, Toggle preview, Swap panel sides), shown while the editor pane is visible.
+- Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
+- A formatting toolbar (Bold, Italic, Strikethrough, Inline code, Code block, Headings, Blockquote, Lists, Link, Image, Table, Footnote, Horizontal rule, Alert, Toggle preview, Swap panel sides), shown while the editor pane is visible.
 - Stable heading permalinks and a floating document outline for documents with multiple headings.
 - Inline (`$...$`) and display (`$$...$$` or fenced `math`) mathematical expressions.
 - YAML front matter delimited by `---` (and closed by `---` or `...`) is treated as document metadata and omitted from the preview.
 - Mermaid diagram rendering with a zoom/pan toolbar.
+- Copy buttons on rendered fenced code blocks.
+- Export of the enhanced preview—including highlighted code, rendered math, and available rendered diagrams—to an HTML document.
+- Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.
+- Synchronized scrolling between the Markdown editor and rendered preview.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Editor font is configurable (Format → Font) and remembered between sessions.
 - GitHub Light and GitHub Dark themes (View → Theme), remembered between sessions.
 - Window position/size/maximized state, panel visibility/order, and splitter position are remembered between sessions; View → Preview on Left controls the panel order.
-- Find/Replace, Undo/Redo, standard clipboard shortcuts.
+- Find/Replace, Go to Line, Undo/Redo, standard clipboard shortcuts.
 - A plain-text Markdown syntax reference (Help → Markdown Reference).
 - Unicode filenames, long Windows paths, drag-and-drop, and document-relative links/images.
 - Failure-safe saves: content is flushed to a temporary file before atomically replacing the destination.
@@ -38,11 +43,15 @@ Launching with no arguments shows just the editor; launching with a file path sh
 | Ctrl+O | Open |
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Save As |
+| Ctrl+W | Close current tab |
+| Ctrl+Shift+T | Reopen last closed tab |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
 | Ctrl+X / Ctrl+C / Ctrl+V | Cut / Copy / Paste |
 | Ctrl+A | Select All |
 | Ctrl+F | Find |
 | Ctrl+H | Replace |
+| Ctrl+G | Go to Line |
 | F3 | Find Next |
 | Tab / Shift+Tab | Indent / outdent line or selection |
 | Ctrl+Shift+V | Toggle preview pane |

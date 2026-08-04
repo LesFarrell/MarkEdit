@@ -66,7 +66,8 @@ char *markdown_to_html(const char *text) {
         "tasklist"
     };
     const int options = CMARK_OPT_DEFAULT | CMARK_OPT_VALIDATE_UTF8 |
-                        CMARK_OPT_FOOTNOTES | CMARK_OPT_STRIKETHROUGH_DOUBLE_TILDE;
+                        CMARK_OPT_FOOTNOTES | CMARK_OPT_STRIKETHROUGH_DOUBLE_TILDE |
+                        CMARK_OPT_SOURCEPOS;
     cmark_parser *parser;
     cmark_node *document;
     cmark_mem *mem = cmark_get_default_mem_allocator();

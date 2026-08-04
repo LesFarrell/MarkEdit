@@ -130,7 +130,7 @@ project "markedit"
         externalincludedirs { WEBVIEW2_DIR.."/include", SCINTILLA_DIR.."/include", LEXILLA_DIR.."/include" }
     filter {}
     libdirs { WEBVIEW2_DIR.."/x64", "." }
-    links { "gdi32", "user32", "comdlg32", "shlwapi", "shell32", "ole32", "Lexilla" }
+        links { "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "Lexilla" }
     dependson { "lexilla" }
 
     warnings "Extra"

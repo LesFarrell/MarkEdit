@@ -40,3 +40,4 @@ third_party/scintilla/bin/*
 third_party/webview2/x64/WebView2LoaderStatic.lib
 .claude/settings.json
 .claude/
+third_party/
