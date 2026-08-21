@@ -8,7 +8,6 @@
  */
 
 #define COBJMACROS
-#define CINTERFACE
 
 #include <windows.h>
 #include <windowsx.h>
@@ -17,8 +16,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <shlwapi.h>
 #include <shellapi.h>
+#include <shobjidl.h>
+#include <spellcheck.h>
+#include <uxtheme.h>
+#include <wincodec.h>
 #include "markdown.h"
 
 #include <WebView2.h>
@@ -29,9 +33,15 @@
 #define ID_EDIT    101
 #define ID_PREVIEW 102
 #define ID_TABS    103
+#define ID_STATUS  104
+#define ID_OUTLINE 105
 #define IDT_PREVIEW_UPDATE 1
 #define IDT_FILE_WATCH 2
 #define IDT_SCROLL_SYNC 3
+#define IDT_SPELL_CHECK 4
+#define IDT_AUTOSAVE 5
+#define IDT_OUTLINE_UPDATE 6
+#define IDT_PRINT_PREVIEW 7
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
 #define SPLITTER_WIDTH 6
 #define TOOLBAR_HEIGHT 32
@@ -46,6 +56,7 @@
 #define IDM_FILE_EXPORT_HTML 207
 #define IDM_FILE_CLOSE     208
 #define IDM_FILE_REOPEN_CLOSED 241
+#define IDM_FILE_OPEN_TERMINAL 243
 #define IDM_FILE_RECENT_0 250 /* IDM_FILE_RECENT_0 .. IDM_FILE_RECENT_0+MAX_RECENT_FILES-1 */
 #define IDM_EDIT_UNDO     210
 #define IDM_EDIT_REDO     219
@@ -58,6 +69,13 @@
 #define IDM_EDIT_REPLACE  217
 #define IDM_EDIT_FINDNEXT 218
 #define IDM_EDIT_GOTOLINE  209
+#define IDM_EDIT_DUPLICATE_LINE 221
+#define IDM_EDIT_MOVE_LINE_UP   222
+#define IDM_EDIT_MOVE_LINE_DOWN 223
+#define IDM_EDIT_DELETE_LINE    224
+#define IDM_EDIT_JOIN_LINES     225
+#define IDM_EDIT_TOGGLE_COMMENT 226
+#define IDM_EDIT_TRIM_WHITESPACE 227
 #define IDM_FORMAT_FONT   220
 #define IDM_VIEW_TOGGLEPREVIEW 230
 #define IDM_VIEW_TOGGLEEDITOR  231
@@ -66,6 +84,10 @@
 #define IDM_VIEW_PREVIEW_ON_LEFT 234
 #define IDM_VIEW_NEXT_TAB        235
 #define IDM_VIEW_PREVIOUS_TAB    236
+#define IDM_VIEW_CUSTOM_CSS      237
+#define IDM_VIEW_CLEAR_CUSTOM_CSS 238
+#define IDM_VIEW_FOCUS_MODE      239
+#define IDM_VIEW_WORD_WRAP       242
 #define IDM_HELP_REFERENCE 240
 
 #define IDM_FMT_BOLD          260
@@ -86,35 +108,71 @@
 #define IDM_FMT_FOOTNOTE      275
 #define IDM_FMT_HRULE         276
 #define IDM_FMT_ALERT         277
+#define IDM_FMT_JSON_PRETTY   278
+#define IDM_FMT_JSON_MINIFY   279
 
+/* Developer commands start at 280: 260-277 is routed wholesale to
+   toolbar_command(), so IDs in that range never reach the switch. */
+#define IDM_EDIT_UPPERCASE       280
+#define IDM_EDIT_LOWERCASE       281
+#define IDM_EDIT_TITLECASE       282
+#define IDM_EDIT_SORT_ASC        283
+#define IDM_EDIT_SORT_DESC       284
+#define IDM_EDIT_SORT_DEDUPE     285
+#define IDM_EDIT_TABS_TO_SPACES  286
+#define IDM_EDIT_SPACES_TO_TABS  287
+#define IDM_EDIT_BOOKMARK_TOGGLE 288
+#define IDM_EDIT_BOOKMARK_NEXT   289
+#define IDM_EDIT_BOOKMARK_PREV   290
+#define IDM_EDIT_BOOKMARK_CLEAR  291
+#define IDM_EDIT_SELECT_NEXT     292
+#define IDM_EDIT_MATCH_BRACE     293
+#define IDM_VIEW_SPELL_CHECK     294
+#define IDM_VIEW_SHOW_WHITESPACE 295
+#define IDM_VIEW_INDENT_GUIDES   296
+#define IDM_VIEW_FOLD_TOGGLE     297
+#define IDM_VIEW_FOLD_ALL        298
+#define IDM_VIEW_UNFOLD_ALL      299
+#define IDM_FILE_PRINT           300
+#define IDM_FILE_EXPORT_PDF      301
+#define IDM_FILE_QUICK_OPEN      302
+#define IDM_FILE_FIND_FOLDER     303
+#define IDM_EDIT_COMMAND_PALETTE 304
+#define IDM_FMT_TABLE_EDITOR     305
+#define IDM_TOOLS_DIAGNOSTICS    306
+#define IDM_TOOLS_LINT           307
+#define IDM_VIEW_OUTLINE         308
+#define IDM_VIEW_SPELL_LANGUAGE  309
 #define IDI_APPICON 1
 
 static HWND g_hEdit; /* Scintilla control */
 static HWND g_hPreview; /* WebView2 host child window */
 static HWND g_hTabs;
+static HWND g_hStatus;
+static HWND g_hOutline;
 static HWND g_hMainWnd;
-static HFONT g_fontMono; /* used only by the plain-EDIT help-reference window */
 static WCHAR g_fontFaceName[LF_FACESIZE] = L"Consolas";
 static int g_fontPointSize = 10;
 
 static ICoreWebView2 *g_webview = NULL;
 static ICoreWebView2Controller *g_webviewController = NULL;
 static ICoreWebView2_3 *g_webview3 = NULL;
+static ICoreWebView2ExecuteScriptCompletedHandler g_scriptHandler;
 static int g_webviewReady = 0;
 static int g_ignoreNextEditorScroll = 0;
 static EventRegistrationToken g_webMessageToken;
 static int g_webMessageRegistered = 0;
 static HBRUSH g_previewBkBrush = NULL; /* matches the preview host's WM_CTLCOLORSTATIC background to the theme, so it doesn't flash white before WebView2 paints */
-static HBRUSH g_helpBkBrush = NULL;
 static HBRUSH g_mainBkBrush = NULL; /* fills the toolbar strip and splitter gap in the main window, matching the theme instead of the system COLOR_WINDOW default */
+static HBRUSH g_menuBkBrush = NULL; /* owner-drawn top-level menu bar background */
+static HFONT g_menuFont = NULL;
+static int g_menuFontDpi = 0;
 static char *g_pendingHtmlBody = NULL; /* set if update requested before webview ready */
 static WCHAR *g_exportPath = NULL;
+static WCHAR *g_pendingPdfPath = NULL;
+static int g_pendingPrintAction = 0; /* 1 = print dialog, 2 = PDF export */
 static int g_previewDarkMode = 0;
-/* Help window: a second top-level window with a read-only textbox showing a
-   plain-text Markdown-syntax reference. Created on demand. */
-static HWND g_hHelpWnd = NULL;
-static HWND g_hHelpEdit = NULL;
-
+static WCHAR *g_customCssPath = NULL;
 #define MAX_DOCUMENTS 32
 typedef struct Document {
     sptr_t sciDocument;
@@ -130,6 +188,7 @@ typedef struct Document {
     int xOffset;
     unsigned untitledNumber;
     int closedIndex;
+    int isReference; /* the Markdown reference, so Help reuses its tab */
 } Document;
 
 static Document g_documents[MAX_DOCUMENTS];
@@ -157,6 +216,20 @@ static int g_commandLinePreviewMode = 0;
 static RECT g_savedWindowRect;
 static int g_haveSavedWindowRect = 0;
 static int g_startMaximized = 0;
+static int g_focusMode = 0;
+/* Markdown is prose: wrapping long paragraphs is the useful default. */
+static int g_wordWrap = 1;
+static int g_showWhitespace = 0;
+static int g_indentGuides = 0;
+static int g_spellCheckEnabled = 1;
+static int g_outlineVisible = 0;
+static WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH] = L"";
+static int g_outlineLines[1024];
+static int g_outlineCount = 0;
+static int g_tabDragIndex = -1;
+static int g_tabDragged = 0;
+static int g_activeLanguage = 0; /* Language of the active document; 0 is LANG_MARKDOWN. */
+static ISpellChecker *g_spellChecker = NULL;
 
 #define MAX_RECENT_FILES 10
 static WCHAR *g_recentFiles[MAX_RECENT_FILES];
@@ -166,6 +239,7 @@ static HWND g_hFindDlg = NULL;
 static FINDREPLACEW g_fr;
 static WCHAR g_findWhat[256] = L"";
 static WCHAR g_replaceWith[256] = L"";
+static DWORD g_findFlags = FR_DOWN;
 static UINT g_msgFindReplace;
 
 void do_save(void);
@@ -174,21 +248,41 @@ void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
 static void apply_markdown_lexer_styles(HWND hEdit);
+static void apply_language_styles(HWND hEdit);
 static void apply_preview_host_theme(void);
-static void apply_help_theme(void);
 static void refresh_menu(HWND hwnd);
+static void layout(HWND hwnd);
+static void update_view_menu(HWND hwnd);
+static void schedule_spell_check(void);
+static void perform_spell_check(void);
+static void update_status_bar(void);
+static void update_outline(void);
+static void write_recovery_snapshot(void);
+static void clear_recovery_snapshot(void);
+static int restore_recovery_snapshot(void);
+static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
+                              WCHAR **labels, int count);
+static int show_text_input(const WCHAR *title, const WCHAR *prompt,
+                           const WCHAR *initial, WCHAR *output, int outputCapacity);
+static void toggle_preview(HWND hwnd);
 static void update_document_mapping(void);
 static void update_title(void);
+static void set_dirty(int dirty);
 static void update_tab_label(int index);
 static void switch_document(int index);
+static int create_document_tab(void);
+static int active_document_is_reusable(void);
 static void check_external_file_change(void);
 static void prompt_reload_active_external_change(void);
 static char *to_utf8(const WCHAR *s);
+static WCHAR *get_settings_path(void);
 static void do_close_document_at(int index);
 static void do_reopen_closed_tab(void);
 static void save_session_documents(void);
 static void restore_session_documents(void);
 static void sync_preview_to_editor_scroll(void);
+static void apply_custom_preview_css(int reportErrors);
+static int paste_image_from_clipboard(void);
 
 static WCHAR *wcsdup_heap(const WCHAR *value) {
     if (!value) return NULL;
@@ -273,9 +367,9 @@ static WCHAR *extended_path(const WCHAR *path) {
 static char *get_edit_text(HWND hEdit, int *outLen) {
     int len = (int)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
     char *buf = (char *)malloc((size_t)len + 1);
-    if (!buf) { *outLen = 0; return NULL; }
+    if (!buf) { if (outLen) *outLen = 0; return NULL; }
     SendMessageA(hEdit, SCI_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf);
-    *outLen = len;
+    if (outLen) *outLen = len;
     return buf;
 }
 
@@ -723,20 +817,30 @@ static void set_edit_text(HWND hEdit, const char *text) {
     SendMessageA(hEdit, SCI_SETTEXT, 0, (LPARAM)text);
 }
 
-/* Configure the Scintilla control as a Markdown source editor: Lexilla's
-   Markdown lexer for syntax highlighting (a passive read-only colorizer -
-   it never edits the buffer), real tab characters at a width of 4, CRLF
-   line endings to match the rest of the app's file I/O, and only the
-   change-notifications we actually act on. Nothing here is auto-triggered by
-   typing (autocomplete/call tips are entirely opt-in in Scintilla and are
-   simply never invoked), so no unexpected characters get inserted. */
+/* Configure the Scintilla control as a source editor: a Lexilla lexer for
+   syntax highlighting (a passive read-only colorizer - it never edits the
+   buffer), real tab characters at a width of 4, CRLF line endings to match
+   the rest of the app's file I/O, and only the change-notifications we
+   actually act on. Smart Markdown input is handled explicitly by
+   EditSubclassProc; Scintilla call tips remain disabled, and its autocomplete
+   list is populated by show_word_completions() rather than by the lexer. */
 #define MARGIN_LINENUMBERS 0
+#define MARGIN_BOOKMARKS 1
+#define MARGIN_FOLD 2
+#define MARKER_BOOKMARK 1
+#define FOLD_MARGIN_WIDTH 14
+#define INDICATOR_SPELLING 20
+static int g_lineNumberDigits = 0;
 
 /* Widen/narrow the line-number margin to fit the current line count (so "9"
    and "9999" both have comfortably-sized gutters, and it grows as the
    document grows past another power of ten). */
 static void update_linenumber_margin_width(HWND hEdit) {
     int lineCount = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
+    int digitCount = 1;
+    for (int n = lineCount; n >= 10; n /= 10) digitCount++;
+    if (digitCount == g_lineNumberDigits) return;
+    g_lineNumberDigits = digitCount;
     char digits[16];
     wsprintfA(digits, "_%d", lineCount); /* leading '_' gives a little breathing room */
     int width = (int)SendMessageA(hEdit, SCI_TEXTWIDTH, STYLE_LINENUMBER, (LPARAM)digits);
@@ -745,7 +849,84 @@ static void update_linenumber_margin_width(HWND hEdit) {
 
 /* Apply GitHub's light/dark palette to the editor so it matches the preview.
    Called once at startup and whenever the selected theme changes. */
+
+/* ---- source language selection, driven by the document file extension ---- */
+
+typedef enum {
+    LANG_MARKDOWN = 0, LANG_JSON, LANG_XML, LANG_HTML, LANG_YAML,
+    LANG_CPP, LANG_PYTHON, LANG_BASH, LANG_POWERSHELL
+} Language;
+
+typedef struct LanguageInfo {
+    Language id;
+    const char *lexer;
+    const WCHAR *extensions; /* semicolon-delimited, each dot-prefixed */
+    const char *keywords;    /* primary keyword list, NULL when the lexer needs none */
+    const char *fenceTag;    /* Markdown info-string; lexer names are not always valid ones */
+    int folds;               /* the vendored Markdown lexer emits no fold levels at all */
+} LanguageInfo;
+
+static const LanguageInfo LANGUAGES[] = {
+    { LANG_MARKDOWN, "markdown", L".md;.markdown;.mdown;.mkd;.mdwn;.text", NULL, "markdown", 0 },
+    { LANG_JSON, "json", L".json;.jsonc;.jsonl;.geojson;.webmanifest", "true false null", "json", 1 },
+    { LANG_XML, "xml", L".xml;.xsd;.xsl;.xslt;.svg;.rss;.atom;.plist;.csproj;.props;.targets", NULL, "xml", 1 },
+    { LANG_HTML, "hypertext", L".html;.htm;.xhtml", NULL, "html", 1 },
+    { LANG_YAML, "yaml", L".yml;.yaml", "true false null yes no on off", "yaml", 1 },
+    { LANG_CPP, "cpp", L".c;.h;.cc;.cpp;.cxx;.hpp;.hxx;.js;.mjs;.cjs;.ts;.tsx;.jsx;.cs;.java;.go;.rs;.php",
+      "auto break case char const continue default do double else enum extern float for goto if"
+      " inline int long register return short signed sizeof static struct switch typedef union"
+      " unsigned void volatile while bool catch class const_cast delete dynamic_cast explicit"
+      " export false friend mutable namespace new operator private protected public"
+      " reinterpret_cast static_cast template this throw true try typeid typename using virtual"
+      " nullptr constexpr decltype noexcept override final function var let await async"
+      " import from interface type extends implements", "c", 1 },
+    { LANG_PYTHON, "python", L".py;.pyw;.pyi",
+      "and as assert async await break class continue def del elif else except finally for from"
+      " global if import in is lambda nonlocal not or pass raise return try while with yield"
+      " None True False self", "python", 1 },
+    { LANG_BASH, "bash", L".sh;.bash;.zsh;.ksh;.bashrc;.profile",
+      "if then else elif fi case esac for while until do done in function select time coproc"
+      " break continue return exit export local readonly declare unset shift eval exec source",
+      "bash", 1 },
+    { LANG_POWERSHELL, "powershell", L".ps1;.psm1;.psd1",
+      "begin break catch continue data do dynamicparam else elseif end exit filter finally for"
+      " foreach from function if in local param process return switch throw trap try until"
+      " where while", "powershell", 1 },
+};
+
+#define LANGUAGE_COUNT ((int)(sizeof(LANGUAGES) / sizeof(LANGUAGES[0])))
+
+/* Case-insensitive match of `extension` against one semicolon-delimited list. */
+static int extension_in_list(const WCHAR *extension, const WCHAR *list) {
+    size_t length = wcslen(extension);
+    for (const WCHAR *entry = list; *entry; ) {
+        const WCHAR *end = wcschr(entry, L';');
+        size_t entryLength = end ? (size_t)(end - entry) : wcslen(entry);
+        if (entryLength == length && _wcsnicmp(entry, extension, length) == 0) return 1;
+        if (!end) break;
+        entry = end + 1;
+    }
+    return 0;
+}
+
+/* Picks the language for a document path. Markdown is the fallback, so an
+   unknown or missing extension keeps the original behaviour. */
+static const LanguageInfo *language_for_path(const WCHAR *path) {
+    if (!path) return &LANGUAGES[LANG_MARKDOWN];
+    const WCHAR *extension = PathFindExtensionW(path);
+    if (!extension || !*extension) return &LANGUAGES[LANG_MARKDOWN];
+
+    for (int l = 0; l < LANGUAGE_COUNT; l++) {
+        if (extension_in_list(extension, LANGUAGES[l].extensions)) return &LANGUAGES[l];
+    }
+    return &LANGUAGES[LANG_MARKDOWN];
+}
 static void apply_editor_theme(HWND hEdit) {
+    /* Scintilla draws its own client area but leaves the scrollbars to the
+       system, which paints them light unless the window opts into the dark
+       explorer theme. */
+    SetWindowTheme(hEdit, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+
     if (g_previewDarkMode) {
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0xE6, 0xED, 0xF3));
         SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0x0D, 0x11, 0x17));
@@ -754,7 +935,7 @@ static void apply_editor_theme(HWND hEdit) {
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x7D, 0x85, 0x90));
         SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0x16, 0x1B, 0x22));
 
-        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0x16, 0x1B, 0x22), 0);
+        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0x21, 0x26, 0x2D), 0);
         SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0xE6, 0xED, 0xF3), 0);
         SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0x26, 0x4F, 0x78));
         SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0xFF, 0xFF, 0xFF));
@@ -766,12 +947,45 @@ static void apply_editor_theme(HWND hEdit) {
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x65, 0x6D, 0x76));
         SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0xF6, 0xF8, 0xFA));
 
-        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0xF0, 0xF3, 0xF6), 0);
+        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0xE8, 0xEC, 0xF1), 0);
         SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0x1F, 0x23, 0x28), 0);
         SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0xB6, 0xD7, 0xFF));
         SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0x1F, 0x23, 0x28));
     }
-    apply_markdown_lexer_styles(hEdit);
+
+    /* These follow SCI_STYLECLEARALL above, which resets every style. The
+       gutter colours match STYLE_LINENUMBER so the margins read as one strip. */
+    COLORREF faint = g_previewDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0xAF, 0xB8, 0xC1);
+    COLORREF gutter = g_previewDarkMode ? RGB(0x16, 0x1B, 0x22) : RGB(0xF6, 0xF8, 0xFA);
+    COLORREF text = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+
+    SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_INDENTGUIDE, (LPARAM)faint);
+    SendMessageA(hEdit, SCI_SETWHITESPACEFORE, TRUE, (LPARAM)faint);
+    SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_BRACELIGHT, (LPARAM)text);
+    SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_BRACELIGHT,
+                 g_previewDarkMode ? RGB(0x3F, 0x46, 0x4F) : RGB(0xCF, 0xD8, 0xE3));
+    SendMessageA(hEdit, SCI_STYLESETBOLD, STYLE_BRACELIGHT, TRUE);
+    SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_BRACEBAD,
+                 g_previewDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E));
+    SendMessageA(hEdit, SCI_STYLESETBOLD, STYLE_BRACEBAD, TRUE);
+
+    SendMessageA(hEdit, SCI_SETFOLDMARGINCOLOUR, TRUE, (LPARAM)gutter);
+    SendMessageA(hEdit, SCI_SETFOLDMARGINHICOLOUR, TRUE, (LPARAM)gutter);
+    for (int marker = SC_MARKNUM_FOLDEREND; marker <= SC_MARKNUM_FOLDEROPEN; marker++) {
+        SendMessageA(hEdit, SCI_MARKERSETFORE, (WPARAM)marker, (LPARAM)gutter);
+        SendMessageA(hEdit, SCI_MARKERSETBACK, (WPARAM)marker, (LPARAM)faint);
+    }
+    SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_BOOKMARK,
+                 (LPARAM)(g_previewDarkMode ? RGB(0x1F, 0x6F, 0xEB) : RGB(0x09, 0x69, 0xDA)));
+    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_BOOKMARK,
+                 (LPARAM)(g_previewDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x21, 0x8B, 0xFF)));
+
+    SendMessageA(hEdit, SCI_INDICSETSTYLE, INDICATOR_SPELLING, INDIC_SQUIGGLE);
+    SendMessageA(hEdit, SCI_INDICSETFORE, INDICATOR_SPELLING,
+                 (LPARAM)(g_previewDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E)));
+    SendMessageA(hEdit, SCI_INDICSETUNDER, INDICATOR_SPELLING, TRUE);
+
+    apply_language_styles(hEdit);
     InvalidateRect(hEdit, NULL, TRUE);
 }
 
@@ -820,6 +1034,391 @@ static void apply_markdown_lexer_styles(HWND hEdit) {
     SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODEBK, (LPARAM)"Consolas");
 }
 
+/* The GitHub syntax palette, shared by every non-Markdown lexer so the editor
+   keeps one look across languages. */
+typedef struct SyntaxPalette {
+    COLORREF comment, keyword, string, number, function, variable, tag, attribute, operatorColour;
+} SyntaxPalette;
+
+static SyntaxPalette syntax_palette(void) {
+    SyntaxPalette p;
+    if (g_previewDarkMode) {
+        p.comment = RGB(0x8B, 0x94, 0x9E);
+        p.keyword = RGB(0xFF, 0x7B, 0x72);
+        p.string = RGB(0xA5, 0xD6, 0xFF);
+        p.number = RGB(0x79, 0xC0, 0xFF);
+        p.function = RGB(0xD2, 0xA8, 0xFF);
+        p.variable = RGB(0xFF, 0xA6, 0x57);
+        p.tag = RGB(0x7E, 0xE7, 0x87);
+        p.attribute = RGB(0x79, 0xC0, 0xFF);
+        p.operatorColour = RGB(0xE6, 0xED, 0xF3);
+    } else {
+        p.comment = RGB(0x6E, 0x77, 0x81);
+        p.keyword = RGB(0xCF, 0x22, 0x2E);
+        p.string = RGB(0x0A, 0x30, 0x69);
+        p.number = RGB(0x09, 0x69, 0xDA);
+        p.function = RGB(0x82, 0x50, 0xDF);
+        p.variable = RGB(0x95, 0x38, 0x00);
+        p.tag = RGB(0x11, 0x63, 0x29);
+        p.attribute = RGB(0x09, 0x69, 0xDA);
+        p.operatorColour = RGB(0x1F, 0x23, 0x28);
+    }
+    return p;
+}
+
+static void style_range(HWND hEdit, const int *styles, int count, COLORREF colour) {
+    for (int i = 0; i < count; i++)
+        SendMessageA(hEdit, SCI_STYLESETFORE, (WPARAM)styles[i], (LPARAM)colour);
+}
+
+static void apply_json_styles(HWND hEdit, const SyntaxPalette *p) {
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_PROPERTYNAME, (LPARAM)p->attribute);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_STRING, (LPARAM)p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_NUMBER, (LPARAM)p->number);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_KEYWORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_LDKEYWORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_OPERATOR, (LPARAM)p->operatorColour);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_ESCAPESEQUENCE, (LPARAM)p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_URI, (LPARAM)p->string);
+    const int comments[] = { SCE_JSON_LINECOMMENT, SCE_JSON_BLOCKCOMMENT };
+    style_range(hEdit, comments, 2, p->comment);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_ERROR, (LPARAM)p->keyword);
+}
+
+static void apply_markup_styles(HWND hEdit, const SyntaxPalette *p) {
+    const int tags[] = { SCE_H_TAG, SCE_H_TAGEND, SCE_H_TAGUNKNOWN, SCE_H_XMLSTART, SCE_H_XMLEND };
+    style_range(hEdit, tags, 5, p->tag);
+    const int attributes[] = { SCE_H_ATTRIBUTE, SCE_H_ATTRIBUTEUNKNOWN };
+    style_range(hEdit, attributes, 2, p->attribute);
+    const int strings[] = { SCE_H_DOUBLESTRING, SCE_H_SINGLESTRING, SCE_H_VALUE };
+    style_range(hEdit, strings, 3, p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_NUMBER, (LPARAM)p->number);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_COMMENT, (LPARAM)p->comment);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_ENTITY, (LPARAM)p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_CDATA, (LPARAM)p->comment);
+}
+
+static void apply_yaml_styles(HWND hEdit, const SyntaxPalette *p) {
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_IDENTIFIER, (LPARAM)p->attribute);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_KEYWORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_NUMBER, (LPARAM)p->number);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_COMMENT, (LPARAM)p->comment);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_REFERENCE, (LPARAM)p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_DOCUMENT, (LPARAM)p->comment);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_OPERATOR, (LPARAM)p->operatorColour);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_ERROR, (LPARAM)p->keyword);
+}
+
+static void apply_cpp_styles(HWND hEdit, const SyntaxPalette *p) {
+    const int comments[] = { SCE_C_COMMENT, SCE_C_COMMENTLINE, SCE_C_COMMENTDOC, SCE_C_COMMENTLINEDOC };
+    style_range(hEdit, comments, 4, p->comment);
+    const int strings[] = { SCE_C_STRING, SCE_C_CHARACTER, SCE_C_VERBATIM, SCE_C_STRINGEOL };
+    style_range(hEdit, strings, 4, p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_WORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_WORD2, (LPARAM)p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_NUMBER, (LPARAM)p->number);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_PREPROCESSOR, (LPARAM)p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_OPERATOR, (LPARAM)p->operatorColour);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_REGEX, (LPARAM)p->string);
+}
+
+static void apply_python_styles(HWND hEdit, const SyntaxPalette *p) {
+    const int comments[] = { SCE_P_COMMENTLINE, SCE_P_COMMENTBLOCK };
+    style_range(hEdit, comments, 2, p->comment);
+    const int strings[] = { SCE_P_STRING, SCE_P_CHARACTER, SCE_P_TRIPLE, SCE_P_TRIPLEDOUBLE, SCE_P_FSTRING };
+    style_range(hEdit, strings, 5, p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_WORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_NUMBER, (LPARAM)p->number);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_DEFNAME, (LPARAM)p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_CLASSNAME, (LPARAM)p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_DECORATOR, (LPARAM)p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_OPERATOR, (LPARAM)p->operatorColour);
+}
+
+static void apply_bash_styles(HWND hEdit, const SyntaxPalette *p) {
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_COMMENTLINE, (LPARAM)p->comment);
+    const int strings[] = { SCE_SH_STRING, SCE_SH_CHARACTER, SCE_SH_HERE_Q, SCE_SH_BACKTICKS };
+    style_range(hEdit, strings, 4, p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_WORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_NUMBER, (LPARAM)p->number);
+    const int variables[] = { SCE_SH_SCALAR, SCE_SH_PARAM, SCE_SH_HERE_DELIM };
+    style_range(hEdit, variables, 3, p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_OPERATOR, (LPARAM)p->operatorColour);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_ERROR, (LPARAM)p->keyword);
+}
+
+static void apply_powershell_styles(HWND hEdit, const SyntaxPalette *p) {
+    const int comments[] = { SCE_POWERSHELL_COMMENT, SCE_POWERSHELL_COMMENTSTREAM,
+                             SCE_POWERSHELL_COMMENTDOCKEYWORD };
+    style_range(hEdit, comments, 3, p->comment);
+    const int strings[] = { SCE_POWERSHELL_STRING, SCE_POWERSHELL_CHARACTER,
+                            SCE_POWERSHELL_HERE_STRING, SCE_POWERSHELL_HERE_CHARACTER };
+    style_range(hEdit, strings, 4, p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_KEYWORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_NUMBER, (LPARAM)p->number);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_VARIABLE, (LPARAM)p->variable);
+    const int functions[] = { SCE_POWERSHELL_CMDLET, SCE_POWERSHELL_FUNCTION, SCE_POWERSHELL_ALIAS };
+    style_range(hEdit, functions, 3, p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_OPERATOR, (LPARAM)p->operatorColour);
+}
+
+/* Applies the current theme colours for whichever language is active. */
+static void apply_language_styles(HWND hEdit) {
+    if (g_activeLanguage == LANG_MARKDOWN) {
+        apply_markdown_lexer_styles(hEdit);
+        return;
+    }
+
+    SyntaxPalette palette = syntax_palette();
+    switch (g_activeLanguage) {
+        case LANG_JSON: apply_json_styles(hEdit, &palette); break;
+        case LANG_XML:
+        case LANG_HTML: apply_markup_styles(hEdit, &palette); break;
+        case LANG_YAML: apply_yaml_styles(hEdit, &palette); break;
+        case LANG_CPP: apply_cpp_styles(hEdit, &palette); break;
+        case LANG_PYTHON: apply_python_styles(hEdit, &palette); break;
+        case LANG_BASH: apply_bash_styles(hEdit, &palette); break;
+        case LANG_POWERSHELL: apply_powershell_styles(hEdit, &palette); break;
+        default: break;
+    }
+}
+
+/* Switches the editor to the lexer for `path`, reapplying the theme so the
+   new styles get colours. Safe to call when the language is unchanged. */
+static void apply_document_language(HWND hEdit, const WCHAR *path) {
+    const LanguageInfo *language = language_for_path(path);
+    g_activeLanguage = language->id;
+
+    void *lexer = CreateLexer(language->lexer);
+    if (lexer) SendMessageA(hEdit, SCI_SETILEXER, 0, (LPARAM)lexer);
+    if (language->keywords)
+        SendMessageA(hEdit, SCI_SETKEYWORDS, 0, (LPARAM)language->keywords);
+
+    /* fold.html is separate from fold: without it the XML/HTML lexer reports no
+       fold points at all. The margin is hidden for languages that cannot fold,
+       rather than shown as a dead strip. */
+    SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold", (LPARAM)(language->folds ? "1" : "0"));
+    SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold.compact", (LPARAM)"0");
+    SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold.html", (LPARAM)"1");
+    SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_FOLD,
+                 language->folds ? FOLD_MARGIN_WIDTH : 0);
+
+    apply_editor_theme(hEdit);
+    SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
+    schedule_spell_check();
+}
+
+/* ---- Native Windows spell checking for Markdown prose. -----------------
+   Scintilla stores UTF-8 byte positions while ISpellChecker reports UTF-16
+   offsets, so each reported range is converted before applying an indicator.
+   Lexer styles keep code, links, rules, and Markdown punctuation unmarked. */
+
+static const GUID MARKEDIT_CLSID_SPELL_CHECKER_FACTORY =
+    {0x7ab36653, 0x1796, 0x484b, {0xbd, 0xfa, 0xe7, 0x4f, 0x1d, 0xb7, 0xc1, 0xdc}};
+static const GUID MARKEDIT_IID_SPELL_CHECKER_FACTORY =
+    {0x8e018a9d, 0x2415, 0x4677, {0xbf, 0x08, 0x79, 0x4e, 0xa6, 0x1f, 0x94, 0xbb}};
+
+static int create_spell_checker_for_language(const WCHAR *requested, int reportErrors) {
+    ISpellCheckerFactory *factory = NULL;
+    HRESULT hr = CoCreateInstance(&MARKEDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
+        CLSCTX_INPROC_SERVER, &MARKEDIT_IID_SPELL_CHECKER_FACTORY, (void **)&factory);
+    if (FAILED(hr) || !factory) return 0;
+
+    WCHAR language[LOCALE_NAME_MAX_LENGTH] = L"";
+    if (requested && requested[0]) {
+        wcsncpy(language, requested, LOCALE_NAME_MAX_LENGTH - 1);
+        language[LOCALE_NAME_MAX_LENGTH - 1] = 0;
+    } else if (!GetUserDefaultLocaleName(language, LOCALE_NAME_MAX_LENGTH))
+        wcscpy(language, L"en-US");
+
+    WINBOOL supported = FALSE;
+    ISpellCheckerFactory_IsSupported(factory, language, &supported);
+    if (!supported) {
+        IEnumString *languages = NULL;
+        if (SUCCEEDED(ISpellCheckerFactory_get_SupportedLanguages(factory, &languages)) && languages) {
+            LPOLESTR first = NULL;
+            ULONG fetched = 0;
+            if (IEnumString_Next(languages, 1, &first, &fetched) == S_OK && first) {
+                wcsncpy(language, first, LOCALE_NAME_MAX_LENGTH - 1);
+                language[LOCALE_NAME_MAX_LENGTH - 1] = 0;
+                CoTaskMemFree(first);
+                supported = TRUE;
+            }
+            IEnumString_Release(languages);
+        }
+    }
+
+    ISpellChecker *checker = NULL;
+    if (supported && SUCCEEDED(ISpellCheckerFactory_CreateSpellChecker(
+            factory, language, &checker)) && checker) {
+        if (g_spellChecker) ISpellChecker_Release(g_spellChecker);
+        g_spellChecker = checker;
+        wcsncpy(g_spellLanguage, language, LOCALE_NAME_MAX_LENGTH - 1);
+        g_spellLanguage[LOCALE_NAME_MAX_LENGTH - 1] = 0;
+    }
+    ISpellCheckerFactory_Release(factory);
+    if (!checker && reportErrors)
+        MessageBoxW(g_hMainWnd, L"The selected Windows spelling dictionary is unavailable.",
+                    L"Spell Check", MB_OK | MB_ICONWARNING);
+    return checker != NULL;
+}
+
+static void init_spell_checker(void) {
+    create_spell_checker_for_language(g_spellLanguage, 0);
+}
+
+static void choose_spell_language(void) {
+    ISpellCheckerFactory *factory = NULL;
+    if (FAILED(CoCreateInstance(&MARKEDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
+                                CLSCTX_INPROC_SERVER, &MARKEDIT_IID_SPELL_CHECKER_FACTORY,
+                                (void **)&factory)) || !factory) return;
+    IEnumString *languages = NULL;
+    WCHAR **labels = NULL;
+    int count = 0, capacity = 0;
+    if (SUCCEEDED(ISpellCheckerFactory_get_SupportedLanguages(factory, &languages)) && languages) {
+        for (;;) {
+            LPOLESTR language = NULL; ULONG fetched = 0;
+            if (IEnumString_Next(languages, 1, &language, &fetched) != S_OK || !language) break;
+            if (count >= capacity) {
+                int next = capacity ? capacity * 2 : 16;
+                WCHAR **grown = (WCHAR **)realloc(labels, (size_t)next * sizeof(WCHAR *));
+                if (!grown) { CoTaskMemFree(language); break; }
+                labels = grown; capacity = next;
+            }
+            WCHAR displayName[LOCALE_NAME_MAX_LENGTH] = L"";
+            GetLocaleInfoEx(language, LOCALE_SLOCALIZEDDISPLAYNAME, displayName,
+                            LOCALE_NAME_MAX_LENGTH);
+            size_t labelCapacity = wcslen(language) + wcslen(displayName) + 8;
+            labels[count] = (WCHAR *)malloc(labelCapacity * sizeof(WCHAR));
+            if (labels[count]) {
+                if (displayName[0]) swprintf(labels[count], labelCapacity, L"%ls — %ls", displayName, language);
+                else wcscpy(labels[count], language);
+                count++;
+            }
+            CoTaskMemFree(language);
+        }
+        IEnumString_Release(languages);
+    }
+    ISpellCheckerFactory_Release(factory);
+    if (!count) {
+        MessageBoxW(g_hMainWnd, L"Windows has no installed spelling dictionaries.",
+                    L"Spell Check", MB_OK | MB_ICONINFORMATION);
+        free(labels); return;
+    }
+    int selected = show_choice_dialog(L"Spell Check Language",
+                                      L"Choose an installed Windows dictionary:", labels, count);
+    if (selected >= 0 && selected < count) {
+        WCHAR locale[LOCALE_NAME_MAX_LENGTH];
+        WCHAR *dash = wcsrchr(labels[selected], L'—');
+        const WCHAR *source = dash ? dash + 1 : labels[selected];
+        while (*source == L' ') source++;
+        wcsncpy(locale, source, LOCALE_NAME_MAX_LENGTH - 1);
+        locale[LOCALE_NAME_MAX_LENGTH - 1] = 0;
+        if (create_spell_checker_for_language(locale, 1)) {
+            WCHAR *settings = get_settings_path();
+            if (settings) {
+                WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, settings);
+                free(settings);
+            }
+            g_spellCheckEnabled = 1;
+            schedule_spell_check();
+            refresh_menu(g_hMainWnd);
+        }
+    }
+    for (int i = 0; i < count; i++) free(labels[i]);
+    free(labels);
+}
+
+static int markdown_style_is_prose(int style) {
+    return style == SCE_MARKDOWN_DEFAULT ||
+           style == SCE_MARKDOWN_STRONG1 || style == SCE_MARKDOWN_STRONG2 ||
+           style == SCE_MARKDOWN_EM1 || style == SCE_MARKDOWN_EM2 ||
+           (style >= SCE_MARKDOWN_HEADER1 && style <= SCE_MARKDOWN_HEADER6) ||
+           style == SCE_MARKDOWN_BLOCKQUOTE || style == SCE_MARKDOWN_STRIKEOUT;
+}
+
+static void schedule_spell_check(void) {
+    if (!g_hMainWnd) return;
+    SetTimer(g_hMainWnd, IDT_SPELL_CHECK, 350, NULL);
+}
+
+static void perform_spell_check(void) {
+    if (!g_hEdit) return;
+    if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
+
+    int textLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
+    SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
+    if (!g_spellCheckEnabled || !g_spellChecker ||
+        g_activeLanguage != LANG_MARKDOWN || textLength <= 0) return;
+
+    /* Ensure the Markdown styles used to exclude code and links are current. */
+    SendMessageA(g_hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
+    int ignoredLength = 0;
+    char *utf8 = get_edit_text(g_hEdit, &ignoredLength);
+    if (!utf8) return;
+
+    int wideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        utf8, textLength, NULL, 0);
+    if (wideLength <= 0) {
+        free(utf8);
+        return;
+    }
+    WCHAR *wide = (WCHAR *)calloc((size_t)wideLength + 1, sizeof(WCHAR));
+    if (!wide) {
+        free(utf8);
+        return;
+    }
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, textLength, wide, wideLength);
+
+    IEnumSpellingError *errors = NULL;
+    if (SUCCEEDED(ISpellChecker_Check(g_spellChecker, wide, &errors)) && errors) {
+        for (;;) {
+            ISpellingError *error = NULL;
+            if (IEnumSpellingError_Next(errors, &error) != S_OK || !error) break;
+            ULONG wideStart = 0, wideSpan = 0;
+            CORRECTIVE_ACTION action = CORRECTIVE_ACTION_NONE;
+            ISpellingError_get_StartIndex(error, &wideStart);
+            ISpellingError_get_Length(error, &wideSpan);
+            ISpellingError_get_CorrectiveAction(error, &action);
+            if (action != CORRECTIVE_ACTION_NONE && wideSpan > 0 &&
+                wideStart <= (ULONG)wideLength && wideSpan <= (ULONG)wideLength - wideStart) {
+                int byteStart = WideCharToMultiByte(CP_UTF8, 0, wide, (int)wideStart,
+                    NULL, 0, NULL, NULL);
+                int byteSpan = WideCharToMultiByte(CP_UTF8, 0, wide + wideStart,
+                    (int)wideSpan, NULL, 0, NULL, NULL);
+                if (byteSpan > 0 && byteStart >= 0 && byteStart + byteSpan <= textLength &&
+                    markdown_style_is_prose((int)SendMessageA(
+                        g_hEdit, SCI_GETSTYLEAT, (WPARAM)byteStart, 0))) {
+                    SendMessageA(g_hEdit, SCI_SETINDICATORVALUE, 1, 0);
+                    SendMessageA(g_hEdit, SCI_INDICATORFILLRANGE,
+                                 (WPARAM)byteStart, (LPARAM)byteSpan);
+                }
+            }
+            ISpellingError_Release(error);
+        }
+        IEnumSpellingError_Release(errors);
+    }
+    free(wide);
+    free(utf8);
+}
+
+/* Keeps the WebView2 controller's own background in step with the theme. It
+   shows through before the shell page paints: at startup, while resizing, and
+   for the frame between a theme switch and the page restyling itself. */
+static void apply_webview_background_colour(void) {
+    if (!g_webviewController) return;
+    ICoreWebView2Controller2 *ctrl2 = NULL;
+    ICoreWebView2Controller_QueryInterface(g_webviewController, &IID_ICoreWebView2Controller2,
+                                           (void **)&ctrl2);
+    if (!ctrl2) return;
+    COREWEBVIEW2_COLOR bg = g_previewDarkMode
+        ? (COREWEBVIEW2_COLOR){255, 0x0D, 0x11, 0x17}
+        : (COREWEBVIEW2_COLOR){255, 0xFF, 0xFF, 0xFF};
+    ICoreWebView2Controller2_put_DefaultBackgroundColor(ctrl2, bg);
+    ICoreWebView2Controller2_Release(ctrl2);
+}
+
 /* (Re)creates g_previewBkBrush to match g_previewDarkMode, so the preview
    host STATIC control's WM_CTLCOLORSTATIC background doesn't flash white/
    light when starting (or switching to) dark mode, before WebView2 itself
@@ -839,14 +1438,76 @@ static void apply_main_theme(HWND hwnd) {
     if (hwnd) InvalidateRect(hwnd, NULL, FALSE);
 }
 
-static void apply_help_theme(void) {
-    if (!g_hHelpEdit && !g_hHelpWnd) return;
-    if (g_helpBkBrush) DeleteObject(g_helpBkBrush);
-    g_helpBkBrush = CreateSolidBrush(g_previewDarkMode
-        ? RGB(0x0D, 0x11, 0x17)
-        : RGB(0xFF, 0xFF, 0xFF));
-    if (g_hHelpEdit) InvalidateRect(g_hHelpEdit, NULL, TRUE);
-    if (g_hHelpWnd) InvalidateRect(g_hHelpWnd, NULL, TRUE);
+/* Popup menus need an explicit uxtheme opt-in to follow MarkEdit's theme.
+   The visible menu bar is owner-drawn below because Windows does not repaint
+   that non-client area when this preference changes at runtime. These private
+   ordinal exports are available from Windows 10 1903 onward. */
+typedef enum { UXTHEME_APPMODE_FORCEDARK = 2, UXTHEME_APPMODE_FORCELIGHT = 3 } UxthemeAppMode;
+typedef UxthemeAppMode (WINAPI *SetPreferredAppModeFn)(UxthemeAppMode appMode);
+typedef BOOL (WINAPI *AllowDarkModeForWindowFn)(HWND hwnd, BOOL allow);
+typedef void (WINAPI *FlushMenuThemesFn)(void);
+
+static SetPreferredAppModeFn g_setPreferredAppMode = NULL;
+static AllowDarkModeForWindowFn g_allowDarkModeForWindow = NULL;
+static FlushMenuThemesFn g_flushMenuThemes = NULL;
+
+static void init_native_menu_theme_support(void) {
+    HMODULE uxtheme = LoadLibraryW(L"uxtheme.dll");
+    if (!uxtheme) return;
+    FARPROC procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(133));
+    memcpy(&g_allowDarkModeForWindow, &procedure, sizeof(g_allowDarkModeForWindow));
+    procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(135));
+    memcpy(&g_setPreferredAppMode, &procedure, sizeof(g_setPreferredAppMode));
+    procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(136));
+    memcpy(&g_flushMenuThemes, &procedure, sizeof(g_flushMenuThemes));
+}
+
+/* Switches the menu bar and its dropdowns between light and dark chrome.
+   FORCEDARK/FORCELIGHT are intentional: the app has its own theme selector,
+   so the selected menu colour must not depend on the Windows system theme.
+   The per-window opt-in is what lets the non-client menu bar follow that
+   process preference. Safe on older Windows releases where the private
+   uxtheme exports are absent; those releases retain their system menu. */
+static void apply_menu_theme(HWND hwnd, int dark) {
+    if (g_setPreferredAppMode)
+        g_setPreferredAppMode(dark ? UXTHEME_APPMODE_FORCEDARK : UXTHEME_APPMODE_FORCELIGHT);
+    if (hwnd && g_allowDarkModeForWindow)
+        g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
+    if (g_flushMenuThemes)
+        g_flushMenuThemes();
+    if (hwnd) {
+        if (g_menuBkBrush) DeleteObject(g_menuBkBrush);
+        g_menuBkBrush = CreateSolidBrush(dark
+            ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+        SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        HMENU menu = GetMenu(hwnd);
+        if (menu && g_menuBkBrush) {
+            MENUINFO info = {0};
+            info.cbSize = sizeof(info);
+            info.fMask = MIM_BACKGROUND;
+            info.hbrBack = g_menuBkBrush;
+            SetMenuInfo(menu, &info);
+        }
+        SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+        DrawMenuBar(hwnd);
+    }
+}
+
+/* Wrapped lines continue with a hanging indent so a wrapped list item or
+   blockquote stays visually attached to its marker. */
+static void apply_word_wrap(HWND hEdit) {
+    SendMessageA(hEdit, SCI_SETWRAPMODE, g_wordWrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
+    if (!g_wordWrap) return;
+    SendMessageA(hEdit, SCI_SETWRAPINDENTMODE, SC_WRAPINDENT_SAME, 0);
+    SendMessageA(hEdit, SCI_SETWRAPVISUALFLAGS, SC_WRAPVISUALFLAG_END, 0);
+}
+
+static void apply_show_whitespace(HWND hEdit) {
+    SendMessageA(hEdit, SCI_SETVIEWWS, g_showWhitespace ? SCWS_VISIBLEALWAYS : SCWS_INVISIBLE, 0);
+}
+
+static void apply_indent_guides(HWND hEdit) {
+    SendMessageA(hEdit, SCI_SETINDENTATIONGUIDES, g_indentGuides ? SC_IV_LOOKBOTH : SC_IV_NONE, 0);
 }
 
 static void configure_scintilla(HWND hEdit) {
@@ -858,23 +1519,52 @@ static void configure_scintilla(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETMODEVENTMASK, SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT, 0);
     SendMessageA(hEdit, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
     SendMessageA(hEdit, SCI_SETSCROLLWIDTH, 1, 0);
-    SendMessageA(hEdit, SCI_SETWRAPMODE, 0 /* SC_WRAP_NONE */, 0);
+    apply_word_wrap(hEdit);
+    apply_show_whitespace(hEdit);
+    apply_indent_guides(hEdit);
+
+    /* Additional carets edit in step with the main one; the smart-input
+       handlers in EditSubclassProc still act on the main caret alone. */
+    SendMessageA(hEdit, SCI_SETMULTIPLESELECTION, TRUE, 0);
+    SendMessageA(hEdit, SCI_SETADDITIONALSELECTIONTYPING, TRUE, 0);
+    SendMessageA(hEdit, SCI_SETMULTIPASTE, SC_MULTIPASTE_EACH, 0);
 
     /* Line numbers: a dedicated margin, sized to fit the current line count. */
     SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_LINENUMBERS, SC_MARGIN_NUMBER);
     update_linenumber_margin_width(hEdit);
 
-    /* Syntax-highlight the Markdown source using Lexilla's bundled lexer
-       (vendored trimmed to just this one language - see third_party/lexilla).
-       ILexer5* ownership passes to Scintilla once handed to SCI_SETILEXER. */
-    void *lexer = CreateLexer("markdown");
-    if (lexer) SendMessageA(hEdit, SCI_SETILEXER, 0, (LPARAM)lexer);
+    /* Bookmark and fold margins. Marker definitions are per-view, so they are
+       set once here and survive the SCI_SETDOCPOINTER swaps done by tabs. */
+    SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_BOOKMARKS, SC_MARGIN_SYMBOL);
+    SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_BOOKMARKS, (LPARAM)(1 << MARKER_BOOKMARK));
+    SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_BOOKMARKS, 14);
+    SendMessageA(hEdit, SCI_SETMARGINSENSITIVEN, MARGIN_BOOKMARKS, TRUE);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_BOOKMARK, SC_MARK_BOOKMARK);
 
-    /* Explicit text colors, rather than relying on Scintilla's own defaults,
+    SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_FOLD, SC_MARGIN_SYMBOL);
+    SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_FOLD, (LPARAM)SC_MASK_FOLDERS);
+    SendMessageA(hEdit, SCI_SETMARGINSENSITIVEN, MARGIN_FOLD, TRUE);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDER, SC_MARK_BOXPLUS);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDEROPEN, SC_MARK_BOXMINUS);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDERSUB, SC_MARK_VLINE);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDERTAIL, SC_MARK_LCORNER);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDEREND, SC_MARK_BOXPLUSCONNECTED);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDEROPENMID, SC_MARK_BOXMINUSCONNECTED);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDERMIDTAIL, SC_MARK_TCORNER);
+    SendMessageA(hEdit, SCI_SETFOLDFLAGS, SC_FOLDFLAG_LINEAFTER_CONTRACTED, 0);
+    SendMessageA(hEdit, SCI_SETAUTOMATICFOLD, SC_AUTOMATICFOLD_CLICK | SC_AUTOMATICFOLD_CHANGE, 0);
+
+    /* Syntax-highlight the source using one of Lexilla's bundled lexers
+       (vendored trimmed to the languages listed in LANGUAGES - see
+       third_party/lexilla). ILexer5* ownership passes to Scintilla once
+       handed to SCI_SETILEXER. apply_document_language() picks the lexer
+       from the file extension; new documents start out as Markdown.
+
+       Explicit text colors, rather than relying on Scintilla's own defaults,
        so the caret-line highlight below is guaranteed to contrast with them.
        apply_editor_theme() sets the actual color values (light or dark),
-       including the Markdown lexer's per-construct colors set above. */
-    apply_editor_theme(hEdit);
+       including the lexer's per-construct colors. */
+    apply_document_language(hEdit, g_currentFile);
 
     /* Highlight the line the caret is on. SC_ALPHA_NOALPHA (rather than
        SC_ALPHA_OPAQUE) is required here: passing anything other than "no
@@ -908,6 +1598,7 @@ static void apply_editor_font(const WCHAR *faceName, int pointSize) {
     /* The margin's digit width depends on the font, so keep both in sync. */
     SendMessageA(g_hEdit, SCI_STYLESETFONT, STYLE_LINENUMBER, (LPARAM)faceUtf8);
     SendMessageA(g_hEdit, SCI_STYLESETSIZE, STYLE_LINENUMBER, pointSize);
+    g_lineNumberDigits = 0; /* font metrics changed even if the line count did not */
     update_linenumber_margin_width(g_hEdit);
     free(faceUtf8);
 }
@@ -949,6 +1640,18 @@ static void load_theme_settings(void) {
         g_previewDarkMode = (value[0] == L'1' || value[0] == L't' || value[0] == L'T' ||
                              value[0] == L'y' || value[0] == L'Y');
     }
+    DWORD cap = 512, n = 0;
+    WCHAR *cssPath = NULL;
+    do {
+        free(cssPath);
+        cssPath = (WCHAR *)calloc(cap, sizeof(WCHAR));
+        if (!cssPath) break;
+        n = GetPrivateProfileStringW(L"Preview", L"CustomCSS", L"", cssPath, cap, path);
+        if (n < cap - 1) break;
+        cap *= 2;
+    } while (cap <= 32768);
+    if (cssPath && cssPath[0]) g_customCssPath = cssPath;
+    else free(cssPath);
     free(path);
 }
 
@@ -958,6 +1661,8 @@ static void save_theme_settings(void) {
     WritePrivateProfileStringW(L"Preview", L"Theme",
                                g_previewDarkMode ? L"github-dark" : L"github-light", path);
     WritePrivateProfileStringW(L"Preview", L"DarkMode", NULL, path);
+    WritePrivateProfileStringW(L"Preview", L"CustomCSS",
+                               g_customCssPath ? g_customCssPath : L"", path);
     free(path);
 }
 
@@ -983,6 +1688,14 @@ static void load_layout_settings(void) {
     g_previewOnLeft = read_profile_int(L"View", L"PreviewOnLeft", 0, path) != 0;
     g_previewVisible = read_profile_int(L"View", L"PreviewVisible", g_previewVisible, path) != 0;
     g_editorVisible = read_profile_int(L"View", L"EditorVisible", g_editorVisible, path) != 0;
+    g_focusMode = read_profile_int(L"View", L"FocusMode", 0, path) != 0;
+    g_wordWrap = read_profile_int(L"View", L"WordWrap", g_wordWrap, path) != 0;
+    g_spellCheckEnabled = read_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path) != 0;
+    g_showWhitespace = read_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path) != 0;
+    g_indentGuides = read_profile_int(L"View", L"IndentGuides", g_indentGuides, path) != 0;
+    g_outlineVisible = read_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path) != 0;
+    GetPrivateProfileStringW(L"SpellCheck", L"Language", L"", g_spellLanguage,
+                             LOCALE_NAME_MAX_LENGTH, path);
     if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
 
     g_splitterRatio = read_profile_int(L"View", L"SplitterRatio", 500, path);
@@ -1007,6 +1720,13 @@ static void save_layout_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
     write_profile_int(L"View", L"PreviewOnLeft", g_previewOnLeft, path);
+    write_profile_int(L"View", L"FocusMode", g_focusMode, path);
+    write_profile_int(L"View", L"WordWrap", g_wordWrap, path);
+    write_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path);
+    write_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path);
+    write_profile_int(L"View", L"IndentGuides", g_indentGuides, path);
+    write_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path);
+    WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
     if (!g_commandLinePreviewMode) {
         write_profile_int(L"View", L"PreviewVisible", g_previewVisible, path);
         write_profile_int(L"View", L"EditorVisible", g_editorVisible, path);
@@ -1048,6 +1768,260 @@ static void save_font_settings(void) {
     swprintf(sizeBuf, 16, L"%d", g_fontPointSize);
     WritePrivateProfileStringW(L"Font", L"PointSize", sizeBuf, path);
     free(path);
+}
+
+static void load_find_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    GetPrivateProfileStringW(L"Find", L"FindWhat", L"", g_findWhat,
+                             sizeof(g_findWhat) / sizeof(g_findWhat[0]), path);
+    GetPrivateProfileStringW(L"Find", L"ReplaceWith", L"", g_replaceWith,
+                             sizeof(g_replaceWith) / sizeof(g_replaceWith[0]), path);
+    g_findFlags = read_profile_int(L"Find", L"MatchCase", 0, path) ? FR_MATCHCASE : 0;
+    if (read_profile_int(L"Find", L"SearchDown", 1, path)) g_findFlags |= FR_DOWN;
+    free(path);
+}
+
+static void save_find_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WritePrivateProfileStringW(L"Find", L"FindWhat", g_findWhat, path);
+    WritePrivateProfileStringW(L"Find", L"ReplaceWith", g_replaceWith, path);
+    write_profile_int(L"Find", L"MatchCase", (g_findFlags & FR_MATCHCASE) != 0, path);
+    write_profile_int(L"Find", L"SearchDown", (g_findFlags & FR_DOWN) != 0, path);
+    free(path);
+}
+
+/* ---- autosave recovery -------------------------------------------------
+   Recovery snapshots live in LocalAppData rather than beside the executable,
+   so running the portable distribution never dirties its own folder. Only
+   modified documents are written; normal saves and a clean exit remove them. */
+
+static WCHAR *get_recovery_directory(void) {
+    DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", NULL, 0);
+    if (!needed) return NULL;
+    WCHAR *local = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));
+    if (!local || !GetEnvironmentVariableW(L"LOCALAPPDATA", local, needed)) {
+        free(local);
+        return NULL;
+    }
+    WCHAR *app = path_join(local, L"MarkEdit");
+    free(local);
+    if (!app) return NULL;
+    CreateDirectoryW(app, NULL);
+    WCHAR *recovery = path_join(app, L"Recovery");
+    free(app);
+    if (recovery) CreateDirectoryW(recovery, NULL);
+    return recovery;
+}
+
+static char *get_document_text(int index, int *outLength) {
+    if (!g_hEdit || index < 0 || index >= g_documentCount) return NULL;
+    sptr_t current = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    int oldSwitching = g_switchingDocument;
+    g_switchingDocument = 1;
+    if (current != g_documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    char *text = get_edit_text(g_hEdit, outLength);
+    if (current != g_documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)current);
+    g_switchingDocument = oldSwitching;
+    return text;
+}
+
+static int write_bytes_file(const WCHAR *path, const char *bytes, size_t length) {
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    size_t total = 0;
+    int ok = 1;
+    while (total < length) {
+        DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : length - total);
+        DWORD written = 0;
+        if (!WriteFile(file, bytes + total, chunk, &written, NULL) || written != chunk) {
+            ok = 0;
+            break;
+        }
+        total += written;
+    }
+    if (!CloseHandle(file)) ok = 0;
+    return ok;
+}
+
+static char *read_bytes_file(const WCHAR *path, int *outLength) {
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > INT_MAX) {
+        CloseHandle(file);
+        return NULL;
+    }
+    int length = (int)size.QuadPart;
+    char *text = (char *)malloc((size_t)length + 1);
+    DWORD read = 0;
+    int ok = text && ReadFile(file, text, (DWORD)length, &read, NULL) && read == (DWORD)length;
+    CloseHandle(file);
+    if (!ok) { free(text); return NULL; }
+    text[length] = 0;
+    if (outLength) *outLength = length;
+    return text;
+}
+
+static void clear_recovery_snapshot(void) {
+    WCHAR *directory = get_recovery_directory();
+    if (!directory) return;
+    WCHAR *manifest = path_join(directory, L"manifest.ini");
+    if (manifest) { DeleteFileW(manifest); free(manifest); }
+    for (int i = 0; i < MAX_DOCUMENTS; i++) {
+        WCHAR name[32];
+        swprintf(name, sizeof(name) / sizeof(name[0]), L"document-%d.txt", i);
+        WCHAR *path = path_join(directory, name);
+        if (path) { DeleteFileW(path); free(path); }
+    }
+    free(directory);
+}
+
+static void write_recovery_snapshot(void) {
+    if (!g_hEdit || g_commandLinePreviewMode) return;
+    int dirtyCount = 0;
+    for (int i = 0; i < g_documentCount; i++) if (g_documents[i].dirty) dirtyCount++;
+    if (!dirtyCount) {
+        clear_recovery_snapshot();
+        update_status_bar();
+        return;
+    }
+
+    WCHAR *directory = get_recovery_directory();
+    WCHAR *manifest = directory ? path_join(directory, L"manifest.ini") : NULL;
+    if (!directory || !manifest) { free(directory); free(manifest); return; }
+    DeleteFileW(manifest);
+    int writtenCount = 0;
+    for (int i = 0; i < g_documentCount; i++) {
+        Document *doc = &g_documents[i];
+        if (!doc->dirty) continue;
+        int length = 0;
+        char *text = get_document_text(i, &length);
+        WCHAR fileName[32], key[32], value[32];
+        swprintf(fileName, sizeof(fileName) / sizeof(fileName[0]), L"document-%d.txt", writtenCount);
+        WCHAR *contentPath = path_join(directory, fileName);
+        if (!text || !contentPath || !write_bytes_file(contentPath, text, (size_t)length)) {
+            free(text); free(contentPath); continue;
+        }
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", writtenCount);
+        WritePrivateProfileStringW(L"Recovery", key, fileName, manifest);
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Path%d", writtenCount);
+        WritePrivateProfileStringW(L"Recovery", key, doc->path ? doc->path : L"", manifest);
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Untitled%d", writtenCount);
+        swprintf(value, sizeof(value) / sizeof(value[0]), L"%u", doc->untitledNumber);
+        WritePrivateProfileStringW(L"Recovery", key, value, manifest);
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Bom%d", writtenCount);
+        WritePrivateProfileStringW(L"Recovery", key, doc->hasBom ? L"1" : L"0", manifest);
+        writtenCount++;
+        free(text);
+        free(contentPath);
+    }
+    WCHAR count[32];
+    swprintf(count, sizeof(count) / sizeof(count[0]), L"%d", writtenCount);
+    WritePrivateProfileStringW(L"Recovery", L"Count", count, manifest);
+    free(manifest);
+    free(directory);
+    update_status_bar();
+}
+
+static int restore_recovery_snapshot(void) {
+    WCHAR *directory = get_recovery_directory();
+    WCHAR *manifest = directory ? path_join(directory, L"manifest.ini") : NULL;
+    if (!directory || !manifest) { free(directory); free(manifest); return 0; }
+    int count = GetPrivateProfileIntW(L"Recovery", L"Count", 0, manifest);
+    if (count <= 0 || count > MAX_DOCUMENTS) {
+        free(directory); free(manifest); return 0;
+    }
+    int answer = MessageBoxW(g_hMainWnd,
+        L"MarkEdit found autosaved documents from an interrupted session. Recover them?",
+        L"Recover Documents", MB_YESNO | MB_ICONQUESTION);
+    if (answer != IDYES) {
+        free(directory); free(manifest);
+        clear_recovery_snapshot();
+        return 0;
+    }
+
+    int restored = 0;
+    for (int i = 0; i < count; i++) {
+        WCHAR key[32], fileName[64], originalPath[32768];
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", i);
+        GetPrivateProfileStringW(L"Recovery", key, L"", fileName,
+                                 sizeof(fileName) / sizeof(fileName[0]), manifest);
+        if (!fileName[0]) continue;
+        WCHAR *contentPath = path_join(directory, fileName);
+        int length = 0;
+        char *text = contentPath ? read_bytes_file(contentPath, &length) : NULL;
+        free(contentPath);
+        if (!text) continue;
+        if (restored > 0 && !create_document_tab()) { free(text); break; }
+        if (restored == 0 && !active_document_is_reusable() && !create_document_tab()) {
+            free(text); break;
+        }
+        g_switchingDocument = 1;
+        set_edit_text(g_hEdit, text);
+        SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+        g_switchingDocument = 0;
+        free(text);
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Path%d", i);
+        GetPrivateProfileStringW(L"Recovery", key, L"", originalPath,
+                                 sizeof(originalPath) / sizeof(originalPath[0]), manifest);
+        replace_wstring(&g_currentFile, originalPath[0] ? originalPath : NULL);
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Untitled%d", i);
+        g_documents[g_activeDocument].untitledNumber =
+            (unsigned)GetPrivateProfileIntW(L"Recovery", key, 0, manifest);
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Bom%d", i);
+        g_hasBom = GetPrivateProfileIntW(L"Recovery", key, 0, manifest) != 0;
+        apply_document_language(g_hEdit, g_currentFile);
+        set_dirty(1);
+        restored++;
+    }
+    free(directory);
+    free(manifest);
+    if (restored) {
+        update_document_mapping();
+        update_preview();
+        write_recovery_snapshot();
+    }
+    return restored > 0;
+}
+
+/* The status bar deliberately computes from Scintilla's UTF-8 document model:
+   character counts are Unicode-aware while columns remain editor columns. */
+static void update_status_bar(void) {
+    if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
+    int length = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    int position = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
+    int column = (int)SendMessageA(g_hEdit, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
+    int characters = (int)SendMessageA(g_hEdit, SCI_COUNTCHARACTERS, 0, (LPARAM)length);
+    int ignored = 0, words = 0, inWord = 0;
+    char *text = get_edit_text(g_hEdit, &ignored);
+    if (text) {
+        for (int i = 0; i < length; i++) {
+            unsigned char ch = (unsigned char)text[i];
+            int wordChar = ch >= 0x80 || isalnum(ch) || ch == '_' || ch == '\'';
+            if (wordChar && !inWord) words++;
+            inWord = wordChar;
+        }
+        free(text);
+    }
+    WCHAR part[128];
+    swprintf(part, sizeof(part) / sizeof(part[0]), L"Ln %d, Col %d", line, column);
+    SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)part);
+    swprintf(part, sizeof(part) / sizeof(part[0]), L"Words %d   Characters %d", words, characters);
+    SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)part);
+    int eol = (int)SendMessageA(g_hEdit, SCI_GETEOLMODE, 0, 0);
+    const WCHAR *eolName = eol == SC_EOL_LF ? L"LF" : eol == SC_EOL_CR ? L"CR" : L"CRLF";
+    swprintf(part, sizeof(part) / sizeof(part[0]), L"UTF-8%ls   %ls",
+             g_hasBom ? L" BOM" : L"", eolName);
+    SendMessageW(g_hStatus, SB_SETTEXTW, 2, (LPARAM)part);
+    SendMessageW(g_hStatus, SB_SETTEXTW, 3,
+                 (LPARAM)(g_dirty ? L"Modified · recovery enabled" : L"Saved"));
 }
 
 /* ---- recently opened files, most-recent-first, stored in the same INI ---- */
@@ -1395,6 +2369,89 @@ static char *json_escape(const char *s) {
     return out;
 }
 
+/* Read a reasonably-sized UTF-8 text file. Custom preview stylesheets are
+   deliberately injected as text instead of linked directly, which keeps the
+   preview's restrictive CSP intact and also makes exported HTML self-contained. */
+static char *read_utf8_text_file(const WCHAR *path, size_t maximumSize) {
+    if (!path) return _strdup("");
+    WCHAR *ioPath = extended_path(path);
+    HANDLE file = CreateFileW(ioPath ? ioPath : path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(ioPath);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+        (unsigned long long)size.QuadPart > maximumSize) {
+        CloseHandle(file);
+        return NULL;
+    }
+    size_t length = (size_t)size.QuadPart;
+    char *buffer = (char *)malloc(length + 1);
+    size_t total = 0;
+    while (buffer && total < length) {
+        DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : length - total);
+        DWORD got = 0;
+        if (!ReadFile(file, buffer + total, chunk, &got, NULL) || got == 0) break;
+        total += got;
+    }
+    CloseHandle(file);
+    if (!buffer || total != length) { free(buffer); return NULL; }
+    buffer[length] = 0;
+    size_t offset = length >= 3 && (unsigned char)buffer[0] == 0xEF &&
+        (unsigned char)buffer[1] == 0xBB && (unsigned char)buffer[2] == 0xBF ? 3 : 0;
+    if (length > offset && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            buffer + offset, (int)(length - offset), NULL, 0) <= 0) {
+        free(buffer);
+        return NULL;
+    }
+    if (offset) memmove(buffer, buffer + offset, length - offset + 1);
+    return buffer;
+}
+
+/* WebView2 accepts UTF-16 scripts. Centralizing the conversion keeps every
+   fire-and-forget call on the same allocation/error path and lets LTO inline
+   it into the small fixed-script callers. */
+static HRESULT execute_webview_script(const char *script,
+                                      ICoreWebView2ExecuteScriptCompletedHandler *handler) {
+    if (!g_webview || !script) return E_HANDLE;
+    WCHAR *wide = to_wide(script);
+    if (!wide) return E_OUTOFMEMORY;
+    HRESULT result = ICoreWebView2_ExecuteScript(g_webview, wide, handler);
+    free(wide);
+    return result;
+}
+
+static void apply_custom_preview_css(int reportErrors) {
+    if (!g_webviewReady || !g_webview) return;
+    char *css = g_customCssPath ? read_utf8_text_file(g_customCssPath, 4 * 1024 * 1024) : _strdup("");
+    if (!css) {
+        if (reportErrors)
+            MessageBoxW(g_hMainWnd,
+                L"The custom stylesheet could not be read. It must be a UTF-8 CSS file smaller than 4 MB.",
+                L"MarkEdit", MB_OK | MB_ICONERROR);
+        css = _strdup("");
+    }
+    if (!css) return;
+    char *escaped = json_escape(css);
+    free(css);
+    if (!escaped) return;
+    const char *prefix = "(()=>{let s=document.getElementById('markedit-custom-css');"
+        "if(!s){s=document.createElement('style');s.id='markedit-custom-css';document.head.appendChild(s)}"
+        "s.textContent='";
+    const char *suffix = "';})()";
+    size_t length = strlen(prefix) + strlen(escaped) + strlen(suffix);
+    char *script = (char *)malloc(length + 1);
+    if (script) {
+        memcpy(script, prefix, strlen(prefix));
+        memcpy(script + strlen(prefix), escaped, strlen(escaped));
+        memcpy(script + strlen(prefix) + strlen(escaped), suffix, strlen(suffix) + 1);
+        execute_webview_script(script, &g_scriptHandler);
+        free(script);
+    }
+    free(escaped);
+}
+
 /* ---- generic single-use COM completion handler (QueryInterface/AddRef/Release are no-ops) ---- */
 
 static ULONG STDMETHODCALLTYPE Handler_AddRef(void *this_) { (void)this_; return 1; }
@@ -1503,6 +2560,30 @@ static ICoreWebView2ExecuteScriptCompletedHandlerVtbl g_exportScriptVtbl = {
 };
 static ICoreWebView2ExecuteScriptCompletedHandler g_exportScriptHandler = { &g_exportScriptVtbl };
 
+static HRESULT STDMETHODCALLTYPE PdfHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out, &IID_ICoreWebView2PrintToPdfCompletedHandler);
+}
+
+static HRESULT STDMETHODCALLTYPE PdfDone_Invoke(ICoreWebView2PrintToPdfCompletedHandler *this_,
+                                                 HRESULT errorCode, WINBOOL result) {
+    (void)this_;
+    if (FAILED(errorCode) || !result)
+        MessageBoxW(g_hMainWnd, L"Could not export the rendered preview to PDF.",
+                    L"MarkEdit", MB_OK | MB_ICONERROR);
+    else
+        MessageBoxW(g_hMainWnd, L"PDF export completed.", L"MarkEdit",
+                    MB_OK | MB_ICONINFORMATION);
+    free(g_pendingPdfPath);
+    g_pendingPdfPath = NULL;
+    g_pendingPrintAction = 0;
+    return S_OK;
+}
+
+static ICoreWebView2PrintToPdfCompletedHandlerVtbl g_pdfVtbl = {
+    (void*)PdfHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)PdfDone_Invoke
+};
+static ICoreWebView2PrintToPdfCompletedHandler g_pdfHandler = { &g_pdfVtbl };
+
 static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceivedEventHandler *this_,
                                                      ICoreWebView2 *sender,
                                                      ICoreWebView2WebMessageReceivedEventArgs *args) {
@@ -1534,6 +2615,7 @@ static HRESULT STDMETHODCALLTYPE NavDone_Invoke(ICoreWebView2NavigationCompleted
     (void)this_; (void)sender; (void)args;
     g_webviewReady = 1;
     apply_preview_theme();
+    apply_custom_preview_css(0);
     if (g_pendingHtmlBody) {
         char *body = g_pendingHtmlBody;
         g_pendingHtmlBody = NULL;
@@ -1672,13 +2754,29 @@ static void update_document_mapping(void) {
     }
 }
 
+/* Launches a terminal rooted in the current file's folder (the app's own
+   folder for an unsaved document). Windows Terminal is tried first, since
+   it's the modern default on Windows 11; cmd.exe is the universal fallback
+   for machines that don't have it installed. */
+static void open_terminal_here(void) {
+    WCHAR *directory = g_currentFile ? path_directory(g_currentFile) : NULL;
+    if (!directory) {
+        WCHAR *module = get_module_path();
+        directory = module ? path_directory(module) : NULL;
+        free(module);
+    }
+    if (!directory) return;
+    HINSTANCE result = ShellExecuteW(g_hMainWnd, L"open", L"wt.exe", NULL, directory, SW_SHOWNORMAL);
+    if ((INT_PTR)result <= 32)
+        ShellExecuteW(g_hMainWnd, L"open", L"cmd.exe", NULL, directory, SW_SHOWNORMAL);
+    free(directory);
+}
+
 static void apply_preview_theme(void) {
     if (!g_webviewReady || !g_webview) return;
     char script[64];
     wsprintfA(script, "window.setTheme('%s');", g_previewDarkMode ? "dark" : "light");
-    WCHAR *wscript = to_wide(script);
-    if (wscript) ICoreWebView2_ExecuteScript(g_webview, wscript, &g_scriptHandler);
-    free(wscript);
+    execute_webview_script(script, &g_scriptHandler);
 }
 
 void push_html_to_webview(const char *htmlFragment) {
@@ -1702,9 +2800,7 @@ void push_html_to_webview(const char *htmlFragment) {
     memcpy(script, prefix, strlen(prefix));
     memcpy(script + strlen(prefix), escaped, escapedLen);
     memcpy(script + strlen(prefix) + escapedLen, suffix, strlen(suffix) + 1);
-    WCHAR *wscript = to_wide(script);
-    if (wscript) ICoreWebView2_ExecuteScript(g_webview, wscript, &g_scriptHandler);
-    free(wscript);
+    execute_webview_script(script, &g_scriptHandler);
     free(script);
     free(escaped);
 }
@@ -1720,18 +2816,7 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
     GetClientRect(g_hPreview, &rc);
     ICoreWebView2Controller_put_Bounds(ctrl, rc);
 
-    /* Set the controller's own background before anything is visible, so a
-       dark-mode start shows a dark WebView2 host immediately instead of
-       flashing its default white background while the shell page loads. */
-    ICoreWebView2Controller2 *ctrl2 = NULL;
-    ICoreWebView2Controller_QueryInterface(ctrl, &IID_ICoreWebView2Controller2, (void **)&ctrl2);
-    if (ctrl2) {
-        COREWEBVIEW2_COLOR bg = g_previewDarkMode
-            ? (COREWEBVIEW2_COLOR){255, 0x0D, 0x11, 0x17}
-            : (COREWEBVIEW2_COLOR){255, 0xFF, 0xFF, 0xFF};
-        ICoreWebView2Controller2_put_DefaultBackgroundColor(ctrl2, bg);
-        ICoreWebView2Controller2_Release(ctrl2);
-    }
+    apply_webview_background_colour();
 
     ICoreWebView2Controller_put_IsVisible(ctrl, TRUE);
 
@@ -1745,6 +2830,15 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
         ICoreWebView2Settings_put_AreDevToolsEnabled(settings, FALSE);
         ICoreWebView2Settings_put_AreDefaultScriptDialogsEnabled(settings, FALSE);
         ICoreWebView2Settings_put_IsWebMessageEnabled(settings, TRUE);
+        /* The preview is a document view, not a browser: let the app's own
+           accelerators through instead of WebView2's F11 fullscreen, Ctrl+P,
+           refresh and friends. Absent on WebView2 Runtimes before 1.0.864.35. */
+        ICoreWebView2Settings3 *settings3 = NULL;
+        if (SUCCEEDED(ICoreWebView2Settings_QueryInterface(settings, &IID_ICoreWebView2Settings3,
+                                                           (void **)&settings3)) && settings3) {
+            ICoreWebView2Settings3_put_AreBrowserAcceleratorKeysEnabled(settings3, FALSE);
+            ICoreWebView2Settings3_Release(settings3);
+        }
         ICoreWebView2Settings_Release(settings);
     }
 
@@ -1818,6 +2912,10 @@ static void init_webview(void) {
 
 static void update_preview(void) {
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_PREVIEW_UPDATE);
+    /* Loading/restoring/switching tabs should not parse Markdown while the
+       preview is hidden. Showing the pane calls update_preview(), and export
+       sets g_exportPath first to force a current off-screen render. */
+    if (!g_previewVisible && !g_exportPath) return;
     int len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
@@ -1833,7 +2931,8 @@ static void update_preview(void) {
     if (!html) return;
     push_html_to_webview(html);
     free(html);
-    if (g_hMainWnd) SetTimer(g_hMainWnd, IDT_SCROLL_SYNC, 40, NULL);
+    if (g_hMainWnd && g_editorVisible && g_previewVisible)
+        SetTimer(g_hMainWnd, IDT_SCROLL_SYNC, 40, NULL);
 }
 
 static void sync_preview_to_editor_scroll(void) {
@@ -1843,9 +2942,7 @@ static void sync_preview_to_editor_scroll(void) {
     char script[96];
     snprintf(script, sizeof(script),
              "if(window.scrollToSourceLine)window.scrollToSourceLine(%d);", line);
-    WCHAR *wide = to_wide(script);
-    if (wide) ICoreWebView2_ExecuteScript(g_webview, wide, &g_scriptHandler);
-    free(wide);
+    execute_webview_script(script, &g_scriptHandler);
 }
 
 /* ================= rest of the app (menus, file I/O, find/replace, font) ================= */
@@ -1856,8 +2953,12 @@ static const WCHAR *document_short_name(const Document *doc) {
 
 static void format_document_label(const Document *doc, WCHAR *label, size_t capacity) {
     const WCHAR *shortName = document_short_name(doc);
-    if (shortName && shortName[0]) {
+    if (doc->isReference && !shortName) {
+        swprintf(label, capacity, L"Markdown Reference%ls", doc->dirty ? L" *" : L"");
+    } else if (shortName && shortName[0]) {
         swprintf(label, capacity, L"%ls%ls", shortName, doc->dirty ? L" *" : L"");
+    } else if (doc->untitledNumber == 0) {
+        swprintf(label, capacity, L"Untitled.md%ls", doc->dirty ? L" *" : L"");
     } else {
         swprintf(label, capacity, L"Untitled %u%ls",
                  doc->untitledNumber, doc->dirty ? L" *" : L"");
@@ -1908,6 +3009,7 @@ static void switch_document(int index) {
     g_activeDocument = index;
     SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
     apply_editor_font(g_fontFaceName, g_fontPointSize);
+    apply_document_language(g_hEdit, g_documents[index].path);
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[index].anchor, (LPARAM)g_documents[index].caret);
     SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)g_documents[index].firstVisibleLine, 0);
     SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)g_documents[index].xOffset, 0);
@@ -1917,6 +3019,8 @@ static void switch_document(int index) {
     update_document_mapping();
     update_preview();
     update_title();
+    update_status_bar();
+    update_outline();
     prompt_reload_active_external_change();
     SetFocus(g_hEdit);
 }
@@ -1954,7 +3058,10 @@ static int create_document_tab(void) {
 }
 
 static void update_title(void) {
-    const WCHAR *name = g_currentFile ? g_currentFile : L"Untitled";
+    const Document *active = &g_documents[g_activeDocument];
+    const WCHAR *name = g_currentFile ? g_currentFile
+        : active->isReference ? L"Markdown Reference"
+        : (active->untitledNumber == 0 ? L"Untitled.md" : L"Untitled");
     size_t cap = wcslen(name) + 32;
     WCHAR *title = (WCHAR *)malloc(cap * sizeof(WCHAR));
     if (!title) return;
@@ -1967,10 +3074,7 @@ static void set_dirty(int dirty) {
     g_dirty = dirty;
     update_tab_label(g_activeDocument);
     update_title();
-}
-
-static void do_new(void) {
-    create_document_tab();
+    update_status_bar();
 }
 
 static int load_file(const WCHAR *path) {
@@ -2019,6 +3123,7 @@ static int load_file(const WCHAR *path) {
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
         g_switchingDocument = 0;
         replace_wstring(&g_currentFile, displayPath ? displayPath : path);
+        apply_document_language(g_hEdit, g_currentFile);
         record_document_file_time(g_activeDocument);
         update_document_mapping();
         update_preview();
@@ -2176,19 +3281,245 @@ static void do_open(void) {
     free(path);
 }
 
-/* Opens a dropped file in its own document tab. */
-static void do_open_dropped_file(const WCHAR *path) {
-    open_file_in_tab(path);
+static int is_image_file(const WCHAR *path) {
+    const WCHAR *extension = PathFindExtensionW(path);
+    return extension && (_wcsicmp(extension, L".png") == 0 ||
+        _wcsicmp(extension, L".jpg") == 0 || _wcsicmp(extension, L".jpeg") == 0 ||
+        _wcsicmp(extension, L".gif") == 0 || _wcsicmp(extension, L".bmp") == 0 ||
+        _wcsicmp(extension, L".webp") == 0 || _wcsicmp(extension, L".svg") == 0);
+}
+
+/* Create a collision-safe destination in an "images" folder next to the
+   current Markdown file. The returned relative path always uses URL-style
+   slashes so it can be inserted directly into Markdown. */
+static int create_image_destination(const WCHAR *preferredName, const WCHAR *defaultExtension,
+                                    WCHAR **destinationOut, WCHAR **relativeOut) {
+    *destinationOut = NULL;
+    *relativeOut = NULL;
+    if (!g_currentFile) {
+        do_save();
+        if (!g_currentFile) return 0;
+    }
+    WCHAR *documentDirectory = path_directory(g_currentFile);
+    WCHAR *imagesDirectory = documentDirectory ? path_join(documentDirectory, L"images") : NULL;
+    free(documentDirectory);
+    if (!imagesDirectory) return 0;
+    WCHAR *ioDirectory = extended_path(imagesDirectory);
+    BOOL made = CreateDirectoryW(ioDirectory ? ioDirectory : imagesDirectory, NULL);
+    DWORD directoryError = made ? ERROR_SUCCESS : GetLastError();
+    free(ioDirectory);
+    if (!made && directoryError != ERROR_ALREADY_EXISTS) {
+        free(imagesDirectory);
+        MessageBoxW(g_hMainWnd, L"Could not create the document's images folder.",
+                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    const WCHAR *leaf = preferredName && preferredName[0] ? PathFindFileNameW(preferredName) : L"image";
+    size_t leafLength = wcslen(leaf);
+    WCHAR *safe = (WCHAR *)malloc((leafLength + 16) * sizeof(WCHAR));
+    if (!safe) { free(imagesDirectory); return 0; }
+    size_t o = 0;
+    for (size_t i = 0; i < leafLength; i++) {
+        WCHAR c = leaf[i];
+        if (c < 32 || wcschr(L"<>:\"/\\|?*", c)) c = L'_';
+        safe[o++] = c;
+    }
+    safe[o] = 0;
+    WCHAR *extension = PathFindExtensionW(safe);
+    if (!extension || !extension[0]) {
+        wcscat(safe, defaultExtension ? defaultExtension : L".png");
+        extension = PathFindExtensionW(safe);
+    }
+    size_t extensionOffset = (size_t)(extension - safe);
+    WCHAR *extensionCopy = wcsdup_heap(extension);
+    safe[extensionOffset] = 0;
+    if (!safe[0]) wcscpy(safe, L"image");
+
+    for (unsigned suffix = 0; suffix < 10000; suffix++) {
+        size_t nameCap = wcslen(safe) + (extensionCopy ? wcslen(extensionCopy) : 0) + 32;
+        WCHAR *name = (WCHAR *)malloc(nameCap * sizeof(WCHAR));
+        if (!name) break;
+        if (suffix == 0) swprintf(name, nameCap, L"%ls%ls", safe, extensionCopy ? extensionCopy : L"");
+        else swprintf(name, nameCap, L"%ls-%u%ls", safe, suffix, extensionCopy ? extensionCopy : L"");
+        WCHAR *candidate = path_join(imagesDirectory, name);
+        WCHAR *ioCandidate = candidate ? extended_path(candidate) : NULL;
+        DWORD attrs = candidate ? GetFileAttributesW(ioCandidate ? ioCandidate : candidate) : INVALID_FILE_ATTRIBUTES;
+        free(ioCandidate);
+        if (candidate && attrs == INVALID_FILE_ATTRIBUTES) {
+            size_t relativeCap = wcslen(name) + 8;
+            WCHAR *relative = (WCHAR *)malloc(relativeCap * sizeof(WCHAR));
+            if (relative) swprintf(relative, relativeCap, L"images/%ls", name);
+            if (relative) {
+                *destinationOut = candidate;
+                *relativeOut = relative;
+                free(name);
+                free(extensionCopy);
+                free(safe);
+                free(imagesDirectory);
+                return 1;
+            }
+            free(candidate);
+        }
+        free(candidate);
+        free(name);
+    }
+    free(extensionCopy);
+    free(safe);
+    free(imagesDirectory);
+    return 0;
+}
+
+static int insert_markdown_image(const WCHAR *relativePath, const WCHAR *altText) {
+    char *relative = to_utf8(relativePath);
+    char *alt = to_utf8(altText && altText[0] ? altText : L"image");
+    if (!relative || !alt) { free(relative); free(alt); return 0; }
+    size_t escapedCap = strlen(alt) * 2 + 1;
+    char *escapedAlt = (char *)malloc(escapedCap);
+    if (!escapedAlt) { free(relative); free(alt); return 0; }
+    size_t o = 0;
+    for (size_t i = 0; alt[i]; i++) {
+        if (alt[i] == '\\' || alt[i] == '[' || alt[i] == ']') escapedAlt[o++] = '\\';
+        escapedAlt[o++] = alt[i];
+    }
+    escapedAlt[o] = 0;
+    size_t cap = o + strlen(relative) + 16;
+    char *markdown = (char *)malloc(cap);
+    int inserted = markdown != NULL;
+    if (markdown) {
+        snprintf(markdown, cap, "![%s](<%s>)", escapedAlt, relative);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)markdown);
+        SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+    }
+    free(markdown);
+    free(escapedAlt);
+    free(relative);
+    free(alt);
+    return inserted;
+}
+
+static int import_image_file(const WCHAR *source) {
+    WCHAR *destination = NULL, *relative = NULL;
+    if (!create_image_destination(source, PathFindExtensionW(source), &destination, &relative)) return 0;
+    WCHAR *ioSource = extended_path(source);
+    WCHAR *ioDestination = extended_path(destination);
+    BOOL copied = CopyFileW(ioSource ? ioSource : source,
+                            ioDestination ? ioDestination : destination, TRUE);
+    free(ioSource);
+    free(ioDestination);
+    if (!copied) {
+        MessageBoxW(g_hMainWnd, L"Could not copy the dropped image into the document's images folder.",
+                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        free(destination);
+        free(relative);
+        return 0;
+    }
+    WCHAR *alt = wcsdup_heap(PathFindFileNameW(source));
+    if (alt) PathRemoveExtensionW(alt);
+    int inserted = insert_markdown_image(relative, alt ? alt : L"image");
+    free(alt);
+    free(destination);
+    free(relative);
+    return inserted;
+}
+
+static int save_hbitmap_as_png(HBITMAP bitmap, const WCHAR *path) {
+    IWICImagingFactory *factory = NULL;
+    IWICBitmap *source = NULL;
+    IWICStream *stream = NULL;
+    IWICBitmapEncoder *encoder = NULL;
+    IWICBitmapFrameEncode *frame = NULL;
+    IPropertyBag2 *properties = NULL;
+    UINT width = 0, height = 0;
+    HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IWICImagingFactory, (void **)&factory);
+    if (SUCCEEDED(hr)) hr = IWICImagingFactory_CreateBitmapFromHBITMAP(
+        factory, bitmap, NULL, WICBitmapIgnoreAlpha, &source);
+    if (SUCCEEDED(hr)) hr = IWICBitmap_GetSize(source, &width, &height);
+    if (SUCCEEDED(hr)) hr = IWICImagingFactory_CreateStream(factory, &stream);
+    WCHAR *ioPath = extended_path(path);
+    if (SUCCEEDED(hr)) hr = IWICStream_InitializeFromFilename(stream, ioPath ? ioPath : path, GENERIC_WRITE);
+    free(ioPath);
+    if (SUCCEEDED(hr)) hr = IWICImagingFactory_CreateEncoder(factory, &GUID_ContainerFormatPng, NULL, &encoder);
+    if (SUCCEEDED(hr)) hr = IWICBitmapEncoder_Initialize(encoder, (IStream *)stream, WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = IWICBitmapEncoder_CreateNewFrame(encoder, &frame, &properties);
+    if (SUCCEEDED(hr)) hr = IWICBitmapFrameEncode_Initialize(frame, properties);
+    if (SUCCEEDED(hr)) hr = IWICBitmapFrameEncode_SetSize(frame, width, height);
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    if (SUCCEEDED(hr)) hr = IWICBitmapFrameEncode_SetPixelFormat(frame, &format);
+    if (SUCCEEDED(hr)) hr = IWICBitmapFrameEncode_WriteSource(frame, (IWICBitmapSource *)source, NULL);
+    if (SUCCEEDED(hr)) hr = IWICBitmapFrameEncode_Commit(frame);
+    if (SUCCEEDED(hr)) hr = IWICBitmapEncoder_Commit(encoder);
+    if (properties) IPropertyBag2_Release(properties);
+    if (frame) IWICBitmapFrameEncode_Release(frame);
+    if (encoder) IWICBitmapEncoder_Release(encoder);
+    if (stream) IWICStream_Release(stream);
+    if (source) IWICBitmap_Release(source);
+    if (factory) IWICImagingFactory_Release(factory);
+    return SUCCEEDED(hr);
+}
+
+static int paste_image_from_clipboard(void) {
+    if (!IsClipboardFormatAvailable(CF_BITMAP)) return 0;
+    /* Rich sources (browsers, Word, Excel) offer text alongside a rendered
+       bitmap. Text is what the user means to paste into Markdown source. */
+    if (IsClipboardFormatAvailable(CF_UNICODETEXT) || IsClipboardFormatAvailable(CF_TEXT)) return 0;
+    if (!g_currentFile) {
+        do_save();
+        if (!g_currentFile) return 1;
+    }
+    if (!OpenClipboard(g_hMainWnd)) return 1;
+    HBITMAP bitmap = (HBITMAP)GetClipboardData(CF_BITMAP);
+    if (!bitmap) { CloseClipboard(); return 1; }
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    WCHAR name[64];
+    swprintf(name, sizeof(name) / sizeof(name[0]), L"image-%04u%02u%02u-%02u%02u%02u.png",
+             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+    WCHAR *destination = NULL, *relative = NULL;
+    int made = create_image_destination(name, L".png", &destination, &relative);
+    int saved = made && save_hbitmap_as_png(bitmap, destination);
+    CloseClipboard();
+    if (!saved) {
+        MessageBoxW(g_hMainWnd, L"Could not save the clipboard image.",
+                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        free(destination);
+        free(relative);
+        return 1;
+    }
+    insert_markdown_image(relative, L"image");
+    free(destination);
+    free(relative);
+    return 1;
 }
 
 static void handle_dropfiles(HDROP hDrop) {
     UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
+    int insertedImage = 0;
+    int undoActive = 0;
     for (UINT i = 0; i < count; i++) {
         UINT cap = DragQueryFileW(hDrop, i, NULL, 0) + 1;
         WCHAR *path = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
-        if (path && DragQueryFileW(hDrop, i, path, cap)) do_open_dropped_file(path);
+        if (path && DragQueryFileW(hDrop, i, path, cap)) {
+            if (g_editorVisible && is_image_file(path)) {
+                if (!undoActive) {
+                    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+                    undoActive = 1;
+                }
+                if (insertedImage) SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)editor_eol_sequence());
+                if (import_image_file(path)) insertedImage = 1;
+            } else {
+                if (undoActive) {
+                    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+                    undoActive = 0;
+                }
+                open_file_in_tab(path);
+                insertedImage = 0;
+            }
+        }
         free(path);
     }
+    if (undoActive) SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
     DragFinish(hDrop);
 }
 
@@ -2257,6 +3588,7 @@ static int save_to_path(const WCHAR *path) {
        `path` may alias g_currentFile, which replace_wstring() can free. */
     add_recent_file(displayPath ? displayPath : path);
     replace_wstring(&g_currentFile, displayPath ? displayPath : path);
+    apply_document_language(g_hEdit, g_currentFile);
     free(ioPath);
     record_document_file_time(g_activeDocument);
     update_document_mapping();
@@ -2363,18 +3695,92 @@ static void do_export_html(void) {
     snprintf(script, scriptCap,
         "window.exportRenderedHTML ? window.exportRenderedHTML('%s','%s') : ''",
         baseEscaped, titleEscaped);
-    WCHAR *wideScript = to_wide(script);
     g_exportPath = path;
     update_preview();
-    HRESULT hr = wideScript
-        ? ICoreWebView2_ExecuteScript(g_webview, wideScript, &g_exportScriptHandler)
-        : E_OUTOFMEMORY;
+    HRESULT hr = execute_webview_script(script, &g_exportScriptHandler);
     if (FAILED(hr)) {
         free(g_exportPath);
         g_exportPath = NULL;
         MessageBoxW(g_hMainWnd, L"Could not start the HTML export.", L"MarkEdit", MB_OK | MB_ICONERROR);
     }
-    free(wideScript); free(script); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
+    free(script); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
+}
+
+static void prepare_rendered_print(int exportPdf) {
+    if (!g_webview || !g_webviewReady) {
+        MessageBoxW(g_hMainWnd, L"The rendered preview is not ready yet.", L"MarkEdit",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g_pendingPrintAction) {
+        MessageBoxW(g_hMainWnd, L"A print or PDF operation is already in progress.", L"MarkEdit",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (exportPdf) {
+        DWORD capacity = 32768;
+        WCHAR *path = (WCHAR *)calloc(capacity, sizeof(WCHAR));
+        if (!path) return;
+        if (g_currentFile) {
+            wcsncpy(path, g_currentFile, capacity - 1);
+            PathRenameExtensionW(path, L".pdf");
+        } else wcscpy(path, L"Untitled.pdf");
+        OPENFILENAMEW dialog = {0};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = g_hMainWnd;
+        dialog.lpstrFilter = L"PDF Documents (*.pdf)\0*.pdf\0All Files (*.*)\0*.*\0";
+        dialog.lpstrFile = path;
+        dialog.nMaxFile = capacity;
+        dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+        dialog.lpstrDefExt = L"pdf";
+        if (!GetSaveFileNameW(&dialog)) { free(path); return; }
+        g_pendingPdfPath = path;
+        g_pendingPrintAction = 2;
+    } else {
+        g_pendingPrintAction = 1;
+    }
+    if (!g_previewVisible) {
+        g_previewVisible = 1;
+        update_view_menu(g_hMainWnd);
+        layout(g_hMainWnd);
+    }
+    update_preview();
+    SetTimer(g_hMainWnd, IDT_PRINT_PREVIEW, 300, NULL);
+}
+
+static void run_pending_print(void) {
+    KillTimer(g_hMainWnd, IDT_PRINT_PREVIEW);
+    if (!g_webview || !g_pendingPrintAction) return;
+    if (g_pendingPrintAction == 1) {
+        ICoreWebView2_16 *printWebView = NULL;
+        if (SUCCEEDED(ICoreWebView2_QueryInterface(g_webview, &IID_ICoreWebView2_16,
+                                                    (void **)&printWebView)) && printWebView) {
+            HRESULT result = ICoreWebView2_16_ShowPrintUI(printWebView,
+                COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM);
+            ICoreWebView2_16_Release(printWebView);
+            if (FAILED(result))
+                MessageBoxW(g_hMainWnd, L"Could not open the print dialog.", L"MarkEdit",
+                            MB_OK | MB_ICONERROR);
+        } else {
+            MessageBoxW(g_hMainWnd, L"This WebView2 Runtime does not support printing.",
+                        L"MarkEdit", MB_OK | MB_ICONERROR);
+        }
+        g_pendingPrintAction = 0;
+    } else if (g_pendingPrintAction == 2 && g_pendingPdfPath) {
+        ICoreWebView2_7 *pdfWebView = NULL;
+        if (SUCCEEDED(ICoreWebView2_QueryInterface(g_webview, &IID_ICoreWebView2_7,
+                                                   (void **)&pdfWebView)) && pdfWebView) {
+            HRESULT result = ICoreWebView2_7_PrintToPdf(pdfWebView, g_pendingPdfPath, NULL,
+                                                        &g_pdfHandler);
+            ICoreWebView2_7_Release(pdfWebView);
+            if (SUCCEEDED(result)) return;
+        }
+        MessageBoxW(g_hMainWnd, L"This WebView2 Runtime could not start PDF export.",
+                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        free(g_pendingPdfPath);
+        g_pendingPdfPath = NULL;
+        g_pendingPrintAction = 0;
+    }
 }
 
 static void release_document_reference(Document *doc) {
@@ -2408,11 +3814,15 @@ static void do_close_document_at(int index) {
         if (!newDoc) return;
         memset(&g_documents[0], 0, sizeof(g_documents[0]));
         g_documents[0].sciDocument = newDoc;
-        g_documents[0].untitledNumber = g_nextUntitledNumber++;
+        /* Closing the final tab leaves one canonical, reusable blank document.
+           Numbered names are reserved for additional unsaved tabs. */
+        g_documents[0].untitledNumber = 0;
         g_switchingDocument = 1;
         SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)newDoc);
         configure_scintilla(g_hEdit);
         apply_editor_font(g_fontFaceName, g_fontPointSize);
+        SendMessageA(g_hEdit, SCI_CLEARALL, 0, 0);
+        SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
         g_switchingDocument = 0;
         push_closed_document(removed, 0);
@@ -2445,10 +3855,6 @@ static void do_close_document_at(int index) {
     refresh_menu(g_hMainWnd);
     prompt_reload_active_external_change();
     SetFocus(g_hEdit);
-}
-
-static void do_close_document(void) {
-    do_close_document_at(g_activeDocument);
 }
 
 static void do_reopen_closed_tab(void) {
@@ -2562,6 +3968,7 @@ static void do_exit(void) {
     if (original < g_documentCount) switch_document(original);
     save_layout_settings();
     save_session_documents();
+    clear_recovery_snapshot();
     for (int i = 0; i < g_documentCount; i++) {
         SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)g_documents[i].sciDocument);
         g_documents[i].sciDocument = 0;
@@ -2663,6 +4070,197 @@ static void show_goto_line_dialog(void) {
     if (result == 0) PostQuitMessage((int)msg.wParam);
 }
 
+/* Reusable searchable picker used by Quick Open, folder search, the command
+   palette, diagnostics and spelling-language selection. Item data keeps the
+   original index while the visible list is filtered. */
+typedef struct ChoiceDialogState {
+    WCHAR **labels;
+    int count;
+    int result;
+    const WCHAR *prompt;
+    HWND edit;
+    HWND list;
+} ChoiceDialogState;
+
+static void refill_choice_list(ChoiceDialogState *state) {
+    WCHAR filter[256];
+    GetWindowTextW(state->edit, filter, sizeof(filter) / sizeof(filter[0]));
+    SendMessageW(state->list, LB_RESETCONTENT, 0, 0);
+    for (int i = 0; i < state->count; i++) {
+        if (filter[0] && !StrStrIW(state->labels[i], filter)) continue;
+        int row = (int)SendMessageW(state->list, LB_ADDSTRING, 0, (LPARAM)state->labels[i]);
+        if (row >= 0) SendMessageW(state->list, LB_SETITEMDATA, (WPARAM)row, (LPARAM)i);
+    }
+    if (SendMessageW(state->list, LB_GETCOUNT, 0, 0) > 0)
+        SendMessageW(state->list, LB_SETCURSEL, 0, 0);
+}
+
+static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    ChoiceDialogState *state = (ChoiceDialogState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_CREATE) {
+        state = (ChoiceDialogState *)((CREATESTRUCTW *)lParam)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+        CreateWindowExW(0, L"STATIC", state->prompt, WS_CHILD | WS_VISIBLE,
+            12, 10, 556, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
+        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            12, 32, 556, 25, hwnd, (HMENU)10, GetModuleHandleW(NULL), NULL);
+        state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            12, 64, 556, 286, hwnd, (HMENU)11, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Open", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            404, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            490, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+        refill_choice_list(state);
+        SetFocus(state->edit);
+        return 0;
+    }
+    if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    switch (msg) {
+        case WM_COMMAND:
+            if (LOWORD(wParam) == 10 && HIWORD(wParam) == EN_CHANGE) {
+                refill_choice_list(state);
+                return 0;
+            }
+            if (LOWORD(wParam) == IDOK ||
+                (LOWORD(wParam) == 11 && HIWORD(wParam) == LBN_DBLCLK)) {
+                int row = (int)SendMessageW(state->list, LB_GETCURSEL, 0, 0);
+                if (row != LB_ERR)
+                    state->result = (int)SendMessageW(state->list, LB_GETITEMDATA, (WPARAM)row, 0);
+                if (state->result >= 0) DestroyWindow(hwnd);
+                return 0;
+            }
+            if (LOWORD(wParam) == IDCANCEL) { DestroyWindow(hwnd); return 0; }
+            break;
+        case WM_SIZE: {
+            int width = LOWORD(lParam), height = HIWORD(lParam);
+            MoveWindow(state->edit, 12, 32, width - 24, 25, TRUE);
+            MoveWindow(state->list, 12, 64, width - 24, height - 108, TRUE);
+            return 0;
+        }
+        case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
+                              WCHAR **labels, int count) {
+    if (!labels || count <= 0) return -1;
+    static int registered = 0;
+    if (!registered) {
+        WNDCLASSW wc = {0};
+        wc.lpfnWndProc = ChoiceWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"MarkEditChoiceDialog";
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return -1;
+        registered = 1;
+    }
+    ChoiceDialogState state = { labels, count, -1, prompt, NULL, NULL };
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditChoiceDialog", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+        CW_USEDEFAULT, CW_USEDEFAULT, 600, 440, g_hMainWnd, NULL,
+        GetModuleHandleW(NULL), &state);
+    if (!dialog) return -1;
+    RECT owner, rc;
+    GetWindowRect(g_hMainWnd, &owner); GetWindowRect(dialog, &rc);
+    SetWindowPos(dialog, HWND_TOP,
+        owner.left + ((owner.right - owner.left) - (rc.right - rc.left)) / 2,
+        owner.top + ((owner.bottom - owner.top) - (rc.bottom - rc.top)) / 2,
+        0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    EnableWindow(g_hMainWnd, FALSE);
+    MSG message = {0}; int loopResult = -1;
+    while (IsWindow(dialog) && (loopResult = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(g_hMainWnd, TRUE);
+    SetForegroundWindow(g_hMainWnd);
+    if (loopResult == 0) PostQuitMessage((int)message.wParam);
+    return state.result;
+}
+
+typedef struct TextInputState {
+    const WCHAR *prompt;
+    const WCHAR *initial;
+    WCHAR *output;
+    int outputCapacity;
+    int accepted;
+    HWND edit;
+} TextInputState;
+
+static LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    TextInputState *state = (TextInputState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_CREATE) {
+        state = (TextInputState *)((CREATESTRUCTW *)lParam)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+        CreateWindowExW(0, L"STATIC", state->prompt, WS_CHILD | WS_VISIBLE,
+            12, 14, 396, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
+        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->initial,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            12, 38, 396, 25, hwnd, (HMENU)10, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            244, 76, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            330, 76, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+        SendMessageW(state->edit, EM_SETSEL, 0, -1);
+        SetFocus(state->edit);
+        return 0;
+    }
+    if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (msg == WM_COMMAND && LOWORD(wParam) == IDOK) {
+        GetWindowTextW(state->edit, state->output, state->outputCapacity);
+        state->accepted = 1;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    if ((msg == WM_COMMAND && LOWORD(wParam) == IDCANCEL) || msg == WM_CLOSE) {
+        DestroyWindow(hwnd); return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static int show_text_input(const WCHAR *title, const WCHAR *prompt,
+                           const WCHAR *initial, WCHAR *output, int outputCapacity) {
+    static int registered = 0;
+    if (!registered) {
+        WNDCLASSW wc = {0};
+        wc.lpfnWndProc = TextInputWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"MarkEditTextInput";
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 0;
+        registered = 1;
+    }
+    TextInputState state = { prompt, initial ? initial : L"", output, outputCapacity, 0, NULL };
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditTextInput", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 440, 145, g_hMainWnd, NULL,
+        GetModuleHandleW(NULL), &state);
+    if (!dialog) return 0;
+    RECT owner, rc;
+    GetWindowRect(g_hMainWnd, &owner); GetWindowRect(dialog, &rc);
+    SetWindowPos(dialog, HWND_TOP,
+        owner.left + ((owner.right - owner.left) - (rc.right - rc.left)) / 2,
+        owner.top + ((owner.bottom - owner.top) - (rc.bottom - rc.top)) / 2,
+        0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    EnableWindow(g_hMainWnd, FALSE);
+    MSG message = {0}; int loopResult = -1;
+    while (IsWindow(dialog) && (loopResult = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(g_hMainWnd, TRUE);
+    SetForegroundWindow(g_hMainWnd);
+    if (loopResult == 0) PostQuitMessage((int)message.wParam);
+    return state.accepted;
+}
+
 static void find_in_edit(const char *needle, int matchCase, int down) {
     if (!needle || !needle[0]) return;
     int len = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
@@ -2732,7 +4330,7 @@ static void show_find_dialog(int replace) {
     g_fr.wFindWhatLen = sizeof(g_findWhat) / sizeof(g_findWhat[0]);
     g_fr.lpstrReplaceWith = g_replaceWith;
     g_fr.wReplaceWithLen = sizeof(g_replaceWith) / sizeof(g_replaceWith[0]);
-    g_fr.Flags = FR_DOWN;
+    g_fr.Flags = g_findFlags;
 
     if (replace) {
         g_hFindDlg = ReplaceTextW(&g_fr);
@@ -2742,6 +4340,11 @@ static void show_find_dialog(int replace) {
 }
 
 static void handle_findmsg(FINDREPLACEW *fr) {
+    /* Every message carries the current checkbox/radio state, including the
+       one sent when the dialog closes, so capture it before acting. */
+    g_findFlags = fr->Flags & (FR_MATCHCASE | FR_DOWN);
+    save_find_settings();
+
     if (fr->Flags & FR_DIALOGTERM) {
         g_hFindDlg = NULL;
         return;
@@ -2813,217 +4416,248 @@ static void do_choose_font(void) {
     }
 }
 
+static void do_choose_custom_css(void) {
+    DWORD cap = 32768;
+    WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
+    if (!path) return;
+    if (g_customCssPath) wcsncpy(path, g_customCssPath, cap - 1);
+    OPENFILENAMEW ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hMainWnd;
+    ofn.lpstrFilter = L"CSS Stylesheets (*.css)\0*.css\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = cap;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    ofn.lpstrDefExt = L"css";
+    if (GetOpenFileNameW(&ofn)) {
+        char *css = read_utf8_text_file(path, 4 * 1024 * 1024);
+        if (!css) {
+            MessageBoxW(g_hMainWnd,
+                L"The stylesheet must be a readable UTF-8 CSS file smaller than 4 MB.",
+                L"MarkEdit", MB_OK | MB_ICONERROR);
+        } else {
+            free(css);
+            WCHAR *full = absolute_path(path);
+            replace_wstring(&g_customCssPath, full ? full : path);
+            free(full);
+            save_theme_settings();
+            apply_custom_preview_css(1);
+            refresh_menu(g_hMainWnd);
+        }
+    }
+    free(path);
+}
+
+static void clear_custom_css(void) {
+    free(g_customCssPath);
+    g_customCssPath = NULL;
+    save_theme_settings();
+    apply_custom_preview_css(0);
+    refresh_menu(g_hMainWnd);
+}
+
 /* ---- Help > Markdown Reference: a plain-text syntax cheat sheet. ---- */
 
-static const char *HELP_REFERENCE_TEXT =
-"MARKEDIT MARKDOWN REFERENCE\r\n"
-"===========================\r\n"
+/* The Markdown reference is itself Markdown: opening it in a tab renders it
+   through the normal preview pipeline, so it demonstrates every construct it
+   documents. Kept read-only-ish by being untitled - saving prompts for a path. */
+static const char *HELP_REFERENCE_MARKDOWN =
+"# MarkEdit Markdown Reference\r\n"
+"\r\n"
 "CommonMark with GitHub-flavoured extensions and MarkEdit preview features.\r\n"
+"Edit this document freely to experiment - it is unsaved, so nothing is\r\n"
+"overwritten.\r\n"
 "\r\n"
-"HEADINGS\r\n"
-"    # Heading 1\r\n"
-"    ## Heading 2\r\n"
-"    ### Heading 3\r\n"
-"    ###### Heading 6\r\n"
+"## Headings\r\n"
 "\r\n"
-"    H1 and H2 can also be made by underlining the preceding text:\r\n"
-"    Heading 1\r\n"
-"    =========\r\n"
-"    Heading 2\r\n"
-"    ---------\r\n"
+"```\r\n"
+"# Heading 1\r\n"
+"## Heading 2\r\n"
+"### Heading 3\r\n"
+"###### Heading 6\r\n"
+"```\r\n"
 "\r\n"
-"    Headings receive link anchors; two or more also show an Outline control.\r\n"
+"H1 and H2 can also be made by underlining the preceding text:\r\n"
 "\r\n"
-"PARAGRAPHS AND LINE BREAKS\r\n"
-"    Separate paragraphs with a blank line.\r\n"
-"    End a line with two spaces or a backslash for a hard line break.\r\n"
+"```\r\n"
+"Heading 1\r\n"
+"=========\r\n"
+"Heading 2\r\n"
+"---------\r\n"
+"```\r\n"
 "\r\n"
-"EMPHASIS AND INLINE CODE\r\n"
-"    **bold** or __bold__\r\n"
-"    *italic* or _italic_\r\n"
-"    ***bold italic***\r\n"
-"    ~~strikethrough~~\r\n"
-"    `inline code`\r\n"
-"    Escape Markdown punctuation with a backslash: \\*literal asterisks\\*\r\n"
+"Headings receive link anchors; two or more also show an Outline control.\r\n"
 "\r\n"
-"LINKS, IMAGES, AUTOLINKS\r\n"
-"    [link text](https://example.com)\r\n"
-"    [link with title](https://example.com \"Optional title\")\r\n"
-"    ![alt text](images/photo.png)\r\n"
-"    [relative link](docs/guide.md)\r\n"
-"    <https://example.com>\r\n"
-"    https://example.com (bare URLs are linked automatically)\r\n"
-"    Relative links and images resolve from the Markdown file's folder.\r\n"
+"## Paragraphs and line breaks\r\n"
 "\r\n"
-"    Reference-style links:\r\n"
-"    [link text][id]\r\n"
-"    [id]: https://example.com\r\n"
+"Separate paragraphs with a blank line.\r\n"
+"End a line with two spaces or a backslash for a hard line break.\r\n"
 "\r\n"
-"LISTS\r\n"
-"    - bullet item\r\n"
-"    - another item\r\n"
-"      - nested item\r\n"
+"## Emphasis and inline code\r\n"
 "\r\n"
-"    1. first\r\n"
-"    2. second\r\n"
-"       1. nested\r\n"
+"| Markdown | Result |\r\n"
+"| :--- | :--- |\r\n"
+"| `**bold**` or `__bold__` | **bold** |\r\n"
+"| `*italic*` or `_italic_` | *italic* |\r\n"
+"| `***bold italic***` | ***bold italic*** |\r\n"
+"| `~~strikethrough~~` | ~~strikethrough~~ |\r\n"
+"| `` `inline code` `` | `inline code` |\r\n"
 "\r\n"
-"    Ordered lists may start at any number. Indent items to nest them.\r\n"
-"    Task lists:\r\n"
-"    - [ ] an unchecked task\r\n"
-"    - [x] a checked task\r\n"
+"Escape Markdown punctuation with a backslash: \\*literal asterisks\\*\r\n"
 "\r\n"
-"BLOCKQUOTES AND ALERTS\r\n"
-"    > a quoted line\r\n"
+"## Links, images, autolinks\r\n"
 "\r\n"
-"    > [!NOTE]\r\n"
-"    > Useful information for the reader.\r\n"
+"```\r\n"
+"[link text](https://example.com)\r\n"
+"[link with title](https://example.com \"Optional title\")\r\n"
+"![alt text](images/photo.png)\r\n"
+"[relative link](docs/guide.md)\r\n"
+"<https://example.com>\r\n"
+"https://example.com (bare URLs are linked automatically)\r\n"
+"```\r\n"
 "\r\n"
-"    Alert types: NOTE, TIP, IMPORTANT, WARNING, CAUTION\r\n"
+"Relative links and images resolve from the Markdown file's folder.\r\n"
+"Pasting an image, or dropping one onto the editor, copies it into an\r\n"
+"`images` folder beside the document and inserts a relative link.\r\n"
 "\r\n"
-"CODE BLOCKS\r\n"
-"    Indent with 4 spaces, or fence with triple backticks:\r\n"
-"    ```\r\n"
-"    code goes here\r\n"
-"    ```\r\n"
+"Reference-style links:\r\n"
 "\r\n"
-"    Add a language for syntax highlighting, such as ```c, ```python,\r\n"
-"    ```javascript, ```powershell, or ```yaml.\r\n"
+"```\r\n"
+"[link text][id]\r\n"
 "\r\n"
-"MERMAID DIAGRAMS\r\n"
-"    Fence diagram source with the mermaid language:\r\n"
-"    ```mermaid\r\n"
-"    graph TD\r\n"
-"      A --> B\r\n"
-"    ```\r\n"
-"    Use the preview toolbar or Ctrl+mouse wheel to zoom; drag to pan.\r\n"
+"[id]: https://example.com\r\n"
+"```\r\n"
 "\r\n"
-"MATHS\r\n"
-"    Inline: Euler's identity is $e^{i\\pi} + 1 = 0$.\r\n"
-"    Display: $$\\int_0^1 x^2 \\, dx$$\r\n"
-"    Fenced display maths:\r\n"
-"    ```math\r\n"
-"    \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\r\n"
-"    ```\r\n"
+"## Lists\r\n"
 "\r\n"
-"TABLES\r\n"
-"    | Left | Centre | Right |\r\n"
-"    | :--- | :----: | ----: |\r\n"
-"    | A    | B      | C     |\r\n"
-"    Colons in the separator row set column alignment.\r\n"
+"- bullet item\r\n"
+"- another item\r\n"
+"  - nested item\r\n"
 "\r\n"
-"FOOTNOTES\r\n"
-"    A sentence with a note.[^1]\r\n"
+"1. first\r\n"
+"2. second\r\n"
+"   1. nested\r\n"
 "\r\n"
-"    [^1]: The footnote text.\r\n"
+"Ordered lists may start at any number. Indent items to nest them.\r\n"
+"Pressing Enter continues a list and Tab nests the current item.\r\n"
 "\r\n"
-"YAML FRONT MATTER\r\n"
-"    A metadata block must start on the document's first line. It is omitted\r\n"
-"    from the preview and may close with either --- or ...\r\n"
-"    ---\r\n"
-"    title: Example\r\n"
-"    tags: [notes, demo]\r\n"
-"    ---\r\n"
+"Task lists:\r\n"
 "\r\n"
-"HORIZONTAL RULES\r\n"
-"    ---\r\n"
-"    ***\r\n"
-"    ___\r\n"
+"- [ ] an unchecked task\r\n"
+"- [x] a checked task\r\n"
 "\r\n"
-"PREVIEW SAFETY\r\n"
-"    Raw HTML is omitted. Unsafe javascript: and data: URLs are not linked.\r\n";
+"## Blockquotes and alerts\r\n"
+"\r\n"
+"> a quoted line\r\n"
+"\r\n"
+"> [!NOTE]\r\n"
+"> Useful information for the reader.\r\n"
+"\r\n"
+"> [!TIP]\r\n"
+"> An optional suggestion.\r\n"
+"\r\n"
+"> [!IMPORTANT]\r\n"
+"> Something the reader must not miss.\r\n"
+"\r\n"
+"> [!WARNING]\r\n"
+"> A consequence the reader should be careful of.\r\n"
+"\r\n"
+"> [!CAUTION]\r\n"
+"> A risk that needs care.\r\n"
+"\r\n"
+"## Code blocks\r\n"
+"\r\n"
+"Indent with 4 spaces, or fence with triple backticks. Add a language for\r\n"
+"syntax highlighting, such as `c`, `python`, `javascript`, `powershell`,\r\n"
+"or `yaml`.\r\n"
+"\r\n"
+"```c\r\n"
+"int main(void) {\r\n"
+"    return 0;\r\n"
+"}\r\n"
+"```\r\n"
+"\r\n"
+"## Mermaid diagrams\r\n"
+"\r\n"
+"Fence diagram source with the `mermaid` language. Use the preview toolbar\r\n"
+"or Ctrl+mouse wheel to zoom; drag to pan.\r\n"
+"\r\n"
+"```mermaid\r\n"
+"graph TD\r\n"
+"  A[Write Markdown] --> B[Live preview]\r\n"
+"  B --> C[Export HTML]\r\n"
+"```\r\n"
+"\r\n"
+"## Maths\r\n"
+"\r\n"
+"Inline: Euler's identity is $e^{i\\pi} + 1 = 0$.\r\n"
+"\r\n"
+"Display: $$\\int_0^1 x^2 dx = \\frac{1}{3}$$\r\n"
+"\r\n"
+"Fenced display maths:\r\n"
+"\r\n"
+"```math\r\n"
+"\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\r\n"
+"```\r\n"
+"\r\n"
+"## Tables\r\n"
+"\r\n"
+"Colons in the separator row set column alignment.\r\n"
+"\r\n"
+"| Left | Centre | Right |\r\n"
+"| :--- | :----: | ----: |\r\n"
+"| A | B | C |\r\n"
+"| longer cell | centred | 42 |\r\n"
+"\r\n"
+"## Footnotes\r\n"
+"\r\n"
+"A sentence with a note.[^1]\r\n"
+"\r\n"
+"[^1]: The footnote text.\r\n"
+"\r\n"
+"## YAML front matter\r\n"
+"\r\n"
+"A metadata block must start on the document's first line. It is omitted\r\n"
+"from the preview and may close with either `---` or `...`\r\n"
+"\r\n"
+"```\r\n"
+"---\r\n"
+"title: Example\r\n"
+"tags: [notes, demo]\r\n"
+"---\r\n"
+"```\r\n"
+"\r\n"
+"## Horizontal rules\r\n"
+"\r\n"
+"Three or more `-`, `*`, or `_` on their own line:\r\n"
+"\r\n"
+"---\r\n"
+"\r\n"
+"## Preview safety\r\n"
+"\r\n"
+"Raw HTML is omitted. Unsafe `javascript:` and `data:` URLs are not linked.\r\n";
 
-static void layout_help_window(HWND hwnd) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    if (g_hHelpEdit) MoveWindow(g_hHelpEdit, 0, 0, rc.right, rc.bottom, TRUE);
-}
-
-static LRESULT CALLBACK HelpWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_CREATE: {
-            g_hHelpEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
-                ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                0, 0, 0, 0, hwnd, NULL, GetModuleHandleA(NULL), NULL);
-            SendMessageA(g_hHelpEdit, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
-            SetWindowTextA(g_hHelpEdit, HELP_REFERENCE_TEXT);
-            apply_help_theme();
-            return 0;
-        }
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLOREDIT:
-            if ((HWND)lParam == g_hHelpEdit && g_helpBkBrush) {
-                HDC hdcEdit = (HDC)wParam;
-                SetBkColor(hdcEdit, g_previewDarkMode
-                    ? RGB(0x0D, 0x11, 0x17)
-                    : RGB(0xFF, 0xFF, 0xFF));
-                SetTextColor(hdcEdit, g_previewDarkMode
-                    ? RGB(0xE6, 0xED, 0xF3)
-                    : RGB(0x1F, 0x23, 0x28));
-                return (LRESULT)g_helpBkBrush;
-            }
-            break;
-        case WM_ERASEBKGND:
-            if (g_helpBkBrush) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                FillRect((HDC)wParam, &rc, g_helpBkBrush);
-                return 1;
-            }
-            break;
-        case WM_SIZE:
-            layout_help_window(hwnd);
-            return 0;
-        case WM_TIMER:
-            if (wParam == IDT_PREVIEW_UPDATE) {
-                update_preview();
-                return 0;
-            }
-            break;
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-            return 0;
-        case WM_DESTROY:
-            g_hHelpEdit = NULL;
-            g_hHelpWnd = NULL;
-            if (g_helpBkBrush) {
-                DeleteObject(g_helpBkBrush);
-                g_helpBkBrush = NULL;
-            }
-            return 0;
-    }
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
-}
-
+/* Opens the reference as an ordinary unsaved document, so the live preview
+   renders it and every construct in it can be edited and experimented with. */
 static void show_help_reference(void) {
-    if (g_hHelpWnd) {
-        SetForegroundWindow(g_hHelpWnd);
-        return;
+    for (int i = 0; i < g_documentCount; i++) {
+        if (g_documents[i].isReference) {
+            switch_document(i);
+            return;
+        }
     }
-
-    static int classRegistered = 0;
-    if (!classRegistered) {
-        WNDCLASSEXA wc = {0};
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = HelpWndProc;
-        wc.hInstance = GetModuleHandleA(NULL);
-        wc.lpszClassName = "MarkEditHelpWndClass";
-        wc.hCursor = LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        RegisterClassExA(&wc);
-        classRegistered = 1;
-    }
-
-    g_hHelpWnd = CreateWindowExA(0, "MarkEditHelpWndClass", "Markdown Reference - MarkEdit",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 720, 780,
-        g_hMainWnd, NULL, GetModuleHandleA(NULL), NULL);
-
-    if (!g_hHelpWnd) return;
-
-    ShowWindow(g_hHelpWnd, SW_SHOW);
-    UpdateWindow(g_hHelpWnd);
+    if (!create_document_tab()) return;
+    g_documents[g_activeDocument].isReference = 1;
+    g_switchingDocument = 1;
+    set_edit_text(g_hEdit, HELP_REFERENCE_MARKDOWN);
+    SendMessageA(g_hEdit, SCI_SETSEL, 0, 0);
+    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    g_switchingDocument = 0;
+    if (!g_previewVisible) toggle_preview(g_hMainWnd);
+    update_tab_label(g_activeDocument);
+    update_title();
+    update_preview();
 }
 
 /* Menu text treats '&' as an accelerator marker; escape it as '&&' so a path
@@ -3037,15 +4671,89 @@ static void escape_ampersands(const WCHAR *in, WCHAR *out, size_t outSize) {
     out[o] = 0;
 }
 
+/* Windows does not recolour the visible, non-client menu bar when an app
+   switches its private dark-mode preference at runtime. Draw just those five
+   top-level items ourselves; the dropdown contents remain native menus and
+   are themed by apply_menu_theme(). */
+static HFONT main_menu_font(void) {
+    HDC dc = GetDC(g_hMainWnd);
+    int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(g_hMainWnd, dc);
+    if (!g_menuFont || dpi != g_menuFontDpi) {
+        if (g_menuFont) DeleteObject(g_menuFont);
+        g_menuFont = CreateFontA(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL,
+            FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
+        g_menuFontDpi = dpi;
+    }
+    return g_menuFont;
+}
+
+static void measure_main_menu_item(MEASUREITEMSTRUCT *mis) {
+    const char *label = (const char *)(UINT_PTR)mis->itemData;
+    HDC dc = GetDC(g_hMainWnd);
+    if (!dc || !label) {
+        if (dc) ReleaseDC(g_hMainWnd, dc);
+        return;
+    }
+    HFONT oldFont = (HFONT)SelectObject(dc, main_menu_font());
+    RECT textRect = {0};
+    DrawTextA(dc, label, -1, &textRect, DT_SINGLELINE | DT_CALCRECT);
+    int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+    /* Win32 adds about 12 DPI-scaled pixels of its own to a menu-bar item's
+       measured width. Offset part of that so the final rectangle retains
+       the seven-pixel inset on each side that draw_main_menu_item uses. */
+    int requestedWidth = textRect.right + MulDiv(2, dpi, 96);
+    mis->itemWidth = (UINT)(requestedWidth > 1 ? requestedWidth : 1);
+    mis->itemHeight = (UINT)(textRect.bottom + MulDiv(8, dpi, 96));
+    SelectObject(dc, oldFont);
+    ReleaseDC(g_hMainWnd, dc);
+}
+
+static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
+    const char *label = (const char *)(UINT_PTR)dis->itemData;
+    if (!label) return;
+
+    int active = (dis->itemState & (ODS_SELECTED | ODS_HOTLIGHT)) != 0;
+    COLORREF background = g_previewDarkMode
+        ? (active ? RGB(0x21, 0x26, 0x2D) : RGB(0x0D, 0x11, 0x17))
+        : (active ? RGB(0xE8, 0xEC, 0xF1) : RGB(0xFF, 0xFF, 0xFF));
+    COLORREF foreground = (dis->itemState & (ODS_DISABLED | ODS_GRAYED))
+        ? (g_previewDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x65, 0x6D, 0x76))
+        : (g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28));
+
+    HBRUSH brush = CreateSolidBrush(background);
+    FillRect(dis->hDC, &dis->rcItem, brush);
+    DeleteObject(brush);
+
+    int oldBkMode = SetBkMode(dis->hDC, TRANSPARENT);
+    COLORREF oldText = SetTextColor(dis->hDC, foreground);
+    HFONT oldFont = (HFONT)SelectObject(dis->hDC, main_menu_font());
+    RECT textRect = dis->rcItem;
+    int dpi = GetDeviceCaps(dis->hDC, LOGPIXELSY);
+    textRect.left += MulDiv(7, dpi, 96);
+    UINT flags = DT_SINGLELINE | DT_LEFT | DT_VCENTER;
+    if (dis->itemState & ODS_NOACCEL) flags |= DT_HIDEPREFIX;
+    DrawTextA(dis->hDC, label, -1, &textRect, flags);
+    SelectObject(dis->hDC, oldFont);
+    SetTextColor(dis->hDC, oldText);
+    SetBkMode(dis->hDC, oldBkMode);
+}
+
 static HMENU build_menu(void) {
     HMENU hMenuBar = CreateMenu();
 
     HMENU hFile = CreatePopupMenu();
     AppendMenuA(hFile, MF_STRING, IDM_FILE_NEW, "&New\tCtrl+N");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN, "&Open...\tCtrl+O");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_QUICK_OPEN, "&Quick Open in Folder...\tCtrl+K");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_FIND_FOLDER, "Find in F&older...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVE, "&Save\tCtrl+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVEAS, "Save &As...\tCtrl+Shift+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_HTML, "Export Rendered &HTML...");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_PDF, "Export Rendered &PDF...");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_PRINT, "&Print Rendered Preview...\tCtrl+P");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN_TERMINAL, "Open &Terminal Here");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_CLOSE, "&Close Tab\tCtrl+W");
     AppendMenuA(hFile, MF_STRING | (g_closedDocumentCount ? 0 : MF_GRAYED),
                 IDM_FILE_REOPEN_CLOSED, "&Reopen Closed Tab\tCtrl+Shift+T");
@@ -3074,7 +4782,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_SEPARATOR, 0, NULL);
 
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXIT, "E&xit");
-    AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hFile, "&File");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFile, "&File");
 
     HMENU hEditMenu = CreatePopupMenu();
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_UNDO, "&Undo\tCtrl+Z");
@@ -3087,19 +4795,79 @@ static HMENU build_menu(void) {
     AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_SELECTALL, "Select &All\tCtrl+A");
     AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_DUPLICATE_LINE, "&Duplicate Line\tCtrl+D");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_MOVE_LINE_UP, "Move Line &Up\tAlt+Up");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_MOVE_LINE_DOWN, "Move Line &Down\tAlt+Down");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_DELETE_LINE, "De&lete Line\tCtrl+Shift+K");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_JOIN_LINES, "&Join Lines\tCtrl+J");
+    AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_TOGGLE_COMMENT, "Toggle Co&mment\tCtrl+/");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_TRIM_WHITESPACE, "Trim Trailing &Whitespace");
+    AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_SELECT_NEXT, "Select Next &Occurrence\tCtrl+Shift+D");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_MATCH_BRACE, "Jump to Matching &Brace\tCtrl+]");
+    AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
+    HMENU hBookmarks = CreatePopupMenu();
+    AppendMenuA(hBookmarks, MF_STRING, IDM_EDIT_BOOKMARK_TOGGLE, "Toggle &Bookmark\tCtrl+F2");
+    AppendMenuA(hBookmarks, MF_STRING, IDM_EDIT_BOOKMARK_NEXT, "&Next Bookmark\tF2");
+    AppendMenuA(hBookmarks, MF_STRING, IDM_EDIT_BOOKMARK_PREV, "&Previous Bookmark\tShift+F2");
+    AppendMenuA(hBookmarks, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hBookmarks, MF_STRING, IDM_EDIT_BOOKMARK_CLEAR, "&Clear All Bookmarks");
+    AppendMenuA(hEditMenu, MF_POPUP, (UINT_PTR)hBookmarks, "Boo&kmarks");
+    HMENU hConvert = CreatePopupMenu();
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_UPPERCASE, "&UPPERCASE");
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_LOWERCASE, "&lowercase");
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_TITLECASE, "&Title Case");
+    AppendMenuA(hConvert, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_SORT_ASC, "Sort Lines &Ascending");
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_SORT_DESC, "Sort Lines Descend&ing");
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_SORT_DEDUPE, "Remove &Duplicate Lines");
+    AppendMenuA(hConvert, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_TABS_TO_SPACES, "Tabs to &Spaces");
+    AppendMenuA(hConvert, MF_STRING, IDM_EDIT_SPACES_TO_TABS, "Spaces to Ta&bs");
+    AppendMenuA(hEditMenu, MF_POPUP, (UINT_PTR)hConvert, "Con&vert");
+    AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_FIND, "&Find...\tCtrl+F");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_FINDNEXT, "Find &Next\tF3");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_REPLACE, "&Replace...\tCtrl+H");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_GOTOLINE, "&Go to Line...\tCtrl+G");
-    AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hEditMenu, "&Edit");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_COMMAND_PALETTE, "Command &Palette...\tCtrl+Shift+P");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hEditMenu, "&Edit");
+
+    HMENU hMarkdown = CreatePopupMenu();
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_BOLD, "&Bold");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_ITALIC, "&Italic");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_STRIKETHROUGH, "Strikethrou&gh");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_CODE, "Inline &Code");
+    AppendMenuA(hMarkdown, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_H1, "Heading &1");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_H2, "Heading &2");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_H3, "Heading &3");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_QUOTE, "Block&quote");
+    AppendMenuA(hMarkdown, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_BULLETLIST, "B&ullet List");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_NUMBERLIST, "&Numbered List");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_TASKLIST, "Tas&k List");
+    AppendMenuA(hMarkdown, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_LINK, "&Link");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_IMAGE, "I&mage");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_TABLE, "&Table");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_TABLE_EDITOR, "Table &Editor...");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_CODEBLOCK, "Code Bl&ock");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_FOOTNOTE, "&Footnote");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_HRULE, "&Horizontal Rule");
+    AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_ALERT, "&Alert");
+
+    HMENU hJson = CreatePopupMenu();
+    AppendMenuA(hJson, MF_STRING, IDM_FMT_JSON_PRETTY, "&Format JSON");
+    AppendMenuA(hJson, MF_STRING, IDM_FMT_JSON_MINIFY, "&Minify JSON");
 
     HMENU hFormat = CreatePopupMenu();
-    AppendMenuA(hFormat, MF_STRING, IDM_FMT_FOOTNOTE, "Insert &Footnote");
-    AppendMenuA(hFormat, MF_STRING, IDM_FMT_HRULE, "Insert &Horizontal Rule");
-    AppendMenuA(hFormat, MF_STRING, IDM_FMT_ALERT, "Insert &Alert");
+    AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hMarkdown, "&Markdown");
+    AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hJson, "&JSON");
     AppendMenuA(hFormat, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hFormat, MF_STRING, IDM_FORMAT_FONT, "&Font...");
-    AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hFormat, "F&ormat");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFormat, "F&ormat");
 
     HMENU hView = CreatePopupMenu();
     AppendMenuA(hView, MF_STRING | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEPREVIEW, "Show &Preview\tCtrl+Shift+V");
@@ -3115,14 +4883,48 @@ static HMENU build_menu(void) {
                        g_previewDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
                        MF_BYCOMMAND);
     AppendMenuA(hView, MF_POPUP, (UINT_PTR)hTheme, "&Theme");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_CUSTOM_CSS, "Custom Preview &CSS...");
+    AppendMenuA(hView, MF_STRING | (g_customCssPath ? 0 : MF_GRAYED),
+                IDM_VIEW_CLEAR_CUSTOM_CSS, "C&lear Custom Preview CSS");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hView, MF_STRING | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_PREVIEW_ON_LEFT, "Preview on &Left");
-    AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hView, "&View");
+    AppendMenuA(hView, MF_STRING | (g_focusMode ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_FOCUS_MODE, "&Focus Mode\tF11");
+    AppendMenuA(hView, MF_STRING | (g_wordWrap ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_WORD_WRAP, "&Word Wrap\tAlt+Z");
+    AppendMenuA(hView, MF_STRING | (g_spellCheckEnabled ? MF_CHECKED : MF_UNCHECKED) |
+                (g_spellChecker ? 0 : MF_GRAYED), IDM_VIEW_SPELL_CHECK, "&Spell Check");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_SPELL_LANGUAGE, "Spell Check &Language...");
+    AppendMenuA(hView, MF_STRING | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_OUTLINE, "Document &Outline");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_SHOW_WHITESPACE, "Show W&hitespace");
+    AppendMenuA(hView, MF_STRING | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_INDENT_GUIDES, "&Indent Guides");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_TOGGLE, "Toggle Fo&ld");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_ALL, "Fold &All");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_UNFOLD_ALL, "&Unfold All");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hView, "&View");
+
+    HMENU hTools = CreatePopupMenu();
+    AppendMenuA(hTools, MF_STRING, IDM_TOOLS_DIAGNOSTICS, "Markdown &Diagnostics...");
+    AppendMenuA(hTools, MF_STRING, IDM_TOOLS_LINT, "Markdown &Lint...");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hTools, "&Tools");
 
     HMENU hHelp = CreatePopupMenu();
     AppendMenuA(hHelp, MF_STRING, IDM_HELP_REFERENCE, "&Markdown Reference");
-    AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hHelp, "&Help");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hHelp, "&Help");
+
+    if (g_menuBkBrush) {
+        MENUINFO info = {0};
+        info.cbSize = sizeof(info);
+        info.fMask = MIM_BACKGROUND;
+        info.hbrBack = g_menuBkBrush;
+        SetMenuInfo(hMenuBar, &info);
+    }
 
     return hMenuBar;
 }
@@ -3132,8 +4934,17 @@ static HMENU build_menu(void) {
    replaced whenever its contents differ). */
 static void refresh_menu(HWND hwnd) {
     HMENU oldMenu = GetMenu(hwnd);
+    if (g_focusMode) {
+        if (oldMenu) {
+            SetMenu(hwnd, NULL);
+            DestroyMenu(oldMenu);
+        }
+        DrawMenuBar(hwnd);
+        return;
+    }
     SetMenu(hwnd, build_menu());
     if (oldMenu) DestroyMenu(oldMenu);
+    DrawMenuBar(hwnd);
 }
 
 static int g_dragging = 0;
@@ -3467,6 +5278,36 @@ static void toolbar_icon_swappanels(HDC hdc, const RECT *rc, COLORREF fg) {
     DeleteObject(pen);
 }
 
+/* A terminal window frame with a ">_" prompt inside. */
+static void toolbar_icon_terminal(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    RECT box = { rc->left + w * 8 / 100, rc->top + h * 12 / 100, rc->right - w * 8 / 100, rc->bottom - h * 12 / 100 };
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, box.left, box.top, box.right, box.bottom);
+
+    int boxW = box.right - box.left, boxH = box.bottom - box.top;
+    int promptX = box.left + boxW * 20 / 100;
+    int promptTopY = box.top + boxH * 30 / 100;
+    int promptMidY = box.top + boxH * 50 / 100;
+    int promptBottomY = box.top + boxH * 70 / 100;
+    int chevronDx = boxW * 16 / 100;
+
+    MoveToEx(hdc, promptX, promptTopY, NULL);
+    LineTo(hdc, promptX + chevronDx, promptMidY);
+    LineTo(hdc, promptX, promptBottomY);
+
+    int underscoreLeft = promptX + chevronDx + boxW * 6 / 100;
+    int underscoreRight = box.right - boxW * 20 / 100;
+    MoveToEx(hdc, underscoreLeft, promptBottomY, NULL);
+    LineTo(hdc, underscoreRight, promptBottomY);
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+}
+
 static void toolbar_icon_text(HDC hdc, const RECT *rc, COLORREF fg, const char *label, int size) {
     HFONT font = CreateFontA(-size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -3528,6 +5369,8 @@ static const struct ToolbarButtonDef TOOLBAR_BUTTONS[] = {
     { 0, NULL, NULL },
     { IDM_VIEW_TOGGLEPREVIEW, toolbar_icon_togglepreview, "Toggle preview" },
     { IDM_VIEW_PREVIEW_ON_LEFT, toolbar_icon_swappanels, "Swap panel sides" },
+    { 0, NULL, NULL },
+    { IDM_FILE_OPEN_TERMINAL, toolbar_icon_terminal, "Open terminal here" },
 };
 #define TOOLBAR_BUTTON_COUNT (int)(sizeof(TOOLBAR_BUTTONS) / sizeof(TOOLBAR_BUTTONS[0]))
 #define TOOLBAR_BUTTON_SIZE (TOOLBAR_HEIGHT - 6)
@@ -3612,19 +5455,42 @@ static void layout(HWND hwnd) {
     GetClientRect(hwnd, &rc);
     int w = rc.right, h = rc.bottom;
 
+    int statusHeight = 22;
+    if (g_hStatus) {
+        MoveWindow(g_hStatus, 0, h - statusHeight, w, statusHeight, TRUE);
+        int parts[4] = { MulDiv(150, w > 0 ? GetDpiForWindow(hwnd) : 96, 96),
+                         MulDiv(345, w > 0 ? GetDpiForWindow(hwnd) : 96, 96),
+                         MulDiv(510, w > 0 ? GetDpiForWindow(hwnd) : 96, 96), -1 };
+        SendMessageW(g_hStatus, SB_SETPARTS, 4, (LPARAM)parts);
+        h -= statusHeight;
+    }
+
     /* The formatting toolbar edits Markdown source, so it's only useful (and
        only shown) while the editor pane is visible. */
-    MoveWindow(g_hTabs, 0, 0, w, TAB_HEIGHT, TRUE);
-    int y = TAB_HEIGHT;
+    ShowWindow(g_hTabs, g_focusMode ? SW_HIDE : SW_SHOW);
+    if (!g_focusMode) MoveWindow(g_hTabs, 0, 0, w, TAB_HEIGHT, TRUE);
+    int y = g_focusMode ? 0 : TAB_HEIGHT;
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
-        if (g_hToolbarButtons[i]) ShowWindow(g_hToolbarButtons[i], g_editorVisible ? SW_SHOW : SW_HIDE);
+        if (g_hToolbarButtons[i])
+            ShowWindow(g_hToolbarButtons[i], g_editorVisible && !g_focusMode ? SW_SHOW : SW_HIDE);
     }
-    if (g_editorVisible) y = layout_toolbar(w, y);
+    if (g_editorVisible && !g_focusMode) y = layout_toolbar(w, y);
     h -= y;
     if (h < 0) h = 0;
 
+    int paneWidth = w;
+    if (g_hOutline && g_outlineVisible && g_editorVisible && !g_focusMode) {
+        int outlineWidth = MulDiv(230, GetDpiForWindow(hwnd), 96);
+        if (outlineWidth > w / 3) outlineWidth = w / 3;
+        paneWidth = w - outlineWidth;
+        MoveWindow(g_hOutline, paneWidth, y, outlineWidth, h, TRUE);
+        ShowWindow(g_hOutline, SW_SHOW);
+    } else if (g_hOutline) {
+        ShowWindow(g_hOutline, SW_HIDE);
+    }
+
     if (g_editorVisible && !g_previewVisible) {
-        MoveWindow(g_hEdit, 0, y, w, h, TRUE);
+        MoveWindow(g_hEdit, 0, y, paneWidth, h, TRUE);
         ShowWindow(g_hEdit, SW_SHOW);
         ShowWindow(g_hPreview, SW_HIDE);
         RECT zero = { 0, 0, 0, 0 };
@@ -3635,23 +5501,24 @@ static void layout(HWND hwnd) {
     if (!g_editorVisible && g_previewVisible) {
         ShowWindow(g_hEdit, SW_HIDE);
         ShowWindow(g_hPreview, SW_SHOW);
-        MoveWindow(g_hPreview, 0, y, w, h, TRUE);
+        MoveWindow(g_hPreview, 0, y, paneWidth, h, TRUE);
         /* WebView2 controller bounds are relative to g_hPreview's own client
            origin (which MoveWindow already positioned), not the main window. */
-        RECT wvRc = { 0, 0, w, h };
+        RECT wvRc = { 0, 0, paneWidth, h };
         set_webview_bounds(wvRc, TRUE);
         return;
     }
 
     /* both visible (the !g_editorVisible && !g_previewVisible case is prevented by the toggle handlers) */
     if (g_splitterPos < 0)
-        g_splitterPos = MulDiv(w - SPLITTER_WIDTH, g_splitterRatio, 1000);
+        g_splitterPos = MulDiv(paneWidth - SPLITTER_WIDTH, g_splitterRatio, 1000);
     if (g_splitterPos < 100) g_splitterPos = 100;
-    if (g_splitterPos > w - 100) g_splitterPos = (w - 100 > 100) ? w - 100 : 100;
+    if (g_splitterPos > paneWidth - 100)
+        g_splitterPos = (paneWidth - 100 > 100) ? paneWidth - 100 : 100;
 
     ShowWindow(g_hEdit, SW_SHOW);
     ShowWindow(g_hPreview, SW_SHOW);
-    int rightWidth = w - g_splitterPos - SPLITTER_WIDTH;
+    int rightWidth = paneWidth - g_splitterPos - SPLITTER_WIDTH;
     RECT wvRc;
     if (g_previewOnLeft) {
         MoveWindow(g_hPreview, 0, y, g_splitterPos, h, TRUE);
@@ -3667,10 +5534,17 @@ static void layout(HWND hwnd) {
 
 static void update_view_menu(HWND hwnd) {
     HMENU hMenuBar = GetMenu(hwnd);
+    if (!hMenuBar) return;
     HMENU hView = GetSubMenu(hMenuBar, 3); /* File, Edit, Format, View */
     CheckMenuItem(hView, IDM_VIEW_TOGGLEPREVIEW, MF_BYCOMMAND | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLEEDITOR, MF_BYCOMMAND | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_PREVIEW_ON_LEFT, MF_BYCOMMAND | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_WORD_WRAP, MF_BYCOMMAND | (g_wordWrap ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_SPELL_CHECK, MF_BYCOMMAND |
+                  (g_spellCheckEnabled ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_SHOW_WHITESPACE, MF_BYCOMMAND | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_INDENT_GUIDES, MF_BYCOMMAND | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_OUTLINE, MF_BYCOMMAND | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED));
     HMENU hTheme = GetSubMenu(hView, 6);
     if (hTheme) {
         CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
@@ -3684,6 +5558,8 @@ static void toggle_preview(HWND hwnd) {
     g_previewVisible = !g_previewVisible;
     update_view_menu(hwnd);
     layout(hwnd);
+    if (g_previewVisible) update_preview();
+    else KillTimer(hwnd, IDT_PREVIEW_UPDATE);
     save_layout_settings();
 }
 
@@ -3707,6 +5583,1274 @@ static void toggle_panel_sides(HWND hwnd) {
     layout(hwnd);
 }
 
+static void toggle_focus_mode(HWND hwnd) {
+    g_focusMode = !g_focusMode;
+    refresh_menu(hwnd);
+    layout(hwnd);
+    save_layout_settings();
+    /* Focus mode hides the menu, so F11 is the only way back out. Keep it on
+       the editor where the accelerator is reachable - WebView2 claims F11 for
+       its own fullscreen whenever the preview has focus. */
+    if (g_editorVisible) SetFocus(g_hEdit);
+}
+
+static void toggle_word_wrap(HWND hwnd) {
+    g_wordWrap = !g_wordWrap;
+    apply_word_wrap(g_hEdit);
+    /* Wrapping makes the horizontal extent meaningless; unwrapping has to
+       re-measure it, which tracking does as lines come back into view. */
+    if (!g_wordWrap) SendMessageA(g_hEdit, SCI_SETSCROLLWIDTH, 1, 0);
+    update_view_menu(hwnd);
+    save_layout_settings();
+}
+
+static void toggle_spell_check(HWND hwnd) {
+    if (!g_spellChecker) return;
+    g_spellCheckEnabled = !g_spellCheckEnabled;
+    if (g_spellCheckEnabled) schedule_spell_check();
+    else perform_spell_check(); /* clears existing indicators */
+    update_view_menu(hwnd);
+    save_layout_settings();
+}
+
+static void toggle_show_whitespace(HWND hwnd) {
+    g_showWhitespace = !g_showWhitespace;
+    apply_show_whitespace(g_hEdit);
+    update_view_menu(hwnd);
+    save_layout_settings();
+}
+
+static void toggle_indent_guides(HWND hwnd) {
+    g_indentGuides = !g_indentGuides;
+    apply_indent_guides(g_hEdit);
+    update_view_menu(hwnd);
+    save_layout_settings();
+}
+
+static void fold_toggle_at_cursor(void) {
+    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    SendMessageA(g_hEdit, SCI_TOGGLEFOLD, (WPARAM)line, 0);
+}
+
+static void fold_all_lines(int expand) {
+    SendMessageA(g_hEdit, SCI_FOLDALL,
+                 (WPARAM)(expand ? SC_FOLDACTION_EXPAND : SC_FOLDACTION_CONTRACT), 0);
+}
+
+/* Sublime/VSCode-style Ctrl+D: selects the word under the caret, or extends
+   the multi-selection to the next occurrence of the current selection. */
+static void select_next_occurrence(void) {
+    SendMessageA(g_hEdit, SCI_MULTIPLESELECTADDNEXT, 0, 0);
+}
+
+static int is_brace_char(char c) {
+    return c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}';
+}
+
+/* The position of the brace adjacent to the caret - preferring the character
+   just before it, so the match follows the caret the way editors expect -
+   or -1 if the caret isn't next to one. */
+static int brace_position_near_caret(void) {
+    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    if (pos > 0 && is_brace_char((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(pos - 1), 0)))
+        return pos - 1;
+    if (is_brace_char((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)pos, 0)))
+        return pos;
+    return -1;
+}
+
+/* Keeps the matching-brace highlight (STYLE_BRACELIGHT/STYLE_BRACEBAD, set up
+   in apply_editor_theme) in sync with the caret. Called on every SCN_UPDATEUI. */
+static void update_brace_highlight(void) {
+    int bracePos = brace_position_near_caret();
+    if (bracePos < 0) {
+        SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
+        return;
+    }
+    int match = (int)SendMessageA(g_hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
+    if (match >= 0) SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)bracePos, (LPARAM)match);
+    else SendMessageA(g_hEdit, SCI_BRACEBADLIGHT, (WPARAM)bracePos, 0);
+}
+
+static void jump_to_matching_brace(void) {
+    int bracePos = brace_position_near_caret();
+    if (bracePos < 0) return;
+    int match = (int)SendMessageA(g_hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
+    if (match < 0) return;
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)match, (LPARAM)match);
+    SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+}
+
+/* Uppercases the first letter of each word in the selection and lowercases
+   the rest. Non-ASCII bytes (including UTF-8 continuation bytes) are left
+   untouched rather than mangled. */
+static void apply_title_case(void) {
+    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    int length = end - start;
+    if (length <= 0) return;
+    char *text = (char *)malloc((size_t)length + 1);
+    if (!text) return;
+    SendMessageA(g_hEdit, SCI_GETSELTEXT, 0, (LPARAM)text);
+    int atWordStart = 1;
+    for (int i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (isalpha(c)) {
+            text[i] = (char)(atWordStart ? toupper(c) : tolower(c));
+            atWordStart = 0;
+        } else {
+            atWordStart = 1;
+        }
+    }
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)end);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)text);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)(start + length));
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(text);
+}
+
+static int compare_lines_asc(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static int compare_lines_desc(const void *a, const void *b) {
+    return strcmp(*(char *const *)b, *(char *const *)a);
+}
+
+/* mode: 0 = sort ascending, 1 = sort descending, 2 = remove duplicate lines
+   (first occurrence kept, order otherwise preserved). Operates on the lines
+   touched by the current selection, as one undo step. */
+static void transform_selected_lines(int mode) {
+    int firstLine, lastLine;
+    toolbar_selected_line_range(&firstLine, &lastLine);
+    if (lastLine <= firstLine) return;
+
+    int rangeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    int rangeEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    int totalLength = rangeEnd - rangeStart;
+    char *buffer = (char *)malloc((size_t)totalLength + 1);
+    if (!buffer) return;
+    struct Sci_TextRange tr;
+    tr.chrg.cpMin = rangeStart;
+    tr.chrg.cpMax = rangeEnd;
+    tr.lpstrText = buffer;
+    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&tr);
+
+    int lineCount = lastLine - firstLine + 1;
+    char **lines = (char **)malloc((size_t)lineCount * sizeof(char *));
+    if (!lines) { free(buffer); return; }
+    int n = 0;
+    char *cursor = buffer;
+    for (int i = 0; i < lineCount; i++) {
+        char *eol = strchr(cursor, '\n');
+        size_t len = eol ? (size_t)(eol - cursor) : strlen(cursor);
+        if (len > 0 && cursor[len - 1] == '\r') len--;
+        char *copy = (char *)malloc(len + 1);
+        if (!copy) {
+            for (int j = 0; j < n; j++) free(lines[j]);
+            free(lines);
+            free(buffer);
+            return;
+        }
+        memcpy(copy, cursor, len);
+        copy[len] = 0;
+        lines[n++] = copy;
+        cursor = eol ? eol + 1 : cursor + strlen(cursor);
+    }
+
+    if (mode == 2) {
+        int kept = 0;
+        for (int i = 0; i < n; i++) {
+            int dup = 0;
+            for (int j = 0; j < kept; j++) {
+                if (strcmp(lines[j], lines[i]) == 0) { dup = 1; break; }
+            }
+            if (dup) free(lines[i]);
+            else lines[kept++] = lines[i];
+        }
+        n = kept;
+    } else {
+        qsort(lines, (size_t)n, sizeof(char *), mode == 1 ? compare_lines_desc : compare_lines_asc);
+    }
+
+    const char *eol = editor_eol_sequence();
+    size_t outCap = 1;
+    for (int i = 0; i < n; i++) outCap += strlen(lines[i]) + strlen(eol);
+    char *out = (char *)malloc(outCap);
+    if (out) {
+        out[0] = 0;
+        for (int i = 0; i < n; i++) {
+            strcat(out, lines[i]);
+            if (i < n - 1) strcat(out, eol);
+        }
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)rangeStart, (LPARAM)rangeEnd);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
+        free(out);
+    }
+    for (int i = 0; i < n; i++) free(lines[i]);
+    free(lines);
+    free(buffer);
+}
+
+/* Rewrites each line's leading indentation between tabs and spaces, using the
+   editor's configured tab width. Only leading whitespace is touched - tabs or
+   spaces elsewhere on the line (inside a string, say) are left alone. */
+static void convert_indentation(int toSpaces) {
+    int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+    if (tabWidth <= 0) tabWidth = 4;
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    for (int line = lineCount - 1; line >= 0; line--) {
+        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        int indentEnd = lineStart;
+        int column = 0;
+        while (indentEnd < lineEnd) {
+            char ch = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)indentEnd, 0);
+            if (ch == ' ') { column++; indentEnd++; }
+            else if (ch == '\t') { column += tabWidth - (column % tabWidth); indentEnd++; }
+            else break;
+        }
+        if (indentEnd == lineStart) continue;
+        int newLen;
+        char *newIndent;
+        if (toSpaces) {
+            newLen = column;
+            newIndent = (char *)malloc((size_t)newLen + 1);
+            if (!newIndent) continue;
+            memset(newIndent, ' ', (size_t)newLen);
+        } else {
+            int tabs = column / tabWidth;
+            int spaces = column % tabWidth;
+            newLen = tabs + spaces;
+            newIndent = (char *)malloc((size_t)newLen + 1);
+            if (!newIndent) continue;
+            memset(newIndent, '\t', (size_t)tabs);
+            memset(newIndent + tabs, ' ', (size_t)spaces);
+        }
+        newIndent[newLen] = 0;
+        SendMessageA(g_hEdit, SCI_SETTARGETRANGE, (WPARAM)lineStart, (LPARAM)indentEnd);
+        SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)newLen, (LPARAM)newIndent);
+        free(newIndent);
+    }
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+}
+
+/* Bookmarks are Scintilla markers on MARKER_BOOKMARK, which live on the
+   document buffer itself - each tab keeps its own set automatically as
+   SCI_SETDOCPOINTER swaps between them. */
+static void toggle_bookmark_at_line(int line) {
+    int mask = (int)SendMessageA(g_hEdit, SCI_MARKERGET, (WPARAM)line, 0);
+    if (mask & (1 << MARKER_BOOKMARK))
+        SendMessageA(g_hEdit, SCI_MARKERDELETE, (WPARAM)line, (LPARAM)MARKER_BOOKMARK);
+    else
+        SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)line, (LPARAM)MARKER_BOOKMARK);
+}
+
+static void toggle_bookmark_at_cursor(void) {
+    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    toggle_bookmark_at_line((int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0));
+}
+
+static void goto_bookmark(int forward) {
+    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    int found;
+    if (forward) {
+        found = (int)SendMessageA(g_hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1), (LPARAM)(1 << MARKER_BOOKMARK));
+        if (found < 0) found = (int)SendMessageA(g_hEdit, SCI_MARKERNEXT, 0, (LPARAM)(1 << MARKER_BOOKMARK));
+    } else {
+        found = (int)SendMessageA(g_hEdit, SCI_MARKERPREVIOUS, (WPARAM)(line - 1), (LPARAM)(1 << MARKER_BOOKMARK));
+        if (found < 0) {
+            int lastLine = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0) - 1;
+            found = (int)SendMessageA(g_hEdit, SCI_MARKERPREVIOUS, (WPARAM)lastLine, (LPARAM)(1 << MARKER_BOOKMARK));
+        }
+    }
+    if (found < 0) return;
+    int gotoPos = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)found, 0);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)gotoPos, (LPARAM)gotoPos);
+    SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+}
+
+static void clear_all_bookmarks(void) {
+    SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BOOKMARK, 0);
+}
+
+/* Strip trailing spaces and tabs from every line, as one undo action. Lines
+   are rewritten back to front so earlier line positions stay valid. */
+static void trim_trailing_whitespace(void) {
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int trimmed = 0;
+
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    for (int line = lineCount - 1; line >= 0; line--) {
+        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        int cut = lineEnd;
+        while (cut > lineStart) {
+            char ch = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(cut - 1), 0);
+            if (ch != ' ' && ch != '\t') break;
+            cut--;
+        }
+        if (cut == lineEnd) continue;
+
+        SendMessageA(g_hEdit, SCI_SETTARGETRANGE, (WPARAM)cut, (LPARAM)lineEnd);
+        SendMessageA(g_hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
+        if (caret > lineEnd) caret -= lineEnd - cut;
+        else if (caret > cut) caret = cut;
+        trimmed = 1;
+    }
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+
+    if (trimmed) SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
+    SetFocus(g_hEdit);
+}
+
+/* True when `line` (length lineLen) is exactly an HTML comment delimiter,
+   ignoring surrounding whitespace. */
+static int line_is_comment_delimiter(const char *line, int lineLen, const char *delimiter) {
+    int i = 0, end = lineLen;
+    while (i < end && (line[i] == ' ' || line[i] == '\t')) i++;
+    while (end > i && (line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+    int delimiterLen = (int)strlen(delimiter);
+    return end - i == delimiterLen && memcmp(line + i, delimiter, (size_t)delimiterLen) == 0;
+}
+
+/* Markdown has no line-comment syntax, so the selected line range is wrapped
+   in an HTML comment on its own lines - and unwrapped when already exactly
+   that. */
+static void toggle_comment(void) {
+    int firstLine, lastLine;
+    toolbar_selected_line_range(&firstLine, &lastLine);
+
+    int length;
+    char *text = get_edit_text(g_hEdit, &length);
+    if (!text) return;
+    int blockStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    int blockEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+
+    int openEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)firstLine, 0);
+    int closeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lastLine, 0);
+    if (lastLine - firstLine >= 1 &&
+        line_is_comment_delimiter(text + blockStart, openEnd - blockStart, "<!--") &&
+        line_is_comment_delimiter(text + closeStart, blockEnd - closeStart, "-->")) {
+        int innerStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(firstLine + 1), 0);
+        int innerEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(lastLine - 1), 0);
+        int innerLength = innerEnd - innerStart;
+        char *inner = (char *)malloc((size_t)innerLength + 1);
+        if (inner) {
+            memcpy(inner, text + innerStart, (size_t)innerLength);
+            inner[innerLength] = 0;
+            SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)blockEnd);
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)inner);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)(blockStart + innerLength));
+            SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+            free(inner);
+        }
+        free(text);
+        SetFocus(g_hEdit);
+        return;
+    }
+
+    const char *eol = editor_eol_sequence();
+    size_t eolLen = strlen(eol);
+    size_t bodyLen = (size_t)(blockEnd - blockStart);
+    size_t openLen = 4 + eolLen;
+    size_t wrappedLen = openLen + bodyLen + eolLen + 3;
+    char *wrapped = (char *)malloc(wrappedLen + 1);
+    if (wrapped) {
+        memcpy(wrapped, "<!--", 4);
+        memcpy(wrapped + 4, eol, eolLen);
+        memcpy(wrapped + openLen, text + blockStart, bodyLen);
+        memcpy(wrapped + openLen + bodyLen, eol, eolLen);
+        memcpy(wrapped + openLen + bodyLen + eolLen, "-->", 3);
+        wrapped[wrappedLen] = 0;
+        SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)blockEnd);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)(blockStart + (int)wrappedLen));
+        SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+        free(wrapped);
+    }
+    free(text);
+    SetFocus(g_hEdit);
+}
+
+/* True when the line begins a fenced code block delimiter (``` or ~~~,
+   after up to three leading spaces as CommonMark allows). */
+static int line_starts_fence(int line) {
+    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+    int i = lineStart;
+    while (i < lineEnd && i - lineStart < 3 &&
+           (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)i, 0) == ' ') i++;
+    char first = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)i, 0);
+    if (first != '`' && first != '~') return 0;
+
+    int run = 0;
+    while (i + run < lineEnd &&
+           (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(i + run), 0) == first) run++;
+    return run >= 3;
+}
+
+/* ---- JSON reformatting for the fenced block at the caret ---- */
+
+typedef struct JsonPrinter {
+    char *out;
+    size_t length, capacity;
+    int failed;
+} JsonPrinter;
+
+static void json_emit(JsonPrinter *p, const char *s, size_t n) {
+    if (p->failed) return;
+    if (p->length + n + 1 > p->capacity) {
+        size_t wanted = (p->length + n + 1) * 2;
+        char *grown = (char *)realloc(p->out, wanted);
+        if (!grown) { p->failed = 1; return; }
+        p->out = grown;
+        p->capacity = wanted;
+    }
+    memcpy(p->out + p->length, s, n);
+    p->length += n;
+    p->out[p->length] = 0;
+}
+
+static void json_emit_indent(JsonPrinter *p, const char *eol, int depth) {
+    json_emit(p, eol, strlen(eol));
+    for (int i = 0; i < depth; i++) json_emit(p, "  ", 2);
+}
+
+/* Copies a quoted string verbatim, honouring backslash escapes so that a
+   quote inside the string doesn't terminate it. Returns the index just past
+   the closing quote, or -1 if it is unterminated. */
+static int json_copy_string(JsonPrinter *p, const char *s, int i, int n) {
+    int start = i;
+    i++;
+    while (i < n && s[i] != '"') i += (s[i] == '\\' && i + 1 < n) ? 2 : 1;
+    if (i >= n) return -1;
+    i++;
+    json_emit(p, s + start, (size_t)(i - start));
+    return i;
+}
+
+/* Reformats `text` as JSON. `indent` selects pretty-printing; otherwise the
+   result is minified. Returns a new string, or NULL when the input can't be
+   reprinted, so the caller can leave the document alone.
+
+   This re-indents rather than validates: brackets must balance and strings
+   must terminate, but grammar errors between tokens (a trailing comma, a
+   missing colon) are passed through unchanged. */
+static char *json_reformat(const char *text, int length, const char *eol, int indent) {
+    JsonPrinter p = { NULL, 0, 0, 0 };
+    int depth = 0, containers = 0, sawValue = 0;
+
+    for (int i = 0; i < length; ) {
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
+
+        if (c == '"') {
+            int next = json_copy_string(&p, text, i, length);
+            if (next < 0) { free(p.out); return NULL; }
+            i = next;
+            sawValue = 1;
+            continue;
+        }
+
+        switch (c) {
+            case '{':
+            case '[':
+                json_emit(&p, &c, 1);
+                depth++;
+                containers++;
+                sawValue = 1;
+                break;
+            case '}':
+            case ']':
+                if (depth == 0) { free(p.out); return NULL; }
+                depth--;
+                /* An empty container stays on one line: "{}" reads better
+                   than a brace pair straddling a blank indented line. */
+                if (p.length && p.out[p.length - 1] != '{' && p.out[p.length - 1] != '[') {
+                    if (indent) json_emit_indent(&p, eol, depth);
+                }
+                json_emit(&p, &c, 1);
+                break;
+            case ':':
+                json_emit(&p, indent ? ": " : ":", indent ? 2 : 1);
+                break;
+            case ',':
+                json_emit(&p, ",", 1);
+                if (indent) json_emit_indent(&p, eol, depth);
+                break;
+            default: {
+                /* A bare literal: number, true, false or null. */
+                int start = i;
+                while (i < length && !strchr(" \t\r\n,:{}[]\"", text[i])) i++;
+                if (i == start) { free(p.out); return NULL; }
+                json_emit(&p, text + start, (size_t)(i - start));
+                sawValue = 1;
+                continue;
+            }
+        }
+
+        i++;
+        /* Indent after an opening brace unless the container closes immediately. */
+        if (indent && (c == '{' || c == '[')) {
+            int j = i;
+            while (j < length && strchr(" \t\r\n", text[j])) j++;
+            if (j < length && text[j] != '}' && text[j] != ']') json_emit_indent(&p, eol, depth);
+        }
+    }
+
+    if (p.failed || depth != 0 || !sawValue || !containers) { free(p.out); return NULL; }
+    return p.out;
+}
+
+/* Finds the fenced block containing `line`, returning the source range between
+   its delimiters. Returns 0 when the caret is not inside a fence. */
+static int fence_body_range(int line, int *bodyStart, int *bodyEnd) {
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int openLine = -1, closeLine = -1;
+
+    for (int scan = line; scan >= 0; scan--) {
+        if (!line_starts_fence(scan)) continue;
+        /* A fence delimiter on the caret's own line is the opener only if the
+           caret sits on the opening one; scanning up finds that either way. */
+        openLine = scan;
+        break;
+    }
+    if (openLine < 0) return 0;
+
+    for (int scan = openLine + 1; scan < lineCount; scan++) {
+        if (line_starts_fence(scan)) { closeLine = scan; break; }
+    }
+    if (closeLine < 0 || line > closeLine) return 0;
+
+    *bodyStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(openLine + 1), 0);
+    *bodyEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(closeLine - 1), 0);
+    return closeLine > openLine + 1;
+}
+
+/* Reformats the selection, or the fenced block at the caret when there is no
+   selection. Leaves the document untouched if the text isn't valid JSON. */
+static void format_json(int indent) {
+    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+
+    if (start == end) {
+        int caretLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+        if (!fence_body_range(caretLine, &start, &end)) {
+            MessageBoxW(g_hMainWnd,
+                        L"Place the caret inside a fenced code block, or select the JSON to format.",
+                        L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+    }
+
+    int length;
+    char *text = get_edit_text(g_hEdit, &length);
+    if (!text) return;
+
+    char *formatted = json_reformat(text + start, end - start, editor_eol_sequence(), indent);
+    free(text);
+    if (!formatted) {
+        MessageBoxW(g_hMainWnd, L"That text could not be read as JSON.",
+                    L"MarkEdit", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)end);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)formatted);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)(start + (int)strlen(formatted)));
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+
+    free(formatted);
+    SetFocus(g_hEdit);
+}
+
+/* ---- document outline and Markdown diagnostics ------------------------- */
+
+static int parse_atx_heading(const char *line, int length, int *textStart, int *textLength) {
+    int i = 0;
+    while (i < length && i < 3 && line[i] == ' ') i++;
+    int hashes = 0;
+    while (i + hashes < length && hashes < 6 && line[i + hashes] == '#') hashes++;
+    if (!hashes || i + hashes >= length ||
+        (line[i + hashes] != ' ' && line[i + hashes] != '\t')) return 0;
+    int start = i + hashes;
+    while (start < length && (line[start] == ' ' || line[start] == '\t')) start++;
+    int end = length;
+    while (end > start && (line[end - 1] == '\r' || line[end - 1] == '\n' ||
+                            line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+    int marker = end;
+    while (marker > start && line[marker - 1] == '#') marker--;
+    if (marker < end && marker > start && (line[marker - 1] == ' ' || line[marker - 1] == '\t')) {
+        end = marker - 1;
+        while (end > start && (line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+    }
+    *textStart = start;
+    *textLength = end - start;
+    return hashes;
+}
+
+static void update_outline(void) {
+    if (!g_hOutline) return;
+    SendMessageW(g_hOutline, LB_RESETCONTENT, 0, 0);
+    g_outlineCount = 0;
+    if (g_activeLanguage != LANG_MARKDOWN) return;
+    int lines = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    for (int lineNumber = 0; lineNumber < lines && g_outlineCount < 1024; lineNumber++) {
+        int linePosition = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+        int style = (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)linePosition, 0);
+        if (style < SCE_MARKDOWN_HEADER1 || style > SCE_MARKDOWN_HEADER6) continue;
+        int length = (int)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
+        if (length <= 0 || length > 65535) continue;
+        char *line = (char *)malloc((size_t)length + 1);
+        if (!line) break;
+        int got = (int)SendMessageA(g_hEdit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
+        line[got >= 0 && got <= length ? got : length] = 0;
+        int start = 0, textLength = 0;
+        int level = parse_atx_heading(line, got, &start, &textLength);
+        if (level && textLength > 0) {
+            char *heading = (char *)malloc((size_t)textLength + 1);
+            if (heading) {
+                memcpy(heading, line + start, (size_t)textLength);
+                heading[textLength] = 0;
+                WCHAR *wide = to_wide(heading);
+                if (wide) {
+                    size_t capacity = wcslen(wide) + (size_t)level * 2 + 1;
+                    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+                    if (label) {
+                        int indent = (level - 1) * 2;
+                        for (int i = 0; i < indent; i++) label[i] = L' ';
+                        wcscpy(label + indent, wide);
+                        SendMessageW(g_hOutline, LB_ADDSTRING, 0, (LPARAM)label);
+                        g_outlineLines[g_outlineCount++] = lineNumber;
+                        free(label);
+                    }
+                    free(wide);
+                }
+                free(heading);
+            }
+        }
+        free(line);
+    }
+}
+
+static void toggle_outline(HWND hwnd) {
+    g_outlineVisible = !g_outlineVisible;
+    update_outline();
+    update_view_menu(hwnd);
+    layout(hwnd);
+    save_layout_settings();
+}
+
+typedef struct DiagnosticList {
+    WCHAR *labels[512];
+    int lines[512];
+    int count;
+} DiagnosticList;
+
+static void add_diagnostic(DiagnosticList *list, int line, const WCHAR *message) {
+    if (list->count >= 512) return;
+    size_t capacity = wcslen(message) + 48;
+    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!label) return;
+    swprintf(label, capacity, L"Line %d — %ls", line + 1, message);
+    list->labels[list->count] = label;
+    list->lines[list->count++] = line;
+}
+
+static void make_heading_slug(const char *text, int length, char *slug, int capacity) {
+    int out = 0, pendingDash = 0;
+    for (int i = 0; i < length && out + 1 < capacity; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (isalnum(ch) || ch >= 0x80) {
+            if (pendingDash && out > 0 && out + 1 < capacity) slug[out++] = '-';
+            slug[out++] = (char)(ch < 0x80 ? tolower(ch) : ch);
+            pendingDash = 0;
+        } else if (ch == ' ' || ch == '-' || ch == '_') {
+            pendingDash = out > 0;
+        }
+    }
+    slug[out] = 0;
+}
+
+static int heading_slug_exists(char slugs[][256], int count, const char *slug) {
+    for (int i = 0; i < count; i++) if (_stricmp(slugs[i], slug) == 0) return 1;
+    return 0;
+}
+
+static void show_markdown_issues(int lintOnly) {
+    if (g_activeLanguage != LANG_MARKDOWN) {
+        MessageBoxW(g_hMainWnd, L"Markdown checks are available for Markdown documents.",
+                    L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    int textLength = 0;
+    char *text = get_edit_text(g_hEdit, &textLength);
+    if (!text) return;
+    DiagnosticList issues = {0};
+    char headingSlugs[256][256];
+    int headingCount = 0, previousLevel = 0;
+    char preferredBullet = 0;
+
+    int lineNumber = 0;
+    for (char *line = text; line <= text + textLength;) {
+        char *end = strchr(line, '\n');
+        int length = end ? (int)(end - line + 1) : (int)strlen(line);
+        int start = 0, headingLength = 0;
+        int level = parse_atx_heading(line, length, &start, &headingLength);
+        if (level && headingLength > 0 && headingCount < 256) {
+            make_heading_slug(line + start, headingLength, headingSlugs[headingCount], 256);
+            int duplicate = heading_slug_exists(headingSlugs, headingCount, headingSlugs[headingCount]);
+            if (!lintOnly && duplicate) add_diagnostic(&issues, lineNumber, L"Duplicate heading anchor");
+            headingCount++;
+            if (lintOnly && previousLevel && level > previousLevel + 1)
+                add_diagnostic(&issues, lineNumber, L"Heading level skips a level");
+            previousLevel = level;
+        } else if (lintOnly) {
+            int i = 0;
+            while (i < length && i < 3 && line[i] == ' ') i++;
+            if (i < length && line[i] == '#') {
+                int j = i;
+                while (j < length && line[j] == '#' && j - i < 6) j++;
+                if (j < length && line[j] != ' ' && line[j] != '\t' && line[j] != '\r' && line[j] != '\n')
+                    add_diagnostic(&issues, lineNumber, L"Add a space after the heading marker");
+            }
+        }
+        if (lintOnly) {
+            int contentEnd = length;
+            while (contentEnd > 0 && (line[contentEnd - 1] == '\r' || line[contentEnd - 1] == '\n')) contentEnd--;
+            if (contentEnd > 0 && (line[contentEnd - 1] == ' ' || line[contentEnd - 1] == '\t'))
+                add_diagnostic(&issues, lineNumber, L"Trailing whitespace");
+            int i = 0;
+            while (i < contentEnd && line[i] == ' ') i++;
+            if (i + 1 < contentEnd && (line[i] == '-' || line[i] == '*' || line[i] == '+') &&
+                (line[i + 1] == ' ' || line[i + 1] == '\t')) {
+                if (!preferredBullet) preferredBullet = line[i];
+                else if (preferredBullet != line[i]) add_diagnostic(&issues, lineNumber, L"Inconsistent bullet marker");
+            }
+        }
+        if (!end) break;
+        line = end + 1;
+        lineNumber++;
+    }
+
+    if (!lintOnly) {
+        WCHAR *baseDirectory = g_currentFile ? path_directory(g_currentFile) : NULL;
+        int warnedUnsaved = 0;
+        lineNumber = 0;
+        for (char *line = text; line <= text + textLength;) {
+            char *end = strchr(line, '\n');
+            int length = end ? (int)(end - line) : (int)strlen(line);
+            for (int i = 0; i + 2 < length; i++) {
+                if (line[i] != ']' || line[i + 1] != '(') continue;
+                int close = i + 2;
+                while (close < length && line[close] != ')') close++;
+                if (close >= length) continue;
+                int start = i + 2, targetLength = close - start;
+                while (targetLength > 0 && isspace((unsigned char)line[start])) { start++; targetLength--; }
+                while (targetLength > 0 && isspace((unsigned char)line[start + targetLength - 1])) targetLength--;
+                if (targetLength >= 2 && line[start] == '<' && line[start + targetLength - 1] == '>') {
+                    start++; targetLength -= 2;
+                } else {
+                    for (int n = 0; n < targetLength; n++) if (isspace((unsigned char)line[start + n])) { targetLength = n; break; }
+                }
+                if (targetLength <= 0 || targetLength >= 2048) { i = close; continue; }
+                char target[2048];
+                memcpy(target, line + start, (size_t)targetLength); target[targetLength] = 0;
+                int image = i > 0 && line[i - 1] == '!';
+                if (_strnicmp(target, "http://", 7) == 0 || _strnicmp(target, "https://", 8) == 0 ||
+                    _strnicmp(target, "mailto:", 7) == 0 || _strnicmp(target, "data:", 5) == 0) {
+                    i = close; continue;
+                }
+                if (target[0] == '#') {
+                    if (!heading_slug_exists(headingSlugs, headingCount, target + 1)) {
+                        WCHAR *wideTarget = to_wide(target);
+                        WCHAR message[2300];
+                        swprintf(message, sizeof(message) / sizeof(message[0]), L"Broken heading link: %ls",
+                                 wideTarget ? wideTarget : L"");
+                        add_diagnostic(&issues, lineNumber, message);
+                        free(wideTarget);
+                    }
+                    i = close; continue;
+                }
+                char *fragment = strchr(target, '#');
+                if (fragment) *fragment = 0;
+                if (!baseDirectory) {
+                    if (!warnedUnsaved) {
+                        add_diagnostic(&issues, lineNumber,
+                            L"Save the document before checking relative links and images");
+                        warnedUnsaved = 1;
+                    }
+                    i = close; continue;
+                }
+                WCHAR *wideTarget = to_wide(target);
+                WCHAR *fullPath = wideTarget && baseDirectory ? path_join(baseDirectory, wideTarget) : NULL;
+                DWORD attrs = fullPath ? GetFileAttributesW(fullPath) : INVALID_FILE_ATTRIBUTES;
+                if (attrs == INVALID_FILE_ATTRIBUTES) {
+                    WCHAR message[2300];
+                    swprintf(message, sizeof(message) / sizeof(message[0]), L"Missing %ls: %ls",
+                             image ? L"image" : L"link target", wideTarget ? wideTarget : L"");
+                    add_diagnostic(&issues, lineNumber, message);
+                }
+                free(fullPath); free(wideTarget);
+                i = close;
+            }
+            if (!end) break;
+            line = end + 1; lineNumber++;
+        }
+        free(baseDirectory);
+    }
+    free(text);
+
+    if (!issues.count) {
+        MessageBoxW(g_hMainWnd, lintOnly ? L"No Markdown lint issues found." : L"No Markdown diagnostics found.",
+                    lintOnly ? L"Markdown Lint" : L"Markdown Diagnostics",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    int selected = show_choice_dialog(lintOnly ? L"Markdown Lint" : L"Markdown Diagnostics",
+        L"Filter issues, then choose one to jump to its source line:", issues.labels, issues.count);
+    if (selected >= 0 && selected < issues.count) {
+        SendMessageA(g_hEdit, SCI_GOTOLINE, (WPARAM)issues.lines[selected], 0);
+        SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+        SetFocus(g_hEdit);
+    }
+    for (int i = 0; i < issues.count; i++) free(issues.labels[i]);
+}
+
+static char *editor_line_text(int lineNumber, int *outLength) {
+    int length = (int)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
+    if (length < 0 || length > 1024 * 1024) return NULL;
+    char *line = (char *)malloc((size_t)length + 1);
+    if (!line) return NULL;
+    int got = (int)SendMessageA(g_hEdit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
+    if (got < 0) got = 0;
+    if (got > length) got = length;
+    line[got] = 0;
+    while (got > 0 && (line[got - 1] == '\r' || line[got - 1] == '\n')) line[--got] = 0;
+    if (outLength) *outLength = got;
+    return line;
+}
+
+static int table_row_cells(const char *line, char cells[][256], int maximum) {
+    int count = 0;
+    const char *cursor = line;
+    while (*cursor == ' ' || *cursor == '\t') cursor++;
+    if (*cursor == '|') cursor++;
+    while (*cursor && count < maximum) {
+        const char *end = strchr(cursor, '|');
+        if (!end) end = cursor + strlen(cursor);
+        const char *start = cursor;
+        while (start < end && (*start == ' ' || *start == '\t')) start++;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        size_t length = (size_t)(end - start);
+        if (length > 255) length = 255;
+        memcpy(cells[count], start, length);
+        cells[count][length] = 0;
+        count++;
+        if (!*end) break;
+        cursor = end + 1;
+        if (!*cursor) break;
+    }
+    return count;
+}
+
+static int append_dynamic(char **buffer, size_t *length, size_t *capacity, const char *text) {
+    size_t add = strlen(text);
+    if (*length + add + 1 > *capacity) {
+        size_t next = *capacity ? *capacity : 512;
+        while (next < *length + add + 1) next *= 2;
+        char *grown = (char *)realloc(*buffer, next);
+        if (!grown) return 0;
+        *buffer = grown; *capacity = next;
+    }
+    memcpy(*buffer + *length, text, add + 1);
+    *length += add;
+    return 1;
+}
+
+static void show_table_editor(void) {
+    int caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int caretLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int first = caretLine, last = caretLine, existing = 0;
+    int lineLength = 0;
+    char *line = editor_line_text(caretLine, &lineLength);
+    if (line && strchr(line, '|')) {
+        while (first > 0) {
+            char *previous = editor_line_text(first - 1, NULL);
+            int belongs = previous && strchr(previous, '|');
+            free(previous);
+            if (!belongs) break;
+            first--;
+        }
+        while (last + 1 < lineCount) {
+            char *next = editor_line_text(last + 1, NULL);
+            int belongs = next && strchr(next, '|');
+            free(next);
+            if (!belongs) break;
+            last++;
+        }
+        if (last - first >= 1) existing = 1;
+    }
+    free(line);
+
+    char cells[51][20][256] = {{{0}}};
+    int existingRows = 0, columns = 3;
+    if (existing) {
+        char *header = editor_line_text(first, NULL);
+        if (header) { columns = table_row_cells(header, cells[0], 20); free(header); }
+        if (columns < 1) columns = 1;
+        existingRows = 1;
+        for (int sourceLine = first + 2; sourceLine <= last && existingRows < 51; sourceLine++) {
+            char *row = editor_line_text(sourceLine, NULL);
+            if (row) { table_row_cells(row, cells[existingRows], columns); free(row); }
+            existingRows++;
+        }
+    } else {
+        existingRows = 4; /* header plus three data rows */
+    }
+
+    WCHAR value[32], rowsText[32], columnsText[32];
+    swprintf(value, sizeof(value) / sizeof(value[0]), L"%d", existingRows > 0 ? existingRows - 1 : 3);
+    if (!show_text_input(L"Table Editor", L"Data rows (excluding the header):", value,
+                         rowsText, sizeof(rowsText) / sizeof(rowsText[0]))) return;
+    swprintf(value, sizeof(value) / sizeof(value[0]), L"%d", columns);
+    if (!show_text_input(L"Table Editor", L"Columns:", value,
+                         columnsText, sizeof(columnsText) / sizeof(columnsText[0]))) return;
+    int dataRows = (int)wcstol(rowsText, NULL, 10);
+    int requestedColumns = (int)wcstol(columnsText, NULL, 10);
+    if (dataRows < 1 || dataRows > 50 || requestedColumns < 1 || requestedColumns > 20) {
+        MessageBoxW(g_hMainWnd, L"Use 1–50 data rows and 1–20 columns.", L"Table Editor",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    columns = requestedColumns;
+    const char *eol = editor_eol_sequence();
+    char *table = NULL; size_t length = 0, capacity = 0;
+    for (int row = 0; row < dataRows + 2; row++) {
+        if (!append_dynamic(&table, &length, &capacity, "|")) break;
+        for (int column = 0; column < columns; column++) {
+            char fallback[64]; const char *cell = "";
+            if (row == 0) {
+                if (existing && column < 20 && cells[0][column][0]) cell = cells[0][column];
+                else { snprintf(fallback, sizeof(fallback), "Header %d", column + 1); cell = fallback; }
+            } else if (row == 1) cell = "---";
+            else if (existing && row - 1 < existingRows && column < 20) cell = cells[row - 1][column];
+            if (!append_dynamic(&table, &length, &capacity, " ") ||
+                !append_dynamic(&table, &length, &capacity, cell) ||
+                !append_dynamic(&table, &length, &capacity, " |")) break;
+        }
+        append_dynamic(&table, &length, &capacity, eol);
+    }
+    if (!table) return;
+    int replaceStart, replaceEnd;
+    if (existing) {
+        replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)first, 0);
+        replaceEnd = last + 1 < lineCount
+            ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(last + 1), 0)
+            : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    } else {
+        replaceStart = replaceEnd = caret;
+        if (position_needs_leading_eol(caret)) {
+            size_t eolLength = strlen(eol);
+            char *withLeading = (char *)malloc(length + eolLength + 1);
+            if (withLeading) {
+                memcpy(withLeading, eol, eolLength);
+                memcpy(withLeading + eolLength, table, length + 1);
+                free(table); table = withLeading; length += eolLength;
+            }
+        }
+    }
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
+    SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)length, (LPARAM)table);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(table);
+    SetFocus(g_hEdit);
+}
+
+/* ---- folder tools and command palette ---------------------------------- */
+
+typedef struct WorkspaceFiles {
+    WCHAR **paths;
+    WCHAR **labels;
+    int *lines;
+    int count;
+    int capacity;
+    WCHAR *root;
+} WorkspaceFiles;
+
+static void free_workspace_files(WorkspaceFiles *files) {
+    for (int i = 0; i < files->count; i++) {
+        free(files->paths[i]);
+        free(files->labels[i]);
+    }
+    free(files->paths); free(files->labels); free(files->lines); free(files->root);
+    memset(files, 0, sizeof(*files));
+}
+
+static int add_workspace_item(WorkspaceFiles *files, const WCHAR *path,
+                              const WCHAR *label, int line) {
+    if (files->count >= files->capacity) {
+        int next = files->capacity ? files->capacity * 2 : 128;
+        WCHAR **paths = (WCHAR **)realloc(files->paths, (size_t)next * sizeof(WCHAR *));
+        if (!paths) return 0;
+        files->paths = paths;
+        WCHAR **labels = (WCHAR **)realloc(files->labels, (size_t)next * sizeof(WCHAR *));
+        if (!labels) return 0;
+        files->labels = labels;
+        int *lines = (int *)realloc(files->lines, (size_t)next * sizeof(int));
+        if (!lines) return 0;
+        files->lines = lines;
+        files->capacity = next;
+    }
+    files->paths[files->count] = wcsdup_heap(path);
+    files->labels[files->count] = wcsdup_heap(label);
+    files->lines[files->count] = line;
+    if (!files->paths[files->count] || !files->labels[files->count]) {
+        free(files->paths[files->count]); free(files->labels[files->count]);
+        return 0;
+    }
+    files->count++;
+    return 1;
+}
+
+static WCHAR *choose_workspace_folder(void) {
+    IFileOpenDialog *dialog = NULL;
+    if (FAILED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                &IID_IFileOpenDialog, (void **)&dialog)) || !dialog) return NULL;
+    FILEOPENDIALOGOPTIONS options = 0;
+    IFileOpenDialog_GetOptions(dialog, &options);
+    IFileOpenDialog_SetOptions(dialog, options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
+                               FOS_PATHMUSTEXIST);
+    WCHAR *resultPath = NULL;
+    if (SUCCEEDED(IFileOpenDialog_Show(dialog, g_hMainWnd))) {
+        IShellItem *item = NULL;
+        if (SUCCEEDED(IFileOpenDialog_GetResult(dialog, &item)) && item) {
+            PWSTR selected = NULL;
+            if (SUCCEEDED(IShellItem_GetDisplayName(item, SIGDN_FILESYSPATH, &selected)) && selected) {
+                resultPath = wcsdup_heap(selected);
+                CoTaskMemFree(selected);
+            }
+            IShellItem_Release(item);
+        }
+    }
+    IFileOpenDialog_Release(dialog);
+    return resultPath;
+}
+
+static int workspace_file_extension(const WCHAR *name) {
+    const WCHAR *extension = PathFindExtensionW(name);
+    static const WCHAR *allowed[] = {
+        L".md", L".markdown", L".mdown", L".mkd", L".txt", L".json", L".yaml", L".yml",
+        L".html", L".htm", L".xml", L".c", L".h", L".cpp", L".hpp", L".js", L".ts",
+        L".py", L".sh", L".bash", L".ps1"
+    };
+    for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++)
+        if (_wcsicmp(extension, allowed[i]) == 0) return 1;
+    return 0;
+}
+
+static int skipped_workspace_directory(const WCHAR *name) {
+    static const WCHAR *skipped[] = {
+        L".git", L".svn", L".hg", L"node_modules", L"build", L"dist", L"Output",
+        L"webview2_data", L".vs", L".vscode"
+    };
+    for (size_t i = 0; i < sizeof(skipped) / sizeof(skipped[0]); i++)
+        if (_wcsicmp(name, skipped[i]) == 0) return 1;
+    return 0;
+}
+
+static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *directory, int depth) {
+    if (depth > 24 || files->count >= 5000) return;
+    WCHAR *pattern = path_join(directory, L"*");
+    if (!pattern) return;
+    WIN32_FIND_DATAW data;
+    HANDLE search = FindFirstFileW(pattern, &data);
+    free(pattern);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
+        WCHAR *full = path_join(directory, data.cFileName);
+        if (!full) continue;
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                !skipped_workspace_directory(data.cFileName))
+                enumerate_workspace_files(files, full, depth + 1);
+        } else if (!(data.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) &&
+                   workspace_file_extension(data.cFileName)) {
+            const WCHAR *relative = full;
+            size_t rootLength = wcslen(files->root);
+            if (_wcsnicmp(full, files->root, rootLength) == 0) {
+                relative = full + rootLength;
+                if (*relative == L'\\' || *relative == L'/') relative++;
+            }
+            add_workspace_item(files, full, relative, 0);
+        }
+        free(full);
+    } while (files->count < 5000 && FindNextFileW(search, &data));
+    FindClose(search);
+}
+
+static int collect_workspace_files(WorkspaceFiles *files) {
+    memset(files, 0, sizeof(*files));
+    files->root = choose_workspace_folder();
+    if (!files->root) return 0;
+    enumerate_workspace_files(files, files->root, 0);
+    return 1;
+}
+
+static void do_quick_open(void) {
+    WorkspaceFiles files;
+    if (!collect_workspace_files(&files)) return;
+    if (!files.count) {
+        MessageBoxW(g_hMainWnd, L"No supported text files were found in that folder.",
+                    L"Quick Open", MB_OK | MB_ICONINFORMATION);
+        free_workspace_files(&files);
+        return;
+    }
+    int selected = show_choice_dialog(L"Quick Open", L"Type part of a file name:",
+                                      files.labels, files.count);
+    if (selected >= 0 && selected < files.count) open_file_in_tab(files.paths[selected]);
+    free_workspace_files(&files);
+}
+
+static void do_find_in_folder(void) {
+    WorkspaceFiles files;
+    if (!collect_workspace_files(&files)) return;
+    WCHAR queryWide[256];
+    if (!show_text_input(L"Find in Folder", L"Text to find (case-insensitive):", L"",
+                         queryWide, sizeof(queryWide) / sizeof(queryWide[0])) || !queryWide[0]) {
+        free_workspace_files(&files); return;
+    }
+    char *query = to_utf8(queryWide);
+    if (!query) { free_workspace_files(&files); return; }
+    WorkspaceFiles results = {0};
+    results.root = wcsdup_heap(files.root);
+    for (int i = 0; i < files.count && results.count < 2000; i++) {
+        WIN32_FILE_ATTRIBUTE_DATA attributes;
+        if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes) ||
+            attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) continue;
+        int length = 0;
+        char *content = read_bytes_file(files.paths[i], &length);
+        if (!content) continue;
+        char *cursor = content;
+        if (length >= 3 && (unsigned char)cursor[0] == 0xEF &&
+            (unsigned char)cursor[1] == 0xBB && (unsigned char)cursor[2] == 0xBF) cursor += 3;
+        int lineNumber = 1;
+        while (*cursor && results.count < 2000) {
+            char *end = strchr(cursor, '\n');
+            if (end) *end = 0;
+            if (StrStrIA(cursor, query)) {
+                char snippet[181];
+                size_t snippetLength = strlen(cursor);
+                if (snippetLength > 180) snippetLength = 180;
+                memcpy(snippet, cursor, snippetLength); snippet[snippetLength] = 0;
+                while (snippetLength && (snippet[snippetLength - 1] == '\r' ||
+                       snippet[snippetLength - 1] == '\n')) snippet[--snippetLength] = 0;
+                WCHAR *wideSnippet = to_wide(snippet);
+                size_t capacity = wcslen(files.labels[i]) + (wideSnippet ? wcslen(wideSnippet) : 0) + 48;
+                WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+                if (label) {
+                    swprintf(label, capacity, L"%ls:%d — %ls", files.labels[i], lineNumber,
+                             wideSnippet ? wideSnippet : L"");
+                    add_workspace_item(&results, files.paths[i], label, lineNumber - 1);
+                    free(label);
+                }
+                free(wideSnippet);
+            }
+            if (!end) break;
+            *end = '\n'; cursor = end + 1; lineNumber++;
+        }
+        free(content);
+    }
+    free(query);
+    free_workspace_files(&files);
+    if (!results.count) {
+        MessageBoxW(g_hMainWnd, L"No matches were found.", L"Find in Folder",
+                    MB_OK | MB_ICONINFORMATION);
+        free_workspace_files(&results); return;
+    }
+    int selected = show_choice_dialog(L"Find in Folder", L"Filter results, then open a match:",
+                                      results.labels, results.count);
+    if (selected >= 0 && selected < results.count && open_file_in_tab(results.paths[selected])) {
+        SendMessageA(g_hEdit, SCI_GOTOLINE, (WPARAM)results.lines[selected], 0);
+        SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+    }
+    free_workspace_files(&results);
+}
+
+typedef struct PaletteCommand { const WCHAR *label; WORD command; } PaletteCommand;
+static const PaletteCommand PALETTE_COMMANDS[] = {
+    {L"File: New", IDM_FILE_NEW}, {L"File: Open", IDM_FILE_OPEN},
+    {L"File: Quick Open in Folder", IDM_FILE_QUICK_OPEN},
+    {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Save", IDM_FILE_SAVE},
+    {L"File: Save As", IDM_FILE_SAVEAS}, {L"File: Export Rendered HTML", IDM_FILE_EXPORT_HTML},
+    {L"File: Export Rendered PDF", IDM_FILE_EXPORT_PDF}, {L"File: Print Rendered Preview", IDM_FILE_PRINT},
+    {L"File: Open Terminal Here", IDM_FILE_OPEN_TERMINAL}, {L"File: Close Tab", IDM_FILE_CLOSE},
+    {L"File: Reopen Closed Tab", IDM_FILE_REOPEN_CLOSED}, {L"Edit: Undo", IDM_EDIT_UNDO},
+    {L"Edit: Redo", IDM_EDIT_REDO}, {L"Edit: Cut", IDM_EDIT_CUT}, {L"Edit: Copy", IDM_EDIT_COPY},
+    {L"Edit: Paste", IDM_EDIT_PASTE}, {L"Edit: Delete", IDM_EDIT_DELETE},
+    {L"Edit: Select All", IDM_EDIT_SELECTALL}, {L"Edit: Find", IDM_EDIT_FIND},
+    {L"Edit: Find Next", IDM_EDIT_FINDNEXT}, {L"Edit: Replace", IDM_EDIT_REPLACE},
+    {L"Edit: Go to Line", IDM_EDIT_GOTOLINE}, {L"Edit: Duplicate Line", IDM_EDIT_DUPLICATE_LINE},
+    {L"Edit: Delete Line", IDM_EDIT_DELETE_LINE}, {L"Edit: Join Lines", IDM_EDIT_JOIN_LINES},
+    {L"Edit: Move Line Up", IDM_EDIT_MOVE_LINE_UP}, {L"Edit: Move Line Down", IDM_EDIT_MOVE_LINE_DOWN},
+    {L"Edit: Toggle Comment", IDM_EDIT_TOGGLE_COMMENT}, {L"Edit: Trim Trailing Whitespace", IDM_EDIT_TRIM_WHITESPACE},
+    {L"Edit: Select Next Occurrence", IDM_EDIT_SELECT_NEXT}, {L"Edit: Jump to Matching Brace", IDM_EDIT_MATCH_BRACE},
+    {L"Edit: Toggle Bookmark", IDM_EDIT_BOOKMARK_TOGGLE}, {L"Edit: Next Bookmark", IDM_EDIT_BOOKMARK_NEXT},
+    {L"Edit: Previous Bookmark", IDM_EDIT_BOOKMARK_PREV}, {L"Edit: Clear Bookmarks", IDM_EDIT_BOOKMARK_CLEAR},
+    {L"Edit: Convert to Uppercase", IDM_EDIT_UPPERCASE}, {L"Edit: Convert to Lowercase", IDM_EDIT_LOWERCASE},
+    {L"Edit: Convert to Title Case", IDM_EDIT_TITLECASE}, {L"Edit: Sort Lines Ascending", IDM_EDIT_SORT_ASC},
+    {L"Edit: Sort Lines Descending", IDM_EDIT_SORT_DESC}, {L"Edit: Remove Duplicate Lines", IDM_EDIT_SORT_DEDUPE},
+    {L"Edit: Tabs to Spaces", IDM_EDIT_TABS_TO_SPACES}, {L"Edit: Spaces to Tabs", IDM_EDIT_SPACES_TO_TABS},
+    {L"Format: Bold", IDM_FMT_BOLD},
+    {L"Format: Italic", IDM_FMT_ITALIC}, {L"Format: Strikethrough", IDM_FMT_STRIKETHROUGH},
+    {L"Format: Inline Code", IDM_FMT_CODE}, {L"Format: Code Block", IDM_FMT_CODEBLOCK},
+    {L"Format: Heading 1", IDM_FMT_H1}, {L"Format: Heading 2", IDM_FMT_H2},
+    {L"Format: Heading 3", IDM_FMT_H3}, {L"Format: Blockquote", IDM_FMT_QUOTE},
+    {L"Format: Bullet List", IDM_FMT_BULLETLIST}, {L"Format: Numbered List", IDM_FMT_NUMBERLIST},
+    {L"Format: Task List", IDM_FMT_TASKLIST}, {L"Format: Link", IDM_FMT_LINK},
+    {L"Format: Image", IDM_FMT_IMAGE}, {L"Format: Table", IDM_FMT_TABLE},
+    {L"Format: Footnote", IDM_FMT_FOOTNOTE}, {L"Format: Horizontal Rule", IDM_FMT_HRULE},
+    {L"Format: Alert", IDM_FMT_ALERT}, {L"Format: Table Editor", IDM_FMT_TABLE_EDITOR},
+    {L"Format: Format JSON", IDM_FMT_JSON_PRETTY},
+    {L"Format: Minify JSON", IDM_FMT_JSON_MINIFY}, {L"Format: Font", IDM_FORMAT_FONT},
+    {L"View: Toggle Preview", IDM_VIEW_TOGGLEPREVIEW}, {L"View: Toggle Editor", IDM_VIEW_TOGGLEEDITOR},
+    {L"View: Toggle Outline", IDM_VIEW_OUTLINE}, {L"View: Focus Mode", IDM_VIEW_FOCUS_MODE},
+    {L"View: Next Tab", IDM_VIEW_NEXT_TAB}, {L"View: Previous Tab", IDM_VIEW_PREVIOUS_TAB},
+    {L"View: Preview on Left", IDM_VIEW_PREVIEW_ON_LEFT},
+    {L"View: Word Wrap", IDM_VIEW_WORD_WRAP}, {L"View: Spell Check", IDM_VIEW_SPELL_CHECK},
+    {L"View: Spell Check Language", IDM_VIEW_SPELL_LANGUAGE}, {L"View: Show Whitespace", IDM_VIEW_SHOW_WHITESPACE},
+    {L"View: Indent Guides", IDM_VIEW_INDENT_GUIDES}, {L"View: GitHub Light Theme", IDM_VIEW_THEME_GITHUB_LIGHT},
+    {L"View: GitHub Dark Theme", IDM_VIEW_THEME_GITHUB_DARK}, {L"View: Custom Preview CSS", IDM_VIEW_CUSTOM_CSS},
+    {L"View: Clear Custom Preview CSS", IDM_VIEW_CLEAR_CUSTOM_CSS}, {L"View: Toggle Fold", IDM_VIEW_FOLD_TOGGLE},
+    {L"View: Fold All", IDM_VIEW_FOLD_ALL}, {L"View: Unfold All", IDM_VIEW_UNFOLD_ALL},
+    {L"Tools: Markdown Diagnostics", IDM_TOOLS_DIAGNOSTICS},
+    {L"Tools: Markdown Lint", IDM_TOOLS_LINT}, {L"Help: Markdown Reference", IDM_HELP_REFERENCE}
+};
+
+static void show_command_palette(void) {
+    int count = (int)(sizeof(PALETTE_COMMANDS) / sizeof(PALETTE_COMMANDS[0]));
+    WCHAR **labels = (WCHAR **)malloc((size_t)count * sizeof(WCHAR *));
+    if (!labels) return;
+    for (int i = 0; i < count; i++) labels[i] = (WCHAR *)PALETTE_COMMANDS[i].label;
+    int selected = show_choice_dialog(L"Command Palette", L"Type to find a command:", labels, count);
+    free(labels);
+    if (selected >= 0 && selected < count)
+        PostMessageW(g_hMainWnd, WM_COMMAND, PALETTE_COMMANDS[selected].command, 0);
+}
+
 static int splitter_contains_x(int x) {
     return g_previewVisible && g_editorVisible &&
            x >= g_splitterPos && x <= g_splitterPos + SPLITTER_WIDTH;
@@ -3715,10 +6859,11 @@ static int splitter_contains_x(int x) {
 static void select_theme(HWND hwnd, int darkMode) {
     g_previewDarkMode = darkMode;
     save_theme_settings();
+    apply_menu_theme(hwnd, darkMode);
     apply_preview_theme();
+    apply_webview_background_colour();
     apply_editor_theme(g_hEdit);
     apply_preview_host_theme();
-    apply_help_theme();
     apply_main_theme(hwnd);
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (g_hToolbarButtons[i]) InvalidateRect(g_hToolbarButtons[i], NULL, TRUE);
@@ -3738,12 +6883,17 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
     }
 
     switch (cmd) {
-        case IDM_FILE_NEW: do_new(); break;
+        case IDM_FILE_NEW: create_document_tab(); break;
         case IDM_FILE_OPEN: do_open(); break;
+        case IDM_FILE_QUICK_OPEN: do_quick_open(); break;
+        case IDM_FILE_FIND_FOLDER: do_find_in_folder(); break;
         case IDM_FILE_SAVE: do_save(); break;
         case IDM_FILE_SAVEAS: do_saveas(); break;
         case IDM_FILE_EXPORT_HTML: do_export_html(); break;
-        case IDM_FILE_CLOSE: do_close_document(); break;
+        case IDM_FILE_EXPORT_PDF: prepare_rendered_print(1); break;
+        case IDM_FILE_PRINT: prepare_rendered_print(0); break;
+        case IDM_FILE_OPEN_TERMINAL: open_terminal_here(); break;
+        case IDM_FILE_CLOSE: do_close_document_at(g_activeDocument); break;
         case IDM_FILE_REOPEN_CLOSED: do_reopen_closed_tab(); break;
         case IDM_FILE_RECENT_CLEAR:
             clear_recent_files();
@@ -3754,12 +6904,36 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_EDIT_REDO: SendMessageA(g_hEdit, SCI_REDO, 0, 0); break;
         case IDM_EDIT_CUT: SendMessageA(g_hEdit, SCI_CUT, 0, 0); break;
         case IDM_EDIT_COPY: SendMessageA(g_hEdit, SCI_COPY, 0, 0); break;
-        case IDM_EDIT_PASTE: SendMessageA(g_hEdit, SCI_PASTE, 0, 0); break;
+        case IDM_EDIT_PASTE:
+            if (!paste_image_from_clipboard()) SendMessageA(g_hEdit, SCI_PASTE, 0, 0);
+            break;
         case IDM_EDIT_DELETE: SendMessageA(g_hEdit, SCI_CLEAR, 0, 0); break;
         case IDM_EDIT_SELECTALL: SendMessageA(g_hEdit, SCI_SELECTALL, 0, 0); break;
+        case IDM_EDIT_DUPLICATE_LINE: SendMessageA(g_hEdit, SCI_LINEDUPLICATE, 0, 0); break;
+        case IDM_EDIT_MOVE_LINE_UP: SendMessageA(g_hEdit, SCI_MOVESELECTEDLINESUP, 0, 0); break;
+        case IDM_EDIT_MOVE_LINE_DOWN: SendMessageA(g_hEdit, SCI_MOVESELECTEDLINESDOWN, 0, 0); break;
+        case IDM_EDIT_DELETE_LINE: SendMessageA(g_hEdit, SCI_LINEDELETE, 0, 0); break;
+        case IDM_EDIT_JOIN_LINES: SendMessageA(g_hEdit, SCI_LINESJOIN, 0, 0); break;
+        case IDM_EDIT_TOGGLE_COMMENT: toggle_comment(); break;
+        case IDM_EDIT_TRIM_WHITESPACE: trim_trailing_whitespace(); break;
+        case IDM_EDIT_SELECT_NEXT: select_next_occurrence(); break;
+        case IDM_EDIT_MATCH_BRACE: jump_to_matching_brace(); break;
+        case IDM_EDIT_BOOKMARK_TOGGLE: toggle_bookmark_at_cursor(); break;
+        case IDM_EDIT_BOOKMARK_NEXT: goto_bookmark(1); break;
+        case IDM_EDIT_BOOKMARK_PREV: goto_bookmark(0); break;
+        case IDM_EDIT_BOOKMARK_CLEAR: clear_all_bookmarks(); break;
+        case IDM_EDIT_UPPERCASE: SendMessageA(g_hEdit, SCI_UPPERCASE, 0, 0); break;
+        case IDM_EDIT_LOWERCASE: SendMessageA(g_hEdit, SCI_LOWERCASE, 0, 0); break;
+        case IDM_EDIT_TITLECASE: apply_title_case(); break;
+        case IDM_EDIT_SORT_ASC: transform_selected_lines(0); break;
+        case IDM_EDIT_SORT_DESC: transform_selected_lines(1); break;
+        case IDM_EDIT_SORT_DEDUPE: transform_selected_lines(2); break;
+        case IDM_EDIT_TABS_TO_SPACES: convert_indentation(1); break;
+        case IDM_EDIT_SPACES_TO_TABS: convert_indentation(0); break;
         case IDM_EDIT_FIND: show_find_dialog(0); break;
         case IDM_EDIT_REPLACE: show_find_dialog(1); break;
         case IDM_EDIT_GOTOLINE: show_goto_line_dialog(); break;
+        case IDM_EDIT_COMMAND_PALETTE: show_command_palette(); break;
         case IDM_EDIT_FINDNEXT:
             if (g_findWhat[0]) {
                 char *findUtf8 = to_utf8(g_findWhat);
@@ -3768,9 +6942,26 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
             } else show_find_dialog(0);
             break;
         case IDM_FORMAT_FONT: do_choose_font(); break;
+        case IDM_FMT_JSON_PRETTY: format_json(1); break;
+        case IDM_FMT_JSON_MINIFY: format_json(0); break;
+        case IDM_FMT_TABLE_EDITOR: show_table_editor(); break;
         case IDM_VIEW_TOGGLEPREVIEW: toggle_preview(hwnd); break;
         case IDM_VIEW_TOGGLEEDITOR: toggle_editor(hwnd); break;
         case IDM_VIEW_PREVIEW_ON_LEFT: toggle_panel_sides(hwnd); break;
+        case IDM_VIEW_CUSTOM_CSS: do_choose_custom_css(); break;
+        case IDM_VIEW_CLEAR_CUSTOM_CSS: clear_custom_css(); break;
+        case IDM_VIEW_FOCUS_MODE: toggle_focus_mode(hwnd); break;
+        case IDM_VIEW_WORD_WRAP: toggle_word_wrap(hwnd); break;
+        case IDM_VIEW_SPELL_CHECK: toggle_spell_check(hwnd); break;
+        case IDM_VIEW_SPELL_LANGUAGE: choose_spell_language(); break;
+        case IDM_VIEW_SHOW_WHITESPACE: toggle_show_whitespace(hwnd); break;
+        case IDM_VIEW_INDENT_GUIDES: toggle_indent_guides(hwnd); break;
+        case IDM_VIEW_FOLD_TOGGLE: fold_toggle_at_cursor(); break;
+        case IDM_VIEW_FOLD_ALL: fold_all_lines(0); break;
+        case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
+        case IDM_VIEW_OUTLINE: toggle_outline(hwnd); break;
+        case IDM_TOOLS_DIAGNOSTICS: show_markdown_issues(0); break;
+        case IDM_TOOLS_LINT: show_markdown_issues(1); break;
         case IDM_VIEW_NEXT_TAB:
             if (g_documentCount > 1) switch_document((g_activeDocument + 1) % g_documentCount);
             break;
@@ -3853,24 +7044,413 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
     }
 }
 
+static int line_has_list_marker(const char *line, int length) {
+    int i = 0;
+    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i + 1 < length && (line[i] == '-' || line[i] == '*' || line[i] == '+') &&
+        (line[i + 1] == ' ' || line[i + 1] == '\t')) return 1;
+    int digits = i;
+    while (i < length && line[i] >= '0' && line[i] <= '9') i++;
+    return i > digits && i + 1 < length && (line[i] == '.' || line[i] == ')') &&
+        (line[i + 1] == ' ' || line[i + 1] == '\t');
+}
+
+/* Preserve real tabs for indentation, but use spaces for alignment after
+   ordinary text. A collapsed caret anywhere in a Markdown list item indents
+   the entire item, which makes nesting work without first moving the caret. */
+static int smart_tab(int reverse) {
+    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (start != end) return 0; /* retain Scintilla's block-selection behavior */
+
+    int lineNumber = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    int lineLength = lineEnd - lineStart;
+    char *line = (char *)malloc((size_t)lineLength + 1);
+    if (!line) return 0;
+    struct Sci_TextRange range = { { lineStart, lineEnd }, line };
+    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    line[lineLength] = 0;
+
+    int leadingLength = 0;
+    while (leadingLength < lineLength &&
+           (line[leadingLength] == ' ' || line[leadingLength] == '\t')) leadingLength++;
+    int listItem = line_has_list_marker(line, lineLength);
+
+    if (reverse && leadingLength > 0) {
+        int remove = 0;
+        int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+        if (tabWidth < 1) tabWidth = 4;
+        if (line[0] == '\t') remove = 1;
+        else while (remove < leadingLength && remove < tabWidth && line[remove] == ' ') remove++;
+        SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)lineStart, 0);
+        SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)(lineStart + remove), 0);
+        SendMessageA(g_hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
+        free(line);
+        return 1;
+    }
+
+    if (!reverse && listItem) {
+        SendMessageA(g_hEdit, SCI_INSERTTEXT, (WPARAM)lineStart, (LPARAM)"\t");
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
+        free(line);
+        return 1;
+    }
+
+    free(line);
+    if (reverse || start <= lineStart + leadingLength) return 0;
+
+    int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+    if (tabWidth < 1) tabWidth = 4;
+    int column = (int)SendMessageA(g_hEdit, SCI_GETCOLUMN, (WPARAM)start, 0);
+    int spaces = tabWidth - column % tabWidth;
+    char padding[32];
+    if (spaces >= (int)sizeof(padding)) spaces = (int)sizeof(padding) - 1;
+    memset(padding, ' ', (size_t)spaces);
+    padding[spaces] = 0;
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)padding);
+    return 1;
+}
+
+static int smart_markdown_newline(void) {
+    int selectionStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selectionEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (selectionStart != selectionEnd) return 0;
+    int caret = selectionEnd;
+    if (caret > 0 && (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)(caret - 1), 0) == SCE_MARKDOWN_CODEBK)
+        return 0;
+    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    int beforeLength = caret - lineStart;
+    if (beforeLength <= 0) return 0;
+    char *before = (char *)malloc((size_t)beforeLength + 1);
+    if (!before) return 0;
+    struct Sci_TextRange range;
+    range.chrg.cpMin = lineStart;
+    range.chrg.cpMax = caret;
+    range.lpstrText = before;
+    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    before[beforeLength] = 0;
+
+    int i = 0;
+    while (i < beforeLength && (before[i] == ' ' || before[i] == '\t')) i++;
+    int indentEnd = i;
+    while (i < beforeLength && before[i] == '>') {
+        i++;
+        if (i < beforeLength && before[i] == ' ') i++;
+    }
+    int quoteEnd = i;
+    int markerStart = i, markerEnd = i, ordered = 0, nextNumber = 0;
+    char punctuation = 0;
+    if (i + 1 < beforeLength && (before[i] == '-' || before[i] == '*' || before[i] == '+') &&
+        (before[i + 1] == ' ' || before[i + 1] == '\t')) {
+        i += 2;
+        markerEnd = i;
+        if (i + 3 < beforeLength && before[i] == '[' &&
+            (before[i + 1] == ' ' || before[i + 1] == 'x' || before[i + 1] == 'X') &&
+            before[i + 2] == ']' && (before[i + 3] == ' ' || before[i + 3] == '\t')) {
+            i += 4;
+            markerEnd = i;
+        }
+    } else {
+        int digits = i;
+        unsigned long number = 0;
+        while (i < beforeLength && before[i] >= '0' && before[i] <= '9') {
+            if (number < 9999999) number = number * 10 + (unsigned)(before[i] - '0');
+            i++;
+        }
+        if (i > digits && i + 1 < beforeLength && (before[i] == '.' || before[i] == ')') &&
+            (before[i + 1] == ' ' || before[i + 1] == '\t')) {
+            punctuation = before[i];
+            i += 2;
+            markerEnd = i;
+            ordered = 1;
+            nextNumber = (int)number + 1;
+        } else {
+            i = markerStart;
+        }
+    }
+    int hasMarker = markerEnd > markerStart;
+    int hasQuote = quoteEnd > indentEnd;
+    if (!hasMarker && !hasQuote) { free(before); return 0; }
+    int contentStart = hasMarker ? markerEnd : quoteEnd;
+    int contentEmpty = 1;
+    for (int p = contentStart; p < beforeLength; p++) {
+        if (before[p] != ' ' && before[p] != '\t') { contentEmpty = 0; break; }
+    }
+
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    if (contentEmpty) {
+        /* An empty list item or quote terminates that construct. Nested quote
+           prefixes remain when terminating a list nested inside a quote. */
+        int keep = hasMarker ? quoteEnd : indentEnd;
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(lineStart + keep), (LPARAM)caret);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
+    } else {
+        const char *eol = editor_eol_sequence();
+        char orderedMarker[48] = "";
+        const char *markerText = NULL;
+        int prefixLength = contentStart;
+        if (ordered) {
+            snprintf(orderedMarker, sizeof(orderedMarker), "%d%c ", nextNumber, punctuation);
+            markerText = orderedMarker;
+            prefixLength = markerStart;
+        }
+        size_t insertLength = strlen(eol) + (size_t)prefixLength +
+            (markerText ? strlen(markerText) : 0);
+        char *insert = (char *)malloc(insertLength + 1);
+        if (insert) {
+            strcpy(insert, eol);
+            memcpy(insert + strlen(eol), before, (size_t)prefixLength);
+            size_t used = strlen(eol) + (size_t)prefixLength;
+            if (markerText) {
+                strcpy(insert + used, markerText);
+            } else if (hasMarker && markerEnd - markerStart >= 5 &&
+                       before[markerStart + 2] == '[') {
+                /* Continue task lists unchecked, even when the previous item was checked. */
+                memcpy(insert + strlen(eol) + markerStart, before + markerStart,
+                       (size_t)(markerEnd - markerStart));
+                insert[strlen(eol) + markerStart + 3] = ' ';
+                insert[insertLength] = 0;
+            } else {
+                insert[insertLength] = 0;
+            }
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
+            free(insert);
+        }
+    }
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(before);
+    return 1;
+}
+
+static int smart_pair_character(char typed) {
+    char closing = typed == '(' ? ')' : typed == '[' ? ']' : typed == '{' ? '}' : typed == '`' ? '`' : 0;
+    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (typed == '`' && start == end) {
+        if ((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == '`') {
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
+            return 1;
+        }
+        if (start >= 2 && (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '`' &&
+            (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 2), 0) == '`') return 0;
+    }
+    if (!closing) {
+        if ((typed == ')' || typed == ']' || typed == '}') && start == end &&
+            (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed) {
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
+            return 1;
+        }
+        return 0;
+    }
+    int length = end - start;
+    char *selected = (char *)malloc((size_t)length + 1);
+    if (!selected) return 0;
+    if (length > 0) SendMessageA(g_hEdit, SCI_GETSELTEXT, 0, (LPARAM)selected);
+    else selected[0] = 0;
+    size_t cap = (size_t)length + 3;
+    char *replacement = (char *)malloc(cap);
+    if (!replacement) { free(selected); return 0; }
+    replacement[0] = typed;
+    if (length > 0) memcpy(replacement + 1, selected, (size_t)length);
+    replacement[length + 1] = closing;
+    replacement[length + 2] = 0;
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
+    if (length > 0) SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1 + length));
+    else SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(replacement);
+    free(selected);
+    return 1;
+}
+
+static int smart_pair_backspace(void) {
+    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (start != end || start <= 0) return 0;
+    char before = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0);
+    char after = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)start, 0);
+    if (!((before == '(' && after == ')') || (before == '[' && after == ']') ||
+          (before == '{' && after == '}') || (before == '`' && after == '`'))) return 0;
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start - 1), (LPARAM)(start + 1));
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
+    return 1;
+}
+
+static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
+    if (!g_spellCheckEnabled || !g_spellChecker || g_activeLanguage != LANG_MARKDOWN)
+        return 0;
+
+    POINT screenPoint;
+    int position;
+    if ((int)GET_X_LPARAM(lParam) == -1 && (int)GET_Y_LPARAM(lParam) == -1) {
+        position = (int)SendMessageA(hwnd, SCI_GETCURRENTPOS, 0, 0);
+        if (!GetCaretPos(&screenPoint)) screenPoint = (POINT){0, 0};
+        ClientToScreen(hwnd, &screenPoint);
+    } else {
+        screenPoint.x = GET_X_LPARAM(lParam);
+        screenPoint.y = GET_Y_LPARAM(lParam);
+        POINT clientPoint = screenPoint;
+        ScreenToClient(hwnd, &clientPoint);
+        position = (int)SendMessageA(hwnd, SCI_POSITIONFROMPOINTCLOSE,
+                                     (WPARAM)clientPoint.x, (LPARAM)clientPoint.y);
+    }
+    if (position < 0) return 0;
+
+    SendMessageA(hwnd, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
+    if (!SendMessageA(hwnd, SCI_INDICATORVALUEAT, INDICATOR_SPELLING, position) && position > 0)
+        position--;
+    if (!SendMessageA(hwnd, SCI_INDICATORVALUEAT, INDICATOR_SPELLING, position)) return 0;
+
+    int start = (int)SendMessageA(hwnd, SCI_INDICATORSTART, INDICATOR_SPELLING, position);
+    int end = (int)SendMessageA(hwnd, SCI_INDICATOREND, INDICATOR_SPELLING, position);
+    if (start < 0 || end <= start) return 0;
+    int byteLength = end - start;
+    char *utf8Word = (char *)malloc((size_t)byteLength + 1);
+    if (!utf8Word) return 1;
+    struct Sci_TextRange range = { { start, end }, utf8Word };
+    SendMessageA(hwnd, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    utf8Word[byteLength] = 0;
+    WCHAR *word = to_wide(utf8Word);
+    free(utf8Word);
+    if (!word) return 1;
+
+    enum {
+        SPELL_SUGGESTION_FIRST = 1, SPELL_SUGGESTION_LAST = 8,
+        SPELL_IGNORE = 20, SPELL_ADD = 21,
+        SPELL_UNDO = 30, SPELL_CUT = 31, SPELL_COPY = 32,
+        SPELL_PASTE = 33, SPELL_SELECT_ALL = 34
+    };
+    WCHAR *suggestions[SPELL_SUGGESTION_LAST] = {0};
+    int suggestionCount = 0;
+    IEnumString *suggestionEnum = NULL;
+    if (SUCCEEDED(ISpellChecker_Suggest(g_spellChecker, word, &suggestionEnum)) && suggestionEnum) {
+        while (suggestionCount < SPELL_SUGGESTION_LAST) {
+            LPOLESTR suggestion = NULL;
+            ULONG fetched = 0;
+            if (IEnumString_Next(suggestionEnum, 1, &suggestion, &fetched) != S_OK || !suggestion)
+                break;
+            suggestions[suggestionCount++] = suggestion;
+        }
+        IEnumString_Release(suggestionEnum);
+    }
+
+    HMENU menu = CreatePopupMenu();
+    for (int i = 0; i < suggestionCount; i++)
+        AppendMenuW(menu, MF_STRING, SPELL_SUGGESTION_FIRST + i, suggestions[i]);
+    if (suggestionCount == 0)
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(No suggestions)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, SPELL_IGNORE, L"Ignore Word");
+    AppendMenuW(menu, MF_STRING, SPELL_ADD, L"Add to Dictionary");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING | (SendMessageA(hwnd, SCI_CANUNDO, 0, 0) ? 0 : MF_GRAYED),
+                SPELL_UNDO, L"Undo");
+    AppendMenuW(menu, MF_STRING, SPELL_CUT, L"Cut");
+    AppendMenuW(menu, MF_STRING, SPELL_COPY, L"Copy");
+    AppendMenuW(menu, MF_STRING, SPELL_PASTE, L"Paste");
+    AppendMenuW(menu, MF_STRING, SPELL_SELECT_ALL, L"Select All");
+
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                  screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL);
+    DestroyMenu(menu);
+    if (command >= SPELL_SUGGESTION_FIRST && command <= (UINT)suggestionCount) {
+        char *replacement = to_utf8(suggestions[command - SPELL_SUGGESTION_FIRST]);
+        if (replacement) {
+            SendMessageA(hwnd, SCI_BEGINUNDOACTION, 0, 0);
+            SendMessageA(hwnd, SCI_SETTARGETSTART, (WPARAM)start, 0);
+            SendMessageA(hwnd, SCI_SETTARGETEND, (WPARAM)end, 0);
+            int inserted = (int)SendMessageA(hwnd, SCI_REPLACETARGET,
+                                              (WPARAM)-1, (LPARAM)replacement);
+            SendMessageA(hwnd, SCI_SETSEL, (WPARAM)(start + inserted),
+                         (LPARAM)(start + inserted));
+            SendMessageA(hwnd, SCI_ENDUNDOACTION, 0, 0);
+            free(replacement);
+            schedule_spell_check();
+        }
+    } else if (command == SPELL_IGNORE) {
+        ISpellChecker_Ignore(g_spellChecker, word);
+        schedule_spell_check();
+    } else if (command == SPELL_ADD) {
+        ISpellChecker_Add(g_spellChecker, word);
+        schedule_spell_check();
+    } else if (command == SPELL_UNDO) SendMessageA(hwnd, SCI_UNDO, 0, 0);
+    else if (command == SPELL_CUT) SendMessageA(hwnd, SCI_CUT, 0, 0);
+    else if (command == SPELL_COPY) SendMessageA(hwnd, SCI_COPY, 0, 0);
+    else if (command == SPELL_PASTE) SendMessageA(hwnd, SCI_PASTE, 0, 0);
+    else if (command == SPELL_SELECT_ALL) SendMessageA(hwnd, SCI_SELECTALL, 0, 0);
+
+    for (int i = 0; i < suggestionCount; i++) CoTaskMemFree(suggestions[i]);
+    free(word);
+    return 1;
+}
+
+static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                         UINT_PTR id, DWORD_PTR data) {
+    (void)id; (void)data;
+    if (msg == WM_CHAR) {
+        if (wParam == '\t' && smart_tab((GetKeyState(VK_SHIFT) & 0x8000) != 0)) return 0;
+        if (wParam == '\r' && smart_markdown_newline()) return 0;
+        if (wParam == '\b' && smart_pair_backspace()) return 0;
+        if (wParam < 128 && smart_pair_character((char)wParam)) return 0;
+    } else if (msg == WM_CONTEXTMENU) {
+        if (show_spelling_context_menu(hwnd, lParam)) return 0;
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, EditSubclassProc, 2);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void move_document_tab(int from, int to) {
+    if (from < 0 || to < 0 || from >= g_documentCount || to >= g_documentCount || from == to) return;
+    save_active_document_view();
+    Document moving = g_documents[from];
+    if (from < to) {
+        for (int i = from; i < to; i++) g_documents[i] = g_documents[i + 1];
+    } else {
+        for (int i = from; i > to; i--) g_documents[i] = g_documents[i - 1];
+    }
+    g_documents[to] = moving;
+    if (g_activeDocument == from) g_activeDocument = to;
+    else if (from < g_activeDocument && to >= g_activeDocument) g_activeDocument--;
+    else if (from > g_activeDocument && to <= g_activeDocument) g_activeDocument++;
+
+    TabCtrl_DeleteItem(g_hTabs, from);
+    TCITEMW item = {0};
+    item.mask = TCIF_TEXT; item.pszText = L"";
+    SendMessageW(g_hTabs, TCM_INSERTITEMW, (WPARAM)to, (LPARAM)&item);
+    for (int i = 0; i < g_documentCount; i++) update_tab_label(i);
+    TabCtrl_SetCurSel(g_hTabs, g_activeDocument);
+    update_title();
+}
+
 static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                         UINT_PTR subclassId, DWORD_PTR refData) {
     (void)subclassId; (void)refData;
-    if (msg == WM_ERASEBKGND && g_previewDarkMode) {
-        RECT client;
-        GetClientRect(hwnd, &client);
-        HBRUSH brush = CreateSolidBrush(RGB(0x01, 0x04, 0x09));
-        FillRect((HDC)wParam, &client, brush);
-        DeleteObject(brush);
-        return 1;
-    } else if (msg == WM_PAINT && g_previewDarkMode) {
+    if (msg == WM_ERASEBKGND) {
+        return 1; /* WM_PAINT fills the whole strip from a back buffer */
+    } else if (msg == WM_PAINT) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         RECT client;
         GetClientRect(hwnd, &client);
-        HBRUSH brush = CreateSolidBrush(RGB(0x01, 0x04, 0x09));
-        FillRect(dc, &client, brush);
+
+        /* Draw the strip and every tab into a back buffer: the tabs are
+           owner-drawn one at a time, which visibly flickers on-screen. */
+        HDC buffer = CreateCompatibleDC(dc);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
+        HBITMAP oldBitmap = (HBITMAP)SelectObject(buffer, bitmap);
+
+        /* The recessed strip behind the tabs, matching the editor's
+           line-number gutter immediately below it. */
+        HBRUSH brush = CreateSolidBrush(g_previewDarkMode
+            ? RGB(0x16, 0x1B, 0x22) : RGB(0xF6, 0xF8, 0xFA));
+        FillRect(buffer, &client, brush);
         DeleteObject(brush);
+
         int selected = TabCtrl_GetCurSel(hwnd);
         for (int i = 0; i < g_documentCount; i++) {
             RECT itemRect;
@@ -3882,13 +7462,40 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             dis.itemAction = ODA_DRAWENTIRE;
             dis.itemState = i == selected ? ODS_SELECTED : 0;
             dis.hwndItem = hwnd;
-            dis.hDC = dc;
+            dis.hDC = buffer;
             dis.rcItem = itemRect;
             draw_tab_item(&dis);
         }
+
+        BitBlt(dc, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
+        SelectObject(buffer, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(buffer);
         EndPaint(hwnd, &ps);
         return 0;
+    } else if (msg == WM_LBUTTONDOWN) {
+        TCHITTESTINFO hit = {0};
+        hit.pt.x = GET_X_LPARAM(lParam); hit.pt.y = GET_Y_LPARAM(lParam);
+        g_tabDragIndex = TabCtrl_HitTest(hwnd, &hit);
+        g_tabDragged = 0;
+        if (g_tabDragIndex >= 0) SetCapture(hwnd);
+    } else if (msg == WM_MOUSEMOVE && g_tabDragIndex >= 0 && (wParam & MK_LBUTTON)) {
+        TCHITTESTINFO hit = {0};
+        hit.pt.x = GET_X_LPARAM(lParam); hit.pt.y = GET_Y_LPARAM(lParam);
+        int target = TabCtrl_HitTest(hwnd, &hit);
+        if (target >= 0 && target != g_tabDragIndex) {
+            move_document_tab(g_tabDragIndex, target);
+            g_tabDragIndex = target;
+            g_tabDragged = 1;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
     } else if (msg == WM_LBUTTONUP || msg == WM_MBUTTONUP) {
+        if (msg == WM_LBUTTONUP && g_tabDragIndex >= 0) {
+            ReleaseCapture();
+            g_tabDragIndex = -1;
+            if (g_tabDragged) { g_tabDragged = 0; return 0; }
+        }
         TCHITTESTINFO hit = {0};
         hit.pt.x = GET_X_LPARAM(lParam);
         hit.pt.y = GET_Y_LPARAM(lParam);
@@ -3912,14 +7519,24 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 static void initialize_main_window(HWND hwnd) {
     g_hMainWnd = hwnd;
 
+    /* The process preference is selected before window creation; complete the
+       per-window opt-in before attaching the menu so its first paint matches. */
+    apply_menu_theme(hwnd, g_previewDarkMode);
+
     HDC hdc = GetDC(hwnd);
     int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-    g_fontMono = CreateFontA(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH, "Consolas");
     ReleaseDC(hwnd, hdc);
 
-    SetMenu(hwnd, build_menu());
+    if (!g_focusMode) SetMenu(hwnd, build_menu());
     create_toolbar(hwnd);
+
+    g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
+        WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+        0, 0, 0, 0, hwnd, (HMENU)ID_STATUS, GetModuleHandleW(NULL), NULL);
+
+    g_hOutline = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+        0, 0, 0, 0, hwnd, (HMENU)ID_OUTLINE, GetModuleHandleW(NULL), NULL);
 
     g_hTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_TOOLTIPS |
@@ -3937,9 +7554,12 @@ static void initialize_main_window(HWND hwnd) {
     }
     SetWindowSubclass(g_hTabs, TabSubclassProc, 1, 0);
 
-    g_hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "Scintilla", "",
+    /* No WS_EX_CLIENTEDGE on either pane: its sunken border is drawn in fixed
+       system greys, which reads as a light seam against the dark theme. */
+    g_hEdit = CreateWindowExA(0, "Scintilla", "",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
         0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, GetModuleHandleA(NULL), NULL);
+    SetWindowSubclass(g_hEdit, EditSubclassProc, 2, 0);
     configure_scintilla(g_hEdit);
     apply_editor_font(g_fontFaceName, g_fontPointSize);
 
@@ -3948,7 +7568,8 @@ static void initialize_main_window(HWND hwnd) {
     memset(&g_documents[0], 0, sizeof(g_documents[0]));
     g_documents[0].sciDocument = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
     SendMessageA(g_hEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_documents[0].sciDocument);
-    g_documents[0].untitledNumber = g_nextUntitledNumber++;
+    /* The sole blank startup tab is the unnumbered canonical document. */
+    g_documents[0].untitledNumber = 0;
     TCITEMW firstTab = {0};
     firstTab.mask = TCIF_TEXT;
     firstTab.pszText = L"";
@@ -3964,12 +7585,15 @@ static void initialize_main_window(HWND hwnd) {
 
     apply_preview_host_theme();
     apply_main_theme(hwnd);
-    g_hPreview = CreateWindowExA(WS_EX_CLIENTEDGE, "STATIC", "",
+    g_hPreview = CreateWindowExA(0, "STATIC", "",
         WS_CHILD | WS_VISIBLE,
         0, 0, 0, 0, hwnd, (HMENU)ID_PREVIEW, GetModuleHandleA(NULL), NULL);
 
     init_webview();
     SetTimer(hwnd, IDT_FILE_WATCH, 1500, NULL);
+    SetTimer(hwnd, IDT_AUTOSAVE, 5000, NULL);
+    update_status_bar();
+    update_outline();
     layout(hwnd);
 }
 
@@ -3978,17 +7602,29 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
 
     struct SCNotification *scn = (struct SCNotification *)notification;
     if (notification->code == SCN_UPDATEUI) {
-        if (scn->updated & SC_UPDATE_V_SCROLL) {
+        if ((scn->updated & SC_UPDATE_V_SCROLL) && g_editorVisible && g_previewVisible) {
             if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
             else SetTimer(hwnd, IDT_SCROLL_SYNC, 35, NULL);
+        }
+        update_brace_highlight();
+        update_status_bar();
+        return;
+    }
+    if (notification->code == SCN_MARGINCLICK) {
+        if (scn->margin == MARGIN_BOOKMARKS) {
+            int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)scn->position, 0);
+            toggle_bookmark_at_line(line);
         }
         return;
     }
     if (notification->code != SCN_MODIFIED) return;
     if (!(scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT))) return;
 
-    if (!g_switchingDocument) set_dirty(1);
-    SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
+    if (!g_switchingDocument && !g_dirty) set_dirty(1);
+    if (g_previewVisible) SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
+    schedule_spell_check();
+    update_status_bar();
+    SetTimer(hwnd, IDT_OUTLINE_UPDATE, 500, NULL);
     if (scn->linesAdded != 0) update_linenumber_margin_width(g_hEdit);
 }
 
@@ -3997,11 +7633,16 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_PREVIEW_UPDATE);
     KillTimer(hwnd, IDT_FILE_WATCH);
     KillTimer(hwnd, IDT_SCROLL_SYNC);
+    KillTimer(hwnd, IDT_SPELL_CHECK);
+    KillTimer(hwnd, IDT_AUTOSAVE);
+    KillTimer(hwnd, IDT_OUTLINE_UPDATE);
+    KillTimer(hwnd, IDT_PRINT_PREVIEW);
     if (g_webview && g_webMessageRegistered) {
         ICoreWebView2_remove_WebMessageReceived(g_webview, g_webMessageToken);
         g_webMessageRegistered = 0;
     }
     if (g_webviewController) ICoreWebView2Controller_Close(g_webviewController);
+    if (g_spellChecker) { ISpellChecker_Release(g_spellChecker); g_spellChecker = NULL; }
     if (g_webview3) { ICoreWebView2_3_Release(g_webview3); g_webview3 = NULL; }
     if (g_webview) { ICoreWebView2_Release(g_webview); g_webview = NULL; }
     if (g_webviewController) { ICoreWebView2Controller_Release(g_webviewController); g_webviewController = NULL; }
@@ -4009,10 +7650,14 @@ static void destroy_main_window(HWND hwnd) {
     g_pendingHtmlBody = NULL;
     free(g_exportPath);
     g_exportPath = NULL;
+    free(g_pendingPdfPath);
+    g_pendingPdfPath = NULL;
+    free(g_customCssPath);
+    g_customCssPath = NULL;
     if (g_previewBkBrush) { DeleteObject(g_previewBkBrush); g_previewBkBrush = NULL; }
-    if (g_helpBkBrush) { DeleteObject(g_helpBkBrush); g_helpBkBrush = NULL; }
     if (g_mainBkBrush) { DeleteObject(g_mainBkBrush); g_mainBkBrush = NULL; }
-    if (g_fontMono) { DeleteObject(g_fontMono); g_fontMono = NULL; }
+    if (g_menuBkBrush) { DeleteObject(g_menuBkBrush); g_menuBkBrush = NULL; }
+    if (g_menuFont) { DeleteObject(g_menuFont); g_menuFont = NULL; }
     for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
     for (int i = 0; i < g_documentCount; i++) free(g_documents[i].path);
     for (int i = 0; i < g_closedDocumentCount; i++) free(g_closedDocuments[i].path);
@@ -4039,8 +7684,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             break;
         }
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
+            if (mis->CtlType == ODT_MENU && mis->itemData) {
+                measure_main_menu_item(mis);
+                return TRUE;
+            }
+            break;
+        }
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+            if (dis->CtlType == ODT_MENU && dis->itemData) {
+                draw_main_menu_item(dis);
+                return TRUE;
+            }
             if (dis->CtlType == ODT_BUTTON) {
                 draw_toolbar_button(dis);
                 return TRUE;
@@ -4052,18 +7709,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
         /* g_hEdit/g_hPreview/the toolbar buttons cover the rest of the client
-           area themselves; this only ever paints the toolbar strip's margins
-           and the splitter gap, so filling the whole client rect is fine -
-           there's nothing else left for DefWindowProc's COLOR_WINDOW brush to
-           paint that isn't about to be covered by a child window anyway. */
-        case WM_ERASEBKGND:
-            if (g_mainBkBrush) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                FillRect((HDC)wParam, &rc, g_mainBkBrush);
-                return 1;
-            }
-            break;
+           area themselves, so this only ever shows through on the toolbar
+           strip's margins and the splitter gap. */
+        case WM_ERASEBKGND: {
+            /* The class has no background brush, so this must always paint. */
+            if (!g_mainBkBrush)
+                g_mainBkBrush = CreateSolidBrush(
+                    g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect((HDC)wParam, &rc, g_mainBkBrush);
+            return 1;
+        }
         case WM_TIMER:
             if (wParam == IDT_PREVIEW_UPDATE) {
                 update_preview();
@@ -4075,6 +7732,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             if (wParam == IDT_SCROLL_SYNC) {
                 sync_preview_to_editor_scroll();
+                return 0;
+            }
+            if (wParam == IDT_SPELL_CHECK) {
+                perform_spell_check();
+                return 0;
+            }
+            if (wParam == IDT_AUTOSAVE) {
+                write_recovery_snapshot();
+                return 0;
+            }
+            if (wParam == IDT_OUTLINE_UPDATE) {
+                KillTimer(hwnd, IDT_OUTLINE_UPDATE);
+                update_outline();
+                return 0;
+            }
+            if (wParam == IDT_PRINT_PREVIEW) {
+                run_pending_print();
                 return 0;
             }
             break;
@@ -4100,7 +7774,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_MOUSEMOVE: {
-            if (g_dragging) {
+            /* Mouse moves arrive far faster than the panes can be resized, so
+               skip the relayout when the splitter has not actually moved. */
+            if (g_dragging && GET_X_LPARAM(lParam) != g_splitterPos) {
                 g_splitterPos = GET_X_LPARAM(lParam);
                 layout(hwnd);
             }
@@ -4140,6 +7816,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_COMMAND:
+            if ((HWND)lParam == g_hOutline && HIWORD(wParam) == LBN_SELCHANGE) {
+                int selected = (int)SendMessageW(g_hOutline, LB_GETCURSEL, 0, 0);
+                if (selected >= 0 && selected < g_outlineCount) {
+                    SendMessageA(g_hEdit, SCI_GOTOLINE, (WPARAM)g_outlineLines[selected], 0);
+                    SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+                    SetFocus(g_hEdit);
+                }
+                return 0;
+            }
             handle_main_command(hwnd, LOWORD(wParam));
             return 0;
         case WM_APP_CLOSE_TAB:
@@ -4151,6 +7836,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_QUERYENDSESSION:
             save_layout_settings();
             save_session_documents();
+            write_recovery_snapshot();
             return TRUE;
         case WM_DESTROY:
             destroy_main_window(hwnd);
@@ -4163,7 +7849,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     (void)hPrevInstance;
     (void)lpCmdLine;
 
-    INITCOMMONCONTROLSEX commonControls = { sizeof(commonControls), ICC_TAB_CLASSES };
+    INITCOMMONCONTROLSEX commonControls = { sizeof(commonControls), ICC_TAB_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&commonControls);
 
     int argc = 0;
@@ -4190,7 +7876,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     load_font_settings();
     load_theme_settings();
+    init_native_menu_theme_support();
+    apply_menu_theme(NULL, g_previewDarkMode);
     load_layout_settings();
+    load_find_settings();
     if (g_commandLinePreviewMode) {
         /* File-association/command-line launches are preview-only for this
            session, without overwriting the user's normal panel visibility. */
@@ -4201,6 +7890,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     prune_missing_recent_files();
 
     HRESULT comResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(comResult)) init_spell_checker();
 
     g_msgFindReplace = RegisterWindowMessageW(FINDMSGSTRINGW);
 
@@ -4214,7 +7904,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.hInstance = hInstance;
     wc.lpszClassName = L"MarkEditWndClass";
     wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    /* No class brush: WM_ERASEBKGND paints the themed background itself, and
+       COLOR_WINDOW would flash white behind a dark-mode window before it runs. */
+    wc.hbrBackground = NULL;
     wc.hIcon = hIconBig;
     wc.hIconSm = hIconSmall;
     RegisterClassExW(&wc);
@@ -4225,8 +7917,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ? g_savedWindowRect.right - g_savedWindowRect.left : 1100;
     int windowHeight = g_haveSavedWindowRect
         ? g_savedWindowRect.bottom - g_savedWindowRect.top : 750;
-    HWND hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"MarkEditWndClass", L"Untitled - MarkEdit",
-        WS_OVERLAPPEDWINDOW,
+    /* WS_CLIPCHILDREN stops the themed parent background repainting underneath
+       the editor and preview panes, which otherwise flashes while resizing. */
+    HWND hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"MarkEditWndClass", L"Untitled.md - MarkEdit",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         windowX, windowY, windowWidth, windowHeight,
         NULL, NULL, hInstance, NULL);
 
@@ -4234,15 +7928,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (hIconSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
 
     if (cliFile) load_file(cliFile);
-    else restore_session_documents();
+    else if (!restore_recovery_snapshot()) restore_session_documents();
     free(cliFile);
 
     ACCEL accels[] = {
         { FVIRTKEY | FCONTROL, 'N', IDM_FILE_NEW },
         { FVIRTKEY | FCONTROL, 'O', IDM_FILE_OPEN },
+        { FVIRTKEY | FCONTROL, 'K', IDM_FILE_QUICK_OPEN },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'P', IDM_EDIT_COMMAND_PALETTE },
         { FVIRTKEY | FCONTROL, 'S', IDM_FILE_SAVE },
+        { FVIRTKEY | FCONTROL, 'P', IDM_FILE_PRINT },
         { FVIRTKEY | FCONTROL | FSHIFT, 'S', IDM_FILE_SAVEAS },
         { FVIRTKEY | FCONTROL, 'A', IDM_EDIT_SELECTALL },
+        { FVIRTKEY | FCONTROL, 'V', IDM_EDIT_PASTE },
         { FVIRTKEY | FCONTROL, 'Y', IDM_EDIT_REDO },
         { FVIRTKEY | FCONTROL, 'F', IDM_EDIT_FIND },
         { FVIRTKEY | FCONTROL, 'H', IDM_EDIT_REPLACE },
@@ -4254,6 +7952,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY, VK_F3, IDM_EDIT_FINDNEXT },
         { FVIRTKEY | FCONTROL | FSHIFT, 'V', IDM_VIEW_TOGGLEPREVIEW },
         { FVIRTKEY | FCONTROL | FSHIFT, 'E', IDM_VIEW_TOGGLEEDITOR },
+        { FVIRTKEY, VK_F11, IDM_VIEW_FOCUS_MODE },
+        { FVIRTKEY | FALT, 'Z', IDM_VIEW_WORD_WRAP },
+        { FVIRTKEY | FCONTROL, 'D', IDM_EDIT_DUPLICATE_LINE },
+        { FVIRTKEY | FALT, VK_UP, IDM_EDIT_MOVE_LINE_UP },
+        { FVIRTKEY | FALT, VK_DOWN, IDM_EDIT_MOVE_LINE_DOWN },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'K', IDM_EDIT_DELETE_LINE },
+        { FVIRTKEY | FCONTROL, 'J', IDM_EDIT_JOIN_LINES },
+        { FVIRTKEY | FCONTROL, VK_OEM_2, IDM_EDIT_TOGGLE_COMMENT },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'D', IDM_EDIT_SELECT_NEXT },
+        { FVIRTKEY | FCONTROL, VK_OEM_6, IDM_EDIT_MATCH_BRACE },
+        { FVIRTKEY | FCONTROL, VK_F2, IDM_EDIT_BOOKMARK_TOGGLE },
+        { FVIRTKEY, VK_F2, IDM_EDIT_BOOKMARK_NEXT },
+        { FVIRTKEY | FSHIFT, VK_F2, IDM_EDIT_BOOKMARK_PREV },
     };
     HACCEL hAccel = CreateAcceleratorTableA(accels, sizeof(accels) / sizeof(accels[0]));
 
