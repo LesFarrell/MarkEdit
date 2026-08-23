@@ -23,7 +23,10 @@
 #include <spellcheck.h>
 #include <uxtheme.h>
 #include <wincodec.h>
+#include "json_formatter.h"
 #include "markdown.h"
+#include "path_utils.h"
+#include "text_codec.h"
 
 #include <WebView2.h>
 #include "third_party/scintilla/include/Scintilla.h"
@@ -139,8 +142,6 @@
 #define IDM_FILE_FIND_FOLDER     303
 #define IDM_EDIT_COMMAND_PALETTE 304
 #define IDM_FMT_TABLE_EDITOR     305
-#define IDM_TOOLS_DIAGNOSTICS    306
-#define IDM_TOOLS_LINT           307
 #define IDM_VIEW_OUTLINE         308
 #define IDM_VIEW_SPELL_LANGUAGE  309
 #define IDI_APPICON 1
@@ -274,7 +275,6 @@ static int create_document_tab(void);
 static int active_document_is_reusable(void);
 static void check_external_file_change(void);
 static void prompt_reload_active_external_change(void);
-static char *to_utf8(const WCHAR *s);
 static WCHAR *get_settings_path(void);
 static void do_close_document_at(int index);
 static void do_reopen_closed_tab(void);
@@ -283,85 +283,6 @@ static void restore_session_documents(void);
 static void sync_preview_to_editor_scroll(void);
 static void apply_custom_preview_css(int reportErrors);
 static int paste_image_from_clipboard(void);
-
-static WCHAR *wcsdup_heap(const WCHAR *value) {
-    if (!value) return NULL;
-    size_t bytes = (wcslen(value) + 1) * sizeof(WCHAR);
-    WCHAR *copy = (WCHAR *)malloc(bytes);
-    if (copy) memcpy(copy, value, bytes);
-    return copy;
-}
-
-static void replace_wstring(WCHAR **target, const WCHAR *value) {
-    WCHAR *copy = value ? wcsdup_heap(value) : NULL;
-    if (value && !copy) return;
-    free(*target);
-    *target = copy;
-}
-
-static WCHAR *get_module_path(void) {
-    DWORD cap = 512;
-    for (;;) {
-        WCHAR *path = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
-        if (!path) return NULL;
-        DWORD n = GetModuleFileNameW(NULL, path, cap);
-        if (n > 0 && n < cap - 1) return path;
-        free(path);
-        if (cap >= 32768) return NULL;
-        cap *= 2;
-    }
-}
-
-static WCHAR *path_directory(const WCHAR *path) {
-    WCHAR *dir = wcsdup_heap(path);
-    if (!dir) return NULL;
-    WCHAR *slash = wcsrchr(dir, L'\\');
-    WCHAR *forward = wcsrchr(dir, L'/');
-    if (forward && (!slash || forward > slash)) slash = forward;
-    if (slash) {
-        if (slash == dir + 2 && dir[1] == L':') slash[1] = 0;
-        else *slash = 0;
-    } else {
-        free(dir);
-        return wcsdup_heap(L".");
-    }
-    return dir;
-}
-
-static WCHAR *path_join(const WCHAR *directory, const WCHAR *name) {
-    size_t a = wcslen(directory), b = wcslen(name);
-    int addSlash = a > 0 && directory[a - 1] != L'\\' && directory[a - 1] != L'/';
-    WCHAR *joined = (WCHAR *)malloc((a + (size_t)addSlash + b + 1) * sizeof(WCHAR));
-    if (!joined) return NULL;
-    memcpy(joined, directory, a * sizeof(WCHAR));
-    if (addSlash) joined[a++] = L'\\';
-    memcpy(joined + a, name, (b + 1) * sizeof(WCHAR));
-    return joined;
-}
-
-static WCHAR *absolute_path(const WCHAR *path) {
-    DWORD cap = GetFullPathNameW(path, 0, NULL, NULL);
-    if (!cap) return wcsdup_heap(path);
-    WCHAR *full = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
-    if (!full) return NULL;
-    if (!GetFullPathNameW(path, cap, full, NULL)) {
-        free(full);
-        return NULL;
-    }
-    return full;
-}
-
-static WCHAR *extended_path(const WCHAR *path) {
-    WCHAR *full = absolute_path(path);
-    if (!full || wcsncmp(full, L"\\\\?\\", 4) == 0) return full;
-    const WCHAR *prefix = wcsncmp(full, L"\\\\", 2) == 0 ? L"\\\\?\\UNC\\" : L"\\\\?\\";
-    const WCHAR *tail = wcsncmp(full, L"\\\\", 2) == 0 ? full + 2 : full;
-    size_t n = wcslen(prefix) + wcslen(tail) + 1;
-    WCHAR *extended = (WCHAR *)malloc(n * sizeof(WCHAR));
-    if (extended) swprintf(extended, n, L"%ls%ls", prefix, tail);
-    free(full);
-    return extended;
-}
 
 /* ---- simple growable text buffer, used to pull text out of the Scintilla control ---- */
 static char *get_edit_text(HWND hEdit, int *outLen) {
@@ -2268,107 +2189,6 @@ static const char *HTML_SHELL =
 "</script>"
 "</body></html>";
 
-/* Convert a UTF-8 (well, ASCII in practice from our EDIT control) C string to a wide string. */
-static WCHAR *to_wide(const char *s) {
-    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
-    if (n <= 0) return NULL;
-    WCHAR *w = (WCHAR *)malloc((size_t)n * sizeof(WCHAR));
-    if (!w) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, w, n)) {
-        free(w);
-        return NULL;
-    }
-    return w;
-}
-
-static char *to_utf8(const WCHAR *s) {
-    int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, NULL, 0, NULL, NULL);
-    if (n <= 0) return NULL;
-    char *utf8 = (char *)malloc((size_t)n);
-    if (!utf8) return NULL;
-    if (!WideCharToMultiByte(CP_UTF8, 0, s, -1, utf8, n, NULL, NULL)) {
-        free(utf8);
-        return NULL;
-    }
-    return utf8;
-}
-
-static int json_hex_digit(WCHAR c) {
-    if (c >= L'0' && c <= L'9') return c - L'0';
-    if (c >= L'a' && c <= L'f') return c - L'a' + 10;
-    if (c >= L'A' && c <= L'F') return c - L'A' + 10;
-    return -1;
-}
-
-/* WebView2 returns ExecuteScript values as JSON. Decode its string result
-   without involving a second scripting engine so exported Unicode remains
-   byte-for-byte UTF-8. */
-static WCHAR *decode_json_string(const WCHAR *json) {
-    if (!json || json[0] != L'"') return NULL;
-    size_t n = wcslen(json);
-    WCHAR *out = (WCHAR *)malloc((n + 1) * sizeof(WCHAR));
-    if (!out) return NULL;
-    size_t o = 0;
-    for (size_t i = 1; i < n && json[i] != L'"'; i++) {
-        WCHAR c = json[i];
-        if (c != L'\\') { out[o++] = c; continue; }
-        if (++i >= n) { free(out); return NULL; }
-        c = json[i];
-        if (c == L'"' || c == L'\\' || c == L'/') out[o++] = c;
-        else if (c == L'b') out[o++] = L'\b';
-        else if (c == L'f') out[o++] = L'\f';
-        else if (c == L'n') out[o++] = L'\n';
-        else if (c == L'r') out[o++] = L'\r';
-        else if (c == L't') out[o++] = L'\t';
-        else if (c == L'u' && i + 4 < n) {
-            int value = 0;
-            for (int j = 0; j < 4; j++) {
-                int digit = json_hex_digit(json[++i]);
-                if (digit < 0) { free(out); return NULL; }
-                value = value * 16 + digit;
-            }
-            out[o++] = (WCHAR)value;
-        } else { free(out); return NULL; }
-    }
-    out[o] = 0;
-    return out;
-}
-
-/* JSON-escape a UTF-8 string for embedding inside a JS string literal (single-quoted). */
-static char *json_escape(const char *s) {
-    size_t n = strlen(s);
-    char *out = (char *)malloc(n * 6 + 1);
-    if (!out) return NULL;
-    size_t o = 0;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        switch (c) {
-            case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
-            case '\'': out[o++] = '\\'; out[o++] = '\''; break;
-            case '<': memcpy(out + o, "\\u003C", 6); o += 6; break;
-            case '\n': out[o++] = '\\'; out[o++] = 'n'; break;
-            case '\r': out[o++] = '\\'; out[o++] = 'r'; break;
-            case '\t': out[o++] = '\\'; out[o++] = 't'; break;
-            case '\b': out[o++] = '\\'; out[o++] = 'b'; break;
-            case '\f': out[o++] = '\\'; out[o++] = 'f'; break;
-            default:
-                if (c < 0x20) {
-                    static const char hex[] = "0123456789abcdef";
-                    out[o++] = '\\'; out[o++] = 'u'; out[o++] = '0'; out[o++] = '0';
-                    out[o++] = hex[c >> 4]; out[o++] = hex[c & 15];
-                } else if (c == 0xE2 && i + 2 < n && (unsigned char)s[i + 1] == 0x80 &&
-                           ((unsigned char)s[i + 2] == 0xA8 || (unsigned char)s[i + 2] == 0xA9)) {
-                    memcpy(out + o, (unsigned char)s[i + 2] == 0xA8 ? "\\u2028" : "\\u2029", 6);
-                    o += 6;
-                    i += 2;
-                } else out[o++] = (char)c;
-                break;
-        }
-    }
-    out[o] = 0;
-    return out;
-}
-
 /* Read a reasonably-sized UTF-8 text file. Custom preview stylesheets are
    deliberately injected as text instead of linked directly, which keeps the
    preview's restrictive CSP intact and also makes exported HTML self-contained. */
@@ -4071,7 +3891,7 @@ static void show_goto_line_dialog(void) {
 }
 
 /* Reusable searchable picker used by Quick Open, folder search, the command
-   palette, diagnostics and spelling-language selection. Item data keeps the
+   palette and spelling-language selection. Item data keeps the
    original index while the visible list is filtered. */
 typedef struct ChoiceDialogState {
     WCHAR **labels;
@@ -4908,11 +4728,6 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_ALL, "Fold &All");
     AppendMenuA(hView, MF_STRING, IDM_VIEW_UNFOLD_ALL, "&Unfold All");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hView, "&View");
-
-    HMENU hTools = CreatePopupMenu();
-    AppendMenuA(hTools, MF_STRING, IDM_TOOLS_DIAGNOSTICS, "Markdown &Diagnostics...");
-    AppendMenuA(hTools, MF_STRING, IDM_TOOLS_LINT, "Markdown &Lint...");
-    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hTools, "&Tools");
 
     HMENU hHelp = CreatePopupMenu();
     AppendMenuA(hHelp, MF_STRING, IDM_HELP_REFERENCE, "&Markdown Reference");
@@ -5999,117 +5814,6 @@ static int line_starts_fence(int line) {
 
 /* ---- JSON reformatting for the fenced block at the caret ---- */
 
-typedef struct JsonPrinter {
-    char *out;
-    size_t length, capacity;
-    int failed;
-} JsonPrinter;
-
-static void json_emit(JsonPrinter *p, const char *s, size_t n) {
-    if (p->failed) return;
-    if (p->length + n + 1 > p->capacity) {
-        size_t wanted = (p->length + n + 1) * 2;
-        char *grown = (char *)realloc(p->out, wanted);
-        if (!grown) { p->failed = 1; return; }
-        p->out = grown;
-        p->capacity = wanted;
-    }
-    memcpy(p->out + p->length, s, n);
-    p->length += n;
-    p->out[p->length] = 0;
-}
-
-static void json_emit_indent(JsonPrinter *p, const char *eol, int depth) {
-    json_emit(p, eol, strlen(eol));
-    for (int i = 0; i < depth; i++) json_emit(p, "  ", 2);
-}
-
-/* Copies a quoted string verbatim, honouring backslash escapes so that a
-   quote inside the string doesn't terminate it. Returns the index just past
-   the closing quote, or -1 if it is unterminated. */
-static int json_copy_string(JsonPrinter *p, const char *s, int i, int n) {
-    int start = i;
-    i++;
-    while (i < n && s[i] != '"') i += (s[i] == '\\' && i + 1 < n) ? 2 : 1;
-    if (i >= n) return -1;
-    i++;
-    json_emit(p, s + start, (size_t)(i - start));
-    return i;
-}
-
-/* Reformats `text` as JSON. `indent` selects pretty-printing; otherwise the
-   result is minified. Returns a new string, or NULL when the input can't be
-   reprinted, so the caller can leave the document alone.
-
-   This re-indents rather than validates: brackets must balance and strings
-   must terminate, but grammar errors between tokens (a trailing comma, a
-   missing colon) are passed through unchanged. */
-static char *json_reformat(const char *text, int length, const char *eol, int indent) {
-    JsonPrinter p = { NULL, 0, 0, 0 };
-    int depth = 0, containers = 0, sawValue = 0;
-
-    for (int i = 0; i < length; ) {
-        char c = text[i];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
-
-        if (c == '"') {
-            int next = json_copy_string(&p, text, i, length);
-            if (next < 0) { free(p.out); return NULL; }
-            i = next;
-            sawValue = 1;
-            continue;
-        }
-
-        switch (c) {
-            case '{':
-            case '[':
-                json_emit(&p, &c, 1);
-                depth++;
-                containers++;
-                sawValue = 1;
-                break;
-            case '}':
-            case ']':
-                if (depth == 0) { free(p.out); return NULL; }
-                depth--;
-                /* An empty container stays on one line: "{}" reads better
-                   than a brace pair straddling a blank indented line. */
-                if (p.length && p.out[p.length - 1] != '{' && p.out[p.length - 1] != '[') {
-                    if (indent) json_emit_indent(&p, eol, depth);
-                }
-                json_emit(&p, &c, 1);
-                break;
-            case ':':
-                json_emit(&p, indent ? ": " : ":", indent ? 2 : 1);
-                break;
-            case ',':
-                json_emit(&p, ",", 1);
-                if (indent) json_emit_indent(&p, eol, depth);
-                break;
-            default: {
-                /* A bare literal: number, true, false or null. */
-                int start = i;
-                while (i < length && !strchr(" \t\r\n,:{}[]\"", text[i])) i++;
-                if (i == start) { free(p.out); return NULL; }
-                json_emit(&p, text + start, (size_t)(i - start));
-                sawValue = 1;
-                continue;
-            }
-        }
-
-        i++;
-        /* Indent after an opening brace unless the container closes immediately. */
-        if (indent && (c == '{' || c == '[')) {
-            int j = i;
-            while (j < length && strchr(" \t\r\n", text[j])) j++;
-            if (j < length && text[j] != '}' && text[j] != ']') json_emit_indent(&p, eol, depth);
-        }
-    }
-
-    if (p.failed || depth != 0 || !sawValue || !containers) { free(p.out); return NULL; }
-    return p.out;
-}
-
 /* Finds the fenced block containing `line`, returning the source range between
    its delimiters. Returns 0 when the caret is not inside a fence. */
 static int fence_body_range(int line, int *bodyStart, int *bodyEnd) {
@@ -6173,7 +5877,7 @@ static void format_json(int indent) {
     SetFocus(g_hEdit);
 }
 
-/* ---- document outline and Markdown diagnostics ------------------------- */
+/* ---- document outline -------------------------------------------------- */
 
 static int parse_atx_heading(const char *line, int length, int *textStart, int *textLength) {
     int i = 0;
@@ -6248,182 +5952,6 @@ static void toggle_outline(HWND hwnd) {
     update_view_menu(hwnd);
     layout(hwnd);
     save_layout_settings();
-}
-
-typedef struct DiagnosticList {
-    WCHAR *labels[512];
-    int lines[512];
-    int count;
-} DiagnosticList;
-
-static void add_diagnostic(DiagnosticList *list, int line, const WCHAR *message) {
-    if (list->count >= 512) return;
-    size_t capacity = wcslen(message) + 48;
-    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (!label) return;
-    swprintf(label, capacity, L"Line %d — %ls", line + 1, message);
-    list->labels[list->count] = label;
-    list->lines[list->count++] = line;
-}
-
-static void make_heading_slug(const char *text, int length, char *slug, int capacity) {
-    int out = 0, pendingDash = 0;
-    for (int i = 0; i < length && out + 1 < capacity; i++) {
-        unsigned char ch = (unsigned char)text[i];
-        if (isalnum(ch) || ch >= 0x80) {
-            if (pendingDash && out > 0 && out + 1 < capacity) slug[out++] = '-';
-            slug[out++] = (char)(ch < 0x80 ? tolower(ch) : ch);
-            pendingDash = 0;
-        } else if (ch == ' ' || ch == '-' || ch == '_') {
-            pendingDash = out > 0;
-        }
-    }
-    slug[out] = 0;
-}
-
-static int heading_slug_exists(char slugs[][256], int count, const char *slug) {
-    for (int i = 0; i < count; i++) if (_stricmp(slugs[i], slug) == 0) return 1;
-    return 0;
-}
-
-static void show_markdown_issues(int lintOnly) {
-    if (g_activeLanguage != LANG_MARKDOWN) {
-        MessageBoxW(g_hMainWnd, L"Markdown checks are available for Markdown documents.",
-                    L"MarkEdit", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-    int textLength = 0;
-    char *text = get_edit_text(g_hEdit, &textLength);
-    if (!text) return;
-    DiagnosticList issues = {0};
-    char headingSlugs[256][256];
-    int headingCount = 0, previousLevel = 0;
-    char preferredBullet = 0;
-
-    int lineNumber = 0;
-    for (char *line = text; line <= text + textLength;) {
-        char *end = strchr(line, '\n');
-        int length = end ? (int)(end - line + 1) : (int)strlen(line);
-        int start = 0, headingLength = 0;
-        int level = parse_atx_heading(line, length, &start, &headingLength);
-        if (level && headingLength > 0 && headingCount < 256) {
-            make_heading_slug(line + start, headingLength, headingSlugs[headingCount], 256);
-            int duplicate = heading_slug_exists(headingSlugs, headingCount, headingSlugs[headingCount]);
-            if (!lintOnly && duplicate) add_diagnostic(&issues, lineNumber, L"Duplicate heading anchor");
-            headingCount++;
-            if (lintOnly && previousLevel && level > previousLevel + 1)
-                add_diagnostic(&issues, lineNumber, L"Heading level skips a level");
-            previousLevel = level;
-        } else if (lintOnly) {
-            int i = 0;
-            while (i < length && i < 3 && line[i] == ' ') i++;
-            if (i < length && line[i] == '#') {
-                int j = i;
-                while (j < length && line[j] == '#' && j - i < 6) j++;
-                if (j < length && line[j] != ' ' && line[j] != '\t' && line[j] != '\r' && line[j] != '\n')
-                    add_diagnostic(&issues, lineNumber, L"Add a space after the heading marker");
-            }
-        }
-        if (lintOnly) {
-            int contentEnd = length;
-            while (contentEnd > 0 && (line[contentEnd - 1] == '\r' || line[contentEnd - 1] == '\n')) contentEnd--;
-            if (contentEnd > 0 && (line[contentEnd - 1] == ' ' || line[contentEnd - 1] == '\t'))
-                add_diagnostic(&issues, lineNumber, L"Trailing whitespace");
-            int i = 0;
-            while (i < contentEnd && line[i] == ' ') i++;
-            if (i + 1 < contentEnd && (line[i] == '-' || line[i] == '*' || line[i] == '+') &&
-                (line[i + 1] == ' ' || line[i + 1] == '\t')) {
-                if (!preferredBullet) preferredBullet = line[i];
-                else if (preferredBullet != line[i]) add_diagnostic(&issues, lineNumber, L"Inconsistent bullet marker");
-            }
-        }
-        if (!end) break;
-        line = end + 1;
-        lineNumber++;
-    }
-
-    if (!lintOnly) {
-        WCHAR *baseDirectory = g_currentFile ? path_directory(g_currentFile) : NULL;
-        int warnedUnsaved = 0;
-        lineNumber = 0;
-        for (char *line = text; line <= text + textLength;) {
-            char *end = strchr(line, '\n');
-            int length = end ? (int)(end - line) : (int)strlen(line);
-            for (int i = 0; i + 2 < length; i++) {
-                if (line[i] != ']' || line[i + 1] != '(') continue;
-                int close = i + 2;
-                while (close < length && line[close] != ')') close++;
-                if (close >= length) continue;
-                int start = i + 2, targetLength = close - start;
-                while (targetLength > 0 && isspace((unsigned char)line[start])) { start++; targetLength--; }
-                while (targetLength > 0 && isspace((unsigned char)line[start + targetLength - 1])) targetLength--;
-                if (targetLength >= 2 && line[start] == '<' && line[start + targetLength - 1] == '>') {
-                    start++; targetLength -= 2;
-                } else {
-                    for (int n = 0; n < targetLength; n++) if (isspace((unsigned char)line[start + n])) { targetLength = n; break; }
-                }
-                if (targetLength <= 0 || targetLength >= 2048) { i = close; continue; }
-                char target[2048];
-                memcpy(target, line + start, (size_t)targetLength); target[targetLength] = 0;
-                int image = i > 0 && line[i - 1] == '!';
-                if (_strnicmp(target, "http://", 7) == 0 || _strnicmp(target, "https://", 8) == 0 ||
-                    _strnicmp(target, "mailto:", 7) == 0 || _strnicmp(target, "data:", 5) == 0) {
-                    i = close; continue;
-                }
-                if (target[0] == '#') {
-                    if (!heading_slug_exists(headingSlugs, headingCount, target + 1)) {
-                        WCHAR *wideTarget = to_wide(target);
-                        WCHAR message[2300];
-                        swprintf(message, sizeof(message) / sizeof(message[0]), L"Broken heading link: %ls",
-                                 wideTarget ? wideTarget : L"");
-                        add_diagnostic(&issues, lineNumber, message);
-                        free(wideTarget);
-                    }
-                    i = close; continue;
-                }
-                char *fragment = strchr(target, '#');
-                if (fragment) *fragment = 0;
-                if (!baseDirectory) {
-                    if (!warnedUnsaved) {
-                        add_diagnostic(&issues, lineNumber,
-                            L"Save the document before checking relative links and images");
-                        warnedUnsaved = 1;
-                    }
-                    i = close; continue;
-                }
-                WCHAR *wideTarget = to_wide(target);
-                WCHAR *fullPath = wideTarget && baseDirectory ? path_join(baseDirectory, wideTarget) : NULL;
-                DWORD attrs = fullPath ? GetFileAttributesW(fullPath) : INVALID_FILE_ATTRIBUTES;
-                if (attrs == INVALID_FILE_ATTRIBUTES) {
-                    WCHAR message[2300];
-                    swprintf(message, sizeof(message) / sizeof(message[0]), L"Missing %ls: %ls",
-                             image ? L"image" : L"link target", wideTarget ? wideTarget : L"");
-                    add_diagnostic(&issues, lineNumber, message);
-                }
-                free(fullPath); free(wideTarget);
-                i = close;
-            }
-            if (!end) break;
-            line = end + 1; lineNumber++;
-        }
-        free(baseDirectory);
-    }
-    free(text);
-
-    if (!issues.count) {
-        MessageBoxW(g_hMainWnd, lintOnly ? L"No Markdown lint issues found." : L"No Markdown diagnostics found.",
-                    lintOnly ? L"Markdown Lint" : L"Markdown Diagnostics",
-                    MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-    int selected = show_choice_dialog(lintOnly ? L"Markdown Lint" : L"Markdown Diagnostics",
-        L"Filter issues, then choose one to jump to its source line:", issues.labels, issues.count);
-    if (selected >= 0 && selected < issues.count) {
-        SendMessageA(g_hEdit, SCI_GOTOLINE, (WPARAM)issues.lines[selected], 0);
-        SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
-        SetFocus(g_hEdit);
-    }
-    for (int i = 0; i < issues.count; i++) free(issues.labels[i]);
 }
 
 static char *editor_line_text(int lineNumber, int *outLength) {
@@ -6836,8 +6364,7 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"View: GitHub Dark Theme", IDM_VIEW_THEME_GITHUB_DARK}, {L"View: Custom Preview CSS", IDM_VIEW_CUSTOM_CSS},
     {L"View: Clear Custom Preview CSS", IDM_VIEW_CLEAR_CUSTOM_CSS}, {L"View: Toggle Fold", IDM_VIEW_FOLD_TOGGLE},
     {L"View: Fold All", IDM_VIEW_FOLD_ALL}, {L"View: Unfold All", IDM_VIEW_UNFOLD_ALL},
-    {L"Tools: Markdown Diagnostics", IDM_TOOLS_DIAGNOSTICS},
-    {L"Tools: Markdown Lint", IDM_TOOLS_LINT}, {L"Help: Markdown Reference", IDM_HELP_REFERENCE}
+    {L"Help: Markdown Reference", IDM_HELP_REFERENCE}
 };
 
 static void show_command_palette(void) {
@@ -6960,8 +6487,6 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_FOLD_ALL: fold_all_lines(0); break;
         case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
         case IDM_VIEW_OUTLINE: toggle_outline(hwnd); break;
-        case IDM_TOOLS_DIAGNOSTICS: show_markdown_issues(0); break;
-        case IDM_TOOLS_LINT: show_markdown_issues(1); break;
         case IDM_VIEW_NEXT_TAB:
             if (g_documentCount > 1) switch_document((g_activeDocument + 1) % g_documentCount);
             break;

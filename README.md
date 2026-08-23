@@ -8,7 +8,7 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
 - GitHub Light and GitHub Dark themes (View → Theme) apply to the editor and preview, are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
 
-Launching with no arguments shows just the editor; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
+Launching with no arguments opens the editor with the saved workspace layout; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
 
 ## Features
 
@@ -35,9 +35,10 @@ Launching with no arguments shows just the editor; launching with a file path sh
 - Copy buttons on rendered fenced code blocks.
 - Export of the enhanced preview—including highlighted code, rendered math, and available rendered diagrams—to an HTML document.
 - Printing and PDF export of the enhanced rendered preview through WebView2.
-- Markdown diagnostics find missing local links/images, broken heading links, and duplicate heading anchors. Markdown lint reports heading-spacing/level, trailing-whitespace, and inconsistent-list-marker issues; selecting a result jumps to its line.
 - The table editor resizes an existing GFM table while preserving its cells, or creates a new table with a chosen number of rows and columns.
-- Quick Open searches file names in a chosen folder, while Find in Folder searches supported text files and opens results at the matching line. Generated/dependency folders are skipped.
+- A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, Refresh, and Git actions. Renaming a file updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
+- Quick Open searches file names in the active workspace, while Find in Folder searches supported text files and opens results at the matching line. If no workspace is open, either command first asks for a folder. Generated/dependency folders are skipped.
+- Git Changes lists modified, staged, deleted, and untracked workspace files and opens a side-by-side **HEAD** versus **working tree** preview. This feature uses `git.exe` from `PATH`; the editor itself remains fully usable without Git.
 - A searchable command palette (Ctrl+Shift+P) exposes the editor's commands without navigating menus.
 - Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.
 - Synchronized scrolling between the Markdown editor and rendered preview.
@@ -46,7 +47,7 @@ Launching with no arguments shows just the editor; launching with a file path sh
 - GitHub Light and GitHub Dark themes (View → Theme), remembered between sessions.
 - An optional UTF-8 custom preview stylesheet (View → Custom Preview CSS), embedded into rendered HTML exports and remembered between sessions.
 - Focus mode (View → Focus Mode or F11) hides the menu, tabs, and formatting toolbar and is remembered between sessions.
-- Window position/size/maximized state, panel visibility/order, and splitter position are remembered between sessions; View → Preview on Left controls the panel order.
+- Window position/size/maximized state, editor/preview order, workspace visibility, active workspace folder, and splitter position are remembered between sessions; View → Preview on Left controls the editor/preview order.
 - Find/Replace, Go to Line, Undo/Redo, standard clipboard shortcuts. The search and replacement text, match-case setting, and search direction are remembered between sessions.
 - A Markdown syntax reference (Help → Markdown Reference), opened as a live Markdown document so the preview renders every construct it documents.
 - Unicode filenames, long Windows paths, drag-and-drop, and document-relative links/images.
@@ -64,6 +65,7 @@ Launching with no arguments shows just the editor; launching with a file path sh
 | Ctrl+Shift+S | Save As |
 | Ctrl+P | Print rendered preview |
 | Ctrl+Shift+P | Command palette |
+| Ctrl+Shift+G | Git changes for the active workspace |
 | Ctrl+W | Close current tab |
 | Ctrl+Shift+T | Reopen last closed tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
@@ -87,15 +89,15 @@ Launching with no arguments shows just the editor; launching with a file path sh
 
 ## Building
 
-Requires a MinGW-w64 toolchain ([w64devkit](https://github.com/skeeto/w64devkit) or similar) with `gcc`, `g++`, and `windres` on `PATH`.
+The standard build requires [Zig](https://ziglang.org/) on `PATH`.
 
 ```
 build.bat
 ```
 
-This uses GCC size optimization, dead-section elimination, and symbol stripping; builds the vendored lexers as `Lexilla.dll`; and produces `markedit.exe` next to the WebView2/Scintilla/Lexilla runtime DLLs in the repository root.
+This uses Zig's C/C++ toolchain with size optimization, dead-section elimination, and symbol stripping. After compiling, it safely clears and recreates `dist/`, then stages `markedit.exe`, the required runtime DLLs, offline preview assets, and licence files there.
 
-A [premake5.lua](premake5.lua) is also provided as an alternative to `build.bat`. From Command Prompt, generate Makefiles and build the same targets with:
+A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC builds. From Command Prompt, generate Makefiles and build the same targets with:
 
 ```bat
 premake5 gmake
@@ -115,7 +117,7 @@ Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https
 
 ## Distribution folder
 
-`dist/` is the clean, unpacked release staging folder. It contains only:
+`dist/` is the clean, unpacked release staging folder generated by `build.bat`. It contains only:
 
 - `markedit.exe` and the three required runtime DLLs: `Scintilla.dll`, `Lexilla.dll`, and `WebView2Loader.dll`;
 - the preview shell, Mermaid, Highlight.js, GitHub Markdown CSS, and the complete `katex/` asset tree needed for offline rendering; and
@@ -126,9 +128,14 @@ Do not package `markedit.ini`, `webview2_data/`, debug symbols, import libraries
 ## Project layout
 
 ```
-markedit.c              application source
+markedit.c              Win32 application and UI orchestration
+path_utils.c / .h       Windows path and heap-string utilities
+text_codec.c / .h       UTF conversion and JSON string encoding
+json_formatter.c / .h   standalone JSON pretty-printer/minifier
 markdown.c / .h         cmark-gfm rendering adapter
 cmark-gfm-sources.rsp   vendored renderer source list and compile flags
+markedit-sources.rsp    application source list used by build.bat
+lexilla-sources.rsp     supported lexer source list used by build.bat
 markedit.rc / .ico       Win32 resources (icon, version info)
 markedit.manifest        DPI-awareness and long-path declarations
 preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid
@@ -137,7 +144,7 @@ mermaid.min.js           bundled Mermaid renderer
 highlight*.js / .css     bundled Highlight.js renderer and light/dark themes
 katex/                    bundled KaTeX renderer, stylesheet, and fonts
 make_icon.ps1            regenerates markedit.ico
-build.bat                size-optimized build script (GCC / G++ / windres)
+build.bat                size-optimized Zig build script
 premake5.lua             alternative Makefile generator for the same build
 markedit.iss             Inno Setup installer script
 dist/                    clean unpacked release staging folder (generated, not tracked)

@@ -1,6 +1,9 @@
 ; Inno Setup script for MarkEdit.
 ; Build markedit.exe first (build.bat), then compile this with Inno Setup
 ; (ISCC.exe markedit.iss) from the repo root.
+; build.bat stages the complete release tree in dist/. User settings, the
+; WebView2 browser profile, debug symbols, import libraries, and compiler
+; objects stay out.
 
 #define MyAppName "MarkEdit"
 #define MyAppVersion "1.0.0"
@@ -31,27 +34,33 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "assocmd"; Description: "Associate .md files with {#MyAppName}"; GroupDescription: "File associations:"
 
 [Files]
-Source: "markedit.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "Scintilla.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "Lexilla.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "WebView2Loader.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "preview_shell.html"; DestDir: "{app}"; Flags: ignoreversion
-Source: "github-markdown.css"; DestDir: "{app}"; Flags: ignoreversion
-Source: "mermaid.min.js"; DestDir: "{app}"; Flags: ignoreversion
-Source: "highlight.min.js"; DestDir: "{app}"; Flags: ignoreversion
-Source: "highlight-powershell.min.js"; DestDir: "{app}"; Flags: ignoreversion
-Source: "highlight-github.min.css"; DestDir: "{app}"; Flags: ignoreversion
-Source: "highlight-github-dark.min.css"; DestDir: "{app}"; Flags: ignoreversion
-Source: "katex\*"; DestDir: "{app}\katex"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "third_party\cmark-gfm\COPYING"; DestDir: "{app}\third_party\cmark-gfm"; Flags: ignoreversion
-Source: "third_party\highlightjs\LICENSE"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
-Source: "third_party\highlightjs\VERSION.txt"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
-Source: "third_party\katex\LICENSE"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
-Source: "third_party\katex\VERSION.txt"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
-Source: "third_party\lexilla\License.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
-Source: "third_party\lexilla\version.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
+; Application runtime.
+Source: "dist\markedit.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\Scintilla.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\Lexilla.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\WebView2Loader.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Offline preview assets.
+Source: "dist\preview_shell.html"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\github-markdown.css"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\mermaid.min.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\highlight.min.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\highlight-powershell.min.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\highlight-github.min.css"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\highlight-github-dark.min.css"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\katex\*"; DestDir: "{app}\katex"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Application and redistributed-component licences.
+Source: "dist\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\third_party\cmark-gfm\COPYING"; DestDir: "{app}\third_party\cmark-gfm"; Flags: ignoreversion
+Source: "dist\third_party\highlightjs\LICENSE"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
+Source: "dist\third_party\highlightjs\VERSION.txt"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
+Source: "dist\third_party\katex\LICENSE"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
+Source: "dist\third_party\katex\VERSION.txt"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
+Source: "dist\third_party\lexilla\License.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
+Source: "dist\third_party\lexilla\version.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
+Source: "dist\third_party\scintilla\License.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
+Source: "dist\third_party\scintilla\version.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
+Source: "dist\third_party\webview2\LICENSE.txt"; DestDir: "{app}\third_party\webview2"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

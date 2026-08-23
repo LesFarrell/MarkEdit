@@ -52,10 +52,10 @@ A copy is at `third_party/scintilla/License.txt`.
 
 ## Lexilla 5.5.1
 
-Markdown source-editor syntax highlighting uses the Markdown lexer from
+Source-editor syntax highlighting uses lexers from
 [Lexilla](https://github.com/ScintillaOrg/lexilla), copyright 1998–2021 by
 Neil Hodgson and contributors, distributed under the same permissive licence
 as Scintilla. `Lexilla.dll` is built from a trimmed copy of the upstream
-source (only the Markdown lexer and its required support code) under
-`third_party/lexilla`; a copy of the licence is at
-`third_party/lexilla/License.txt`.
+source under `third_party/lexilla`, carrying the Markdown, JSON, XML/HTML,
+YAML, C/C++, Python, Bash and PowerShell lexers with their required support
+code; a copy of the licence is at `third_party/lexilla/License.txt`.

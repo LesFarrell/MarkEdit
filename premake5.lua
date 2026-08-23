@@ -1,12 +1,13 @@
 -- Premake5 script for MarkEdit.
--- Mirrors build.bat / test.bat using a native MinGW-w64 GCC toolchain.
+-- Alternative to the Zig-based build.bat / test.bat scripts, using a native
+-- MinGW-w64 GCC toolchain.
 -- Generate Makefiles with:  premake5 gmake
 -- Then build with:          make config=release_x64
 -- (builds markedit.exe, Lexilla.dll, and test_parser).
 --
 -- premake5 --help for other actions (e.g. `premake5 vs2022`), but this
--- project's headers/libs are laid out for the MinGW-w64 GCC toolchain used by
--- build.bat, so gmake is the supported action.
+-- project's headers/libs are laid out for MinGW-w64-compatible toolchains, so
+-- gmake is the supported Premake action.
 
 workspace "MarkEdit"
     configurations { "Release" }
@@ -79,9 +80,8 @@ function cmark_gfm_settings()
     filter {}
 end
 
--- Trimmed down from Lexilla's full ~130-language catalogue to just the
--- Markdown lexer and its required lexlib support code - see the comment in
--- third_party/lexilla/src/Lexilla.cxx.
+-- Trimmed down from Lexilla's full catalogue to the languages supported by
+-- MarkEdit; keep this list aligned with lexilla-sources.rsp.
 project "lexilla"
     kind "SharedLib"
     language "C++"
@@ -93,8 +93,18 @@ project "lexilla"
     files {
         LEXILLA_DIR.."/src/Lexilla.cxx",
         LEXILLA_DIR.."/lexers/LexMarkdown.cxx",
+        LEXILLA_DIR.."/lexers/LexJSON.cxx",
+        LEXILLA_DIR.."/lexers/LexHTML.cxx",
+        LEXILLA_DIR.."/lexers/LexYAML.cxx",
+        LEXILLA_DIR.."/lexers/LexCPP.cxx",
+        LEXILLA_DIR.."/lexers/LexPython.cxx",
+        LEXILLA_DIR.."/lexers/LexBash.cxx",
+        LEXILLA_DIR.."/lexers/LexPowerShell.cxx",
         LEXILLA_DIR.."/lexlib/Accessor.cxx",
+        LEXILLA_DIR.."/lexlib/CharacterCategory.cxx",
         LEXILLA_DIR.."/lexlib/CharacterSet.cxx",
+        LEXILLA_DIR.."/lexlib/DefaultLexer.cxx",
+        LEXILLA_DIR.."/lexlib/InList.cxx",
         LEXILLA_DIR.."/lexlib/LexAccessor.cxx",
         LEXILLA_DIR.."/lexlib/LexerBase.cxx",
         LEXILLA_DIR.."/lexlib/LexerModule.cxx",
@@ -119,7 +129,14 @@ project "markedit"
     targetdir "."
     objdir "build/obj/markedit"
 
-    files { "markedit.c", "markdown.c", "markedit.rc" }
+    files {
+        "markedit.c",
+        "path_utils.c", "path_utils.h",
+        "text_codec.c", "text_codec.h",
+        "json_formatter.c", "json_formatter.h",
+        "markdown.c", "markdown.h",
+        "markedit.rc",
+    }
     cmark_gfm_settings()
 
     includedirs { "." }
@@ -130,7 +147,7 @@ project "markedit"
         externalincludedirs { WEBVIEW2_DIR.."/include", SCINTILLA_DIR.."/include", LEXILLA_DIR.."/include" }
     filter {}
     libdirs { WEBVIEW2_DIR.."/x64", "." }
-        links { "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "Lexilla" }
+        links { "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "windowscodecs", "uxtheme", "Lexilla" }
     dependson { "lexilla" }
 
     warnings "Extra"
@@ -140,7 +157,7 @@ project "markedit"
         buildoptions { "-Wno-unknown-pragmas" }
         -- This vendor import library is named WebView2Loader.dll.lib rather
         -- than libWebView2Loader.a, so pass its path directly to GNU ld.
-        linkoptions { "-mwindows", "../"..WEBVIEW2_DIR.."/x64/WebView2Loader.dll.lib" }
+        linkoptions { "../"..WEBVIEW2_DIR.."/x64/WebView2Loader.dll.lib" }
     filter {}
 
     -- {COPY}'s generated `IF EXIST (...) ELSE (...)` batch syntax only runs
