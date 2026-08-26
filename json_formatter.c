@@ -47,12 +47,17 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
     int depth = 0;
     int containers = 0;
     int sawValue = 0;
+    int closed = 0; /* the outermost container has closed - anything but trailing whitespace after this is invalid */
 
     for (int i = 0; i < length;) {
         char character = text[i];
         if (character == ' ' || character == '\t' || character == '\r' || character == '\n') {
             i++;
             continue;
+        }
+        if (closed) {
+            free(printer.output);
+            return NULL;
         }
         if (character == '"') {
             int next = json_copy_string(&printer, text, i, length);
@@ -80,6 +85,7 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
                     return NULL;
                 }
                 depth--;
+                if (depth == 0) closed = 1;
                 if (printer.length && printer.output[printer.length - 1] != '{' &&
                     printer.output[printer.length - 1] != '[' && indent)
                     json_emit_indent(&printer, eol, depth);

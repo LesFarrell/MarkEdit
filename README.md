@@ -16,13 +16,18 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - GitHub-style note, tip, important, warning, and caution alerts.
 - Local syntax highlighting for named code fences in the preview, and for Markdown source in the editor, with matching light and dark themes.
 - Editor syntax highlighting follows the file extension: Markdown, JSON, XML, HTML, YAML, C/C++/JavaScript/TypeScript, Python, Bash and PowerShell. Unrecognised extensions fall back to Markdown.
+- Python files can be run with Ctrl+F5 or debugged with F5 through the standard `pdb` debugger. The current execution line is highlighted in MarkEdit and all local variables are printed at every stop. Use F10 to step over, Shift+F11 to step into, and F6 to continue from either the editor or the Run menu; `vars` and `globals` remain available in the console. MarkEdit prefers an activated virtual environment, then a project-local `.venv`/`venv`, then Python on `PATH`.
+- Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. Editor breakpoints are loaded before execution and the current execution line is highlighted in MarkEdit. Use F10 to step over, Shift+F11 to step into, and F6 to continue; `print expression`, `watch expression`, and `vars` are available in the console. Function arguments and local variables are shown automatically at each stop. Running can use GCC/G++, Clang, or Zig; debugging requires GCC/G++ or Clang plus GDB on `PATH`.
+- F9 (or a click in the marker gutter) toggles per-document Python/C/C++ breakpoints, and Run → Clear All Breakpoints removes them together.
 - Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
 - Tabs can be reordered by dragging. Dirty and unsaved tabs are snapshotted every five seconds to a recovery area under Local AppData and can be restored after an interrupted session.
 - A formatting toolbar (Bold, Italic, Strikethrough, Inline code, Code block, Headings, Blockquote, Lists, Link, Image, Table, Footnote, Horizontal rule, Alert, Toggle preview, Swap panel sides), shown while the editor pane is visible.
 - Smart Markdown editing continues blockquotes and bullet, numbered, and task lists on Enter (incrementing numbered lists and resetting task items), terminates empty items, and pairs brackets and inline backticks.
-- Smart four-column tabs use real tabs for leading indentation, nest a list item from anywhere on its line, and use spaces only for alignment within ordinary text.
+- Smart four-column tabs use real tabs for leading indentation, nest a list item from anywhere on its line, and use spaces only for alignment within ordinary text. Enter preserves the current indentation, adds a level after C-family/JSON braces, Python/YAML colons, and shell block openers, and expands paired braces or brackets onto aligned lines. Closing braces typed on a blank indented line move back one level automatically.
 - Line editing commands: duplicate, delete, join, and move lines up or down, plus trimming trailing whitespace across the document in a single undo step.
 - Toggle Comment wraps the selected lines in an HTML comment (Markdown has no line-comment syntax) and unwraps them again.
+- Select All Occurrences (Ctrl+Shift+L) turns every match of the word under the caret, or of the current selection, into its own selection for multi-caret editing.
+- Convert Line Endings (Edit → Convert → Line Endings) rewrites the document to CRLF, LF, or CR and switches the editor's save format to match.
 - Format JSON and Minify JSON (Format menu) reindent the fenced code block at the caret, or the current selection. Text that cannot be read as JSON is left untouched. These re-indent rather than validate: bracket balance and string termination are checked, but grammar errors between tokens (a trailing comma, a missing colon) pass through unchanged.
 - Word wrap (View → Word Wrap or Alt+Z), remembered between sessions.
 - A live status bar reports the caret line/column, word and Unicode character counts, UTF-8/BOM state, line endings, and save/recovery state.
@@ -44,6 +49,8 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Synchronized scrolling between the Markdown editor and rendered preview.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Editor font is configurable (Format → Font) and remembered between sessions.
+- Editor zoom (View → Zoom In/Out/Reset or Ctrl+=/Ctrl+-/Ctrl+0) scales the editor text independently of the configured font size and is remembered between sessions.
+- Open Terminal Here (File menu or toolbar) opens Windows Terminal, falling back to Command Prompt, in the current file's folder. Show in Explorer (File menu) opens Explorer with the current file pre-selected.
 - GitHub Light and GitHub Dark themes (View → Theme), remembered between sessions.
 - An optional UTF-8 custom preview stylesheet (View → Custom Preview CSS), embedded into rendered HTML exports and remembered between sessions.
 - Focus mode (View → Focus Mode or F11) hides the menu, tabs, and formatting toolbar and is remembered between sessions.
@@ -76,12 +83,21 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | Ctrl+H | Replace |
 | Ctrl+G | Go to Line |
 | F3 | Find Next |
+| F5 | Debug active Python, C, or C++ file |
+| F6 | Continue the active debug session |
+| F10 | Step over the current line |
+| Shift+F11 | Step into the current call |
+| Ctrl+F5 | Run active Python, C, or C++ file |
+| F9 | Toggle debugger breakpoint |
 | Tab / Shift+Tab | Smart indent / outdent (four-column tab stops) |
 | Ctrl+D | Duplicate line |
 | Ctrl+Shift+K | Delete line |
 | Ctrl+J | Join lines |
 | Alt+Up / Alt+Down | Move line or selection up / down |
 | Ctrl+/ | Toggle comment |
+| Ctrl+Shift+L | Select all occurrences |
+| Ctrl+=/Ctrl+- | Zoom in / out |
+| Ctrl+0 | Reset zoom |
 | Ctrl+Shift+V | Toggle preview pane |
 | Ctrl+Shift+E | Toggle editor pane |
 | F11 | Toggle focus mode |

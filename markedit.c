@@ -33,118 +33,7 @@
 #include "third_party/lexilla/include/Lexilla.h"
 #include "third_party/lexilla/include/SciLexer.h"
 
-#define ID_EDIT    101
-#define ID_PREVIEW 102
-#define ID_TABS    103
-#define ID_STATUS  104
-#define ID_OUTLINE 105
-#define IDT_PREVIEW_UPDATE 1
-#define IDT_FILE_WATCH 2
-#define IDT_SCROLL_SYNC 3
-#define IDT_SPELL_CHECK 4
-#define IDT_AUTOSAVE 5
-#define IDT_OUTLINE_UPDATE 6
-#define IDT_PRINT_PREVIEW 7
-#define WM_APP_CLOSE_TAB (WM_APP + 1)
-#define SPLITTER_WIDTH 6
-#define TOOLBAR_HEIGHT 32
-#define TAB_HEIGHT 28
-
-#define IDM_FILE_NEW      201
-#define IDM_FILE_OPEN     202
-#define IDM_FILE_SAVE     203
-#define IDM_FILE_SAVEAS   204
-#define IDM_FILE_EXIT     205
-#define IDM_FILE_RECENT_CLEAR 206
-#define IDM_FILE_EXPORT_HTML 207
-#define IDM_FILE_CLOSE     208
-#define IDM_FILE_REOPEN_CLOSED 241
-#define IDM_FILE_OPEN_TERMINAL 243
-#define IDM_FILE_RECENT_0 250 /* IDM_FILE_RECENT_0 .. IDM_FILE_RECENT_0+MAX_RECENT_FILES-1 */
-#define IDM_EDIT_UNDO     210
-#define IDM_EDIT_REDO     219
-#define IDM_EDIT_CUT      211
-#define IDM_EDIT_COPY     212
-#define IDM_EDIT_PASTE    213
-#define IDM_EDIT_DELETE   214
-#define IDM_EDIT_SELECTALL 215
-#define IDM_EDIT_FIND     216
-#define IDM_EDIT_REPLACE  217
-#define IDM_EDIT_FINDNEXT 218
-#define IDM_EDIT_GOTOLINE  209
-#define IDM_EDIT_DUPLICATE_LINE 221
-#define IDM_EDIT_MOVE_LINE_UP   222
-#define IDM_EDIT_MOVE_LINE_DOWN 223
-#define IDM_EDIT_DELETE_LINE    224
-#define IDM_EDIT_JOIN_LINES     225
-#define IDM_EDIT_TOGGLE_COMMENT 226
-#define IDM_EDIT_TRIM_WHITESPACE 227
-#define IDM_FORMAT_FONT   220
-#define IDM_VIEW_TOGGLEPREVIEW 230
-#define IDM_VIEW_TOGGLEEDITOR  231
-#define IDM_VIEW_THEME_GITHUB_LIGHT 232
-#define IDM_VIEW_THEME_GITHUB_DARK  233
-#define IDM_VIEW_PREVIEW_ON_LEFT 234
-#define IDM_VIEW_NEXT_TAB        235
-#define IDM_VIEW_PREVIOUS_TAB    236
-#define IDM_VIEW_CUSTOM_CSS      237
-#define IDM_VIEW_CLEAR_CUSTOM_CSS 238
-#define IDM_VIEW_FOCUS_MODE      239
-#define IDM_VIEW_WORD_WRAP       242
-#define IDM_HELP_REFERENCE 240
-
-#define IDM_FMT_BOLD          260
-#define IDM_FMT_ITALIC        261
-#define IDM_FMT_STRIKETHROUGH 262
-#define IDM_FMT_CODE          263
-#define IDM_FMT_H1            264
-#define IDM_FMT_H2            265
-#define IDM_FMT_H3            266
-#define IDM_FMT_QUOTE         267
-#define IDM_FMT_BULLETLIST    268
-#define IDM_FMT_NUMBERLIST    269
-#define IDM_FMT_TASKLIST      270
-#define IDM_FMT_LINK          271
-#define IDM_FMT_IMAGE         272
-#define IDM_FMT_TABLE         273
-#define IDM_FMT_CODEBLOCK     274
-#define IDM_FMT_FOOTNOTE      275
-#define IDM_FMT_HRULE         276
-#define IDM_FMT_ALERT         277
-#define IDM_FMT_JSON_PRETTY   278
-#define IDM_FMT_JSON_MINIFY   279
-
-/* Developer commands start at 280: 260-277 is routed wholesale to
-   toolbar_command(), so IDs in that range never reach the switch. */
-#define IDM_EDIT_UPPERCASE       280
-#define IDM_EDIT_LOWERCASE       281
-#define IDM_EDIT_TITLECASE       282
-#define IDM_EDIT_SORT_ASC        283
-#define IDM_EDIT_SORT_DESC       284
-#define IDM_EDIT_SORT_DEDUPE     285
-#define IDM_EDIT_TABS_TO_SPACES  286
-#define IDM_EDIT_SPACES_TO_TABS  287
-#define IDM_EDIT_BOOKMARK_TOGGLE 288
-#define IDM_EDIT_BOOKMARK_NEXT   289
-#define IDM_EDIT_BOOKMARK_PREV   290
-#define IDM_EDIT_BOOKMARK_CLEAR  291
-#define IDM_EDIT_SELECT_NEXT     292
-#define IDM_EDIT_MATCH_BRACE     293
-#define IDM_VIEW_SPELL_CHECK     294
-#define IDM_VIEW_SHOW_WHITESPACE 295
-#define IDM_VIEW_INDENT_GUIDES   296
-#define IDM_VIEW_FOLD_TOGGLE     297
-#define IDM_VIEW_FOLD_ALL        298
-#define IDM_VIEW_UNFOLD_ALL      299
-#define IDM_FILE_PRINT           300
-#define IDM_FILE_EXPORT_PDF      301
-#define IDM_FILE_QUICK_OPEN      302
-#define IDM_FILE_FIND_FOLDER     303
-#define IDM_EDIT_COMMAND_PALETTE 304
-#define IDM_FMT_TABLE_EDITOR     305
-#define IDM_VIEW_OUTLINE         308
-#define IDM_VIEW_SPELL_LANGUAGE  309
-#define IDI_APPICON 1
+#include "markedit.h"
 
 static HWND g_hEdit; /* Scintilla control */
 static HWND g_hPreview; /* WebView2 host child window */
@@ -174,6 +63,13 @@ static WCHAR *g_pendingPdfPath = NULL;
 static int g_pendingPrintAction = 0; /* 1 = print dialog, 2 = PDF export */
 static int g_previewDarkMode = 0;
 static WCHAR *g_customCssPath = NULL;
+static WCHAR *g_debugLocationPath = NULL;
+static WCHAR *g_debugWorkingDirectory = NULL;
+static WCHAR *g_lastDebugSource = NULL;
+static HANDLE g_debugProcess = NULL;
+static int g_debugLocationSeen = 0;
+static int g_lastDebugLine = -1;
+static int g_activeDebuggerKind = 0; /* 1 = pdb, 2 = GDB */
 #define MAX_DOCUMENTS 32
 typedef struct Document {
     sptr_t sciDocument;
@@ -198,6 +94,11 @@ static int g_activeDocument = 0;
 static unsigned g_nextUntitledNumber = 1;
 static int g_switchingDocument = 0;
 static char g_tabTooltipAnsi[32768];
+/* Set on every edit and every dirty-state change; cleared once
+   write_recovery_snapshot() has brought the on-disk snapshot back in sync.
+   Lets the 5s autosave timer skip its work entirely while idle instead of
+   rewriting unchanged documents every tick. */
+static int g_recoverySnapshotStale = 0;
 
 #define MAX_CLOSED_DOCUMENTS 10
 static Document g_closedDocuments[MAX_CLOSED_DOCUMENTS];
@@ -224,6 +125,7 @@ static int g_showWhitespace = 0;
 static int g_indentGuides = 0;
 static int g_spellCheckEnabled = 1;
 static int g_outlineVisible = 0;
+static int g_editorZoom = 0; /* Scintilla SCI_SETZOOM units: +1/-1 per level, 0 is 100%. */
 static WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH] = L"";
 static int g_outlineLines[1024];
 static int g_outlineCount = 0;
@@ -242,47 +144,6 @@ static WCHAR g_findWhat[256] = L"";
 static WCHAR g_replaceWith[256] = L"";
 static DWORD g_findFlags = FR_DOWN;
 static UINT g_msgFindReplace;
-
-void do_save(void);
-static void update_preview(void);
-void push_html_to_webview(const char *htmlFragment);
-static void apply_preview_theme(void);
-static void apply_editor_theme(HWND hEdit);
-static void apply_markdown_lexer_styles(HWND hEdit);
-static void apply_language_styles(HWND hEdit);
-static void apply_preview_host_theme(void);
-static void refresh_menu(HWND hwnd);
-static void layout(HWND hwnd);
-static void update_view_menu(HWND hwnd);
-static void schedule_spell_check(void);
-static void perform_spell_check(void);
-static void update_status_bar(void);
-static void update_outline(void);
-static void write_recovery_snapshot(void);
-static void clear_recovery_snapshot(void);
-static int restore_recovery_snapshot(void);
-static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
-                              WCHAR **labels, int count);
-static int show_text_input(const WCHAR *title, const WCHAR *prompt,
-                           const WCHAR *initial, WCHAR *output, int outputCapacity);
-static void toggle_preview(HWND hwnd);
-static void update_document_mapping(void);
-static void update_title(void);
-static void set_dirty(int dirty);
-static void update_tab_label(int index);
-static void switch_document(int index);
-static int create_document_tab(void);
-static int active_document_is_reusable(void);
-static void check_external_file_change(void);
-static void prompt_reload_active_external_change(void);
-static WCHAR *get_settings_path(void);
-static void do_close_document_at(int index);
-static void do_reopen_closed_tab(void);
-static void save_session_documents(void);
-static void restore_session_documents(void);
-static void sync_preview_to_editor_scroll(void);
-static void apply_custom_preview_css(int reportErrors);
-static int paste_image_from_clipboard(void);
 
 /* ---- simple growable text buffer, used to pull text out of the Scintilla control ---- */
 static char *get_edit_text(HWND hEdit, int *outLen) {
@@ -749,6 +610,8 @@ static void set_edit_text(HWND hEdit, const char *text) {
 #define MARGIN_BOOKMARKS 1
 #define MARGIN_FOLD 2
 #define MARKER_BOOKMARK 1
+#define MARKER_BREAKPOINT 2
+#define MARKER_DEBUG_LINE 3
 #define FOLD_MARGIN_WIDTH 14
 #define INDICATOR_SPELLING 20
 static int g_lineNumberDigits = 0;
@@ -900,6 +763,12 @@ static void apply_editor_theme(HWND hEdit) {
                  (LPARAM)(g_previewDarkMode ? RGB(0x1F, 0x6F, 0xEB) : RGB(0x09, 0x69, 0xDA)));
     SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_BOOKMARK,
                  (LPARAM)(g_previewDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x21, 0x8B, 0xFF)));
+    SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_BREAKPOINT, RGB(0xFF, 0xFF, 0xFF));
+    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_BREAKPOINT,
+                 (LPARAM)(g_previewDarkMode ? RGB(0xF8, 0x51, 0x49) : RGB(0xCF, 0x22, 0x2E)));
+    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_DEBUG_LINE,
+                 (LPARAM)(g_previewDarkMode ? RGB(0x9E, 0x6A, 0x03) : RGB(0xFF, 0xDF, 0x5D)));
+    SendMessageA(hEdit, SCI_MARKERSETALPHA, MARKER_DEBUG_LINE, 90);
 
     SendMessageA(hEdit, SCI_INDICSETSTYLE, INDICATOR_SPELLING, INDIC_SQUIGGLE);
     SendMessageA(hEdit, SCI_INDICSETFORE, INDICATOR_SPELLING,
@@ -1443,6 +1312,7 @@ static void configure_scintilla(HWND hEdit) {
     apply_word_wrap(hEdit);
     apply_show_whitespace(hEdit);
     apply_indent_guides(hEdit);
+    SendMessageA(hEdit, SCI_SETZOOM, (WPARAM)g_editorZoom, 0);
 
     /* Additional carets edit in step with the main one; the smart-input
        handlers in EditSubclassProc still act on the main caret alone. */
@@ -1457,10 +1327,13 @@ static void configure_scintilla(HWND hEdit) {
     /* Bookmark and fold margins. Marker definitions are per-view, so they are
        set once here and survive the SCI_SETDOCPOINTER swaps done by tabs. */
     SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_BOOKMARKS, SC_MARGIN_SYMBOL);
-    SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_BOOKMARKS, (LPARAM)(1 << MARKER_BOOKMARK));
+    SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_BOOKMARKS,
+                 (LPARAM)((1 << MARKER_BOOKMARK) | (1 << MARKER_BREAKPOINT)));
     SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_BOOKMARKS, 14);
     SendMessageA(hEdit, SCI_SETMARGINSENSITIVEN, MARGIN_BOOKMARKS, TRUE);
     SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_BOOKMARK, SC_MARK_BOOKMARK);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_BREAKPOINT, SC_MARK_CIRCLE);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_DEBUG_LINE, SC_MARK_BACKGROUND);
 
     SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_FOLD, SC_MARGIN_SYMBOL);
     SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_FOLD, (LPARAM)SC_MASK_FOLDERS);
@@ -1615,6 +1488,9 @@ static void load_layout_settings(void) {
     g_showWhitespace = read_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path) != 0;
     g_indentGuides = read_profile_int(L"View", L"IndentGuides", g_indentGuides, path) != 0;
     g_outlineVisible = read_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path) != 0;
+    g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
+    if (g_editorZoom < -10) g_editorZoom = -10;
+    if (g_editorZoom > 20) g_editorZoom = 20;
     GetPrivateProfileStringW(L"SpellCheck", L"Language", L"", g_spellLanguage,
                              LOCALE_NAME_MAX_LENGTH, path);
     if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
@@ -1647,6 +1523,7 @@ static void save_layout_settings(void) {
     write_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path);
     write_profile_int(L"View", L"IndentGuides", g_indentGuides, path);
     write_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path);
+    write_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
     if (!g_commandLinePreviewMode) {
         write_profile_int(L"View", L"PreviewVisible", g_previewVisible, path);
@@ -1805,11 +1682,13 @@ static void clear_recovery_snapshot(void) {
 
 static void write_recovery_snapshot(void) {
     if (!g_hEdit || g_commandLinePreviewMode) return;
+    if (!g_recoverySnapshotStale) return;
+    g_recoverySnapshotStale = 0;
     int dirtyCount = 0;
     for (int i = 0; i < g_documentCount; i++) if (g_documents[i].dirty) dirtyCount++;
     if (!dirtyCount) {
         clear_recovery_snapshot();
-        update_status_bar();
+        update_status_position();
         return;
     }
 
@@ -1913,12 +1792,37 @@ static int restore_recovery_snapshot(void) {
 
 /* The status bar deliberately computes from Scintilla's UTF-8 document model:
    character counts are Unicode-aware while columns remain editor columns. */
-static void update_status_bar(void) {
+/* Ln/Col, encoding, and dirty-status fields only - all O(1) Scintilla
+   queries, safe to call on every caret move or scroll tick. Word/character
+   counts need a full-document scan, so they're left to update_status_bar()
+   and only refreshed when the text can actually have changed. */
+/* Backing storage for the status bar's four segments (0: Ln/Col, 1: Words/
+   Characters, 2: encoding, 3: save state). The strip is fully repainted by
+   StatusSubclassProc below instead of through SB_SETTEXT + owner-draw:
+   comctl32 draws a light 3D bevel between parts by itself regardless of
+   SBT_OWNERDRAW/SBT_NOBORDERS, which reads as bright seams against a dark
+   theme. Parts must own their text for as long as the control might repaint
+   them, so a transient stack buffer would otherwise be read back as a
+   dangling pointer once these functions return. */
+static WCHAR g_statusPartText[4][128];
+
+static void update_status_position(void) {
     if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
-    int length = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     int position = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
     int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
     int column = (int)SendMessageA(g_hEdit, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
+    swprintf(g_statusPartText[0], 128, L"Ln %d, Col %d", line, column);
+    int eol = (int)SendMessageA(g_hEdit, SCI_GETEOLMODE, 0, 0);
+    const WCHAR *eolName = eol == SC_EOL_LF ? L"LF" : eol == SC_EOL_CR ? L"CR" : L"CRLF";
+    swprintf(g_statusPartText[2], 128, L"UTF-8%ls   %ls", g_hasBom ? L" BOM" : L"", eolName);
+    swprintf(g_statusPartText[3], 128, L"%ls", g_dirty ? L"Modified · recovery enabled" : L"Saved");
+    InvalidateRect(g_hStatus, NULL, FALSE);
+}
+
+static void update_status_bar(void) {
+    update_status_position();
+    if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
+    int length = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     int characters = (int)SendMessageA(g_hEdit, SCI_COUNTCHARACTERS, 0, (LPARAM)length);
     int ignored = 0, words = 0, inWord = 0;
     char *text = get_edit_text(g_hEdit, &ignored);
@@ -1931,18 +1835,48 @@ static void update_status_bar(void) {
         }
         free(text);
     }
-    WCHAR part[128];
-    swprintf(part, sizeof(part) / sizeof(part[0]), L"Ln %d, Col %d", line, column);
-    SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)part);
-    swprintf(part, sizeof(part) / sizeof(part[0]), L"Words %d   Characters %d", words, characters);
-    SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)part);
-    int eol = (int)SendMessageA(g_hEdit, SCI_GETEOLMODE, 0, 0);
-    const WCHAR *eolName = eol == SC_EOL_LF ? L"LF" : eol == SC_EOL_CR ? L"CR" : L"CRLF";
-    swprintf(part, sizeof(part) / sizeof(part[0]), L"UTF-8%ls   %ls",
-             g_hasBom ? L" BOM" : L"", eolName);
-    SendMessageW(g_hStatus, SB_SETTEXTW, 2, (LPARAM)part);
-    SendMessageW(g_hStatus, SB_SETTEXTW, 3,
-                 (LPARAM)(g_dirty ? L"Modified · recovery enabled" : L"Saved"));
+    swprintf(g_statusPartText[1], 128, L"Words %d   Characters %d", words, characters);
+    InvalidateRect(g_hStatus, NULL, FALSE);
+}
+
+/* Paints the whole status bar strip itself in the app's own GitHub palette:
+   comctl32's default rendering has no opt-in for a custom light/dark palette
+   the way the editor/menu/toolbar do, and (unlike those) drawing only the
+   owner-drawn parts still leaves the control's own bevel between them, which
+   shows up as light seams. SB_SETPARTS (via layout()) still establishes the
+   four part rectangles this reads with SB_GETRECT; nothing else about the
+   control's own painting is used. */
+static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                            UINT_PTR subclassId, DWORD_PTR refData) {
+    (void)subclassId; (void)refData;
+    if (msg == WM_ERASEBKGND) {
+        return 1; /* WM_PAINT fills the whole strip itself. */
+    } else if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client;
+        GetClientRect(hwnd, &client);
+        COLORREF background = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
+        COLORREF foreground = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+        HBRUSH brush = CreateSolidBrush(background);
+        FillRect(dc, &client, brush);
+        DeleteObject(brush);
+        SetTextColor(dc, foreground);
+        SetBkMode(dc, TRANSPARENT);
+        for (int i = 0; i < 4; i++) {
+            RECT partRect;
+            if (!SendMessageW(hwnd, SB_GETRECT, (WPARAM)i, (LPARAM)&partRect)) continue;
+            partRect.left += 4;
+            partRect.right -= 4;
+            DrawTextW(dc, g_statusPartText[i], -1, &partRect,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, StatusSubclassProc, 1);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 /* ---- recently opened files, most-recent-first, stored in the same INI ---- */
@@ -2218,8 +2152,7 @@ static char *read_utf8_text_file(const WCHAR *path, size_t maximumSize) {
     CloseHandle(file);
     if (!buffer || total != length) { free(buffer); return NULL; }
     buffer[length] = 0;
-    size_t offset = length >= 3 && (unsigned char)buffer[0] == 0xEF &&
-        (unsigned char)buffer[1] == 0xBB && (unsigned char)buffer[2] == 0xBF ? 3 : 0;
+    size_t offset = has_utf8_bom(buffer, (int)length) ? 3 : 0;
     if (length > offset && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
             buffer + offset, (int)(length - offset), NULL, 0) <= 0) {
         free(buffer);
@@ -2350,23 +2283,8 @@ static HRESULT STDMETHODCALLTYPE ExportDone_Invoke(ICoreWebView2ExecuteScriptCom
     int ok = 0;
     if (utf8 && g_exportPath) {
         WCHAR *ioPath = extended_path(g_exportPath);
-        HANDLE file = CreateFileW(ioPath ? ioPath : g_exportPath, GENERIC_WRITE, 0, NULL,
-                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok = write_bytes_file(ioPath ? ioPath : g_exportPath, utf8, strlen(utf8));
         free(ioPath);
-        if (file != INVALID_HANDLE_VALUE) {
-            size_t length = strlen(utf8), total = 0;
-            ok = 1;
-            while (total < length) {
-                DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : length - total);
-                DWORD written = 0;
-                if (!WriteFile(file, utf8 + total, chunk, &written, NULL) || written != chunk) {
-                    ok = 0;
-                    break;
-                }
-                total += written;
-            }
-            if (!CloseHandle(file)) ok = 0;
-        }
     }
     if (!ok) MessageBoxW(g_hMainWnd, L"Could not export the rendered HTML.", L"MarkEdit", MB_OK | MB_ICONERROR);
     free(utf8);
@@ -2476,12 +2394,8 @@ static WCHAR *decode_document_url(const WCHAR *uri) {
     size_t o = 0;
     for (const WCHAR *p = encoded; p < end;) {
         if (*p == L'%' && p + 2 < end) {
-            int hi = (p[1] >= L'0' && p[1] <= L'9') ? p[1] - L'0' :
-                     (p[1] >= L'a' && p[1] <= L'f') ? p[1] - L'a' + 10 :
-                     (p[1] >= L'A' && p[1] <= L'F') ? p[1] - L'A' + 10 : -1;
-            int lo = (p[2] >= L'0' && p[2] <= L'9') ? p[2] - L'0' :
-                     (p[2] >= L'a' && p[2] <= L'f') ? p[2] - L'a' + 10 :
-                     (p[2] >= L'A' && p[2] <= L'F') ? p[2] - L'A' + 10 : -1;
+            int hi = hex_digit_value(p[1]);
+            int lo = hex_digit_value(p[2]);
             if (hi >= 0 && lo >= 0) {
                 bytes[o++] = (char)((hi << 4) | lo);
                 p += 3;
@@ -2590,6 +2504,23 @@ static void open_terminal_here(void) {
     if ((INT_PTR)result <= 32)
         ShellExecuteW(g_hMainWnd, L"open", L"cmd.exe", NULL, directory, SW_SHOWNORMAL);
     free(directory);
+}
+
+/* Opens Explorer with the current file pre-selected. Unlike Open Terminal
+   Here, there's no reasonable fallback for an unsaved document - Explorer
+   can't select a file that doesn't exist on disk yet. */
+static void reveal_in_explorer(void) {
+    if (!g_currentFile) {
+        MessageBoxW(g_hMainWnd, L"Save the document first to show it in Explorer.",
+                    L"Show in Explorer", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    size_t capacity = wcslen(g_currentFile) + 16;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"/select,\"%ls\"", g_currentFile);
+    ShellExecuteW(g_hMainWnd, L"open", L"explorer.exe", parameters, NULL, SW_SHOWNORMAL);
+    free(parameters);
 }
 
 static void apply_preview_theme(void) {
@@ -2892,9 +2823,10 @@ static void update_title(void) {
 
 static void set_dirty(int dirty) {
     g_dirty = dirty;
+    g_recoverySnapshotStale = 1;
     update_tab_label(g_activeDocument);
     update_title();
-    update_status_bar();
+    update_status_position();
 }
 
 static int load_file(const WCHAR *path) {
@@ -2931,7 +2863,7 @@ static int load_file(const WCHAR *path) {
     if (buf && total == length) {
         buf[length] = 0;
         const char *content = buf;
-        if (length >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
+        if (has_utf8_bom(buf, (int)length)) {
             content += 3;
             g_hasBom = 1;
         } else {
@@ -3080,7 +3012,7 @@ static void do_open(void) {
     OPENFILENAMEW ofn = {0};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMainWnd;
-    ofn.lpstrFilter = L"Markdown Files (*.md;*.markdown)\0*.md;*.markdown\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Markdown Files (*.md;*.markdown)\0*.md;*.markdown\0Python Files (*.py;*.pyw)\0*.py;*.pyw\0C/C++ Files (*.c;*.cc;*.cpp;*.cxx)\0*.c;*.cc;*.cpp;*.cxx\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = cap;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
@@ -3427,7 +3359,7 @@ static int do_saveas(void) {
     OPENFILENAMEW ofn = {0};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMainWnd;
-    ofn.lpstrFilter = L"Markdown Files (*.md)\0*.md\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Markdown Files (*.md)\0*.md\0Python Files (*.py;*.pyw)\0*.py;*.pyw\0C/C++ Files (*.c;*.cc;*.cpp;*.cxx)\0*.c;*.cc;*.cpp;*.cxx\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = cap;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
@@ -4574,6 +4506,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_PDF, "Export Rendered &PDF...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_PRINT, "&Print Rendered Preview...\tCtrl+P");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN_TERMINAL, "Open &Terminal Here");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_SHOW_EXPLORER, "Show in E&xplorer");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_CLOSE, "&Close Tab\tCtrl+W");
     AppendMenuA(hFile, MF_STRING | (g_closedDocumentCount ? 0 : MF_GRAYED),
                 IDM_FILE_REOPEN_CLOSED, "&Reopen Closed Tab\tCtrl+Shift+T");
@@ -4625,6 +4558,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_TRIM_WHITESPACE, "Trim Trailing &Whitespace");
     AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_SELECT_NEXT, "Select Next &Occurrence\tCtrl+Shift+D");
+    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_SELECT_ALL_OCCURRENCES, "Select All O&ccurrences\tCtrl+Shift+L");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_MATCH_BRACE, "Jump to Matching &Brace\tCtrl+]");
     AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
     HMENU hBookmarks = CreatePopupMenu();
@@ -4645,6 +4579,12 @@ static HMENU build_menu(void) {
     AppendMenuA(hConvert, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hConvert, MF_STRING, IDM_EDIT_TABS_TO_SPACES, "Tabs to &Spaces");
     AppendMenuA(hConvert, MF_STRING, IDM_EDIT_SPACES_TO_TABS, "Spaces to Ta&bs");
+    AppendMenuA(hConvert, MF_SEPARATOR, 0, NULL);
+    HMENU hLineEndings = CreatePopupMenu();
+    AppendMenuA(hLineEndings, MF_STRING, IDM_EDIT_EOL_CRLF, "&CRLF (Windows)");
+    AppendMenuA(hLineEndings, MF_STRING, IDM_EDIT_EOL_LF, "&LF (Unix/macOS)");
+    AppendMenuA(hLineEndings, MF_STRING, IDM_EDIT_EOL_CR, "C&R (Classic Mac)");
+    AppendMenuA(hConvert, MF_POPUP, (UINT_PTR)hLineEndings, "Line &Endings");
     AppendMenuA(hEditMenu, MF_POPUP, (UINT_PTR)hConvert, "Con&vert");
     AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_FIND, "&Find...\tCtrl+F");
@@ -4689,6 +4629,17 @@ static HMENU build_menu(void) {
     AppendMenuA(hFormat, MF_STRING, IDM_FORMAT_FONT, "&Font...");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFormat, "F&ormat");
 
+    HMENU hRun = CreatePopupMenu();
+    AppendMenuA(hRun, MF_STRING, IDM_RUN_FILE, "&Run File\tCtrl+F5");
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_FILE, "&Debug File\tF5");
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_CONTINUE, "&Continue\tF6");
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_STEP_OVER, "Step &Over\tF10");
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_STEP_INTO, "Step &Into\tShift+F11");
+    AppendMenuA(hRun, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_BREAKPOINT, "Toggle &Breakpoint\tF9");
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_CLEAR_BREAKPOINTS, "&Clear All Breakpoints");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hRun, "&Run");
+
     HMENU hView = CreatePopupMenu();
     AppendMenuA(hView, MF_STRING | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEPREVIEW, "Show &Preview\tCtrl+Shift+V");
     AppendMenuA(hView, MF_STRING | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEEDITOR, "Show &Editor\tCtrl+Shift+E");
@@ -4727,6 +4678,10 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_TOGGLE, "Toggle Fo&ld");
     AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_ALL, "Fold &All");
     AppendMenuA(hView, MF_STRING, IDM_VIEW_UNFOLD_ALL, "&Unfold All");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_IN, "Zoom &In\tCtrl+=");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_OUT, "Zoom &Out\tCtrl+-");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_RESET, "&Reset Zoom\tCtrl+0");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hView, "&View");
 
     HMENU hHelp = CreatePopupMenu();
@@ -5277,6 +5232,10 @@ static void layout(HWND hwnd) {
                          MulDiv(345, w > 0 ? GetDpiForWindow(hwnd) : 96, 96),
                          MulDiv(510, w > 0 ? GetDpiForWindow(hwnd) : 96, 96), -1 };
         SendMessageW(g_hStatus, SB_SETPARTS, 4, (LPARAM)parts);
+        /* StatusSubclassProc paints from these part rectangles via
+           SB_GETRECT, so a resize needs a repaint to match the new sizes -
+           including once at startup, right after the parts are first set. */
+        update_status_bar();
         h -= statusHeight;
     }
 
@@ -5439,6 +5398,24 @@ static void toggle_indent_guides(HWND hwnd) {
     g_indentGuides = !g_indentGuides;
     apply_indent_guides(g_hEdit);
     update_view_menu(hwnd);
+    save_layout_settings();
+}
+
+/* Scintilla's own zoom range is unbounded in either direction; clamp to a
+   range that stays legible (-10) and useful (+20, roughly 3x) at the
+   default 10pt-ish editor font. */
+static void adjust_editor_zoom(int delta) {
+    int zoom = g_editorZoom + delta;
+    if (zoom < -10) zoom = -10;
+    if (zoom > 20) zoom = 20;
+    g_editorZoom = zoom;
+    SendMessageA(g_hEdit, SCI_SETZOOM, (WPARAM)g_editorZoom, 0);
+    save_layout_settings();
+}
+
+static void reset_editor_zoom(void) {
+    g_editorZoom = 0;
+    SendMessageA(g_hEdit, SCI_SETZOOM, 0, 0);
     save_layout_settings();
 }
 
@@ -5653,6 +5630,20 @@ static void convert_indentation(int toSpaces) {
     SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
 }
 
+/* Rewrites every line ending to eolMode (SC_EOL_CRLF/CR/LF) and switches the
+   document's own EOL mode to match, so newly typed newlines follow suit. */
+static void convert_line_endings(int eolMode) {
+    SendMessageA(g_hEdit, SCI_CONVERTEOLS, (WPARAM)eolMode, 0);
+    SendMessageA(g_hEdit, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
+    update_status_position();
+}
+
+/* Sublime/VSCode-style Ctrl+Shift+L: every occurrence of the word under the
+   caret (or of the current selection) becomes its own selection at once. */
+static void select_all_occurrences(void) {
+    SendMessageA(g_hEdit, SCI_MULTIPLESELECTADDEACH, 0, 0);
+}
+
 /* Bookmarks are Scintilla markers on MARKER_BOOKMARK, which live on the
    document buffer itself - each tab keeps its own set automatically as
    SCI_SETDOCPOINTER swaps between them. */
@@ -5691,6 +5682,884 @@ static void goto_bookmark(int forward) {
 
 static void clear_all_bookmarks(void) {
     SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BOOKMARK, 0);
+}
+
+typedef enum DebugSourceKind {
+    DEBUG_SOURCE_NONE = 0, DEBUG_SOURCE_PYTHON, DEBUG_SOURCE_C, DEBUG_SOURCE_CPP
+} DebugSourceKind;
+
+static DebugSourceKind debug_source_kind(const WCHAR *path) {
+    const WCHAR *extension = path ? PathFindExtensionW(path) : NULL;
+    if (!extension) return DEBUG_SOURCE_NONE;
+    if (_wcsicmp(extension, L".py") == 0 || _wcsicmp(extension, L".pyw") == 0)
+        return DEBUG_SOURCE_PYTHON;
+    if (_wcsicmp(extension, L".c") == 0) return DEBUG_SOURCE_C;
+    if (_wcsicmp(extension, L".cc") == 0 || _wcsicmp(extension, L".cpp") == 0 ||
+        _wcsicmp(extension, L".cxx") == 0)
+        return DEBUG_SOURCE_CPP;
+    return DEBUG_SOURCE_NONE;
+}
+
+/* Debugger breakpoints are separate from general-purpose bookmarks, but share
+   the same narrow marker margin. Scintilla keeps them attached to their lines
+   as text is inserted or removed. */
+static void toggle_breakpoint_at_line(int line) {
+    if (debug_source_kind(g_currentFile) == DEBUG_SOURCE_NONE) {
+        MessageBoxW(g_hMainWnd, L"Breakpoints are available for Python, C, and C++ files.",
+                    L"Debugging", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    int mask = (int)SendMessageA(g_hEdit, SCI_MARKERGET, (WPARAM)line, 0);
+    if (mask & (1 << MARKER_BREAKPOINT))
+        SendMessageA(g_hEdit, SCI_MARKERDELETE, (WPARAM)line, (LPARAM)MARKER_BREAKPOINT);
+    else
+        SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)line, (LPARAM)MARKER_BREAKPOINT);
+}
+
+static void toggle_breakpoint_at_cursor(void) {
+    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    toggle_breakpoint_at_line(line);
+}
+
+static void clear_debug_breakpoints(void) {
+    SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BREAKPOINT, 0);
+}
+
+static int is_runnable_python_path(const WCHAR *path) {
+    return debug_source_kind(path) == DEBUG_SOURCE_PYTHON;
+}
+
+static int is_existing_file(const WCHAR *path) {
+    DWORD attributes = path ? GetFileAttributesW(path) : INVALID_FILE_ATTRIBUTES;
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* The full path to Windows PowerShell when it's found under the system
+   directory, or NULL to let ShellExecute resolve "powershell.exe" from PATH
+   instead. Caller frees a non-NULL result. */
+static WCHAR *locate_powershell(void) {
+    WCHAR systemDirectory[MAX_PATH];
+    if (!GetSystemDirectoryW(systemDirectory, MAX_PATH)) return NULL;
+    WCHAR *candidate = path_join(systemDirectory, L"WindowsPowerShell\\v1.0\\powershell.exe");
+    if (candidate && is_existing_file(candidate)) return candidate;
+    free(candidate);
+    return NULL;
+}
+
+/* Collects the 0-based line numbers of every breakpoint marker in the active
+   document in one pass, so callers don't need a separate counting scan
+   before walking the same markers again to emit debugger commands. Returns
+   the count; *outLines is NULL when it's 0. Caller frees a non-NULL result. */
+static int collect_breakpoint_lines(int **outLines) {
+    int capacity = 0, count = 0;
+    int *lines = NULL;
+    int line = -1;
+    while ((line = (int)SendMessageA(g_hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1),
+                                      (LPARAM)(1 << MARKER_BREAKPOINT))) >= 0) {
+        if (count >= capacity) {
+            int next = capacity ? capacity * 2 : 8;
+            int *grown = (int *)realloc(lines, (size_t)next * sizeof(int));
+            if (!grown) break;
+            lines = grown;
+            capacity = next;
+        }
+        lines[count++] = line;
+    }
+    *outLines = lines;
+    return count;
+}
+
+static WCHAR *python_from_environment_root(const WCHAR *root) {
+    if (!root || !root[0]) return NULL;
+    WCHAR *candidate = path_join(root, L"Scripts\\python.exe");
+    if (candidate && is_existing_file(candidate)) return candidate;
+    free(candidate);
+    return NULL;
+}
+
+static WCHAR *python_from_named_environment(const WCHAR *directory, const WCHAR *name) {
+    WCHAR *root = path_join(directory, name);
+    WCHAR *python = python_from_environment_root(root);
+    free(root);
+    return python;
+}
+
+static WCHAR *executable_on_search_path(const WCHAR *name) {
+    DWORD capacity = SearchPathW(NULL, name, NULL, 0, NULL, NULL);
+    if (!capacity) return NULL;
+    WCHAR *path = (WCHAR *)malloc(((size_t)capacity + 1) * sizeof(WCHAR));
+    if (!path) return NULL;
+    DWORD length = SearchPathW(NULL, name, NULL, capacity + 1, path, NULL);
+    if (!length || length > capacity) {
+        free(path);
+        return NULL;
+    }
+    return path;
+}
+
+/* Prefer an activated environment, then a project-local .venv/venv found by
+   walking up from the script, and finally the standard launcher/interpreters
+   on PATH. This lets common Python projects work without MarkEdit settings. */
+static WCHAR *find_python_interpreter(const WCHAR *scriptPath) {
+    DWORD environmentLength = GetEnvironmentVariableW(L"VIRTUAL_ENV", NULL, 0);
+    if (environmentLength) {
+        WCHAR *environment = (WCHAR *)malloc((size_t)environmentLength * sizeof(WCHAR));
+        if (environment && GetEnvironmentVariableW(L"VIRTUAL_ENV", environment,
+                                                    environmentLength)) {
+            WCHAR *python = python_from_environment_root(environment);
+            free(environment);
+            if (python) return python;
+        } else {
+            free(environment);
+        }
+    }
+
+    WCHAR *directory = path_directory(scriptPath);
+    while (directory) {
+        WCHAR *python = python_from_named_environment(directory, L".venv");
+        if (!python) python = python_from_named_environment(directory, L"venv");
+        if (python) {
+            free(directory);
+            return python;
+        }
+        WCHAR *parent = path_directory(directory);
+        if (!parent || _wcsicmp(parent, directory) == 0) {
+            free(parent);
+            break;
+        }
+        free(directory);
+        directory = parent;
+    }
+    free(directory);
+
+    static const WCHAR *names[] = { L"py.exe", L"python.exe", L"python3.exe" };
+    for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
+        WCHAR *python = executable_on_search_path(names[i]);
+        if (python) return python;
+    }
+    return NULL;
+}
+
+/* A PowerShell single-quoted literal only treats another apostrophe specially;
+   doubling it gives us safe arguments even for paths containing shell syntax. */
+static WCHAR *powershell_literal(const WCHAR *value) {
+    size_t length = wcslen(value);
+    WCHAR *literal = (WCHAR *)malloc((length * 2 + 3) * sizeof(WCHAR));
+    if (!literal) return NULL;
+    size_t output = 0;
+    literal[output++] = L'\'';
+    for (size_t i = 0; i < length; i++) {
+        if (value[i] == L'\'') literal[output++] = L'\'';
+        literal[output++] = value[i];
+    }
+    literal[output++] = L'\'';
+    literal[output] = 0;
+    return literal;
+}
+
+static WCHAR *debug_temporary_path(const WCHAR *extension) {
+    WCHAR temporaryDirectory[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, temporaryDirectory);
+    if (!length || length >= MAX_PATH) return NULL;
+    WCHAR name[96];
+    swprintf(name, sizeof(name) / sizeof(name[0]), L"markedit-debug-%lu-%llu.%ls",
+             GetCurrentProcessId(), (unsigned long long)GetTickCount64(), extension);
+    return path_join(temporaryDirectory, name);
+}
+
+static void clear_debug_execution_markers(void) {
+    if (!g_hEdit || g_documentCount <= 0) return;
+    sptr_t active = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    int oldSwitching = g_switchingDocument;
+    g_switchingDocument = 1;
+    for (int i = 0; i < g_documentCount; i++) {
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[i].sciDocument);
+        SendMessageA(g_hEdit, SCI_MARKERDELETEALL, MARKER_DEBUG_LINE, 0);
+    }
+    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)active);
+    g_switchingDocument = oldSwitching;
+}
+
+static void stop_debug_location_tracking(void) {
+    if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_DEBUG_LOCATION);
+    if (g_debugProcess) {
+        CloseHandle(g_debugProcess);
+        g_debugProcess = NULL;
+    }
+    if (g_debugLocationPath) DeleteFileW(g_debugLocationPath);
+    free(g_debugLocationPath); g_debugLocationPath = NULL;
+    free(g_debugWorkingDirectory); g_debugWorkingDirectory = NULL;
+    free(g_lastDebugSource); g_lastDebugSource = NULL;
+    g_debugLocationSeen = 0;
+    g_lastDebugLine = -1;
+    g_activeDebuggerKind = 0;
+    clear_debug_execution_markers();
+}
+
+static void start_debug_location_tracking(const WCHAR *locationPath,
+                                          const WCHAR *workingDirectory,
+                                          int debuggerKind, HANDLE process) {
+    stop_debug_location_tracking();
+    g_debugLocationPath = wcsdup_heap(locationPath);
+    g_debugWorkingDirectory = wcsdup_heap(workingDirectory);
+    g_debugProcess = process;
+    g_debugLocationSeen = 1; /* The launcher creates a `starting` sentinel. */
+    g_activeDebuggerKind = debuggerKind;
+    if (g_hMainWnd) SetTimer(g_hMainWnd, IDT_DEBUG_LOCATION, 150, NULL);
+}
+
+static WCHAR *debug_location_to_wide(const char *text) {
+    WCHAR *wide = to_wide(text);
+    if (wide) return wide;
+    int length = MultiByteToWideChar(CP_ACP, 0, text, -1, NULL, 0);
+    if (length <= 0) return NULL;
+    wide = (WCHAR *)malloc((size_t)length * sizeof(WCHAR));
+    if (!wide || !MultiByteToWideChar(CP_ACP, 0, text, -1, wide, length)) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static int parse_debug_location(char *text, WCHAR **sourceOut, int *lineOut) {
+    if (!text || !sourceOut || !lineOut) return 0;
+    char *source = text;
+    char *separator = strchr(text, '\n');
+    char *lineText = NULL;
+    if (separator) {
+        *separator = 0;
+        lineText = separator + 1;
+        /* GDB's `frame` output always starts with the "#N" frame number;
+           matching on " at " too would misidentify a pdb sentinel (a bare
+           "path\nline") whose path happens to contain that substring. */
+        if (text[0] == '#') {
+            *separator = '\n';
+            char *at = strstr(text, " at ");
+            if (!at) return 0;
+            source = at + 4;
+            char *end = strchr(source, '\n');
+            if (end) *end = 0;
+            char *colon = strrchr(source, ':');
+            if (!colon) return 0;
+            *colon = 0;
+            lineText = colon + 1;
+        }
+    }
+    if (!separator || !lineText) return 0;
+    char *endNumber = NULL;
+    long line = strtol(lineText, &endNumber, 10);
+    if (endNumber == lineText || line <= 0 || line > INT_MAX) return 0;
+    size_t sourceLength = strlen(source);
+    while (sourceLength && (source[sourceLength - 1] == '\r' || source[sourceLength - 1] == ' '))
+        source[--sourceLength] = 0;
+    WCHAR *wide = debug_location_to_wide(source);
+    if (!wide) return 0;
+    for (WCHAR *character = wide; *character; character++)
+        if (*character == L'/') *character = L'\\';
+    WCHAR *resolved = PathIsRelativeW(wide) && g_debugWorkingDirectory
+        ? path_join(g_debugWorkingDirectory, wide) : wcsdup_heap(wide);
+    free(wide);
+    if (!resolved) return 0;
+    WCHAR *absolute = absolute_path(resolved);
+    free(resolved);
+    *sourceOut = absolute;
+    *lineOut = (int)line;
+    return absolute != NULL;
+}
+
+static void poll_debug_location(void) {
+    if (!g_debugLocationPath) return;
+    if (g_debugProcess && WaitForSingleObject(g_debugProcess, 0) == WAIT_OBJECT_0) {
+        stop_debug_location_tracking();
+        return;
+    }
+    int length = 0;
+    char *text = read_bytes_file(g_debugLocationPath, &length);
+    if (!text) {
+        /* A debugger may have the file briefly open while replacing its
+           contents. Only a genuinely missing file means the session ended. */
+        if (GetFileAttributesW(g_debugLocationPath) != INVALID_FILE_ATTRIBUTES) return;
+        if (g_debugLocationSeen) stop_debug_location_tracking();
+        return;
+    }
+    g_debugLocationSeen = 1;
+    WCHAR *source = NULL;
+    int line = 0;
+    int parsed = parse_debug_location(text, &source, &line);
+    free(text);
+    if (!parsed) return;
+    if (g_lastDebugSource && _wcsicmp(g_lastDebugSource, source) == 0 &&
+        g_lastDebugLine == line) {
+        free(source);
+        return;
+    }
+    if (!is_existing_file(source) || !open_file_in_tab(source)) {
+        free(source);
+        return;
+    }
+    clear_debug_execution_markers();
+    SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)(line - 1), MARKER_DEBUG_LINE);
+    SendMessageA(g_hEdit, SCI_ENSUREVISIBLE, (WPARAM)(line - 1), 0);
+    int visibleLines = (int)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE,
+                 (WPARAM)(line > visibleLines / 2 ? line - visibleLines / 2 - 1 : 0), 0);
+    replace_wstring(&g_lastDebugSource, source);
+    g_lastDebugLine = line;
+    free(source);
+}
+
+static int send_debug_console_command(const WCHAR *command) {
+    if (!g_debugProcess || WaitForSingleObject(g_debugProcess, 0) != WAIT_TIMEOUT)
+        return 0;
+    DWORD processId = GetProcessId(g_debugProcess);
+    if (!processId) return 0;
+    if (!AttachConsole(processId)) {
+        if (GetLastError() != ERROR_ACCESS_DENIED) return 0;
+        FreeConsole();
+        if (!AttachConsole(processId)) return 0;
+    }
+    HANDLE input = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                               OPEN_EXISTING, 0, NULL);
+    int ok = 0;
+    if (input != INVALID_HANDLE_VALUE) {
+        size_t length = wcslen(command);
+        INPUT_RECORD *records = (INPUT_RECORD *)calloc(length * 2 + 2, sizeof(INPUT_RECORD));
+        if (records) {
+            DWORD count = 0;
+            for (size_t i = 0; i < length; i++) {
+                records[count].EventType = KEY_EVENT;
+                records[count].Event.KeyEvent.bKeyDown = TRUE;
+                records[count].Event.KeyEvent.wRepeatCount = 1;
+                records[count++].Event.KeyEvent.uChar.UnicodeChar = command[i];
+                records[count] = records[count - 1];
+                records[count++].Event.KeyEvent.bKeyDown = FALSE;
+            }
+            records[count].EventType = KEY_EVENT;
+            records[count].Event.KeyEvent.bKeyDown = TRUE;
+            records[count].Event.KeyEvent.wRepeatCount = 1;
+            records[count].Event.KeyEvent.wVirtualKeyCode = VK_RETURN;
+            records[count++].Event.KeyEvent.uChar.UnicodeChar = L'\r';
+            records[count] = records[count - 1];
+            records[count++].Event.KeyEvent.bKeyDown = FALSE;
+            DWORD inserted = 0;
+            ok = WriteConsoleInputW(input, records, count, &inserted) && inserted == count;
+            free(records);
+        }
+        CloseHandle(input);
+    }
+    FreeConsole();
+    return ok;
+}
+
+static void run_debugger_command(int action) {
+    const WCHAR *command = NULL;
+    if (g_activeDebuggerKind == 1)
+        command = action == IDM_DEBUG_STEP_OVER ? L"nv" :
+                  action == IDM_DEBUG_STEP_INTO ? L"sv" : L"cv";
+    else if (g_activeDebuggerKind == 2)
+        command = action == IDM_DEBUG_STEP_OVER ? L"next" :
+                  action == IDM_DEBUG_STEP_INTO ? L"step" : L"continue";
+    if (!command || !send_debug_console_command(command))
+        MessageBoxW(g_hMainWnd, L"Start a debug session with F5 before using this command.",
+                    L"Debugging", MB_OK | MB_ICONINFORMATION);
+}
+
+static WCHAR *python_double_quoted_literal(const WCHAR *value) {
+    size_t length = wcslen(value);
+    WCHAR *literal = (WCHAR *)malloc((length * 2 + 3) * sizeof(WCHAR));
+    if (!literal) return NULL;
+    size_t output = 0;
+    literal[output++] = L'"';
+    for (size_t i = 0; i < length; i++) {
+        if (value[i] == L'\\' || value[i] == L'"') literal[output++] = L'\\';
+        literal[output++] = value[i];
+    }
+    literal[output++] = L'"';
+    literal[output] = 0;
+    return literal;
+}
+
+static int write_pdb_driver(const WCHAR *path, const WCHAR *statePath, const WCHAR *scriptPath,
+                            const int *breakpointLines, int breakpointCount) {
+    WCHAR *stateLiteral = python_double_quoted_literal(statePath);
+    WCHAR *scriptLiteral = python_double_quoted_literal(scriptPath);
+    if (!stateLiteral || !scriptLiteral) {
+        free(stateLiteral); free(scriptLiteral);
+        return 0;
+    }
+    size_t capacity = wcslen(stateLiteral) + wcslen(scriptLiteral) +
+                      (size_t)breakpointCount * 64 + 3072;
+    WCHAR *driver = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!driver) {
+        free(stateLiteral); free(scriptLiteral);
+        return 0;
+    }
+    /* Two Python-3.13+ pdb quirks this driver has to work around:
+       1. debugger._run(pdb._ScriptTarget(...)) (used below when available)
+          clears the driver's own __main__ globals before running the target
+          script, so a plain module-level lookup of STATE/pprint from inside
+          interaction() - called back later, once the script is running -
+          raises NameError. Capturing them as default-argument values bakes
+          them into the function object at *definition* time instead, which
+          survives the globals wipe.
+       2. pdb._ScriptTarget resolves the script path through realpath-style
+          normalization for the code object it compiles, so a breakpoint set
+          against the path as given (which can be an 8.3 short name, e.g. for
+          a file under a long-username or %TEMP%-style directory) silently
+          never matches. Normalizing SCRIPT the same way before set_break()
+          keeps both in agreement regardless of which path form was passed in. */
+    int written = swprintf(driver, capacity,
+        L"import os, pdb, pprint, sys\n"
+        L"STATE = %ls\n"
+        L"SCRIPT = %ls\n"
+        L"SCRIPT = os.path.realpath(SCRIPT)\n"
+        L"class MarkEditPdb(pdb.Pdb):\n"
+        L"    def interaction(self, frame, traceback, _markedit_state=STATE, _markedit_pprint=pprint):\n"
+        L"        try:\n"
+        L"            with open(_markedit_state, 'w', encoding='utf-8') as stream:\n"
+        L"                stream.write(frame.f_code.co_filename + '\\n' + str(frame.f_lineno))\n"
+        L"        except OSError:\n"
+        L"            pass\n"
+        L"        print('\\nLocals:')\n"
+        L"        _markedit_pprint.pprint({key: value for key, value in frame.f_locals.items() "
+        L"if not key.startswith('__')})\n"
+        L"        return super().interaction(frame, traceback)\n"
+        L"debugger = MarkEditPdb()\n"
+        L"debugger.rcLines.extend([\n"
+        L"    'alias vars pp locals()',\n"
+        L"    'alias globals pp globals()',\n"
+        L"    'alias nv next',\n"
+        L"    'alias sv step',\n"
+        L"    'alias cv continue',\n"
+        L"])\n",
+        stateLiteral, scriptLiteral);
+    free(stateLiteral); free(scriptLiteral);
+    if (written < 0) {
+        free(driver);
+        return 0;
+    }
+    size_t used = (size_t)written;
+    for (int i = 0; i < breakpointCount; i++) {
+        written = swprintf(driver + used, capacity - used,
+                           L"debugger.set_break(SCRIPT, %d)\n", breakpointLines[i] + 1);
+        if (written < 0) { free(driver); return 0; }
+        used += (size_t)written;
+    }
+    if (breakpointCount) {
+        written = swprintf(driver + used, capacity - used,
+                           L"debugger.rcLines.append('continue')\n");
+        if (written < 0) { free(driver); return 0; }
+        used += (size_t)written;
+    }
+    written = swprintf(driver + used, capacity - used,
+        L"sys.argv = [SCRIPT]\n"
+        L"if hasattr(pdb, '_ScriptTarget') and hasattr(debugger, '_run'):\n"
+        L"    debugger._run(pdb._ScriptTarget(SCRIPT))\n"
+        L"elif hasattr(debugger, '_runscript'):\n"
+        L"    debugger._runscript(SCRIPT)\n"
+        L"else:\n"
+        L"    namespace = {'__name__': '__main__', '__file__': SCRIPT}\n"
+        L"    debugger.run(compile(open(SCRIPT, 'rb').read(), SCRIPT, 'exec'), namespace, namespace)\n");
+    if (written < 0) { free(driver); return 0; }
+    char *utf8 = to_utf8(driver);
+    free(driver);
+    if (!utf8) return 0;
+    int result = write_bytes_file(path, utf8, strlen(utf8));
+    free(utf8);
+    return result;
+}
+
+/* Shared cleanup for launch_python_file()'s several early-exit points. */
+static void free_python_launch_buffers(WCHAR *directory, WCHAR *debugLocation, WCHAR *pdbDriver,
+                                        WCHAR *quotedPython, WCHAR *quotedScript,
+                                        WCHAR *quotedDebugLocation, WCHAR *quotedPdbDriver) {
+    free(directory);
+    free(debugLocation);
+    free(pdbDriver);
+    free(quotedPython);
+    free(quotedScript);
+    free(quotedDebugLocation);
+    free(quotedPdbDriver);
+}
+
+static void launch_python_file(int debug) {
+    /* launch_active_source_file() already saved g_currentFile before calling
+       here, same as it does before launch_native_file(). */
+    if (!is_runnable_python_path(g_currentFile)) {
+        MessageBoxW(g_hMainWnd,
+                    L"Save the active document as a .py or .pyw file first.",
+                    debug ? L"Debug Python" : L"Run Python",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    WCHAR *python = find_python_interpreter(g_currentFile);
+    if (!python) {
+        MessageBoxW(g_hMainWnd,
+                    L"No Python interpreter was found. Install Python 3, activate a virtual "
+                    L"environment, or create .venv beside the project.",
+                    debug ? L"Debug Python" : L"Run Python",
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    WCHAR *directory = path_directory(g_currentFile);
+    int usePython3Launcher = _wcsicmp(PathFindFileNameW(python), L"py.exe") == 0;
+    WCHAR *debugLocation = debug ? debug_temporary_path(L"location") : NULL;
+    WCHAR *pdbDriver = debug ? debug_temporary_path(L"py") : NULL;
+    WCHAR *quotedPython = powershell_literal(python);
+    WCHAR *quotedScript = powershell_literal(g_currentFile);
+    WCHAR *quotedDebugLocation = debugLocation ? powershell_literal(debugLocation) : NULL;
+    WCHAR *quotedPdbDriver = pdbDriver ? powershell_literal(pdbDriver) : NULL;
+    free(python);
+    if (!directory || !quotedPython || !quotedScript ||
+        (debug && (!debugLocation || !pdbDriver || !quotedDebugLocation || !quotedPdbDriver))) {
+        free_python_launch_buffers(directory, debugLocation, pdbDriver, quotedPython,
+                                    quotedScript, quotedDebugLocation, quotedPdbDriver);
+        return;
+    }
+
+    int *breakpointLines = NULL;
+    int breakpointCount = debug ? collect_breakpoint_lines(&breakpointLines) : 0;
+    if (debug && (!write_pdb_driver(pdbDriver, debugLocation, g_currentFile,
+                                     breakpointLines, breakpointCount) ||
+                  !write_bytes_file(debugLocation, "starting\n", 9))) {
+        free(breakpointLines);
+        DeleteFileW(pdbDriver);
+        DeleteFileW(debugLocation);
+        free_python_launch_buffers(directory, debugLocation, pdbDriver, quotedPython,
+                                    quotedScript, quotedDebugLocation, quotedPdbDriver);
+        return;
+    }
+    free(breakpointLines);
+    size_t capacity = wcslen(quotedPython) + wcslen(quotedScript) +
+                      (quotedDebugLocation ? wcslen(quotedDebugLocation) : 0) +
+                      (quotedPdbDriver ? wcslen(quotedPdbDriver) : 0) + 1536;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) {
+        if (debug) { DeleteFileW(pdbDriver); DeleteFileW(debugLocation); }
+        free_python_launch_buffers(directory, debugLocation, pdbDriver, quotedPython,
+                                    quotedScript, quotedDebugLocation, quotedPdbDriver);
+        return;
+    }
+
+    int written;
+    int filesHandedOff = 0;
+    if (debug) {
+        written = swprintf(parameters, capacity,
+            L"-NoLogo -NoProfile -NoExit -Command \"Write-Host "
+            L"'pdb: F10/n next, Shift+F11/s step, F6/c continue; vars, globals, b <line>, p <expr>, where, q'; "
+            L"& %ls%ls '-c' 'import runpy,sys; "
+            L"runpy.run_path(sys.argv[1],run_name=\"markedit_pdb_driver\")' %ls; "
+            L"try { [System.IO.File]::Delete(%ls) } catch {}; "
+            L"try { [System.IO.File]::Delete(%ls) } catch {}\"",
+            quotedPython, usePython3Launcher ? L" -3" : L"", quotedPdbDriver,
+            quotedPdbDriver, quotedDebugLocation);
+    } else {
+        written = swprintf(parameters, capacity,
+            L"-NoLogo -NoProfile -NoExit -Command \"& %ls%ls %ls; Write-Host ''; "
+            L"Write-Host ('Process exited with code ' + $LASTEXITCODE)\"",
+            quotedPython, usePython3Launcher ? L" -3" : L"", quotedScript);
+    }
+    if (written < 0) goto python_launch_cleanup;
+
+    WCHAR *powershell = locate_powershell();
+    const WCHAR *executable = powershell ? powershell : L"powershell.exe";
+    SHELLEXECUTEINFOW execute = {0};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS;
+    execute.hwnd = g_hMainWnd;
+    execute.lpVerb = L"open";
+    execute.lpFile = executable;
+    execute.lpParameters = parameters;
+    execute.lpDirectory = directory;
+    execute.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) {
+        MessageBoxW(g_hMainWnd, L"The Python console could not be started.",
+                    debug ? L"Debug Python" : L"Run Python", MB_OK | MB_ICONERROR);
+    } else {
+        if (debug) {
+            filesHandedOff = 1;
+            start_debug_location_tracking(debugLocation, directory, 1, execute.hProcess);
+        } else if (execute.hProcess) {
+            CloseHandle(execute.hProcess);
+        }
+    }
+    free(powershell);
+
+python_launch_cleanup:
+    if (debug && !filesHandedOff) {
+        DeleteFileW(pdbDriver);
+        DeleteFileW(debugLocation);
+    }
+    free(parameters);
+    free_python_launch_buffers(directory, debugLocation, pdbDriver, quotedPython,
+                                quotedScript, quotedDebugLocation, quotedPdbDriver);
+}
+
+static WCHAR *find_native_compiler(DebugSourceKind kind, int debug, int *usesZig) {
+    static const WCHAR *cCompilers[] = { L"gcc.exe", L"clang.exe", L"zig.exe" };
+    static const WCHAR *cppCompilers[] = { L"g++.exe", L"clang++.exe", L"zig.exe" };
+    const WCHAR **names = kind == DEBUG_SOURCE_C ? cCompilers : cppCompilers;
+    int count = kind == DEBUG_SOURCE_C
+              ? (int)(sizeof(cCompilers) / sizeof(cCompilers[0]))
+              : (int)(sizeof(cppCompilers) / sizeof(cppCompilers[0]));
+    /* Zig's Windows debug output is not readable by GDB; it remains a useful
+       fallback for Run, while Debug requires a GCC- or Clang-style compiler. */
+    if (debug) count--;
+    if (usesZig) *usesZig = 0;
+    for (int i = 0; i < count; i++) {
+        WCHAR *compiler = executable_on_search_path(names[i]);
+        if (compiler) {
+            if (usesZig) *usesZig = _wcsicmp(PathFindFileNameW(compiler), L"zig.exe") == 0;
+            return compiler;
+        }
+    }
+    return NULL;
+}
+
+static WCHAR *native_temporary_executable(void) {
+    return debug_temporary_path(L"exe");
+}
+
+static WCHAR *native_temporary_gdb_commands(void) {
+    return debug_temporary_path(L"gdb");
+}
+
+static WCHAR *gdb_source_path(const WCHAR *path) {
+    WCHAR *copy = wcsdup_heap(path);
+    if (!copy) return NULL;
+    for (WCHAR *character = copy; *character; character++)
+        if (*character == L'\\') *character = L'/';
+    return copy;
+}
+
+/* Multi-line GDB commands such as `define hook-stop` must come from a command
+   file. Supplying each line through a separate -ex leaves GDB waiting at its
+   interactive definition prompt. The hook makes every next/step/continue stop
+   show all arguments and in-scope local variables without another command. */
+static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const WCHAR *locationPath,
+                              const int *breakpointLines, int breakpointCount) {
+    size_t capacity = wcslen(locationPath) + 1024 +
+                      (size_t)breakpointCount * (wcslen(sourcePath) + 64);
+    WCHAR *commands = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!commands) return 0;
+    int written = swprintf(commands, capacity,
+        L"set pagination off\n"
+        L"set breakpoint pending on\n"
+        L"set print pretty on\n"
+        L"set print object on\n"
+        L"set logging file %ls\n"
+        L"set logging overwrite on\n"
+        L"set logging redirect on\n"
+        L"define vars\n"
+        L"  echo \\nArguments:\\n\n"
+        L"  info args\n"
+        L"  echo Locals:\\n\n"
+        L"  info locals\n"
+        L"end\n"
+        L"define hook-stop\n"
+        L"  set logging enabled on\n"
+        L"  frame\n"
+        L"  set logging enabled off\n"
+        L"  vars\n"
+        L"end\n", locationPath);
+    if (written < 0) {
+        free(commands);
+        return 0;
+    }
+    size_t used = (size_t)written;
+    for (int i = 0; i < breakpointCount; i++) {
+        written = swprintf(commands + used, capacity - used,
+                           L"break %ls:%d\n", sourcePath, breakpointLines[i] + 1);
+        if (written < 0) {
+            free(commands);
+            return 0;
+        }
+        used += (size_t)written;
+    }
+    written = swprintf(commands + used, capacity - used,
+                       breakpointCount ? L"run\n" : L"start\n");
+    if (written < 0) {
+        free(commands);
+        return 0;
+    }
+    char *utf8 = to_utf8(commands);
+    free(commands);
+    if (!utf8) return 0;
+    int result = write_bytes_file(path, utf8, strlen(utf8));
+    free(utf8);
+    return result;
+}
+
+static void launch_native_file(DebugSourceKind kind, int debug) {
+    int usesZig = 0;
+    WCHAR *compiler = find_native_compiler(kind, debug, &usesZig);
+    WCHAR *debugger = debug ? executable_on_search_path(L"gdb.exe") : NULL;
+    if (!compiler) {
+        MessageBoxW(g_hMainWnd,
+                    debug
+                        ? L"No GDB-compatible C/C++ compiler was found. Install GCC/G++ or Clang and add it to PATH."
+                        : L"No C/C++ compiler was found. Install GCC, Clang, or Zig and add it to PATH.",
+                    debug ? L"Debug C/C++" : L"Run C/C++", MB_OK | MB_ICONERROR);
+        return;
+    }
+    if (debug && !debugger) {
+        free(compiler);
+        MessageBoxW(g_hMainWnd,
+                    L"GDB was not found on PATH. Install a Windows GDB toolchain to step through C/C++ code.",
+                    L"Debug C/C++", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    WCHAR *output = native_temporary_executable();
+    WCHAR *gdbCommands = debug ? native_temporary_gdb_commands() : NULL;
+    WCHAR *debugLocation = debug ? debug_temporary_path(L"location") : NULL;
+    WCHAR *directory = path_directory(g_currentFile);
+    WCHAR *sourceForGdb = gdb_source_path(g_currentFile);
+    WCHAR *locationForGdb = debugLocation ? gdb_source_path(debugLocation) : NULL;
+    WCHAR *quotedCompiler = powershell_literal(compiler);
+    WCHAR *quotedDebugger = debugger ? powershell_literal(debugger) : NULL;
+    WCHAR *quotedSource = powershell_literal(g_currentFile);
+    WCHAR *quotedOutput = output ? powershell_literal(output) : NULL;
+    WCHAR *quotedGdbCommands = gdbCommands ? powershell_literal(gdbCommands) : NULL;
+    WCHAR *quotedDebugLocation = debugLocation ? powershell_literal(debugLocation) : NULL;
+    free(compiler);
+    free(debugger);
+    if (!output || (debug && (!gdbCommands || !debugLocation || !locationForGdb)) ||
+        !directory || !sourceForGdb || !quotedCompiler ||
+        (debug && (!quotedDebugger || !quotedGdbCommands || !quotedDebugLocation)) ||
+        !quotedSource || !quotedOutput) {
+        free(output); free(directory); free(sourceForGdb); free(quotedCompiler);
+        free(gdbCommands); free(debugLocation); free(locationForGdb);
+        free(quotedGdbCommands); free(quotedDebugLocation); free(quotedDebugger);
+        free(quotedSource); free(quotedOutput);
+        return;
+    }
+
+    int commandFileHandedOff = 0;
+    int *breakpointLines = NULL;
+    int breakpointCount = debug ? collect_breakpoint_lines(&breakpointLines) : 0;
+    if (debug) {
+        int wroteCommands = write_gdb_commands(gdbCommands, sourceForGdb, locationForGdb,
+                                                breakpointLines, breakpointCount);
+        free(breakpointLines);
+        if (!wroteCommands || !write_bytes_file(debugLocation, "starting\n", 9))
+            goto native_launch_cleanup;
+    }
+    size_t capacity = wcslen(quotedCompiler) + wcslen(quotedSource) +
+                      wcslen(quotedOutput) + (quotedDebugger ? wcslen(quotedDebugger) : 0) +
+                      (quotedGdbCommands ? wcslen(quotedGdbCommands) : 0) +
+                      (quotedDebugLocation ? wcslen(quotedDebugLocation) : 0) + 2048;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) goto native_launch_cleanup;
+
+    const WCHAR *compilerMode = usesZig
+        ? (kind == DEBUG_SOURCE_C ? L" cc" : L" c++") : L"";
+    const WCHAR *standard = kind == DEBUG_SOURCE_C ? L"-std=gnu11" : L"-std=gnu++17";
+    const WCHAR *buildFlags = debug
+        ? L"'-g' '-O0' '-fno-omit-frame-pointer'" : L"'-O2'";
+    int written = swprintf(parameters, capacity,
+        L"-NoLogo -NoProfile -NoExit -Command \"Write-Host 'Building %ls...'; "
+        L"& %ls%ls '%ls' %ls '-o' %ls %ls; "
+        L"if ($LASTEXITCODE -eq 0) { ",
+        kind == DEBUG_SOURCE_C ? L"C" : L"C++", quotedCompiler, compilerMode,
+        standard, buildFlags, quotedOutput, quotedSource);
+    if (written < 0) goto native_parameters_cleanup;
+    size_t used = (size_t)written;
+
+    if (debug) {
+        written = swprintf(parameters + used, capacity - used,
+            L"Write-Host 'gdb: next/n, step/s, continue/c, vars, print <expr>, bt, watch <expr>, quit'; "
+            L"Write-Host 'Arguments and locals are shown automatically whenever execution stops.'; "
+            L"& %ls '-q' '-x' %ls %ls; ",
+            quotedDebugger, quotedGdbCommands, quotedOutput);
+        if (written < 0) goto native_parameters_cleanup;
+        used += (size_t)written;
+    } else {
+        written = swprintf(parameters + used, capacity - used,
+            L"& %ls; $markeditExit = $LASTEXITCODE; Write-Host ''; "
+            L"Write-Host ('Process exited with code ' + $markeditExit); ", quotedOutput);
+    }
+    if (written < 0) goto native_parameters_cleanup;
+    used += (size_t)written;
+    /* Deleting the just-executed binary can transiently fail with "Access is
+       denied" (Windows Defender's on-execute scan holds a brief lock on a
+       freshly run .exe); a bare Delete() call would surface that as a scary
+       PowerShell error right after the program's own output, even though the
+       run itself succeeded. try/catch makes the best-effort cleanup silent. */
+    written = swprintf(parameters + used, capacity - used,
+        debug
+            ? L"}; try { [System.IO.File]::Delete(%ls) } catch {}; "
+              L"try { [System.IO.File]::Delete(%ls) } catch {}; "
+              L"try { [System.IO.File]::Delete(%ls) } catch {}\""
+            : L"}; try { [System.IO.File]::Delete(%ls) } catch {}\"",
+        quotedOutput, quotedGdbCommands, quotedDebugLocation);
+    if (written < 0) goto native_parameters_cleanup;
+
+    WCHAR *powershell = locate_powershell();
+    const WCHAR *shell = powershell ? powershell : L"powershell.exe";
+    SHELLEXECUTEINFOW execute = {0};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS;
+    execute.hwnd = g_hMainWnd;
+    execute.lpVerb = L"open";
+    execute.lpFile = shell;
+    execute.lpParameters = parameters;
+    execute.lpDirectory = directory;
+    execute.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) {
+        MessageBoxW(g_hMainWnd, L"The C/C++ build console could not be started.",
+                    debug ? L"Debug C/C++" : L"Run C/C++", MB_OK | MB_ICONERROR);
+    } else {
+        if (debug) {
+            commandFileHandedOff = 1;
+            start_debug_location_tracking(debugLocation, directory, 2, execute.hProcess);
+        } else if (execute.hProcess) {
+            CloseHandle(execute.hProcess);
+        }
+    }
+    free(powershell);
+
+native_parameters_cleanup:
+    free(parameters);
+native_launch_cleanup:
+    if (!commandFileHandedOff) {
+        if (gdbCommands) DeleteFileW(gdbCommands);
+        if (debugLocation) DeleteFileW(debugLocation);
+    }
+    free(output);
+    free(gdbCommands);
+    free(debugLocation);
+    free(locationForGdb);
+    free(quotedGdbCommands);
+    free(quotedDebugLocation);
+    free(directory);
+    free(sourceForGdb);
+    free(quotedCompiler);
+    free(quotedDebugger);
+    free(quotedSource);
+    free(quotedOutput);
+}
+
+static void launch_active_source_file(int debug) {
+    if (!g_currentFile) {
+        do_save();
+        if (!g_currentFile) return;
+    } else if (g_dirty && !save_to_path(g_currentFile)) {
+        return;
+    }
+    DebugSourceKind kind = debug_source_kind(g_currentFile);
+    if (kind == DEBUG_SOURCE_PYTHON) {
+        launch_python_file(debug);
+    } else if (kind == DEBUG_SOURCE_C || kind == DEBUG_SOURCE_CPP) {
+        launch_native_file(kind, debug);
+    } else {
+        MessageBoxW(g_hMainWnd,
+                    L"Run and Debug support .py, .pyw, .c, .cc, .cpp, and .cxx files.",
+                    debug ? L"Debug File" : L"Run File", MB_OK | MB_ICONINFORMATION);
+    }
 }
 
 /* Strip trailing spaces and tabs from every line, as one undo action. Lines
@@ -5753,8 +6622,12 @@ static void toggle_comment(void) {
         line_is_comment_delimiter(text + blockStart, openEnd - blockStart, "<!--") &&
         line_is_comment_delimiter(text + closeStart, blockEnd - closeStart, "-->")) {
         int innerStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(firstLine + 1), 0);
-        int innerEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(lastLine - 1), 0);
-        int innerLength = innerEnd - innerStart;
+        /* lastLine == firstLine + 1 means the delimiters are on adjacent
+           lines with nothing between them - the inner content is empty
+           rather than computed from a line range (which would go negative). */
+        int innerLength = lastLine - firstLine >= 2
+            ? (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(lastLine - 1), 0) - innerStart
+            : 0;
         char *inner = (char *)malloc((size_t)innerLength + 1);
         if (inner) {
             memcpy(inner, text + innerStart, (size_t)innerLength);
@@ -6273,8 +7146,7 @@ static void do_find_in_folder(void) {
         char *content = read_bytes_file(files.paths[i], &length);
         if (!content) continue;
         char *cursor = content;
-        if (length >= 3 && (unsigned char)cursor[0] == 0xEF &&
-            (unsigned char)cursor[1] == 0xBB && (unsigned char)cursor[2] == 0xBF) cursor += 3;
+        if (has_utf8_bom(cursor, length)) cursor += 3;
         int lineNumber = 1;
         while (*cursor && results.count < 2000) {
             char *end = strchr(cursor, '\n');
@@ -6325,7 +7197,8 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Save", IDM_FILE_SAVE},
     {L"File: Save As", IDM_FILE_SAVEAS}, {L"File: Export Rendered HTML", IDM_FILE_EXPORT_HTML},
     {L"File: Export Rendered PDF", IDM_FILE_EXPORT_PDF}, {L"File: Print Rendered Preview", IDM_FILE_PRINT},
-    {L"File: Open Terminal Here", IDM_FILE_OPEN_TERMINAL}, {L"File: Close Tab", IDM_FILE_CLOSE},
+    {L"File: Open Terminal Here", IDM_FILE_OPEN_TERMINAL}, {L"File: Show in Explorer", IDM_FILE_SHOW_EXPLORER},
+    {L"File: Close Tab", IDM_FILE_CLOSE},
     {L"File: Reopen Closed Tab", IDM_FILE_REOPEN_CLOSED}, {L"Edit: Undo", IDM_EDIT_UNDO},
     {L"Edit: Redo", IDM_EDIT_REDO}, {L"Edit: Cut", IDM_EDIT_CUT}, {L"Edit: Copy", IDM_EDIT_COPY},
     {L"Edit: Paste", IDM_EDIT_PASTE}, {L"Edit: Delete", IDM_EDIT_DELETE},
@@ -6335,13 +7208,18 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Edit: Delete Line", IDM_EDIT_DELETE_LINE}, {L"Edit: Join Lines", IDM_EDIT_JOIN_LINES},
     {L"Edit: Move Line Up", IDM_EDIT_MOVE_LINE_UP}, {L"Edit: Move Line Down", IDM_EDIT_MOVE_LINE_DOWN},
     {L"Edit: Toggle Comment", IDM_EDIT_TOGGLE_COMMENT}, {L"Edit: Trim Trailing Whitespace", IDM_EDIT_TRIM_WHITESPACE},
-    {L"Edit: Select Next Occurrence", IDM_EDIT_SELECT_NEXT}, {L"Edit: Jump to Matching Brace", IDM_EDIT_MATCH_BRACE},
+    {L"Edit: Select Next Occurrence", IDM_EDIT_SELECT_NEXT},
+    {L"Edit: Select All Occurrences", IDM_EDIT_SELECT_ALL_OCCURRENCES},
+    {L"Edit: Jump to Matching Brace", IDM_EDIT_MATCH_BRACE},
     {L"Edit: Toggle Bookmark", IDM_EDIT_BOOKMARK_TOGGLE}, {L"Edit: Next Bookmark", IDM_EDIT_BOOKMARK_NEXT},
     {L"Edit: Previous Bookmark", IDM_EDIT_BOOKMARK_PREV}, {L"Edit: Clear Bookmarks", IDM_EDIT_BOOKMARK_CLEAR},
     {L"Edit: Convert to Uppercase", IDM_EDIT_UPPERCASE}, {L"Edit: Convert to Lowercase", IDM_EDIT_LOWERCASE},
     {L"Edit: Convert to Title Case", IDM_EDIT_TITLECASE}, {L"Edit: Sort Lines Ascending", IDM_EDIT_SORT_ASC},
     {L"Edit: Sort Lines Descending", IDM_EDIT_SORT_DESC}, {L"Edit: Remove Duplicate Lines", IDM_EDIT_SORT_DEDUPE},
     {L"Edit: Tabs to Spaces", IDM_EDIT_TABS_TO_SPACES}, {L"Edit: Spaces to Tabs", IDM_EDIT_SPACES_TO_TABS},
+    {L"Edit: Convert Line Endings to CRLF", IDM_EDIT_EOL_CRLF},
+    {L"Edit: Convert Line Endings to LF", IDM_EDIT_EOL_LF},
+    {L"Edit: Convert Line Endings to CR", IDM_EDIT_EOL_CR},
     {L"Format: Bold", IDM_FMT_BOLD},
     {L"Format: Italic", IDM_FMT_ITALIC}, {L"Format: Strikethrough", IDM_FMT_STRIKETHROUGH},
     {L"Format: Inline Code", IDM_FMT_CODE}, {L"Format: Code Block", IDM_FMT_CODEBLOCK},
@@ -6354,13 +7232,20 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Format: Alert", IDM_FMT_ALERT}, {L"Format: Table Editor", IDM_FMT_TABLE_EDITOR},
     {L"Format: Format JSON", IDM_FMT_JSON_PRETTY},
     {L"Format: Minify JSON", IDM_FMT_JSON_MINIFY}, {L"Format: Font", IDM_FORMAT_FONT},
+    {L"Run: Run File", IDM_RUN_FILE}, {L"Run: Debug File", IDM_DEBUG_FILE},
+    {L"Run: Continue", IDM_DEBUG_CONTINUE}, {L"Run: Step Over", IDM_DEBUG_STEP_OVER},
+    {L"Run: Step Into", IDM_DEBUG_STEP_INTO},
+    {L"Run: Toggle Breakpoint", IDM_DEBUG_BREAKPOINT},
+    {L"Run: Clear All Breakpoints", IDM_DEBUG_CLEAR_BREAKPOINTS},
     {L"View: Toggle Preview", IDM_VIEW_TOGGLEPREVIEW}, {L"View: Toggle Editor", IDM_VIEW_TOGGLEEDITOR},
     {L"View: Toggle Outline", IDM_VIEW_OUTLINE}, {L"View: Focus Mode", IDM_VIEW_FOCUS_MODE},
     {L"View: Next Tab", IDM_VIEW_NEXT_TAB}, {L"View: Previous Tab", IDM_VIEW_PREVIOUS_TAB},
     {L"View: Preview on Left", IDM_VIEW_PREVIEW_ON_LEFT},
     {L"View: Word Wrap", IDM_VIEW_WORD_WRAP}, {L"View: Spell Check", IDM_VIEW_SPELL_CHECK},
     {L"View: Spell Check Language", IDM_VIEW_SPELL_LANGUAGE}, {L"View: Show Whitespace", IDM_VIEW_SHOW_WHITESPACE},
-    {L"View: Indent Guides", IDM_VIEW_INDENT_GUIDES}, {L"View: GitHub Light Theme", IDM_VIEW_THEME_GITHUB_LIGHT},
+    {L"View: Indent Guides", IDM_VIEW_INDENT_GUIDES}, {L"View: Zoom In", IDM_VIEW_ZOOM_IN},
+    {L"View: Zoom Out", IDM_VIEW_ZOOM_OUT}, {L"View: Reset Zoom", IDM_VIEW_ZOOM_RESET},
+    {L"View: GitHub Light Theme", IDM_VIEW_THEME_GITHUB_LIGHT},
     {L"View: GitHub Dark Theme", IDM_VIEW_THEME_GITHUB_DARK}, {L"View: Custom Preview CSS", IDM_VIEW_CUSTOM_CSS},
     {L"View: Clear Custom Preview CSS", IDM_VIEW_CLEAR_CUSTOM_CSS}, {L"View: Toggle Fold", IDM_VIEW_FOLD_TOGGLE},
     {L"View: Fold All", IDM_VIEW_FOLD_ALL}, {L"View: Unfold All", IDM_VIEW_UNFOLD_ALL},
@@ -6396,6 +7281,7 @@ static void select_theme(HWND hwnd, int darkMode) {
         if (g_hToolbarButtons[i]) InvalidateRect(g_hToolbarButtons[i], NULL, TRUE);
     }
     if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);
+    if (g_hStatus) InvalidateRect(g_hStatus, NULL, TRUE);
     refresh_menu(hwnd);
 }
 
@@ -6420,6 +7306,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FILE_EXPORT_PDF: prepare_rendered_print(1); break;
         case IDM_FILE_PRINT: prepare_rendered_print(0); break;
         case IDM_FILE_OPEN_TERMINAL: open_terminal_here(); break;
+        case IDM_FILE_SHOW_EXPLORER: reveal_in_explorer(); break;
         case IDM_FILE_CLOSE: do_close_document_at(g_activeDocument); break;
         case IDM_FILE_REOPEN_CLOSED: do_reopen_closed_tab(); break;
         case IDM_FILE_RECENT_CLEAR:
@@ -6444,6 +7331,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_EDIT_TOGGLE_COMMENT: toggle_comment(); break;
         case IDM_EDIT_TRIM_WHITESPACE: trim_trailing_whitespace(); break;
         case IDM_EDIT_SELECT_NEXT: select_next_occurrence(); break;
+        case IDM_EDIT_SELECT_ALL_OCCURRENCES: select_all_occurrences(); break;
         case IDM_EDIT_MATCH_BRACE: jump_to_matching_brace(); break;
         case IDM_EDIT_BOOKMARK_TOGGLE: toggle_bookmark_at_cursor(); break;
         case IDM_EDIT_BOOKMARK_NEXT: goto_bookmark(1); break;
@@ -6457,6 +7345,9 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_EDIT_SORT_DEDUPE: transform_selected_lines(2); break;
         case IDM_EDIT_TABS_TO_SPACES: convert_indentation(1); break;
         case IDM_EDIT_SPACES_TO_TABS: convert_indentation(0); break;
+        case IDM_EDIT_EOL_CRLF: convert_line_endings(SC_EOL_CRLF); break;
+        case IDM_EDIT_EOL_LF: convert_line_endings(SC_EOL_LF); break;
+        case IDM_EDIT_EOL_CR: convert_line_endings(SC_EOL_CR); break;
         case IDM_EDIT_FIND: show_find_dialog(0); break;
         case IDM_EDIT_REPLACE: show_find_dialog(1); break;
         case IDM_EDIT_GOTOLINE: show_goto_line_dialog(); break;
@@ -6472,6 +7363,13 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FMT_JSON_PRETTY: format_json(1); break;
         case IDM_FMT_JSON_MINIFY: format_json(0); break;
         case IDM_FMT_TABLE_EDITOR: show_table_editor(); break;
+        case IDM_RUN_FILE: launch_active_source_file(0); break;
+        case IDM_DEBUG_FILE: launch_active_source_file(1); break;
+        case IDM_DEBUG_CONTINUE: run_debugger_command(IDM_DEBUG_CONTINUE); break;
+        case IDM_DEBUG_STEP_OVER: run_debugger_command(IDM_DEBUG_STEP_OVER); break;
+        case IDM_DEBUG_STEP_INTO: run_debugger_command(IDM_DEBUG_STEP_INTO); break;
+        case IDM_DEBUG_BREAKPOINT: toggle_breakpoint_at_cursor(); break;
+        case IDM_DEBUG_CLEAR_BREAKPOINTS: clear_debug_breakpoints(); break;
         case IDM_VIEW_TOGGLEPREVIEW: toggle_preview(hwnd); break;
         case IDM_VIEW_TOGGLEEDITOR: toggle_editor(hwnd); break;
         case IDM_VIEW_PREVIEW_ON_LEFT: toggle_panel_sides(hwnd); break;
@@ -6487,6 +7385,9 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_FOLD_ALL: fold_all_lines(0); break;
         case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
         case IDM_VIEW_OUTLINE: toggle_outline(hwnd); break;
+        case IDM_VIEW_ZOOM_IN: adjust_editor_zoom(1); break;
+        case IDM_VIEW_ZOOM_OUT: adjust_editor_zoom(-1); break;
+        case IDM_VIEW_ZOOM_RESET: reset_editor_zoom(); break;
         case IDM_VIEW_NEXT_TAB:
             if (g_documentCount > 1) switch_document((g_activeDocument + 1) % g_documentCount);
             break;
@@ -6750,6 +7651,199 @@ static int smart_markdown_newline(void) {
     return 1;
 }
 
+static int ends_with_word(const char *text, int length, const char *word) {
+    int wordLength = (int)strlen(word);
+    if (length < wordLength || memcmp(text + length - wordLength, word,
+                                      (size_t)wordLength) != 0) return 0;
+    return length == wordLength || !(isalnum((unsigned char)text[length - wordLength - 1]) ||
+                                      text[length - wordLength - 1] == '_');
+}
+
+static int style_allows_indent(int position) {
+    int style = (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)position, 0);
+    switch (g_activeLanguage) {
+        case LANG_CPP:
+            return !(style == SCE_C_COMMENT || style == SCE_C_COMMENTLINE ||
+                     style == SCE_C_COMMENTDOC || style == SCE_C_COMMENTLINEDOC ||
+                     style == SCE_C_STRING || style == SCE_C_CHARACTER ||
+                     style == SCE_C_STRINGEOL || style == SCE_C_VERBATIM ||
+                     style == SCE_C_REGEX || style == SCE_C_STRINGRAW ||
+                     style == SCE_C_TRIPLEVERBATIM || style == SCE_C_HASHQUOTEDSTRING);
+        case LANG_JSON:
+            return !(style == SCE_JSON_STRING || style == SCE_JSON_STRINGEOL ||
+                     style == SCE_JSON_LINECOMMENT || style == SCE_JSON_BLOCKCOMMENT);
+        case LANG_PYTHON:
+            return !(style == SCE_P_COMMENTLINE || style == SCE_P_COMMENTBLOCK ||
+                     style == SCE_P_STRING || style == SCE_P_CHARACTER ||
+                     style == SCE_P_TRIPLE || style == SCE_P_TRIPLEDOUBLE ||
+                     style == SCE_P_STRINGEOL || style == SCE_P_FSTRING ||
+                     style == SCE_P_FCHARACTER || style == SCE_P_FTRIPLE ||
+                     style == SCE_P_FTRIPLEDOUBLE);
+        case LANG_YAML:
+            return style != SCE_YAML_COMMENT;
+        case LANG_BASH:
+            return !(style == SCE_SH_COMMENTLINE || style == SCE_SH_STRING ||
+                     style == SCE_SH_CHARACTER || style == SCE_SH_HERE_DELIM ||
+                     style == SCE_SH_HERE_Q);
+        case LANG_POWERSHELL:
+            return !(style == SCE_POWERSHELL_COMMENT ||
+                     style == SCE_POWERSHELL_COMMENTSTREAM ||
+                     style == SCE_POWERSHELL_COMMENTDOCKEYWORD ||
+                     style == SCE_POWERSHELL_STRING ||
+                     style == SCE_POWERSHELL_CHARACTER ||
+                     style == SCE_POWERSHELL_HERE_STRING ||
+                     style == SCE_POWERSHELL_HERE_CHARACTER);
+        default:
+            return 1;
+    }
+}
+
+static int line_opens_indent(const char *before, int contentStart, int trimmedEnd,
+                             int lineStart, char *closingOut) {
+    if (closingOut) *closingOut = 0;
+    if (trimmedEnd <= contentStart || before[contentStart] == '#') return 0;
+    if (!style_allows_indent(lineStart + trimmedEnd - 1)) return 0;
+    char last = before[trimmedEnd - 1];
+    switch (g_activeLanguage) {
+        case LANG_CPP:
+        case LANG_POWERSHELL:
+            if (last == '{') { if (closingOut) *closingOut = '}'; return 1; }
+            break;
+        case LANG_JSON:
+            if (last == '{') { if (closingOut) *closingOut = '}'; return 1; }
+            if (last == '[') { if (closingOut) *closingOut = ']'; return 1; }
+            break;
+        case LANG_PYTHON:
+        case LANG_YAML:
+            return last == ':';
+        case LANG_BASH:
+            if (last == '{') { if (closingOut) *closingOut = '}'; return 1; }
+            return ends_with_word(before + contentStart, trimmedEnd - contentStart, "then") ||
+                   ends_with_word(before + contentStart, trimmedEnd - contentStart, "do") ||
+                   ends_with_word(before + contentStart, trimmedEnd - contentStart, "in");
+        default:
+            break;
+    }
+    return 0;
+}
+
+/* Carry the current line's leading whitespace onto the next line and add one
+   real tab after language-specific block openers. When the caret is between a
+   paired opener and closer, expand both onto properly aligned lines at once. */
+static int smart_indented_newline(void) {
+    int selectionStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selectionEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (selectionStart != selectionEnd) return 0;
+    int caret = selectionEnd;
+    int lineNumber = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    int beforeLength = caret - lineStart;
+    if (beforeLength < 0) return 0;
+    char *before = (char *)malloc((size_t)beforeLength + 1);
+    if (!before) return 0;
+    struct Sci_TextRange range = { { lineStart, caret }, before };
+    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    before[beforeLength] = 0;
+
+    int indentLength = 0;
+    while (indentLength < beforeLength &&
+           (before[indentLength] == ' ' || before[indentLength] == '\t')) indentLength++;
+    int trimmedEnd = beforeLength;
+    while (trimmedEnd > indentLength &&
+           (before[trimmedEnd - 1] == ' ' || before[trimmedEnd - 1] == '\t')) trimmedEnd--;
+    char closing = 0;
+    int addIndent = line_opens_indent(before, indentLength, trimmedEnd, lineStart, &closing);
+
+    int after = caret;
+    while (after < lineEnd) {
+        char character = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)after, 0);
+        if (character != ' ' && character != '\t') break;
+        after++;
+    }
+    int pairedClose = addIndent && closing && after < lineEnd &&
+        (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)after, 0) == closing;
+    if (pairedClose) {
+        int rest = after + 1;
+        while (rest < lineEnd) {
+            char character = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)rest, 0);
+            if (character != ' ' && character != '\t') { pairedClose = 0; break; }
+            rest++;
+        }
+    }
+
+    if (!indentLength && !addIndent) { free(before); return 0; }
+    const char *eol = editor_eol_sequence();
+    size_t eolLength = strlen(eol);
+    size_t firstLength = eolLength + (size_t)indentLength + (addIndent ? 1 : 0);
+    size_t insertLength = firstLength + (pairedClose ? eolLength + (size_t)indentLength : 0);
+    char *insert = (char *)malloc(insertLength + 1);
+    if (!insert) { free(before); return 0; }
+    size_t used = 0;
+    memcpy(insert + used, eol, eolLength); used += eolLength;
+    memcpy(insert + used, before, (size_t)indentLength); used += (size_t)indentLength;
+    if (addIndent) insert[used++] = '\t';
+    if (pairedClose) {
+        memcpy(insert + used, eol, eolLength); used += eolLength;
+        memcpy(insert + used, before, (size_t)indentLength); used += (size_t)indentLength;
+    }
+    insert[used] = 0;
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    if (pairedClose && after > caret)
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)after);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
+    if (pairedClose)
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(caret + (int)firstLength),
+                     (LPARAM)(caret + (int)firstLength));
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(insert);
+    free(before);
+    return 1;
+}
+
+static int smart_newline(void) {
+    if (g_activeLanguage == LANG_MARKDOWN && smart_markdown_newline()) return 1;
+    return smart_indented_newline();
+}
+
+/* Typing a closing brace on an otherwise blank indented line brings it back
+   one indentation level. Existing auto-paired closers are still skipped by
+   smart_pair_character() instead of being replaced. */
+static int smart_closing_indent(char typed) {
+    int valid = typed == '}' && (g_activeLanguage == LANG_CPP ||
+        g_activeLanguage == LANG_BASH || g_activeLanguage == LANG_POWERSHELL ||
+        g_activeLanguage == LANG_JSON);
+    if (typed == ']' && g_activeLanguage == LANG_JSON) valid = 1;
+    if (!valid) return 0;
+    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (start != end || (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed)
+        return 0;
+    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    for (int position = lineStart; position < start; position++) {
+        char character = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)position, 0);
+        if (character != ' ' && character != '\t') return 0;
+    }
+    if (start == lineStart) return 0;
+    int removeStart = start;
+    if ((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '\t') {
+        removeStart--;
+    } else {
+        int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+        if (tabWidth < 1) tabWidth = 4;
+        while (removeStart > lineStart && start - removeStart < tabWidth &&
+               (char)SendMessageA(g_hEdit, SCI_GETCHARAT,
+                                  (WPARAM)(removeStart - 1), 0) == ' ') removeStart--;
+    }
+    char replacement[2] = { typed, 0 };
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)removeStart, (LPARAM)start);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    return 1;
+}
+
 static int smart_pair_character(char typed) {
     char closing = typed == '(' ? ')' : typed == '[' ? ']' : typed == '{' ? '}' : typed == '`' ? '`' : 0;
     int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
@@ -6918,8 +8012,9 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     (void)id; (void)data;
     if (msg == WM_CHAR) {
         if (wParam == '\t' && smart_tab((GetKeyState(VK_SHIFT) & 0x8000) != 0)) return 0;
-        if (wParam == '\r' && smart_markdown_newline()) return 0;
+        if (wParam == '\r' && smart_newline()) return 0;
         if (wParam == '\b' && smart_pair_backspace()) return 0;
+        if (wParam < 128 && smart_closing_indent((char)wParam)) return 0;
         if (wParam < 128 && smart_pair_character((char)wParam)) return 0;
     } else if (msg == WM_CONTEXTMENU) {
         if (show_spelling_context_menu(hwnd, lParam)) return 0;
@@ -7058,6 +8153,7 @@ static void initialize_main_window(HWND hwnd) {
     g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
         WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
         0, 0, 0, 0, hwnd, (HMENU)ID_STATUS, GetModuleHandleW(NULL), NULL);
+    SetWindowSubclass(g_hStatus, StatusSubclassProc, 1, 0);
 
     g_hOutline = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
         WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
@@ -7132,13 +8228,19 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
             else SetTimer(hwnd, IDT_SCROLL_SYNC, 35, NULL);
         }
         update_brace_highlight();
-        update_status_bar();
+        update_status_position();
         return;
     }
     if (notification->code == SCN_MARGINCLICK) {
         if (scn->margin == MARGIN_BOOKMARKS) {
             int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)scn->position, 0);
-            toggle_bookmark_at_line(line);
+            /* Debuggable files default the margin to breakpoints, but Shift+Click
+               always reaches a bookmark - otherwise mouse-driven bookmarking would
+               be silently unavailable for any Python/C/C++ file. */
+            if (!(scn->modifiers & SCMOD_SHIFT) && debug_source_kind(g_currentFile) != DEBUG_SOURCE_NONE)
+                toggle_breakpoint_at_line(line);
+            else
+                toggle_bookmark_at_line(line);
         }
         return;
     }
@@ -7146,6 +8248,7 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
     if (!(scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT))) return;
 
     if (!g_switchingDocument && !g_dirty) set_dirty(1);
+    if (!g_switchingDocument) g_recoverySnapshotStale = 1;
     if (g_previewVisible) SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
     schedule_spell_check();
     update_status_bar();
@@ -7162,6 +8265,7 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_AUTOSAVE);
     KillTimer(hwnd, IDT_OUTLINE_UPDATE);
     KillTimer(hwnd, IDT_PRINT_PREVIEW);
+    stop_debug_location_tracking();
     if (g_webview && g_webMessageRegistered) {
         ICoreWebView2_remove_WebMessageReceived(g_webview, g_webMessageToken);
         g_webMessageRegistered = 0;
@@ -7274,6 +8378,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             if (wParam == IDT_PRINT_PREVIEW) {
                 run_pending_print();
+                return 0;
+            }
+            if (wParam == IDT_DEBUG_LOCATION) {
+                poll_debug_location();
                 return 0;
             }
             break;
@@ -7486,15 +8594,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, 'J', IDM_EDIT_JOIN_LINES },
         { FVIRTKEY | FCONTROL, VK_OEM_2, IDM_EDIT_TOGGLE_COMMENT },
         { FVIRTKEY | FCONTROL | FSHIFT, 'D', IDM_EDIT_SELECT_NEXT },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'L', IDM_EDIT_SELECT_ALL_OCCURRENCES },
         { FVIRTKEY | FCONTROL, VK_OEM_6, IDM_EDIT_MATCH_BRACE },
+        { FVIRTKEY | FCONTROL, VK_F5, IDM_RUN_FILE },
+        { FVIRTKEY, VK_F5, IDM_DEBUG_FILE },
+        { FVIRTKEY, VK_F6, IDM_DEBUG_CONTINUE },
+        { FVIRTKEY, VK_F10, IDM_DEBUG_STEP_OVER },
+        { FVIRTKEY | FSHIFT, VK_F11, IDM_DEBUG_STEP_INTO },
+        { FVIRTKEY, VK_F9, IDM_DEBUG_BREAKPOINT },
         { FVIRTKEY | FCONTROL, VK_F2, IDM_EDIT_BOOKMARK_TOGGLE },
         { FVIRTKEY, VK_F2, IDM_EDIT_BOOKMARK_NEXT },
         { FVIRTKEY | FSHIFT, VK_F2, IDM_EDIT_BOOKMARK_PREV },
+        { FVIRTKEY | FCONTROL, VK_OEM_PLUS, IDM_VIEW_ZOOM_IN },
+        { FVIRTKEY | FCONTROL, VK_ADD, IDM_VIEW_ZOOM_IN },
+        { FVIRTKEY | FCONTROL, VK_OEM_MINUS, IDM_VIEW_ZOOM_OUT },
+        { FVIRTKEY | FCONTROL, VK_SUBTRACT, IDM_VIEW_ZOOM_OUT },
+        { FVIRTKEY | FCONTROL, '0', IDM_VIEW_ZOOM_RESET },
     };
     HACCEL hAccel = CreateAcceleratorTableA(accels, sizeof(accels) / sizeof(accels[0]));
 
     ShowWindow(hwnd, g_startMaximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(hwnd);
+    
 
     MSG msg;
     int messageResult;
