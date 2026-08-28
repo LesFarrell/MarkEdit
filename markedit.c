@@ -4,7 +4,8 @@
  * Right pane: WebView2-hosted HTML preview (supports Mermaid diagrams,
  * with native browser zoom/pan/scroll), re-rendered on every edit.
  *
- * Build with a MinGW-w64 toolchain by running build.bat.
+ * Build with Zig on PATH by running build.bat (see premake5.lua for the
+ * alternative MinGW-w64 GCC build).
  */
 
 #define COBJMACROS
@@ -62,6 +63,15 @@ static WCHAR *g_exportPath = NULL;
 static WCHAR *g_pendingPdfPath = NULL;
 static int g_pendingPrintAction = 0; /* 1 = print dialog, 2 = PDF export */
 static int g_previewDarkMode = 0;
+/* User-configurable Run/Debug C/C++ compiler backend; see load_compiler_settings()
+   and find_native_compiler() further down. Auto keeps the existing GCC/Clang/
+   Zig/MSVC priority search; the others pin Run/Debug to just one of them. */
+typedef enum {
+    COMPILER_BACKEND_AUTO = 0, COMPILER_BACKEND_GCC, COMPILER_BACKEND_CLANG,
+    COMPILER_BACKEND_ZIG, COMPILER_BACKEND_MSVC
+} CompilerBackendPreference;
+static CompilerBackendPreference g_compilerBackend = COMPILER_BACKEND_AUTO;
+static WCHAR *g_vcvarsallOverridePath = NULL; /* [Compiler] VcvarsallPath override; skips auto-detection */
 static WCHAR *g_customCssPath = NULL;
 static WCHAR *g_debugLocationPath = NULL;
 static WCHAR *g_debugWorkingDirectory = NULL;
@@ -120,7 +130,7 @@ static int g_haveSavedWindowRect = 0;
 static int g_startMaximized = 0;
 static int g_focusMode = 0;
 /* Markdown is prose: wrapping long paragraphs is the useful default. */
-static int g_wordWrap = 1;
+static int g_wordWrap = 0;
 static int g_showWhitespace = 0;
 static int g_indentGuides = 0;
 static int g_spellCheckEnabled = 1;
@@ -638,7 +648,7 @@ static void update_linenumber_margin_width(HWND hEdit) {
 
 typedef enum {
     LANG_MARKDOWN = 0, LANG_JSON, LANG_XML, LANG_HTML, LANG_YAML,
-    LANG_CPP, LANG_PYTHON, LANG_BASH, LANG_POWERSHELL
+    LANG_CPP, LANG_PYTHON, LANG_BASH, LANG_POWERSHELL, LANG_LUA
 } Language;
 
 typedef struct LanguageInfo {
@@ -676,6 +686,9 @@ static const LanguageInfo LANGUAGES[] = {
       "begin break catch continue data do dynamicparam else elseif end exit filter finally for"
       " foreach from function if in local param process return switch throw trap try until"
       " where while", "powershell", 1 },
+    { LANG_LUA, "lua", L".lua",
+      "and break do else elseif end false for function goto if in local nil not or repeat return"
+      " then true until while", "lua", 1 },
 };
 
 #define LANGUAGE_COUNT ((int)(sizeof(LANGUAGES) / sizeof(LANGUAGES[0])))
@@ -952,6 +965,21 @@ static void apply_powershell_styles(HWND hEdit, const SyntaxPalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_OPERATOR, (LPARAM)p->operatorColour);
 }
 
+static void apply_lua_styles(HWND hEdit, const SyntaxPalette *p) {
+    const int comments[] = { SCE_LUA_COMMENT, SCE_LUA_COMMENTLINE, SCE_LUA_COMMENTDOC };
+    style_range(hEdit, comments, 3, p->comment);
+    const int strings[] = { SCE_LUA_STRING, SCE_LUA_CHARACTER, SCE_LUA_LITERALSTRING, SCE_LUA_STRINGEOL };
+    style_range(hEdit, strings, 4, p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_WORD, (LPARAM)p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_NUMBER, (LPARAM)p->number);
+    const int functions[] = { SCE_LUA_WORD2, SCE_LUA_WORD3 };
+    style_range(hEdit, functions, 2, p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_IDENTIFIER, (LPARAM)p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_PREPROCESSOR, (LPARAM)p->variable);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_OPERATOR, (LPARAM)p->operatorColour);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_LABEL, (LPARAM)p->function);
+}
+
 /* Applies the current theme colours for whichever language is active. */
 static void apply_language_styles(HWND hEdit) {
     if (g_activeLanguage == LANG_MARKDOWN) {
@@ -969,6 +997,7 @@ static void apply_language_styles(HWND hEdit) {
         case LANG_PYTHON: apply_python_styles(hEdit, &palette); break;
         case LANG_BASH: apply_bash_styles(hEdit, &palette); break;
         case LANG_POWERSHELL: apply_powershell_styles(hEdit, &palette); break;
+        case LANG_LUA: apply_lua_styles(hEdit, &palette); break;
         default: break;
     }
 }
@@ -1019,7 +1048,7 @@ static int create_spell_checker_for_language(const WCHAR *requested, int reportE
         wcsncpy(language, requested, LOCALE_NAME_MAX_LENGTH - 1);
         language[LOCALE_NAME_MAX_LENGTH - 1] = 0;
     } else if (!GetUserDefaultLocaleName(language, LOCALE_NAME_MAX_LENGTH))
-        wcscpy(language, L"en-US");
+        wcscpy(language, L"en-GB");
 
     WINBOOL supported = FALSE;
     ISpellCheckerFactory_IsSupported(factory, language, &supported);
@@ -1491,7 +1520,7 @@ static void load_layout_settings(void) {
     g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     if (g_editorZoom < -10) g_editorZoom = -10;
     if (g_editorZoom > 20) g_editorZoom = 20;
-    GetPrivateProfileStringW(L"SpellCheck", L"Language", L"", g_spellLanguage,
+    GetPrivateProfileStringW(L"SpellCheck", L"Language", L"en-GB", g_spellLanguage,
                              LOCALE_NAME_MAX_LENGTH, path);
     if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
 
@@ -1587,6 +1616,38 @@ static void save_find_settings(void) {
     WritePrivateProfileStringW(L"Find", L"ReplaceWith", g_replaceWith, path);
     write_profile_int(L"Find", L"MatchCase", (g_findFlags & FR_MATCHCASE) != 0, path);
     write_profile_int(L"Find", L"SearchDown", (g_findFlags & FR_DOWN) != 0, path);
+    free(path);
+}
+
+/* [Compiler] is hand-edited in markedit.ini rather than exposed through a
+   menu: Backend pins Run/Debug C/C++ to one compiler instead of the default
+   Auto priority search (GCC, Clang, Zig, then MSVC as a Run-only fallback),
+   and VcvarsallPath points at a specific vcvarsall.bat when MSVC isn't
+   installed in one of the standard Program Files locations find_vcvarsall()
+   checks. */
+static void load_compiler_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WCHAR value[16];
+    GetPrivateProfileStringW(L"Compiler", L"Backend", L"Auto", value, 16, path);
+    if (_wcsicmp(value, L"GCC") == 0) g_compilerBackend = COMPILER_BACKEND_GCC;
+    else if (_wcsicmp(value, L"Clang") == 0) g_compilerBackend = COMPILER_BACKEND_CLANG;
+    else if (_wcsicmp(value, L"Zig") == 0) g_compilerBackend = COMPILER_BACKEND_ZIG;
+    else if (_wcsicmp(value, L"MSVC") == 0) g_compilerBackend = COMPILER_BACKEND_MSVC;
+    else g_compilerBackend = COMPILER_BACKEND_AUTO;
+
+    DWORD cap = 512, n = 0;
+    WCHAR *vcvarsall = NULL;
+    do {
+        free(vcvarsall);
+        vcvarsall = (WCHAR *)calloc(cap, sizeof(WCHAR));
+        if (!vcvarsall) break;
+        n = GetPrivateProfileStringW(L"Compiler", L"VcvarsallPath", L"", vcvarsall, cap, path);
+        if (n < cap - 1) break;
+        cap *= 2;
+    } while (cap <= 32768);
+    if (vcvarsall && vcvarsall[0]) g_vcvarsallOverridePath = vcvarsall;
+    else free(vcvarsall);
     free(path);
 }
 
@@ -3013,6 +3074,7 @@ static void do_open(void) {
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMainWnd;
     ofn.lpstrFilter = L"Markdown Files (*.md;*.markdown)\0*.md;*.markdown\0Python Files (*.py;*.pyw)\0*.py;*.pyw\0C/C++ Files (*.c;*.cc;*.cpp;*.cxx)\0*.c;*.cc;*.cpp;*.cxx\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 5; /* "All Files (*.*)" - the dialog otherwise defaults to entry 1 */
     ofn.lpstrFile = path;
     ofn.nMaxFile = cap;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
@@ -5685,7 +5747,7 @@ static void clear_all_bookmarks(void) {
 }
 
 typedef enum DebugSourceKind {
-    DEBUG_SOURCE_NONE = 0, DEBUG_SOURCE_PYTHON, DEBUG_SOURCE_C, DEBUG_SOURCE_CPP
+    DEBUG_SOURCE_NONE = 0, DEBUG_SOURCE_PYTHON, DEBUG_SOURCE_C, DEBUG_SOURCE_CPP, DEBUG_SOURCE_LUA
 } DebugSourceKind;
 
 static DebugSourceKind debug_source_kind(const WCHAR *path) {
@@ -5697,14 +5759,23 @@ static DebugSourceKind debug_source_kind(const WCHAR *path) {
     if (_wcsicmp(extension, L".cc") == 0 || _wcsicmp(extension, L".cpp") == 0 ||
         _wcsicmp(extension, L".cxx") == 0)
         return DEBUG_SOURCE_CPP;
+    if (_wcsicmp(extension, L".lua") == 0) return DEBUG_SOURCE_LUA;
     return DEBUG_SOURCE_NONE;
+}
+
+/* Only Python/C/C++ have a debugger backend (pdb, GDB); Lua is Run-only, so
+   it must not be treated as debuggable just because debug_source_kind()
+   returns something other than DEBUG_SOURCE_NONE for it - that value also
+   drives whether clicking the margin sets a breakpoint vs. a bookmark. */
+static int is_debuggable_source(DebugSourceKind kind) {
+    return kind == DEBUG_SOURCE_PYTHON || kind == DEBUG_SOURCE_C || kind == DEBUG_SOURCE_CPP;
 }
 
 /* Debugger breakpoints are separate from general-purpose bookmarks, but share
    the same narrow marker margin. Scintilla keeps them attached to their lines
    as text is inserted or removed. */
 static void toggle_breakpoint_at_line(int line) {
-    if (debug_source_kind(g_currentFile) == DEBUG_SOURCE_NONE) {
+    if (!is_debuggable_source(debug_source_kind(g_currentFile))) {
         MessageBoxW(g_hMainWnd, L"Breakpoints are available for Python, C, and C++ files.",
                     L"Debugging", MB_OK | MB_ICONINFORMATION);
         return;
@@ -6298,22 +6369,148 @@ python_launch_cleanup:
                                 quotedScript, quotedDebugLocation, quotedPdbDriver);
 }
 
-static WCHAR *find_native_compiler(DebugSourceKind kind, int debug, int *usesZig) {
-    static const WCHAR *cCompilers[] = { L"gcc.exe", L"clang.exe", L"zig.exe" };
-    static const WCHAR *cppCompilers[] = { L"g++.exe", L"clang++.exe", L"zig.exe" };
-    const WCHAR **names = kind == DEBUG_SOURCE_C ? cCompilers : cppCompilers;
-    int count = kind == DEBUG_SOURCE_C
-              ? (int)(sizeof(cCompilers) / sizeof(cCompilers[0]))
-              : (int)(sizeof(cppCompilers) / sizeof(cppCompilers[0]));
-    /* Zig's Windows debug output is not readable by GDB; it remains a useful
-       fallback for Run, while Debug requires a GCC- or Clang-style compiler. */
-    if (debug) count--;
-    if (usesZig) *usesZig = 0;
-    for (int i = 0; i < count; i++) {
+/* Lua is Run-only: there's no bundled debugger the way GDB and pdb back
+   C/C++ and Python (a standalone Lua debugger isn't something you can just
+   find on PATH the way those are), so this only ever runs the script. */
+static WCHAR *find_lua_interpreter(void) {
+    static const WCHAR *names[] = { L"lua.exe", L"lua5.4.exe", L"lua54.exe",
+                                     L"lua5.3.exe", L"lua53.exe", L"lua5.1.exe", L"luajit.exe" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        WCHAR *lua = executable_on_search_path(names[i]);
+        if (lua) return lua;
+    }
+    return NULL;
+}
+
+static void launch_lua_file(void) {
+    WCHAR *lua = find_lua_interpreter();
+    if (!lua) {
+        MessageBoxW(g_hMainWnd,
+                    L"No Lua interpreter was found. Install Lua (or LuaJIT) and add it to PATH.",
+                    L"Run Lua", MB_OK | MB_ICONERROR);
+        return;
+    }
+    WCHAR *directory = path_directory(g_currentFile);
+    WCHAR *quotedLua = powershell_literal(lua);
+    WCHAR *quotedScript = powershell_literal(g_currentFile);
+    free(lua);
+    if (!directory || !quotedLua || !quotedScript) {
+        free(directory); free(quotedLua); free(quotedScript);
+        return;
+    }
+
+    size_t capacity = wcslen(quotedLua) + wcslen(quotedScript) + 256;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) {
+        free(directory); free(quotedLua); free(quotedScript);
+        return;
+    }
+    int written = swprintf(parameters, capacity,
+        L"-NoLogo -NoProfile -NoExit -Command \"& %ls %ls; Write-Host ''; "
+        L"Write-Host ('Process exited with code ' + $LASTEXITCODE)\"",
+        quotedLua, quotedScript);
+    if (written < 0) {
+        free(parameters); free(directory); free(quotedLua); free(quotedScript);
+        return;
+    }
+
+    WCHAR *powershell = locate_powershell();
+    const WCHAR *executable = powershell ? powershell : L"powershell.exe";
+    SHELLEXECUTEINFOW execute = {0};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS;
+    execute.hwnd = g_hMainWnd;
+    execute.lpVerb = L"open";
+    execute.lpFile = executable;
+    execute.lpParameters = parameters;
+    execute.lpDirectory = directory;
+    execute.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) {
+        MessageBoxW(g_hMainWnd, L"The Lua console could not be started.",
+                    L"Run Lua", MB_OK | MB_ICONERROR);
+    } else if (execute.hProcess) {
+        CloseHandle(execute.hProcess);
+    }
+    free(powershell);
+    free(parameters);
+    free(directory);
+    free(quotedLua);
+    free(quotedScript);
+}
+
+typedef enum {
+    NATIVE_COMPILER_GCC = 0, NATIVE_COMPILER_CLANG, NATIVE_COMPILER_ZIG, NATIVE_COMPILER_MSVC
+} NativeCompilerKind;
+
+/* MSVC has no single "cl.exe" to look up on PATH the way GCC/Clang/Zig do:
+   its compiler only works once vcvarsall.bat has set up INCLUDE/LIB/PATH for
+   a specific architecture, and it isn't installed on PATH by default. Rather
+   than shelling out to vswhere.exe (adds a process-capture dependency for a
+   value that rarely changes), check the standard install layout directly.
+   Visual Studio itself always lands under the 32-bit Program Files directory
+   even on 64-bit Windows; standalone Build Tools installs sometimes use the
+   64-bit one, so both are checked. */
+static WCHAR *find_vcvarsall(void) {
+    if (g_vcvarsallOverridePath) return wcsdup_heap(g_vcvarsallOverridePath);
+    static const WCHAR *years[] = { L"2022", L"2019" };
+    static const WCHAR *editions[] = { L"Enterprise", L"Professional", L"Community", L"BuildTools" };
+    static const WCHAR *envNames[] = { L"ProgramFiles(x86)", L"ProgramFiles" };
+    for (int e = 0; e < 2; e++) {
+        WCHAR programFiles[MAX_PATH];
+        if (!GetEnvironmentVariableW(envNames[e], programFiles, MAX_PATH)) continue;
+        for (int y = 0; y < (int)(sizeof(years) / sizeof(years[0])); y++) {
+            for (int ed = 0; ed < (int)(sizeof(editions) / sizeof(editions[0])); ed++) {
+                WCHAR path[MAX_PATH * 2];
+                swprintf(path, MAX_PATH * 2,
+                    L"%ls\\Microsoft Visual Studio\\%ls\\%ls\\VC\\Auxiliary\\Build\\vcvarsall.bat",
+                    programFiles, years[y], editions[ed]);
+                if (PathFileExistsW(path)) return wcsdup_heap(path);
+            }
+        }
+    }
+    return NULL;
+}
+
+/* g_compilerBackend (see load_compiler_settings()) either pins the search to
+   one compiler or leaves it Auto, trying GCC, Clang, then Zig in that order
+   and falling back to MSVC only for Run (never Debug: there's no GDB-
+   readable debug info from cl.exe, so Debug requires a GCC- or Clang-style
+   compiler same as before this setting existed). */
+static WCHAR *find_native_compiler(DebugSourceKind kind, int debug, NativeCompilerKind *compilerKind) {
+    static const WCHAR *cNames[]   = { L"gcc.exe", L"clang.exe", L"zig.exe" };
+    static const WCHAR *cppNames[] = { L"g++.exe", L"clang++.exe", L"zig.exe" };
+    static const NativeCompilerKind kinds[] = { NATIVE_COMPILER_GCC, NATIVE_COMPILER_CLANG, NATIVE_COMPILER_ZIG };
+    const WCHAR **names = kind == DEBUG_SOURCE_C ? cNames : cppNames;
+
+    if (compilerKind) *compilerKind = NATIVE_COMPILER_GCC;
+
+    if (g_compilerBackend == COMPILER_BACKEND_MSVC) {
+        if (debug) return NULL;
+        WCHAR *vcvarsall = find_vcvarsall();
+        if (vcvarsall && compilerKind) *compilerKind = NATIVE_COMPILER_MSVC;
+        return vcvarsall;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        if (debug && kinds[i] == NATIVE_COMPILER_ZIG) continue;
+        if (g_compilerBackend != COMPILER_BACKEND_AUTO) {
+            CompilerBackendPreference want =
+                kinds[i] == NATIVE_COMPILER_GCC ? COMPILER_BACKEND_GCC :
+                kinds[i] == NATIVE_COMPILER_CLANG ? COMPILER_BACKEND_CLANG : COMPILER_BACKEND_ZIG;
+            if (g_compilerBackend != want) continue;
+        }
         WCHAR *compiler = executable_on_search_path(names[i]);
         if (compiler) {
-            if (usesZig) *usesZig = _wcsicmp(PathFindFileNameW(compiler), L"zig.exe") == 0;
+            if (compilerKind) *compilerKind = kinds[i];
             return compiler;
+        }
+    }
+
+    if (g_compilerBackend == COMPILER_BACKEND_AUTO && !debug) {
+        WCHAR *vcvarsall = find_vcvarsall();
+        if (vcvarsall) {
+            if (compilerKind) *compilerKind = NATIVE_COMPILER_MSVC;
+            return vcvarsall;
         }
     }
     return NULL;
@@ -6393,15 +6590,86 @@ static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const 
     return result;
 }
 
+/* MSVC needs its own launch path rather than reusing the PowerShell one
+   below: cl.exe only works once vcvarsall.bat has set up INCLUDE/LIB/PATH
+   for a target architecture, and a batch file's environment changes don't
+   propagate out to a parent PowerShell session the way they would to a
+   further command chained in the same cmd.exe process. So the whole
+   build+run+cleanup chain runs as a single cmd.exe command instead. */
+static void launch_msvc_file(DebugSourceKind kind, WCHAR *vcvarsallPath) {
+    WCHAR *output = native_temporary_executable();
+    WCHAR *directory = path_directory(g_currentFile);
+    if (!output || !directory) {
+        free(vcvarsallPath); free(output); free(directory);
+        return;
+    }
+
+    const WCHAR *std = kind == DEBUG_SOURCE_C ? L"/std:c11" : L"/std:c++17";
+    size_t capacity = wcslen(vcvarsallPath) + wcslen(output) * 3 + wcslen(g_currentFile) + 512;
+    WCHAR *command = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!command) {
+        free(vcvarsallPath); free(output); free(directory);
+        return;
+    }
+    /* The leading/trailing quote wrapping the whole /k argument is cmd.exe's
+       documented workaround for a command line that itself contains further
+       quoted substrings (the VS install path, source, and output paths can
+       all contain spaces): when the switch's remainder starts and ends with
+       a quote character, cmd strips only that outer pair and leaves
+       everything between - including each inner "..." - untouched, rather
+       than mangling it with its ad-hoc first-quote/last-quote stripping
+       rule. enabledelayedexpansion + !errorlevel! (rather than %errorlevel%)
+       is needed because cmd expands %-variables once, when the whole /k
+       line is parsed, before any of the chained commands actually run - so
+       plain %errorlevel% would show a stale value from before the build. */
+    int written = swprintf(command, capacity,
+        L"/k \"setlocal enabledelayedexpansion && call \"%ls\" x64 >nul && "
+        L"echo Building %ls... && "
+        L"cl.exe /nologo %ls /O2 /EHsc /Fe:\"%ls\" \"%ls\" && "
+        L"(\"%ls\" & echo. & echo Process exited with code !errorlevel!) & "
+        L"del /f /q \"%ls\" >nul 2>nul\"",
+        vcvarsallPath, kind == DEBUG_SOURCE_C ? L"C" : L"C++", std, output, g_currentFile,
+        output, output);
+    free(vcvarsallPath);
+    if (written < 0) {
+        free(command); free(output); free(directory);
+        return;
+    }
+
+    SHELLEXECUTEINFOW execute = {0};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS;
+    execute.hwnd = g_hMainWnd;
+    execute.lpVerb = L"open";
+    execute.lpFile = L"cmd.exe";
+    execute.lpParameters = command;
+    execute.lpDirectory = directory;
+    execute.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) {
+        MessageBoxW(g_hMainWnd, L"The C/C++ build console could not be started.",
+                    L"Run C/C++", MB_OK | MB_ICONERROR);
+    } else if (execute.hProcess) {
+        CloseHandle(execute.hProcess);
+    }
+    free(command);
+    free(output);
+    free(directory);
+}
+
 static void launch_native_file(DebugSourceKind kind, int debug) {
-    int usesZig = 0;
-    WCHAR *compiler = find_native_compiler(kind, debug, &usesZig);
+    NativeCompilerKind compilerKind = NATIVE_COMPILER_GCC;
+    WCHAR *compiler = find_native_compiler(kind, debug, &compilerKind);
+    if (compiler && compilerKind == NATIVE_COMPILER_MSVC) {
+        launch_msvc_file(kind, compiler);
+        return;
+    }
     WCHAR *debugger = debug ? executable_on_search_path(L"gdb.exe") : NULL;
     if (!compiler) {
         MessageBoxW(g_hMainWnd,
                     debug
                         ? L"No GDB-compatible C/C++ compiler was found. Install GCC/G++ or Clang and add it to PATH."
-                        : L"No C/C++ compiler was found. Install GCC, Clang, or Zig and add it to PATH.",
+                        : L"No C/C++ compiler was found. Install GCC, Clang, Zig, or Visual Studio "
+                          L"(Desktop development with C++ workload) and add it to PATH.",
                     debug ? L"Debug C/C++" : L"Run C/C++", MB_OK | MB_ICONERROR);
         return;
     }
@@ -6455,7 +6723,7 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) goto native_launch_cleanup;
 
-    const WCHAR *compilerMode = usesZig
+    const WCHAR *compilerMode = compilerKind == NATIVE_COMPILER_ZIG
         ? (kind == DEBUG_SOURCE_C ? L" cc" : L" c++") : L"";
     const WCHAR *standard = kind == DEBUG_SOURCE_C ? L"-std=gnu11" : L"-std=gnu++17";
     const WCHAR *buildFlags = debug
@@ -6555,9 +6823,17 @@ static void launch_active_source_file(int debug) {
         launch_python_file(debug);
     } else if (kind == DEBUG_SOURCE_C || kind == DEBUG_SOURCE_CPP) {
         launch_native_file(kind, debug);
+    } else if (kind == DEBUG_SOURCE_LUA) {
+        if (debug) {
+            MessageBoxW(g_hMainWnd, L"Lua files support Run only; there is no Lua debugger integration.",
+                        L"Debug File", MB_OK | MB_ICONINFORMATION);
+        } else {
+            launch_lua_file();
+        }
     } else {
         MessageBoxW(g_hMainWnd,
-                    L"Run and Debug support .py, .pyw, .c, .cc, .cpp, and .cxx files.",
+                    L"Run supports .py, .pyw, .c, .cc, .cpp, .cxx, and .lua files. "
+                    L"Debug supports all of those except .lua.",
                     debug ? L"Debug File" : L"Run File", MB_OK | MB_ICONINFORMATION);
     }
 }
@@ -8237,7 +8513,7 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
             /* Debuggable files default the margin to breakpoints, but Shift+Click
                always reaches a bookmark - otherwise mouse-driven bookmarking would
                be silently unavailable for any Python/C/C++ file. */
-            if (!(scn->modifiers & SCMOD_SHIFT) && debug_source_kind(g_currentFile) != DEBUG_SOURCE_NONE)
+            if (!(scn->modifiers & SCMOD_SHIFT) && is_debuggable_source(debug_source_kind(g_currentFile)))
                 toggle_breakpoint_at_line(line);
             else
                 toggle_bookmark_at_line(line);
@@ -8513,6 +8789,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     apply_menu_theme(NULL, g_previewDarkMode);
     load_layout_settings();
     load_find_settings();
+    load_compiler_settings();
     if (g_commandLinePreviewMode) {
         /* File-association/command-line launches are preview-only for this
            session, without overwriting the user's normal panel visibility. */

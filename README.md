@@ -15,9 +15,10 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - CommonMark plus GFM tables, task lists, strikethrough, bare-URL autolinks, and footnotes, along with code-fence language classes used by syntax-aware preview features.
 - GitHub-style note, tip, important, warning, and caution alerts.
 - Local syntax highlighting for named code fences in the preview, and for Markdown source in the editor, with matching light and dark themes.
-- Editor syntax highlighting follows the file extension: Markdown, JSON, XML, HTML, YAML, C/C++/JavaScript/TypeScript, Python, Bash and PowerShell. Unrecognised extensions fall back to Markdown.
+- Editor syntax highlighting follows the file extension: Markdown, JSON, XML, HTML, YAML, C/C++/JavaScript/TypeScript, Python, Bash, PowerShell, and Lua. Unrecognised extensions fall back to Markdown.
 - Python files can be run with Ctrl+F5 or debugged with F5 through the standard `pdb` debugger. The current execution line is highlighted in MarkEdit and all local variables are printed at every stop. Use F10 to step over, Shift+F11 to step into, and F6 to continue from either the editor or the Run menu; `vars` and `globals` remain available in the console. MarkEdit prefers an activated virtual environment, then a project-local `.venv`/`venv`, then Python on `PATH`.
-- Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. Editor breakpoints are loaded before execution and the current execution line is highlighted in MarkEdit. Use F10 to step over, Shift+F11 to step into, and F6 to continue; `print expression`, `watch expression`, and `vars` are available in the console. Function arguments and local variables are shown automatically at each stop. Running can use GCC/G++, Clang, or Zig; debugging requires GCC/G++ or Clang plus GDB on `PATH`.
+- Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. Editor breakpoints are loaded before execution and the current execution line is highlighted in MarkEdit. Use F10 to step over, Shift+F11 to step into, and F6 to continue; `print expression`, `watch expression`, and `vars` are available in the console. Function arguments and local variables are shown automatically at each stop. Running can use GCC/G++, Clang, Zig, or MSVC (`cl.exe`, found via a standard Visual Studio/Build Tools install or `[Compiler] VcvarsallPath` in `markedit.ini`); debugging requires GCC/G++ or Clang plus GDB on `PATH` (MSVC is Run-only — there's no bundled debugger for it). `[Compiler] Backend` in `markedit.ini` pins Run/Debug to one of GCC, Clang, Zig, or MSVC instead of the default auto-detect order.
+- Lua files (`.lua`) can be run with Ctrl+F5 using `lua`, a versioned `lua5.x`, or `luajit` found on `PATH`. Lua is Run-only; there is no Lua debugger integration.
 - F9 (or a click in the marker gutter) toggles per-document Python/C/C++ breakpoints, and Run → Clear All Breakpoints removes them together.
 - Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
 - Tabs can be reordered by dragging. Dirty and unsaved tabs are snapshotted every five seconds to a recovery area under Local AppData and can be restored after an interrupted session.
@@ -87,7 +88,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | F6 | Continue the active debug session |
 | F10 | Step over the current line |
 | Shift+F11 | Step into the current call |
-| Ctrl+F5 | Run active Python, C, or C++ file |
+| Ctrl+F5 | Run active Python, C, C++, or Lua file |
 | F9 | Toggle debugger breakpoint |
 | Tab / Shift+Tab | Smart indent / outdent (four-column tab stops) |
 | Ctrl+D | Duplicate line |

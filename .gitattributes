@@ -38,3 +38,8 @@ third_party/katex/VERSION.txt text eol=lf
 
 # Preserve the pinned upstream cmark-gfm files verbatim.
 third_party/cmark-gfm/** -text whitespace=-blank-at-eol,-blank-at-eof
+
+# Preserve the pinned upstream Lexilla files verbatim (trimmed to the
+# supported languages and their dependencies; src/Lexilla.cxx is hand-edited
+# to register only those lexers - see the comment in that file).
+third_party/lexilla/** -text whitespace=-blank-at-eol,-blank-at-eof

@@ -57,5 +57,5 @@ Source-editor syntax highlighting uses lexers from
 Neil Hodgson and contributors, distributed under the same permissive licence
 as Scintilla. `Lexilla.dll` is built from a trimmed copy of the upstream
 source under `third_party/lexilla`, carrying the Markdown, JSON, XML/HTML,
-YAML, C/C++, Python, Bash and PowerShell lexers with their required support
-code; a copy of the licence is at `third_party/lexilla/License.txt`.
+YAML, C/C++, Python, Bash, PowerShell and Lua lexers with their required
+support code; a copy of the licence is at `third_party/lexilla/License.txt`.

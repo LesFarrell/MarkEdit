@@ -1,5 +1,8 @@
 markedit.c
+editor_language.c
 path_utils.c
 text_codec.c
 json_formatter.c
 markdown.c
+recent_files.c
+workspace_files.c
