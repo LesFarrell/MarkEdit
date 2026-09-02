@@ -100,6 +100,7 @@ project "lexilla"
         LEXILLA_DIR.."/lexers/LexPython.cxx",
         LEXILLA_DIR.."/lexers/LexBash.cxx",
         LEXILLA_DIR.."/lexers/LexPowerShell.cxx",
+        LEXILLA_DIR.."/lexers/LexLua.cxx",
         LEXILLA_DIR.."/lexlib/Accessor.cxx",
         LEXILLA_DIR.."/lexlib/CharacterCategory.cxx",
         LEXILLA_DIR.."/lexlib/CharacterSet.cxx",
@@ -131,10 +132,13 @@ project "markedit"
 
     files {
         "markedit.c",
+        "editor_language.c", "editor_language.h",
         "path_utils.c", "path_utils.h",
         "text_codec.c", "text_codec.h",
         "json_formatter.c", "json_formatter.h",
         "markdown.c", "markdown.h",
+        "recent_files.c", "recent_files.h",
+        "workspace_files.c", "workspace_files.h",
         "markedit.rc",
     }
     cmark_gfm_settings()
@@ -147,7 +151,7 @@ project "markedit"
         externalincludedirs { WEBVIEW2_DIR.."/include", SCINTILLA_DIR.."/include", LEXILLA_DIR.."/include" }
     filter {}
     libdirs { WEBVIEW2_DIR.."/x64", "." }
-        links { "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "windowscodecs", "uxtheme", "Lexilla" }
+        links { "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "windowscodecs", "uxtheme", "dwmapi", "Lexilla" }
     dependson { "lexilla" }
 
     warnings "Extra"
@@ -166,9 +170,32 @@ project "markedit"
     -- run with cwd = the gmake2 build/ directory (not targetdir), so both the
     -- source (vendor dir) and destination (repo root, alongside markedit.exe)
     -- are given relative to build/.
+    --
+    -- The remaining commands mirror build.bat's dist/ staging (same file
+    -- list, same third_party/<component> licence/version layout) so this
+    -- build path also produces a complete, ready-to-run folder instead of
+    -- leaving binaries and sources mixed together in the repo root. Unlike
+    -- build.bat, this doesn't wipe dist/ first - mkdir -p/cp -f only add or
+    -- overwrite, so a stale file from a since-removed dependency could
+    -- linger; that tradeoff matches this script's role as the lighter-weight
+    -- alternative to the primary Zig/build.bat release path.
     postbuildcommands {
         "cp -f ../"..WEBVIEW2_DIR.."/x64/WebView2Loader.dll ..",
         "cp -f ../"..SCINTILLA_DIR.."/bin/Scintilla.dll ..",
+        "mkdir -p ../dist/katex ../dist/third_party/cmark-gfm ../dist/third_party/highlightjs "..
+            "../dist/third_party/katex ../dist/third_party/lexilla ../dist/third_party/scintilla "..
+            "../dist/third_party/webview2",
+        "cp -f ../markedit.exe ../Lexilla.dll ../Scintilla.dll ../WebView2Loader.dll "..
+            "../preview_shell.html ../github-markdown.css ../mermaid.min.js ../highlight.min.js "..
+            "../highlight-powershell.min.js ../highlight-github.min.css ../highlight-github-dark.min.css "..
+            "../LICENSE ../THIRD_PARTY_NOTICES.md ../dist/",
+        "cp -rf ../katex/. ../dist/katex/",
+        "cp -f ../"..CMARK_GFM_DIR.."/COPYING ../dist/third_party/cmark-gfm/",
+        "cp -f ../third_party/highlightjs/LICENSE ../third_party/highlightjs/VERSION.txt ../dist/third_party/highlightjs/",
+        "cp -f ../third_party/katex/LICENSE ../third_party/katex/VERSION.txt ../dist/third_party/katex/",
+        "cp -f ../"..LEXILLA_DIR.."/License.txt ../"..LEXILLA_DIR.."/version.txt ../dist/third_party/lexilla/",
+        "cp -f ../"..SCINTILLA_DIR.."/License.txt ../"..SCINTILLA_DIR.."/version.txt ../dist/third_party/scintilla/",
+        "cp -f ../"..WEBVIEW2_DIR.."/LICENSE.txt ../dist/third_party/webview2/",
     }
 
 project "test_parser"

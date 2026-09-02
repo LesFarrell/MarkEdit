@@ -28,7 +28,7 @@ zig cc -std=c11 %COMMON_FLAGS% -Wall -Wextra -Wno-unknown-pragmas ^
     third_party\webview2\x64\WebView2Loader.dll.lib libLexilla.dll.a ^
     -isystem third_party\webview2\include -isystem third_party\lexilla\include ^
     -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -lshlwapi -lshell32 -lole32 ^
-    -lwindowscodecs -luxtheme -Wl,--subsystem,windows %LINK_FLAGS%
+    -lwindowscodecs -luxtheme -ldwmapi -Wl,--subsystem,windows %LINK_FLAGS%
 if %errorlevel% neq 0 (
     echo Build failed.
     exit /b 1

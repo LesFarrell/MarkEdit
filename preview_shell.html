@@ -57,6 +57,7 @@ img{max-width:100%;}
 .markdown-alert-important{--alert-color:#8250df;}
 .markdown-alert-warning{--alert-color:#9a6700;}
 .markdown-alert-caution{--alert-color:#cf222e;}
+.wikilink{text-decoration-style:dotted;}
 .heading-anchor{margin-left:.35em;color:inherit!important;text-decoration:none!important;opacity:0;}
 h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:hover>.heading-anchor,h5:hover>.heading-anchor,h6:hover>.heading-anchor,.heading-anchor:focus{opacity:.55;}
 .document-outline{position:fixed;top:8px;right:12px;z-index:20;max-width:min(300px,70vw);border:1px solid #d0d7de;border-radius:6px;background:rgba(255,255,255,.96);box-shadow:0 3px 12px rgba(31,35,40,.15);font-size:13px;}
@@ -199,6 +200,87 @@ window.addEventListener('scroll', () => {
     if (line) window.chrome.webview.postMessage('scroll:' + line);
   });
 }, { passive: true });
+
+const EMOJI_MAP = {
+  smile: '😄', smiley: '😃', grinning: '😀', laughing: '😆', joy: '😂', rofl: '🤣',
+  wink: '😉', blush: '😊', slight_smile: '🙂', upside_down: '🙃',
+  heart: '❤️', heart_eyes: '😍', kissing_heart: '😘', two_hearts: '💕', broken_heart: '💔',
+  yellow_heart: '💛', blue_heart: '💙', green_heart: '💚', purple_heart: '💜',
+  thinking: '🤔', neutral_face: '😐', confused: '😕', worried: '😟', cry: '😢', sob: '😭',
+  angry: '😠', rage: '😡', scream: '😱', flushed: '😳', sweat_smile: '😅',
+  sleepy: '😪', sleeping: '😴', yum: '😋', stuck_out_tongue: '😛',
+  thumbsup: '👍', '+1': '👍', thumbsdown: '👎', '-1': '👎', clap: '👏', pray: '🙏',
+  raised_hands: '🙌', wave: '👋', ok_hand: '👌', muscle: '💪', point_right: '👉',
+  point_left: '👈', point_up: '👆', point_down: '👇', eyes: '👀', raised_hand: '✋',
+  fire: '🔥', sparkles: '✨', star: '⭐', star2: '🌟', zap: '⚡', boom: '💥',
+  tada: '🎉', confetti_ball: '🎊', balloon: '🎈', gift: '🎁', rocket: '🚀',
+  trophy: '🏆', medal: '🏅',
+  100: '💯', warning: '⚠️', x: '❌', heavy_check_mark: '✔️', white_check_mark: '✅',
+  question: '❓', exclamation: '❗', bulb: '💡', memo: '📝', pencil2: '✏️',
+  wrench: '🔧', gear: '⚙️', hammer: '🔨', lock: '🔒', unlock: '🔓', key: '🔑',
+  mag: '🔍', bell: '🔔', no_bell: '🔕', calendar: '📅', clock1: '🕐',
+  hourglass: '⏳', stopwatch: '⏱️', recycle: '♻️', globe_with_meridians: '🌐',
+  bug: '🐛', computer: '💻', keyboard: '⌨️', floppy_disk: '💾',
+  package: '📦', file_folder: '📁', open_file_folder: '📂', page_facing_up: '📄',
+  link: '🔗', paperclip: '📎', chart_with_upwards_trend: '📈', bar_chart: '📊',
+  coffee: '☕', beer: '🍺', beers: '🍻', pizza: '🍕', cake: '🍰', birthday: '🎂', apple: '🍎',
+  sunny: '☀️', cloud: '☁️', rainbow: '🌈', snowflake: '❄️', umbrella: '☂️',
+  dog: '🐶', cat: '🐱', unicorn: '🦄', see_no_evil: '🙈', hear_no_evil: '🙉', speak_no_evil: '🙊',
+  arrow_up: '⬆️', arrow_down: '⬇️', arrow_left: '⬅️', arrow_right: '➡️', arrows_counterclockwise: '🔄',
+  red_circle: '🔴', green_circle: '🟢', yellow_circle: '🟡', large_blue_circle: '🔵',
+  white_circle: '⚪', black_circle: '⚫',
+  checkered_flag: '🏁', construction: '🚧', no_entry: '⛔', rotating_light: '🚨'
+};
+
+/* Replaces :shortcode: emoji and [[wiki-link]] / [[wiki-link|label]] text
+   with real content in a single pass per text node, skipping text that's
+   already inside a link, code, or script/style so source-looking spans
+   (URLs, code samples) are never rewritten. A wiki-link becomes a real
+   click target that asks the native host to open (or offer to create) the
+   named note - see the "wikilink:" case in WebMessage_Invoke. */
+function enhanceInlineText(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const skip = node.parentElement && node.parentElement.closest('a,code,pre,script,style');
+      return skip ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  const nodes = [];
+  let node;
+  while ((node = walker.nextNode())) nodes.push(node);
+
+  const pattern = /:([a-z0-9_+-]+):|\[\[([^[\]|]+)(?:\|([^[\]]+))?\]\]/g;
+  nodes.forEach((textNode) => {
+    const text = textNode.nodeValue;
+    pattern.lastIndex = 0;
+    if (!pattern.test(text)) return;
+    pattern.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0, match;
+    while ((match = pattern.exec(text))) {
+      if (match.index > last) frag.appendChild(document.createTextNode(text.slice(last, match.index)));
+      if (match[1] !== undefined) {
+        const emoji = EMOJI_MAP[match[1]];
+        frag.appendChild(document.createTextNode(emoji || match[0]));
+      } else {
+        const target = match[2].trim();
+        const label = (match[3] || match[2]).trim();
+        const link = document.createElement('a');
+        link.href = '#';
+        link.className = 'wikilink';
+        link.textContent = label;
+        link.addEventListener('click', (event) => {
+          event.preventDefault();
+          window.chrome?.webview?.postMessage('wikilink:' + encodeURIComponent(target));
+        });
+        frag.appendChild(link);
+      }
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.replaceWith(frag);
+  });
+}
 
 function enhanceAlerts(root) {
   const alertNames = {
@@ -466,6 +548,7 @@ function setContent(html) {
   document.getElementById('content').innerHTML = '<article class="markdown-body">' + html + '</article>';
   const article = document.querySelector('#content > .markdown-body');
   enhanceAlerts(article);
+  enhanceInlineText(article);
   enhanceFragmentLinks(article);
   enhanceHeadings(article);
   renderMath(article);

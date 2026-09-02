@@ -22,6 +22,7 @@
 
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
+#define WM_APP_DEFERRED_INIT (WM_APP + 2)
 #define SPLITTER_WIDTH 6
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
@@ -138,6 +139,7 @@
 #define IDM_EDIT_EOL_CRLF        320
 #define IDM_EDIT_EOL_LF          321
 #define IDM_EDIT_EOL_CR          322
+#define IDM_FILE_GO_BACK         323
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1

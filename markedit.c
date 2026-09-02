@@ -24,6 +24,17 @@
 #include <spellcheck.h>
 #include <uxtheme.h>
 #include <wincodec.h>
+#include <dwmapi.h>
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+/* Windows builds before 20H1 (19041) shipped the same attribute under this
+   ordinal instead; harmless to set on newer builds since only one of the two
+   actually takes effect there. */
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
+#define DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 19
+#endif
 #include "json_formatter.h"
 #include "markdown.h"
 #include "path_utils.h"
@@ -42,6 +53,12 @@ static HWND g_hTabs;
 static HWND g_hStatus;
 static HWND g_hOutline;
 static HWND g_hMainWnd;
+/* The main window's accelerator table, forwarded into from the preview's
+   AcceleratorKeyPressed handler - see AccelKey_Invoke() - since disabling
+   WebView2's own browser accelerators (AreBrowserAcceleratorKeysEnabled)
+   stops it acting on them but does not, by itself, deliver them to the
+   host's message loop. Set once in WinMain. */
+static HACCEL g_hAccel = NULL;
 static WCHAR g_fontFaceName[LF_FACESIZE] = L"Consolas";
 static int g_fontPointSize = 10;
 
@@ -114,6 +131,15 @@ static int g_recoverySnapshotStale = 0;
 static Document g_closedDocuments[MAX_CLOSED_DOCUMENTS];
 static int g_closedDocumentCount = 0;
 
+/* Documents a [[wiki-link]] jump was made from, most recent last, so
+   "Go Back" can return to wherever the last jump started - see
+   open_wikilink_target() and go_wiki_back(). Only documents with a saved
+   path can be recorded; jumping from an unsaved document simply isn't
+   undoable this way, the same limitation the recent-files list has. */
+#define MAX_WIKI_BACK 10
+static WCHAR *g_wikiBackStack[MAX_WIKI_BACK];
+static int g_wikiBackCount = 0;
+
 /* Most editor operations naturally target the selected tab. These aliases
    keep that code direct while the storage itself remains per-document. */
 #define g_currentFile (g_documents[g_activeDocument].path)
@@ -128,6 +154,11 @@ static int g_commandLinePreviewMode = 0;
 static RECT g_savedWindowRect;
 static int g_haveSavedWindowRect = 0;
 static int g_startMaximized = 0;
+/* File named on the command line, if any; handed off from WinMain to the
+   deferred startup init that runs after the window is first shown (see
+   run_deferred_startup_init()), and freed there. */
+static WCHAR *g_pendingCliFile = NULL;
+static int g_comInitialized = 0;
 static int g_focusMode = 0;
 /* Markdown is prose: wrapping long paragraphs is the useful default. */
 static int g_wordWrap = 0;
@@ -1281,12 +1312,14 @@ static void init_native_menu_theme_support(void) {
     memcpy(&g_flushMenuThemes, &procedure, sizeof(g_flushMenuThemes));
 }
 
-/* Switches the menu bar and its dropdowns between light and dark chrome.
-   FORCEDARK/FORCELIGHT are intentional: the app has its own theme selector,
-   so the selected menu colour must not depend on the Windows system theme.
-   The per-window opt-in is what lets the non-client menu bar follow that
-   process preference. Safe on older Windows releases where the private
-   uxtheme exports are absent; those releases retain their system menu. */
+/* Switches the menu bar, its dropdowns, and the window's title bar/border
+   between light and dark chrome. FORCEDARK/FORCELIGHT are intentional: the
+   app has its own theme selector, so the selected menu colour must not
+   depend on the Windows system theme. The per-window opt-in is what lets
+   the non-client menu bar follow that process preference. Safe on older
+   Windows releases where the private uxtheme exports (or DWMWA_USE_
+   IMMERSIVE_DARK_MODE) are absent; those releases retain their system
+   chrome. */
 static void apply_menu_theme(HWND hwnd, int dark) {
     if (g_setPreferredAppMode)
         g_setPreferredAppMode(dark ? UXTHEME_APPMODE_FORCEDARK : UXTHEME_APPMODE_FORCELIGHT);
@@ -1295,6 +1328,16 @@ static void apply_menu_theme(HWND hwnd, int dark) {
     if (g_flushMenuThemes)
         g_flushMenuThemes();
     if (hwnd) {
+        /* Non-client caption/border: DWM ignores this until the window is
+           told to repaint its frame, hence the SetWindowPos nudge below. */
+        BOOL useDark = dark ? TRUE : FALSE;
+        if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                          &useDark, sizeof(useDark))))
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                                   &useDark, sizeof(useDark));
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
         if (g_menuBkBrush) DeleteObject(g_menuBkBrush);
         g_menuBkBrush = CreateSolidBrush(dark
             ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
@@ -2094,6 +2137,7 @@ static const char *HTML_SHELL =
 ".markdown-alert-important{--alert-color:#8250df;}"
 ".markdown-alert-warning{--alert-color:#9a6700;}"
 ".markdown-alert-caution{--alert-color:#cf222e;}"
+".wikilink{text-decoration-style:dotted;}"
 ".heading-anchor{margin-left:.35em;color:inherit!important;text-decoration:none!important;opacity:0;}"
 "h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:hover>.heading-anchor,h5:hover>.heading-anchor,h6:hover>.heading-anchor,.heading-anchor:focus{opacity:.55;}"
 ".document-outline{position:fixed;top:8px;right:12px;z-index:20;max-width:min(300px,70vw);border:1px solid #d0d7de;border-radius:6px;background:rgba(255,255,255,.96);box-shadow:0 3px 12px rgba(31,35,40,.15);font-size:13px;}"
@@ -2143,6 +2187,33 @@ static const char *HTML_SHELL =
 "function sourceTop(el){return el.getBoundingClientRect().top+window.scrollY;}"
 "window.scrollToSourceLine=function(line){const blocks=sourceBlocks();if(!blocks.length)return;let current=blocks[0],next=null;for(let i=0;i<blocks.length;i++){if(sourceLine(blocks[i])>line){next=blocks[i];break;}current=blocks[i];}let top=sourceTop(current);if(next){const first=sourceLine(current),last=sourceLine(next),ratio=last>first?Math.max(0,Math.min(1,(line-first)/(last-first))):0;top+=(sourceTop(next)-sourceTop(current))*ratio;}suppressScrollPost=true;window.scrollTo(0,Math.max(0,top-12));setTimeout(()=>suppressScrollPost=false,80);};"
 "window.addEventListener('scroll',()=>{if(suppressScrollPost||scrollPostPending)return;scrollPostPending=true;requestAnimationFrame(()=>{scrollPostPending=false;if(suppressScrollPost||!window.chrome?.webview)return;const blocks=sourceBlocks();if(!blocks.length)return;const top=window.scrollY+18;let current=blocks[0];for(const block of blocks){if(sourceTop(block)>top)break;current=block;}const line=sourceLine(current);if(line)window.chrome.webview.postMessage('scroll:'+line);});},{passive:true});"
+"const EMOJI_MAP={smile:'\xF0\x9F\x98\x84',smiley:'\xF0\x9F\x98\x83',grinning:'\xF0\x9F\x98\x80',laughing:'\xF0\x9F\x98\x86',joy:'\xF0\x9F\x98\x82',rofl:'\xF0\x9F\xA4\xA3',wink:'\xF0\x9F\x98\x89',blush:'\xF0\x9F\x98\x8A',slight_smile:'\xF0\x9F\x99\x82',upside_down:'\xF0\x9F\x99\x83',"
+"heart:'\xE2\x9D\xA4\xEF\xB8\x8F',heart_eyes:'\xF0\x9F\x98\x8D',kissing_heart:'\xF0\x9F\x98\x98',two_hearts:'\xF0\x9F\x92\x95',broken_heart:'\xF0\x9F\x92\x94',yellow_heart:'\xF0\x9F\x92\x9B',blue_heart:'\xF0\x9F\x92\x99',green_heart:'\xF0\x9F\x92\x9A',purple_heart:'\xF0\x9F\x92\x9C',"
+"thinking:'\xF0\x9F\xA4\x94',neutral_face:'\xF0\x9F\x98\x90',confused:'\xF0\x9F\x98\x95',worried:'\xF0\x9F\x98\x9F',cry:'\xF0\x9F\x98\xA2',sob:'\xF0\x9F\x98\xAD',angry:'\xF0\x9F\x98\xA0',rage:'\xF0\x9F\x98\xA1',scream:'\xF0\x9F\x98\xB1',flushed:'\xF0\x9F\x98\xB3',sweat_smile:'\xF0\x9F\x98\x85',sleepy:'\xF0\x9F\x98\xAA',sleeping:'\xF0\x9F\x98\xB4',yum:'\xF0\x9F\x98\x8B',stuck_out_tongue:'\xF0\x9F\x98\x9B',"
+"thumbsup:'\xF0\x9F\x91\x8D','+1':'\xF0\x9F\x91\x8D',thumbsdown:'\xF0\x9F\x91\x8E','-1':'\xF0\x9F\x91\x8E',clap:'\xF0\x9F\x91\x8F',pray:'\xF0\x9F\x99\x8F',raised_hands:'\xF0\x9F\x99\x8C',wave:'\xF0\x9F\x91\x8B',ok_hand:'\xF0\x9F\x91\x8C',muscle:'\xF0\x9F\x92\xAA',point_right:'\xF0\x9F\x91\x89',point_left:'\xF0\x9F\x91\x88',point_up:'\xF0\x9F\x91\x86',point_down:'\xF0\x9F\x91\x87',eyes:'\xF0\x9F\x91\x80',raised_hand:'\xE2\x9C\x8B',"
+"fire:'\xF0\x9F\x94\xA5',sparkles:'\xE2\x9C\xA8',star:'\xE2\xAD\x90',star2:'\xF0\x9F\x8C\x9F',zap:'\xE2\x9A\xA1',boom:'\xF0\x9F\x92\xA5',tada:'\xF0\x9F\x8E\x89',confetti_ball:'\xF0\x9F\x8E\x8A',balloon:'\xF0\x9F\x8E\x88',gift:'\xF0\x9F\x8E\x81',rocket:'\xF0\x9F\x9A\x80',trophy:'\xF0\x9F\x8F\x86',medal:'\xF0\x9F\x8F\x85',"
+"100:'\xF0\x9F\x92\xAF',warning:'\xE2\x9A\xA0\xEF\xB8\x8F',x:'\xE2\x9D\x8C',heavy_check_mark:'\xE2\x9C\x94\xEF\xB8\x8F',white_check_mark:'\xE2\x9C\x85',question:'\xE2\x9D\x93',exclamation:'\xE2\x9D\x97',bulb:'\xF0\x9F\x92\xA1',memo:'\xF0\x9F\x93\x9D',pencil2:'\xE2\x9C\x8F\xEF\xB8\x8F',"
+"wrench:'\xF0\x9F\x94\xA7',gear:'\xE2\x9A\x99\xEF\xB8\x8F',hammer:'\xF0\x9F\x94\xA8',lock:'\xF0\x9F\x94\x92',unlock:'\xF0\x9F\x94\x93',key:'\xF0\x9F\x94\x91',mag:'\xF0\x9F\x94\x8D',bell:'\xF0\x9F\x94\x94',no_bell:'\xF0\x9F\x94\x95',calendar:'\xF0\x9F\x93\x85',clock1:'\xF0\x9F\x95\x90',hourglass:'\xE2\x8F\xB3',stopwatch:'\xE2\x8F\xB1\xEF\xB8\x8F',recycle:'\xE2\x99\xBB\xEF\xB8\x8F',globe_with_meridians:'\xF0\x9F\x8C\x90',"
+"bug:'\xF0\x9F\x90\x9B',computer:'\xF0\x9F\x92\xBB',keyboard:'\xE2\x8C\xA8\xEF\xB8\x8F',floppy_disk:'\xF0\x9F\x92\xBE',package:'\xF0\x9F\x93\xA6',file_folder:'\xF0\x9F\x93\x81',open_file_folder:'\xF0\x9F\x93\x82',page_facing_up:'\xF0\x9F\x93\x84',link:'\xF0\x9F\x94\x97',paperclip:'\xF0\x9F\x93\x8E',chart_with_upwards_trend:'\xF0\x9F\x93\x88',bar_chart:'\xF0\x9F\x93\x8A',"
+"coffee:'\xE2\x98\x95',beer:'\xF0\x9F\x8D\xBA',beers:'\xF0\x9F\x8D\xBB',pizza:'\xF0\x9F\x8D\x95',cake:'\xF0\x9F\x8D\xB0',birthday:'\xF0\x9F\x8E\x82',apple:'\xF0\x9F\x8D\x8E',sunny:'\xE2\x98\x80\xEF\xB8\x8F',cloud:'\xE2\x98\x81\xEF\xB8\x8F',rainbow:'\xF0\x9F\x8C\x88',snowflake:'\xE2\x9D\x84\xEF\xB8\x8F',umbrella:'\xE2\x98\x82\xEF\xB8\x8F',"
+"dog:'\xF0\x9F\x90\xB6',cat:'\xF0\x9F\x90\xB1',unicorn:'\xF0\x9F\xA6\x84',see_no_evil:'\xF0\x9F\x99\x88',hear_no_evil:'\xF0\x9F\x99\x89',speak_no_evil:'\xF0\x9F\x99\x8A',"
+"arrow_up:'\xE2\xAC\x86\xEF\xB8\x8F',arrow_down:'\xE2\xAC\x87\xEF\xB8\x8F',arrow_left:'\xE2\xAC\x85\xEF\xB8\x8F',arrow_right:'\xE2\x9E\xA1\xEF\xB8\x8F',arrows_counterclockwise:'\xF0\x9F\x94\x84',"
+"red_circle:'\xF0\x9F\x94\xB4',green_circle:'\xF0\x9F\x9F\xA2',yellow_circle:'\xF0\x9F\x9F\xA1',large_blue_circle:'\xF0\x9F\x94\xB5',white_circle:'\xE2\x9A\xAA',black_circle:'\xE2\x9A\xAB',"
+"checkered_flag:'\xF0\x9F\x8F\x81',construction:'\xF0\x9F\x9A\xA7',no_entry:'\xE2\x9B\x94',rotating_light:'\xF0\x9F\x9A\xA8'};"
+"function enhanceInlineText(root){"
+"  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode(node){const skip=node.parentElement&&node.parentElement.closest('a,code,pre,script,style');return skip?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;}});"
+"  const nodes=[];let node;while((node=walker.nextNode()))nodes.push(node);"
+"  const pattern=/:([a-z0-9_+-]+):|\\[\\[([^\\[\\]|]+)(?:\\|([^\\[\\]]+))?\\]\\]/g;"
+"  nodes.forEach((textNode)=>{const text=textNode.nodeValue;pattern.lastIndex=0;if(!pattern.test(text))return;pattern.lastIndex=0;"
+"    const frag=document.createDocumentFragment();let last=0,match;"
+"    while((match=pattern.exec(text))){if(match.index>last)frag.appendChild(document.createTextNode(text.slice(last,match.index)));"
+"      if(match[1]!==undefined){const emoji=EMOJI_MAP[match[1]];frag.appendChild(document.createTextNode(emoji||match[0]));}"
+"      else{const target=match[2].trim();const label=(match[3]||match[2]).trim();const link=document.createElement('a');link.href='#';link.className='wikilink';link.textContent=label;"
+"        link.addEventListener('click',(e)=>{e.preventDefault();window.chrome?.webview?.postMessage('wikilink:'+encodeURIComponent(target));});frag.appendChild(link);}"
+"      last=match.index+match[0].length;}"
+"    if(last<text.length)frag.appendChild(document.createTextNode(text.slice(last)));textNode.replaceWith(frag);"
+"  });"
+"}"
 "function enhanceAlerts(root){"
 "  const names={NOTE:'Note',TIP:'Tip',IMPORTANT:'Important',WARNING:'Warning',CAUTION:'Caution'};"
 "  root.querySelectorAll('blockquote').forEach((quote)=>{"
@@ -2174,7 +2245,7 @@ static const char *HTML_SHELL =
 "    const area=document.createElement('textarea');area.value=code.textContent;area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();button.textContent='Copied';setTimeout(()=>button.textContent='Copy',1200);};pre.appendChild(button);});}"
 "function setContent(html){"
 "  document.getElementById('content').innerHTML = '<article class=\"markdown-body\">' + html + '</article>';"
-"  const article=document.querySelector('#content > .markdown-body');enhanceAlerts(article);enhanceFragmentLinks(article);enhanceHeadings(article);enhanceCodeCopy(article);"
+"  const article=document.querySelector('#content > .markdown-body');enhanceAlerts(article);enhanceInlineText(article);enhanceFragmentLinks(article);enhanceHeadings(article);enhanceCodeCopy(article);"
 "}"
 "window.setContent = setContent;"
 "window.exportRenderedHTML=function(baseHref,title){const source=document.querySelector('#content > .markdown-body');if(!source)return '';const article=source.cloneNode(true);article.querySelectorAll('.code-copy-button,.heading-anchor').forEach((el)=>el.remove());"
@@ -2313,6 +2384,11 @@ static HRESULT STDMETHODCALLTYPE WebMessageHandler_QI(void *this_, REFIID riid, 
         &IID_ICoreWebView2WebMessageReceivedEventHandler);
 }
 
+static HRESULT STDMETHODCALLTYPE AccelKeyHandler_QI(void *this_, REFIID riid, void **out) {
+    return Handler_QueryInterface(this_, riid, out,
+        &IID_ICoreWebView2AcceleratorKeyPressedEventHandler);
+}
+
 /* Environment created handler */
 static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *this_, HRESULT errorCode, ICoreWebView2Environment *env);
 static ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandlerVtbl g_envVtbl = {
@@ -2383,15 +2459,18 @@ static ICoreWebView2PrintToPdfCompletedHandlerVtbl g_pdfVtbl = {
 };
 static ICoreWebView2PrintToPdfCompletedHandler g_pdfHandler = { &g_pdfVtbl };
 
+static void open_wikilink_target(const WCHAR *encoded);
+
 static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceivedEventHandler *this_,
                                                      ICoreWebView2 *sender,
                                                      ICoreWebView2WebMessageReceivedEventArgs *args) {
     (void)this_; (void)sender;
     LPWSTR message = NULL;
-    if (!g_editorVisible || !g_previewVisible ||
-        FAILED(ICoreWebView2WebMessageReceivedEventArgs_TryGetWebMessageAsString(args, &message)) ||
+    if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_TryGetWebMessageAsString(args, &message)) ||
         !message) return S_OK;
-    if (wcsncmp(message, L"scroll:", 7) == 0) {
+    /* Scroll sync only makes sense with both panes on screen; wiki-link
+       navigation should work regardless of which panes are visible. */
+    if (g_editorVisible && g_previewVisible && wcsncmp(message, L"scroll:", 7) == 0) {
         WCHAR *end = NULL;
         long line = wcstol(message + 7, &end, 10);
         int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
@@ -2400,6 +2479,8 @@ static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceiv
             KillTimer(g_hMainWnd, IDT_SCROLL_SYNC);
             SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)(line - 1), 0);
         }
+    } else if (wcsncmp(message, L"wikilink:", 9) == 0) {
+        open_wikilink_target(message + 9);
     }
     CoTaskMemFree(message);
     return S_OK;
@@ -2408,6 +2489,43 @@ static ICoreWebView2WebMessageReceivedEventHandlerVtbl g_webMessageVtbl = {
     (void*)WebMessageHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)WebMessage_Invoke
 };
 static ICoreWebView2WebMessageReceivedEventHandler g_webMessageHandler = { &g_webMessageVtbl };
+
+/* AcceleratorKeyPressed handler: disabling AreBrowserAcceleratorKeysEnabled
+   (see CtrlCreated_Invoke) stops WebView2 acting on its own accelerators,
+   but the preview runs in a separate process with its own input queue, so
+   the key never otherwise reaches this window's accelerator table - e.g.
+   Ctrl+S, or Alt+Left for "Go Back" after following a wiki-link, would
+   silently do nothing while focus is in the preview. Replaying the event as
+   a real WM_(SYS)KEYDOWN through TranslateAcceleratorA against the same
+   table WinMain's message loop uses puts every accelerator back to work
+   from the preview, and is a no-op (falls through unhandled) for any key
+   that isn't actually one of them. */
+static HRESULT STDMETHODCALLTYPE AccelKey_Invoke(ICoreWebView2AcceleratorKeyPressedEventHandler *this_,
+                                                   ICoreWebView2Controller *sender,
+                                                   ICoreWebView2AcceleratorKeyPressedEventArgs *args) {
+    (void)this_; (void)sender;
+    if (!g_hAccel || !g_hMainWnd) return S_OK;
+    COREWEBVIEW2_KEY_EVENT_KIND kind;
+    if (FAILED(ICoreWebView2AcceleratorKeyPressedEventArgs_get_KeyEventKind(args, &kind))) return S_OK;
+    if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+        return S_OK;
+    UINT32 virtualKey = 0;
+    INT keyLParam = 0;
+    ICoreWebView2AcceleratorKeyPressedEventArgs_get_VirtualKey(args, &virtualKey);
+    ICoreWebView2AcceleratorKeyPressedEventArgs_get_KeyEventLParam(args, &keyLParam);
+    MSG msg = {0};
+    msg.hwnd = g_hMainWnd;
+    msg.message = (kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) ? WM_SYSKEYDOWN : WM_KEYDOWN;
+    msg.wParam = (WPARAM)virtualKey;
+    msg.lParam = (LPARAM)keyLParam;
+    if (TranslateAcceleratorA(g_hMainWnd, g_hAccel, &msg))
+        ICoreWebView2AcceleratorKeyPressedEventArgs_put_Handled(args, TRUE);
+    return S_OK;
+}
+static ICoreWebView2AcceleratorKeyPressedEventHandlerVtbl g_accelKeyVtbl = {
+    (void*)AccelKeyHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)AccelKey_Invoke
+};
+static ICoreWebView2AcceleratorKeyPressedEventHandler g_accelKeyHandler = { &g_accelKeyVtbl };
 
 /* NavigationCompleted handler: the initial shell page is ready, flush any pending content */
 static HRESULT STDMETHODCALLTYPE NavDone_Invoke(ICoreWebView2NavigationCompletedEventHandler *this_, ICoreWebView2 *sender, ICoreWebView2NavigationCompletedEventArgs *args) {
@@ -2444,11 +2562,12 @@ static int path_escapes_base(const WCHAR *relative) {
     return 0;
 }
 
-static WCHAR *decode_document_url(const WCHAR *uri) {
-    static const WCHAR prefix[] = L"https://document.local/";
-    if (_wcsnicmp(uri, prefix, wcslen(prefix)) != 0) return NULL;
-    const WCHAR *encoded = uri + wcslen(prefix);
-    const WCHAR *end = encoded + wcscspn(encoded, L"?#");
+/* Percent-decodes [encoded, end) - which may contain UTF-16 surrogate pairs
+   as well as %XX-escaped UTF-8 bytes, exactly as URIs from the preview's
+   WebView2 content arrive - into a plain UTF-16 string. Shared by every
+   caller that turns a link or postMessage payload from the preview back
+   into a native string (document-relative links, wiki-link targets). */
+static WCHAR *percent_decode_wide(const WCHAR *encoded, const WCHAR *end) {
     size_t byteCap = (size_t)(end - encoded) * 4 + 1;
     char *bytes = (char *)malloc(byteCap);
     if (!bytes) return NULL;
@@ -2475,12 +2594,22 @@ static WCHAR *decode_document_url(const WCHAR *uri) {
     bytes[o] = 0;
     int wideLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes, (int)o, NULL, 0);
     if (wideLen <= 0) { free(bytes); return NULL; }
-    WCHAR *relative = (WCHAR *)malloc(((size_t)wideLen + 1) * sizeof(WCHAR));
-    if (!relative) { free(bytes); return NULL; }
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes, (int)o, relative, wideLen);
-    relative[wideLen] = 0;
+    WCHAR *decoded = (WCHAR *)malloc(((size_t)wideLen + 1) * sizeof(WCHAR));
+    if (!decoded) { free(bytes); return NULL; }
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes, (int)o, decoded, wideLen);
+    decoded[wideLen] = 0;
     free(bytes);
-    for (int i = 0; i < wideLen; i++) if (relative[i] == L'/') relative[i] = L'\\';
+    return decoded;
+}
+
+static WCHAR *decode_document_url(const WCHAR *uri) {
+    static const WCHAR prefix[] = L"https://document.local/";
+    if (_wcsnicmp(uri, prefix, wcslen(prefix)) != 0) return NULL;
+    const WCHAR *encoded = uri + wcslen(prefix);
+    const WCHAR *end = encoded + wcscspn(encoded, L"?#");
+    WCHAR *relative = percent_decode_wide(encoded, end);
+    if (!relative) return NULL;
+    for (WCHAR *p = relative; *p; p++) if (*p == L'/') *p = L'\\';
     if (path_escapes_base(relative)) { free(relative); return NULL; }
     WCHAR *directory = g_currentFile ? path_directory(g_currentFile) : NULL;
     if (!directory) {
@@ -2492,6 +2621,91 @@ static WCHAR *decode_document_url(const WCHAR *uri) {
     free(directory);
     free(relative);
     return full;
+}
+
+static int open_file_in_tab(const WCHAR *path);
+
+/* Records the current document as a "Go Back" target, called right before a
+   wiki-link jump actually navigates away from it. Bounded and FIFO like
+   g_closedDocuments, and silently a no-op for an unsaved document - see the
+   g_wikiBackStack comment. */
+static void push_wiki_back(void) {
+    if (!g_currentFile) return;
+    if (g_wikiBackCount == MAX_WIKI_BACK) {
+        free(g_wikiBackStack[0]);
+        for (int i = 0; i + 1 < g_wikiBackCount; i++) g_wikiBackStack[i] = g_wikiBackStack[i + 1];
+        g_wikiBackCount--;
+    }
+    g_wikiBackStack[g_wikiBackCount++] = wcsdup_heap(g_currentFile);
+}
+
+/* Returns to wherever the most recent wiki-link jump was made from. */
+static void go_wiki_back(void) {
+    if (g_wikiBackCount <= 0) return;
+    WCHAR *path = g_wikiBackStack[--g_wikiBackCount];
+    open_file_in_tab(path);
+    free(path);
+    refresh_menu(g_hMainWnd);
+}
+
+/* Resolves a [[wiki-link]] target clicked in the preview (see the
+   "wikilink:" case in WebMessage_Invoke) to a note file and opens it. The
+   target names a note by title, resolved against the current document's
+   directory exactly like a regular document-relative Markdown link - a
+   ".md" extension is assumed unless the author already gave one. If the
+   note doesn't exist yet, offers to create it rather than silently failing,
+   since that's the point of a wiki-link over a plain reference. */
+static void open_wikilink_target(const WCHAR *encoded) {
+    WCHAR *name = percent_decode_wide(encoded, encoded + wcslen(encoded));
+    if (!name) return;
+    for (WCHAR *p = name; *p; p++) if (*p == L'/') *p = L'\\';
+    if (!*name || path_escapes_base(name)) { free(name); return; }
+
+    WCHAR *directory = g_currentFile ? path_directory(g_currentFile) : NULL;
+    if (!directory) {
+        WCHAR *module = get_module_path();
+        directory = module ? path_directory(module) : NULL;
+        free(module);
+    }
+    if (!directory) { free(name); return; }
+
+    WCHAR *combined = NULL;
+    const WCHAR *target = name;
+    if (!*PathFindExtensionW(name)) {
+        combined = (WCHAR *)malloc((wcslen(name) + 4) * sizeof(WCHAR));
+        if (combined) {
+            wcscpy(combined, name);
+            wcscat(combined, L".md");
+            target = combined;
+        }
+    }
+    WCHAR *full = path_join(directory, target);
+    free(directory);
+    free(combined);
+    free(name);
+    if (!full) return;
+
+    DWORD attrs = GetFileAttributesW(full);
+    if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        push_wiki_back();
+        open_file_in_tab(full);
+        refresh_menu(g_hMainWnd);
+    } else {
+        WCHAR prompt[MAX_PATH + 64];
+        wsprintfW(prompt, L"\"%s\" doesn't exist yet. Create it?", PathFindFileNameW(full));
+        if (MessageBoxW(g_hMainWnd, prompt, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            HANDLE file = CreateFileW(full, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (file == INVALID_HANDLE_VALUE) {
+                MessageBoxW(g_hMainWnd, L"Could not create the note.", L"MarkEdit", MB_OK | MB_ICONERROR);
+            } else {
+                CloseHandle(file);
+                push_wiki_back();
+                open_file_in_tab(full);
+                refresh_menu(g_hMainWnd);
+            }
+        }
+    }
+    free(full);
 }
 
 /* NavigationStarting handler: links clicked inside the preview (Markdown links,
@@ -2661,6 +2875,8 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
     if (SUCCEEDED(ICoreWebView2_add_WebMessageReceived(webview, &g_webMessageHandler,
                                                        &g_webMessageToken)))
         g_webMessageRegistered = 1;
+    EventRegistrationToken accelKeyToken;
+    ICoreWebView2Controller_add_AcceleratorKeyPressed(ctrl, &g_accelKeyHandler, &accelKeyToken);
 
     /* Serve the shell + mermaid.min.js from the exe's folder via a virtual host,
        so the page has a real origin and can load mermaid.min.js by relative URL. */
@@ -4572,6 +4788,8 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_STRING, IDM_FILE_CLOSE, "&Close Tab\tCtrl+W");
     AppendMenuA(hFile, MF_STRING | (g_closedDocumentCount ? 0 : MF_GRAYED),
                 IDM_FILE_REOPEN_CLOSED, "&Reopen Closed Tab\tCtrl+Shift+T");
+    AppendMenuA(hFile, MF_STRING | (g_wikiBackCount ? 0 : MF_GRAYED),
+                IDM_FILE_GO_BACK, "Go &Back\tAlt+Left");
     AppendMenuA(hFile, MF_SEPARATOR, 0, NULL);
 
     HMENU hRecent = CreatePopupMenu();
@@ -7475,7 +7693,8 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"File: Export Rendered PDF", IDM_FILE_EXPORT_PDF}, {L"File: Print Rendered Preview", IDM_FILE_PRINT},
     {L"File: Open Terminal Here", IDM_FILE_OPEN_TERMINAL}, {L"File: Show in Explorer", IDM_FILE_SHOW_EXPLORER},
     {L"File: Close Tab", IDM_FILE_CLOSE},
-    {L"File: Reopen Closed Tab", IDM_FILE_REOPEN_CLOSED}, {L"Edit: Undo", IDM_EDIT_UNDO},
+    {L"File: Reopen Closed Tab", IDM_FILE_REOPEN_CLOSED}, {L"File: Go Back", IDM_FILE_GO_BACK},
+    {L"Edit: Undo", IDM_EDIT_UNDO},
     {L"Edit: Redo", IDM_EDIT_REDO}, {L"Edit: Cut", IDM_EDIT_CUT}, {L"Edit: Copy", IDM_EDIT_COPY},
     {L"Edit: Paste", IDM_EDIT_PASTE}, {L"Edit: Delete", IDM_EDIT_DELETE},
     {L"Edit: Select All", IDM_EDIT_SELECTALL}, {L"Edit: Find", IDM_EDIT_FIND},
@@ -7585,6 +7804,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FILE_SHOW_EXPLORER: reveal_in_explorer(); break;
         case IDM_FILE_CLOSE: do_close_document_at(g_activeDocument); break;
         case IDM_FILE_REOPEN_CLOSED: do_reopen_closed_tab(); break;
+        case IDM_FILE_GO_BACK: go_wiki_back(); break;
         case IDM_FILE_RECENT_CLEAR:
             clear_recent_files();
             refresh_menu(hwnd);
@@ -8486,12 +8706,31 @@ static void initialize_main_window(HWND hwnd) {
         WS_CHILD | WS_VISIBLE,
         0, 0, 0, 0, hwnd, (HMENU)ID_PREVIEW, GetModuleHandleA(NULL), NULL);
 
-    init_webview();
     SetTimer(hwnd, IDT_FILE_WATCH, 1500, NULL);
     SetTimer(hwnd, IDT_AUTOSAVE, 5000, NULL);
     update_status_bar();
     update_outline();
     layout(hwnd);
+}
+
+/* Runs the slow, non-essential startup work that would otherwise keep the
+   window from appearing promptly: spell-checker COM activation, the
+   WebView2 environment/controller handshake, and reopening the
+   command-line file or the previous session's tabs. WinMain posts
+   WM_APP_DEFERRED_INIT right after creating the window instead of running
+   this inline, so it runs on the first pass through the message loop -
+   after the window is already shown - rather than stretching out the
+   startup wait cursor while nothing is on screen yet. */
+static void run_deferred_startup_init(void) {
+    if (g_comInitialized) init_spell_checker();
+    init_webview();
+    if (g_pendingCliFile) {
+        load_file(g_pendingCliFile);
+        free(g_pendingCliFile);
+        g_pendingCliFile = NULL;
+    } else if (!restore_recovery_snapshot()) {
+        restore_session_documents();
+    }
 }
 
 static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
@@ -8566,6 +8805,7 @@ static void destroy_main_window(HWND hwnd) {
     for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
     for (int i = 0; i < g_documentCount; i++) free(g_documents[i].path);
     for (int i = 0; i < g_closedDocumentCount; i++) free(g_closedDocuments[i].path);
+    for (int i = 0; i < g_wikiBackCount; i++) free(g_wikiBackStack[i]);
     PostQuitMessage(0);
 }
 
@@ -8739,6 +8979,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_CLOSE_TAB:
             do_close_document_at((int)wParam);
             return 0;
+        case WM_APP_DEFERRED_INIT:
+            run_deferred_startup_init();
+            return 0;
         case WM_CLOSE:
             do_exit();
             return 0;
@@ -8800,7 +9043,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     prune_missing_recent_files();
 
     HRESULT comResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    if (SUCCEEDED(comResult)) init_spell_checker();
+    g_comInitialized = SUCCEEDED(comResult);
 
     g_msgFindReplace = RegisterWindowMessageW(FINDMSGSTRINGW);
 
@@ -8837,9 +9080,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (hIconBig) SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
     if (hIconSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
 
-    if (cliFile) load_file(cliFile);
-    else if (!restore_recovery_snapshot()) restore_session_documents();
-    free(cliFile);
+    g_pendingCliFile = cliFile;
+    PostMessageW(hwnd, WM_APP_DEFERRED_INIT, 0, 0);
 
     ACCEL accels[] = {
         { FVIRTKEY | FCONTROL, 'N', IDM_FILE_NEW },
@@ -8857,6 +9099,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, 'G', IDM_EDIT_GOTOLINE },
         { FVIRTKEY | FCONTROL, 'W', IDM_FILE_CLOSE },
         { FVIRTKEY | FCONTROL | FSHIFT, 'T', IDM_FILE_REOPEN_CLOSED },
+        { FVIRTKEY | FALT, VK_LEFT, IDM_FILE_GO_BACK },
         { FVIRTKEY | FCONTROL, VK_TAB, IDM_VIEW_NEXT_TAB },
         { FVIRTKEY | FCONTROL | FSHIFT, VK_TAB, IDM_VIEW_PREVIOUS_TAB },
         { FVIRTKEY, VK_F3, IDM_EDIT_FINDNEXT },
@@ -8889,6 +9132,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, '0', IDM_VIEW_ZOOM_RESET },
     };
     HACCEL hAccel = CreateAcceleratorTableA(accels, sizeof(accels) / sizeof(accels[0]));
+    g_hAccel = hAccel;
 
     ShowWindow(hwnd, g_startMaximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(hwnd);
