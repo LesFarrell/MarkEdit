@@ -52,6 +52,7 @@ static HWND g_hPreview; /* WebView2 host child window */
 static HWND g_hTabs;
 static HWND g_hStatus;
 static HWND g_hOutline;
+static HWND g_hMinimap; /* zoomed-out Scintilla view sharing g_hEdit's document */
 static HWND g_hMainWnd;
 /* The main window's accelerator table, forwarded into from the preview's
    AcceleratorKeyPressed handler - see AccelKey_Invoke() - since disabling
@@ -166,6 +167,10 @@ static int g_showWhitespace = 0;
 static int g_indentGuides = 0;
 static int g_spellCheckEnabled = 1;
 static int g_outlineVisible = 0;
+static int g_minimapVisible = 1;
+static int g_minimapDragging = 0;
+static int g_minimapViewTop = 0; /* client-relative y (minimap coords) of the visible-region box */
+static int g_minimapViewHeight = 0;
 static int g_editorZoom = 0; /* Scintilla SCI_SETZOOM units: +1/-1 per level, 0 is 100%. */
 static WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH] = L"";
 static int g_outlineLines[1024];
@@ -650,6 +655,21 @@ static void set_edit_text(HWND hEdit, const char *text) {
 #define MARGIN_LINENUMBERS 0
 #define MARGIN_BOOKMARKS 1
 #define MARGIN_FOLD 2
+/* Fixed point size for the minimap's copy of the editor font - deliberately
+   independent of the user's chosen editor font size (and its zoom level) so
+   the overview stays small and legible as an overview rather than scaling
+   up along with the main editor's text. In hundredths of a point (see
+   SCI_STYLESETSIZEFRACTIONAL/SC_FONT_SIZE_MULTIPLIER) so it can go below the
+   smallest whole point size. */
+#define MINIMAP_FONT_SIZE_HUNDREDTHS 150
+/* Negative extra ascent/descent (see SCI_SETEXTRAASCENT/DESCENT) packs the
+   minimap's lines closer together than the font's natural leading - Scintilla
+   clamps ascent to a 1px and descent to a 0px floor, so this can't collapse
+   lines into each other. Passed as plain negative ints below; the WPARAM
+   round-trip preserves the sign (Scintilla reads it back via
+   static_cast<int>(wParam)). */
+#define MINIMAP_EXTRA_ASCENT -2
+#define MINIMAP_EXTRA_DESCENT -3
 #define MARKER_BOOKMARK 1
 #define MARKER_BREAKPOINT 2
 #define MARKER_DEBUG_LINE 3
@@ -1081,7 +1101,7 @@ static int create_spell_checker_for_language(const WCHAR *requested, int reportE
     } else if (!GetUserDefaultLocaleName(language, LOCALE_NAME_MAX_LENGTH))
         wcscpy(language, L"en-GB");
 
-    WINBOOL supported = FALSE;
+    BOOL supported = FALSE;
     ISpellCheckerFactory_IsSupported(factory, language, &supported);
     if (!supported) {
         IEnumString *languages = NULL;
@@ -1312,6 +1332,36 @@ static void init_native_menu_theme_support(void) {
     memcpy(&g_flushMenuThemes, &procedure, sizeof(g_flushMenuThemes));
 }
 
+/* DarkMode_Explorer themes the menu bar's fill and its dropdowns, but the
+   1px separator the non-client area draws along the menu bar's bottom edge
+   stays a light system colour regardless - it isn't part of what that theme
+   (or the ODT_MENU owner-draw for the item labels) covers. Painted over
+   directly with the same dark fill used elsewhere, right after Windows
+   finishes its own non-client painting. Only needed in dark mode; light
+   mode's own separator already matches the rest of the light chrome. */
+static void erase_menu_bottom_seam(HWND hwnd) {
+    if (!g_previewDarkMode) return;
+    RECT windowRect;
+    if (!GetWindowRect(hwnd, &windowRect)) return;
+    POINT clientTopLeft = {0, 0};
+    if (!ClientToScreen(hwnd, &clientTopLeft)) return;
+    RECT clientRect;
+    if (!GetClientRect(hwnd, &clientRect)) return;
+    int lineX = clientTopLeft.x - windowRect.left;
+    int lineY = clientTopLeft.y - windowRect.top - 1;
+    int lineWidth = clientRect.right - clientRect.left;
+    if (lineX < 0 || lineY < 0 || lineWidth <= 0) return;
+    HDC hdc = GetWindowDC(hwnd);
+    if (!hdc) return;
+    RECT lineRect = {lineX, lineY, lineX + lineWidth, lineY + 1};
+    HBRUSH brush = CreateSolidBrush(RGB(0x0D, 0x11, 0x17));
+    if (brush) {
+        FillRect(hdc, &lineRect, brush);
+        DeleteObject(brush);
+    }
+    ReleaseDC(hwnd, hdc);
+}
+
 /* Switches the menu bar, its dropdowns, and the window's title bar/border
    between light and dark chrome. FORCEDARK/FORCELIGHT are intentional: the
    app has its own theme selector, so the selected menu colour must not
@@ -1352,6 +1402,7 @@ static void apply_menu_theme(HWND hwnd, int dark) {
         }
         SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
         DrawMenuBar(hwnd);
+        erase_menu_bottom_seam(hwnd);
     }
 }
 
@@ -1442,6 +1493,18 @@ static void configure_scintilla(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETCARETLINEBACKALPHA, SC_ALPHA_NOALPHA, 0);
 }
 
+/* apply_editor_theme() bolds several per-construct styles (Markdown headings/
+   strong text, and various lexers' keywords) to make them stand out in the
+   full-size editor. At the minimap's tiny fixed size (MINIMAP_FONT_SIZE_HUNDREDTHS)
+   bold weight just reads as thick, smudged blocks rather than legible text,
+   so every style is forced back to regular weight there after the theme is
+   applied - see the two callers below. */
+static void strip_minimap_bold(void) {
+    if (!g_hMinimap) return;
+    for (int style = 0; style <= STYLE_MAX; style++)
+        SendMessageA(g_hMinimap, SCI_STYLESETBOLD, (WPARAM)style, FALSE);
+}
+
 /* Apply a font face/point size to the Scintilla control by setting the
    default style (Scintilla styles text via numeric style IDs rather than an
    HFONT). SCI_STYLECLEARALL below resets every style - including the
@@ -1466,6 +1529,21 @@ static void apply_editor_font(const WCHAR *faceName, int pointSize) {
     SendMessageA(g_hEdit, SCI_STYLESETSIZE, STYLE_LINENUMBER, pointSize);
     g_lineNumberDigits = 0; /* font metrics changed even if the line count did not */
     update_linenumber_margin_width(g_hEdit);
+
+    /* The minimap is a second view onto the same document, so it keeps its
+       own copy of every style and needs the same font/theme applied - but at
+       a fixed small size (see MINIMAP_FONT_SIZE_HUNDREDTHS) rather than the
+       editor's own point size, so it doesn't grow along with it. Zoom stays
+       at 0: sizing is done via STYLESETSIZEFRACTIONAL alone. */
+    if (g_hMinimap) {
+        SendMessageA(g_hMinimap, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
+        SendMessageA(g_hMinimap, SCI_STYLESETSIZEFRACTIONAL, STYLE_DEFAULT, MINIMAP_FONT_SIZE_HUNDREDTHS);
+        SendMessageA(g_hMinimap, SCI_STYLECLEARALL, 0, 0);
+        apply_editor_theme(g_hMinimap);
+        strip_minimap_bold();
+        SendMessageA(g_hMinimap, SCI_SETZOOM, 0, 0);
+        update_minimap_viewport();
+    }
     free(faceUtf8);
 }
 
@@ -1560,6 +1638,7 @@ static void load_layout_settings(void) {
     g_showWhitespace = read_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path) != 0;
     g_indentGuides = read_profile_int(L"View", L"IndentGuides", g_indentGuides, path) != 0;
     g_outlineVisible = read_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path) != 0;
+    g_minimapVisible = read_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path) != 0;
     g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     if (g_editorZoom < -10) g_editorZoom = -10;
     if (g_editorZoom > 20) g_editorZoom = 20;
@@ -1595,6 +1674,7 @@ static void save_layout_settings(void) {
     write_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path);
     write_profile_int(L"View", L"IndentGuides", g_indentGuides, path);
     write_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path);
+    write_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path);
     write_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
     if (!g_commandLinePreviewMode) {
@@ -2440,7 +2520,7 @@ static HRESULT STDMETHODCALLTYPE PdfHandler_QI(void *this_, REFIID riid, void **
 }
 
 static HRESULT STDMETHODCALLTYPE PdfDone_Invoke(ICoreWebView2PrintToPdfCompletedHandler *this_,
-                                                 HRESULT errorCode, WINBOOL result) {
+                                                 HRESULT errorCode, BOOL result) {
     (void)this_;
     if (FAILED(errorCode) || !result)
         MessageBoxW(g_hMainWnd, L"Could not export the rendered preview to PDF.",
@@ -3030,12 +3110,23 @@ static void record_document_file_time(int index) {
     free(ioPath);
 }
 
+/* Swaps the shared document pointer for both the main editor and its
+   minimap, keeping the minimap's overview in sync with whichever tab is
+   active. Not used for the transient peeks in get_document_text() and
+   clear_debug_execution_markers(), which restore the original pointer
+   before returning and would otherwise flash the minimap at an unrelated
+   document. */
+static void set_active_editor_document(sptr_t doc) {
+    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
+    if (g_hMinimap) SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
+}
+
 static void switch_document(int index) {
     if (!g_hEdit || index < 0 || index >= g_documentCount || index == g_activeDocument) return;
     save_active_document_view();
     g_switchingDocument = 1;
     g_activeDocument = index;
-    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    set_active_editor_document(g_documents[index].sciDocument);
     apply_editor_font(g_fontFaceName, g_fontPointSize);
     apply_document_language(g_hEdit, g_documents[index].path);
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[index].anchor, (LPARAM)g_documents[index].caret);
@@ -3067,7 +3158,7 @@ static int create_document_tab(void) {
     g_documents[index].untitledNumber = g_nextUntitledNumber++;
     g_activeDocument = index;
     g_switchingDocument = 1;
-    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)sciDoc);
+    set_active_editor_document(sciDoc);
     configure_scintilla(g_hEdit);
     apply_editor_font(g_fontFaceName, g_fontPointSize);
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
@@ -3199,7 +3290,7 @@ static int open_file_in_tab(const WCHAR *path) {
         TabCtrl_DeleteItem(g_hTabs, removeIndex);
         g_documentCount--;
         g_activeDocument = target;
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[target].sciDocument);
+        set_active_editor_document(g_documents[target].sciDocument);
         apply_editor_font(g_fontFaceName, g_fontPointSize);
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[target].anchor, (LPARAM)g_documents[target].caret);
         SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)failedDoc);
@@ -3848,7 +3939,7 @@ static void do_close_document_at(int index) {
            Numbered names are reserved for additional unsaved tabs. */
         g_documents[0].untitledNumber = 0;
         g_switchingDocument = 1;
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)newDoc);
+        set_active_editor_document(newDoc);
         configure_scintilla(g_hEdit);
         apply_editor_font(g_fontFaceName, g_fontPointSize);
         SendMessageA(g_hEdit, SCI_CLEARALL, 0, 0);
@@ -3871,7 +3962,7 @@ static void do_close_document_at(int index) {
     g_documentCount--;
     g_activeDocument = removeIndex < g_documentCount ? removeIndex : g_documentCount - 1;
     g_switchingDocument = 1;
-    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[g_activeDocument].sciDocument);
+    set_active_editor_document(g_documents[g_activeDocument].sciDocument);
     apply_editor_font(g_fontFaceName, g_fontPointSize);
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[g_activeDocument].anchor,
                  (LPARAM)g_documents[g_activeDocument].caret);
@@ -3906,7 +3997,7 @@ static void do_reopen_closed_tab(void) {
         index = 0;
         g_activeDocument = 0;
         g_switchingDocument = 1;
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)restored.sciDocument);
+        set_active_editor_document(restored.sciDocument);
         g_switchingDocument = 0;
         release_document_reference(&blank);
     } else {
@@ -3920,7 +4011,7 @@ static void do_reopen_closed_tab(void) {
         g_documentCount++;
         g_activeDocument = index;
         g_switchingDocument = 1;
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)restored.sciDocument);
+        set_active_editor_document(restored.sciDocument);
         g_switchingDocument = 0;
         TCITEMW item = {0};
         item.mask = TCIF_TEXT;
@@ -4558,6 +4649,31 @@ static const char *HELP_REFERENCE_MARKDOWN =
 "[id]: https://example.com\r\n"
 "```\r\n"
 "\r\n"
+"## Wiki-links\r\n"
+"\r\n"
+"```\r\n"
+"[[Other Note]]\r\n"
+"[[Other Note|custom label]]\r\n"
+"```\r\n"
+"\r\n"
+"Click a wiki-link to open that note from the current document's folder (a\r\n"
+"`.md` extension is assumed unless one is given), or offer to create it if\r\n"
+"it doesn't exist yet. File > Go Back (Alt+Left) returns to wherever the\r\n"
+"jump was made from.\r\n"
+"\r\n"
+"## Emoji shortcodes\r\n"
+"\r\n"
+"| Markdown | Result |\r\n"
+"| :--- | :--- |\r\n"
+"| `:tada:` | :tada: |\r\n"
+"| `:rocket:` | :rocket: |\r\n"
+"| `:+1:` | :+1: |\r\n"
+"| `:100:` | :100: |\r\n"
+"| `:fire:` | :fire: |\r\n"
+"\r\n"
+"An unrecognised shortcode such as `:not_a_real_shortcode:` is left as\r\n"
+"plain text.\r\n"
+"\r\n"
 "## Lists\r\n"
 "\r\n"
 "- bullet item\r\n"
@@ -4778,6 +4894,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN, "&Open...\tCtrl+O");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_QUICK_OPEN, "&Quick Open in Folder...\tCtrl+K");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_FIND_FOLDER, "Find in F&older...");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_GIT_CHANGES, "&Git Changes...\tCtrl+Shift+G");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVE, "&Save\tCtrl+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVEAS, "Save &As...\tCtrl+Shift+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_HTML, "Export Rendered &HTML...");
@@ -4949,6 +5066,8 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_STRING, IDM_VIEW_SPELL_LANGUAGE, "Spell Check &Language...");
     AppendMenuA(hView, MF_STRING | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_OUTLINE, "Document &Outline");
+    AppendMenuA(hView, MF_STRING | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_MINIMAP, "Mini&map");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hView, MF_STRING | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_SHOW_WHITESPACE, "Show W&hitespace");
@@ -5500,6 +5619,29 @@ static int layout_toolbar(int width, int top) {
     return y + TOOLBAR_BUTTON_SIZE + 3;
 }
 
+/* Positions the editor within [x, x+width) x [y, y+h), carving a strip off
+   its right edge for the minimap when one should be shown - regardless of
+   which side of the splitter the editor itself is on, so the minimap always
+   sits immediately next to the text it overviews. */
+static void layout_editor_with_minimap(HWND hwnd, int x, int y, int width, int h) {
+    int minimapWidth = (g_hMinimap && g_minimapVisible && !g_focusMode) ?
+        MulDiv(MINIMAP_WIDTH, GetDpiForWindow(hwnd), 96) : 0;
+    if (minimapWidth > width - 80) minimapWidth = 0; /* not enough room to keep the editor usable */
+
+    int editorWidth = width - minimapWidth;
+    MoveWindow(g_hEdit, x, y, editorWidth, h, TRUE);
+    ShowWindow(g_hEdit, SW_SHOW);
+
+    if (!g_hMinimap) return;
+    if (minimapWidth > 0) {
+        MoveWindow(g_hMinimap, x + editorWidth, y, minimapWidth, h, TRUE);
+        ShowWindow(g_hMinimap, SW_SHOW);
+        update_minimap_viewport();
+    } else {
+        ShowWindow(g_hMinimap, SW_HIDE);
+    }
+}
+
 static void layout(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
@@ -5544,8 +5686,7 @@ static void layout(HWND hwnd) {
     }
 
     if (g_editorVisible && !g_previewVisible) {
-        MoveWindow(g_hEdit, 0, y, paneWidth, h, TRUE);
-        ShowWindow(g_hEdit, SW_SHOW);
+        layout_editor_with_minimap(hwnd, 0, y, paneWidth, h);
         ShowWindow(g_hPreview, SW_HIDE);
         RECT zero = { 0, 0, 0, 0 };
         set_webview_bounds(zero, FALSE);
@@ -5554,6 +5695,7 @@ static void layout(HWND hwnd) {
 
     if (!g_editorVisible && g_previewVisible) {
         ShowWindow(g_hEdit, SW_HIDE);
+        if (g_hMinimap) ShowWindow(g_hMinimap, SW_HIDE);
         ShowWindow(g_hPreview, SW_SHOW);
         MoveWindow(g_hPreview, 0, y, paneWidth, h, TRUE);
         /* WebView2 controller bounds are relative to g_hPreview's own client
@@ -5570,16 +5712,15 @@ static void layout(HWND hwnd) {
     if (g_splitterPos > paneWidth - 100)
         g_splitterPos = (paneWidth - 100 > 100) ? paneWidth - 100 : 100;
 
-    ShowWindow(g_hEdit, SW_SHOW);
     ShowWindow(g_hPreview, SW_SHOW);
     int rightWidth = paneWidth - g_splitterPos - SPLITTER_WIDTH;
     RECT wvRc;
     if (g_previewOnLeft) {
         MoveWindow(g_hPreview, 0, y, g_splitterPos, h, TRUE);
-        MoveWindow(g_hEdit, g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
+        layout_editor_with_minimap(hwnd, g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h);
         wvRc = (RECT){ 0, 0, g_splitterPos, h };
     } else {
-        MoveWindow(g_hEdit, 0, y, g_splitterPos, h, TRUE);
+        layout_editor_with_minimap(hwnd, 0, y, g_splitterPos, h);
         MoveWindow(g_hPreview, g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
         wvRc = (RECT){ 0, 0, rightWidth, h };
     }
@@ -5589,7 +5730,7 @@ static void layout(HWND hwnd) {
 static void update_view_menu(HWND hwnd) {
     HMENU hMenuBar = GetMenu(hwnd);
     if (!hMenuBar) return;
-    HMENU hView = GetSubMenu(hMenuBar, 3); /* File, Edit, Format, View */
+    HMENU hView = GetSubMenu(hMenuBar, 4); /* File, Edit, Format, Run, View */
     CheckMenuItem(hView, IDM_VIEW_TOGGLEPREVIEW, MF_BYCOMMAND | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLEEDITOR, MF_BYCOMMAND | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_PREVIEW_ON_LEFT, MF_BYCOMMAND | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED));
@@ -5599,6 +5740,7 @@ static void update_view_menu(HWND hwnd) {
     CheckMenuItem(hView, IDM_VIEW_SHOW_WHITESPACE, MF_BYCOMMAND | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_INDENT_GUIDES, MF_BYCOMMAND | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_OUTLINE, MF_BYCOMMAND | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_MINIMAP, MF_BYCOMMAND | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED));
     HMENU hTheme = GetSubMenu(hView, 6);
     if (hTheme) {
         CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
@@ -7321,6 +7463,142 @@ static void toggle_outline(HWND hwnd) {
     save_layout_settings();
 }
 
+/* One-time, document-independent setup for the minimap's Scintilla view:
+   read-only, no margins or scrollbars of its own, unwrapped so each document
+   line maps to exactly one minimap line, and no visible caret. Font, theme,
+   and zoom are applied separately (see apply_editor_font()) since those also
+   need to be reapplied whenever the editor's font or theme changes. */
+static void configure_minimap(HWND hMinimap) {
+    SendMessageA(hMinimap, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
+    SendMessageA(hMinimap, SCI_SETREADONLY, TRUE, 0);
+    SendMessageA(hMinimap, SCI_SETUNDOCOLLECTION, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETVSCROLLBAR, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETHSCROLLBAR, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
+    SendMessageA(hMinimap, SCI_SETMARGINWIDTHN, MARGIN_LINENUMBERS, 0);
+    SendMessageA(hMinimap, SCI_SETMARGINWIDTHN, MARGIN_BOOKMARKS, 0);
+    SendMessageA(hMinimap, SCI_SETMARGINWIDTHN, MARGIN_FOLD, 0);
+    SendMessageA(hMinimap, SCI_SETCARETSTYLE, CARETSTYLE_INVISIBLE, 0);
+    SendMessageA(hMinimap, SCI_SETCARETLINEVISIBLE, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETMOUSEDOWNCAPTURES, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETCURSOR, SC_CURSORARROW, 0);
+    SendMessageA(hMinimap, SCI_SETZOOM, 0, 0); /* sizing is done via STYLESETSIZEFRACTIONAL, see apply_editor_font() */
+    SendMessageA(hMinimap, SCI_SETEXTRAASCENT, (WPARAM)MINIMAP_EXTRA_ASCENT, 0);
+    SendMessageA(hMinimap, SCI_SETEXTRADESCENT, (WPARAM)MINIMAP_EXTRA_DESCENT, 0);
+}
+
+/* Recomputes the minimap's own scroll position (for documents too long to
+   fit the minimap at once) and the visible-region box drawn over it, then
+   asks for a repaint. Called whenever the main editor scrolls, its content
+   changes size, or the minimap is resized/shown. */
+static void update_minimap_viewport(void) {
+    if (!g_hMinimap || !g_hEdit || !g_minimapVisible || !IsWindowVisible(g_hMinimap)) return;
+
+    int totalLines = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int mainFirstVisible = (int)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    int mainFirstDocLine = (int)SendMessageA(g_hEdit, SCI_DOCLINEFROMVISIBLE, (WPARAM)mainFirstVisible, 0);
+    int mainLinesOnScreen = (int)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+
+    int minimapLineHeight = (int)SendMessageA(g_hMinimap, SCI_TEXTHEIGHT, 0, 0);
+    if (minimapLineHeight < 1) minimapLineHeight = 1;
+    RECT mmRect;
+    GetClientRect(g_hMinimap, &mmRect);
+    int minimapLinesOnScreen = (mmRect.bottom - mmRect.top) / minimapLineHeight;
+    if (minimapLinesOnScreen < 1) minimapLinesOnScreen = 1;
+
+    /* Documents that fit entirely within the minimap's height stay pinned at
+       the top; longer ones scroll to keep the main editor's viewport roughly
+       centered within the minimap. */
+    int minimapFirstDocLine = 0;
+    if (totalLines > minimapLinesOnScreen) {
+        minimapFirstDocLine = mainFirstDocLine - (minimapLinesOnScreen - mainLinesOnScreen) / 2;
+        int maxFirst = totalLines - minimapLinesOnScreen;
+        if (minimapFirstDocLine > maxFirst) minimapFirstDocLine = maxFirst;
+        if (minimapFirstDocLine < 0) minimapFirstDocLine = 0;
+    }
+    int minimapFirstVisible = (int)SendMessageA(g_hMinimap, SCI_VISIBLEFROMDOCLINE, (WPARAM)minimapFirstDocLine, 0);
+    SendMessageA(g_hMinimap, SCI_SETFIRSTVISIBLELINE, (WPARAM)minimapFirstVisible, 0);
+
+    g_minimapViewTop = (mainFirstDocLine - minimapFirstDocLine) * minimapLineHeight;
+    g_minimapViewHeight = mainLinesOnScreen * minimapLineHeight;
+    if (g_minimapViewHeight < 4) g_minimapViewHeight = 4;
+
+    InvalidateRect(g_hMinimap, NULL, FALSE);
+}
+
+/* Scrolls the main editor so the document line under minimap-local y is
+   centered in its viewport - used for both a single click and drag-to-scroll. */
+static void minimap_scroll_main_to_y(int y) {
+    if (!g_hEdit || !g_hMinimap) return;
+    int pos = (int)SendMessageA(g_hMinimap, SCI_POSITIONFROMPOINT, (WPARAM)0, (LPARAM)y);
+    if (pos < 0) return;
+    int docLine = (int)SendMessageA(g_hMinimap, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    int mainLinesOnScreen = (int)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+    int target = docLine - mainLinesOnScreen / 2;
+    if (target < 0) target = 0;
+    int targetVisible = (int)SendMessageA(g_hEdit, SCI_VISIBLEFROMDOCLINE, (WPARAM)target, 0);
+    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)targetVisible, 0);
+}
+
+static LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                            UINT_PTR id, DWORD_PTR data) {
+    (void)id; (void)data;
+    switch (msg) {
+        case WM_LBUTTONDOWN:
+            g_minimapDragging = 1;
+            SetCapture(hwnd);
+            minimap_scroll_main_to_y(GET_Y_LPARAM(lParam));
+            return 0;
+        case WM_MOUSEMOVE:
+            if (g_minimapDragging) minimap_scroll_main_to_y(GET_Y_LPARAM(lParam));
+            return 0;
+        case WM_LBUTTONUP:
+            if (g_minimapDragging) { g_minimapDragging = 0; ReleaseCapture(); }
+            return 0;
+        case WM_CAPTURECHANGED:
+            g_minimapDragging = 0;
+            return 0;
+        /* Swallowed rather than forwarded to Scintilla's default handling,
+           which would otherwise open its own context menu or place a caret
+           in what is meant to be a read-only overview. */
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_CONTEXTMENU:
+        case WM_LBUTTONDBLCLK:
+            return 0;
+        case WM_MOUSEWHEEL:
+            if (g_hEdit) SendMessageA(g_hEdit, WM_MOUSEWHEEL, wParam, lParam);
+            return 0;
+        case WM_PAINT: {
+            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            RECT box = { rc.left, g_minimapViewTop, rc.right, g_minimapViewTop + g_minimapViewHeight };
+            if (box.top < rc.top) box.top = rc.top;
+            if (box.bottom > rc.bottom) box.bottom = rc.bottom;
+            if (box.bottom > box.top) {
+                HDC hdc = GetDC(hwnd);
+                HBRUSH brush = CreateSolidBrush(g_previewDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0x8B, 0x94, 0x9E));
+                FrameRect(hdc, &box, brush);
+                DeleteObject(brush);
+                ReleaseDC(hwnd, hdc);
+            }
+            return result;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, MinimapSubclassProc, 1);
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void toggle_minimap(HWND hwnd) {
+    g_minimapVisible = !g_minimapVisible;
+    update_view_menu(hwnd);
+    layout(hwnd);
+    save_layout_settings();
+}
+
 static char *editor_line_text(int lineNumber, int *outLength) {
     int length = (int)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
     if (length < 0 || length > 1024 * 1024) return NULL;
@@ -7605,6 +7883,144 @@ static int collect_workspace_files(WorkspaceFiles *files) {
     return 1;
 }
 
+/* Run Git directly and capture stdout/stderr without cmd.exe re-parsing the
+   repository path. The caller owns the returned byte buffer. */
+static char *capture_git_output(const WCHAR *directory, const WCHAR *arguments,
+                                DWORD *exitCode, size_t *outputLength) {
+    if (exitCode) *exitCode = (DWORD)-1;
+    if (outputLength) *outputLength = 0;
+    size_t commandCapacity = wcslen(directory) + wcslen(arguments) + 64;
+    WCHAR *command = (WCHAR *)malloc(commandCapacity * sizeof(WCHAR));
+    if (!command) return NULL;
+    swprintf(command, commandCapacity, L"git.exe -C \"%ls\" %ls", directory, arguments);
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+    HANDLE readPipe = NULL, writePipe = NULL;
+    if (!CreatePipe(&readPipe, &writePipe, &security, 0)) { free(command); return NULL; }
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW startup = {0};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = writePipe;
+    startup.hStdError = writePipe;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process = {0};
+    BOOL started = CreateProcessW(NULL, command, NULL, NULL, TRUE,
+                                  CREATE_NO_WINDOW, NULL, directory, &startup, &process);
+    free(command);
+    CloseHandle(writePipe);
+    if (!started) { CloseHandle(readPipe); return NULL; }
+    size_t length = 0, capacity = 4096;
+    char *output = (char *)malloc(capacity);
+    BYTE chunk[4096];
+    DWORD got = 0;
+    while (output && ReadFile(readPipe, chunk, sizeof(chunk), &got, NULL) && got) {
+        if (length + got + 1 > capacity) {
+            size_t next = capacity;
+            while (next < length + got + 1) next *= 2;
+            char *grown = (char *)realloc(output, next);
+            if (!grown) { free(output); output = NULL; break; }
+            output = grown; capacity = next;
+        }
+        memcpy(output + length, chunk, got);
+        length += got;
+    }
+    CloseHandle(readPipe);
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD code = (DWORD)-1;
+    GetExitCodeProcess(process.hProcess, &code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (output) output[length] = 0;
+    if (exitCode) *exitCode = code;
+    if (outputLength) *outputLength = length;
+    return output;
+}
+
+static const WCHAR *git_status_description(char index, char worktree) {
+    if (index == '?' && worktree == '?') return L"Untracked";
+    if (index == 'U' || worktree == 'U' || (index == 'A' && worktree == 'A') ||
+        (index == 'D' && worktree == 'D')) return L"Conflict";
+    if (index != ' ' && worktree != ' ') return L"Staged + modified";
+    if (index != ' ') return L"Staged";
+    if (worktree == 'D') return L"Deleted";
+    return L"Modified";
+}
+
+static void do_git_changes(void) {
+    WCHAR *directory = g_currentFile ? path_directory(g_currentFile) : choose_workspace_folder();
+    if (!directory) return;
+    DWORD code = 0;
+    size_t rootBytes = 0;
+    char *rootOutput = capture_git_output(directory, L"rev-parse --show-toplevel", &code, &rootBytes);
+    if (!rootOutput) {
+        MessageBoxW(g_hMainWnd, L"Git could not be started. Make sure git.exe is available on PATH.",
+                    L"Git Changes", MB_OK | MB_ICONERROR);
+        free(directory); return;
+    }
+    if (code != 0) {
+        MessageBoxW(g_hMainWnd, L"The selected folder is not inside a Git repository.",
+                    L"Git Changes", MB_OK | MB_ICONINFORMATION);
+        free(rootOutput); free(directory); return;
+    }
+    while (rootBytes && (rootOutput[rootBytes - 1] == '\r' || rootOutput[rootBytes - 1] == '\n'))
+        rootOutput[--rootBytes] = 0;
+    WCHAR *root = to_wide(rootOutput);
+    free(rootOutput); free(directory);
+    if (!root) return;
+    size_t statusLength = 0;
+    char *status = capture_git_output(root, L"status --porcelain=v1 -z --untracked-files=all",
+                                      &code, &statusLength);
+    if (!status || code != 0) {
+        MessageBoxW(g_hMainWnd, L"Git could not read the repository status.", L"Git Changes",
+                    MB_OK | MB_ICONERROR);
+        free(status); free(root); return;
+    }
+    WorkspaceFiles changes = {0};
+    size_t position = 0;
+    while (position + 3 <= statusLength) {
+        char index = status[position], worktree = status[position + 1];
+        if (status[position + 2] != ' ') break;
+        char *name = status + position + 3;
+        size_t remaining = statusLength - position - 3;
+        size_t nameLength = strnlen(name, remaining);
+        if (nameLength == remaining) break;
+        WCHAR *wideName = to_wide(name);
+        if (!wideName) break;
+        for (WCHAR *p = wideName; *p; p++) if (*p == L'/') *p = L'\\';
+        WCHAR *full = path_join(root, wideName);
+        const WCHAR *description = git_status_description(index, worktree);
+        size_t labelCapacity = wcslen(wideName) + wcslen(description) + 8;
+        WCHAR *label = (WCHAR *)malloc(labelCapacity * sizeof(WCHAR));
+        if (full && label) {
+            swprintf(label, labelCapacity, L"%ls  %ls", description, wideName);
+            add_workspace_item(&changes, full, label, (worktree == 'D' || index == 'D') ? -1 : 0);
+        }
+        free(label); free(full); free(wideName);
+        position += 3 + nameLength + 1;
+        if ((index == 'R' || index == 'C') && position < statusLength) {
+            size_t oldLength = strnlen(status + position, statusLength - position);
+            position += oldLength + 1;
+        }
+    }
+    free(status); free(root);
+    if (!changes.count) {
+        MessageBoxW(g_hMainWnd, L"The working tree is clean.", L"Git Changes",
+                    MB_OK | MB_ICONINFORMATION);
+        free_workspace_files(&changes); return;
+    }
+    int selected = show_choice_dialog(L"Git Changes", L"Type to filter changed files:",
+                                      changes.labels, changes.count);
+    if (selected >= 0 && selected < changes.count) {
+        DWORD attributes = GetFileAttributesW(changes.paths[selected]);
+        if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY))
+            open_file_in_tab(changes.paths[selected]);
+        else
+            MessageBoxW(g_hMainWnd, L"This change has no working-tree file to open (it may be deleted).",
+                        L"Git Changes", MB_OK | MB_ICONINFORMATION);
+    }
+    free_workspace_files(&changes);
+}
+
 static void do_quick_open(void) {
     WorkspaceFiles files;
     if (!collect_workspace_files(&files)) return;
@@ -7688,6 +8104,7 @@ typedef struct PaletteCommand { const WCHAR *label; WORD command; } PaletteComma
 static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"File: New", IDM_FILE_NEW}, {L"File: Open", IDM_FILE_OPEN},
     {L"File: Quick Open in Folder", IDM_FILE_QUICK_OPEN},
+    {L"File: Git Changes", IDM_FILE_GIT_CHANGES},
     {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Save", IDM_FILE_SAVE},
     {L"File: Save As", IDM_FILE_SAVEAS}, {L"File: Export Rendered HTML", IDM_FILE_EXPORT_HTML},
     {L"File: Export Rendered PDF", IDM_FILE_EXPORT_PDF}, {L"File: Print Rendered Preview", IDM_FILE_PRINT},
@@ -7733,7 +8150,8 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Run: Toggle Breakpoint", IDM_DEBUG_BREAKPOINT},
     {L"Run: Clear All Breakpoints", IDM_DEBUG_CLEAR_BREAKPOINTS},
     {L"View: Toggle Preview", IDM_VIEW_TOGGLEPREVIEW}, {L"View: Toggle Editor", IDM_VIEW_TOGGLEEDITOR},
-    {L"View: Toggle Outline", IDM_VIEW_OUTLINE}, {L"View: Focus Mode", IDM_VIEW_FOCUS_MODE},
+    {L"View: Toggle Outline", IDM_VIEW_OUTLINE}, {L"View: Toggle Minimap", IDM_VIEW_MINIMAP},
+    {L"View: Focus Mode", IDM_VIEW_FOCUS_MODE},
     {L"View: Next Tab", IDM_VIEW_NEXT_TAB}, {L"View: Previous Tab", IDM_VIEW_PREVIOUS_TAB},
     {L"View: Preview on Left", IDM_VIEW_PREVIEW_ON_LEFT},
     {L"View: Word Wrap", IDM_VIEW_WORD_WRAP}, {L"View: Spell Check", IDM_VIEW_SPELL_CHECK},
@@ -7770,6 +8188,11 @@ static void select_theme(HWND hwnd, int darkMode) {
     apply_preview_theme();
     apply_webview_background_colour();
     apply_editor_theme(g_hEdit);
+    if (g_hMinimap) {
+        apply_editor_theme(g_hMinimap);
+        strip_minimap_bold();
+        SendMessageA(g_hMinimap, SCI_SETZOOM, 0, 0);
+    }
     apply_preview_host_theme();
     apply_main_theme(hwnd);
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
@@ -7795,6 +8218,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FILE_OPEN: do_open(); break;
         case IDM_FILE_QUICK_OPEN: do_quick_open(); break;
         case IDM_FILE_FIND_FOLDER: do_find_in_folder(); break;
+        case IDM_FILE_GIT_CHANGES: do_git_changes(); break;
         case IDM_FILE_SAVE: do_save(); break;
         case IDM_FILE_SAVEAS: do_saveas(); break;
         case IDM_FILE_EXPORT_HTML: do_export_html(); break;
@@ -7881,6 +8305,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_FOLD_ALL: fold_all_lines(0); break;
         case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
         case IDM_VIEW_OUTLINE: toggle_outline(hwnd); break;
+        case IDM_VIEW_MINIMAP: toggle_minimap(hwnd); break;
         case IDM_VIEW_ZOOM_IN: adjust_editor_zoom(1); break;
         case IDM_VIEW_ZOOM_OUT: adjust_editor_zoom(-1); break;
         case IDM_VIEW_ZOOM_RESET: reset_editor_zoom(); break;
@@ -8678,6 +9103,13 @@ static void initialize_main_window(HWND hwnd) {
         0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, GetModuleHandleA(NULL), NULL);
     SetWindowSubclass(g_hEdit, EditSubclassProc, 2, 0);
     configure_scintilla(g_hEdit);
+
+    g_hMinimap = CreateWindowExA(0, "Scintilla", "",
+        WS_CHILD | (g_minimapVisible ? WS_VISIBLE : 0),
+        0, 0, 0, 0, hwnd, (HMENU)ID_MINIMAP, GetModuleHandleA(NULL), NULL);
+    SetWindowSubclass(g_hMinimap, MinimapSubclassProc, 1, 0);
+    configure_minimap(g_hMinimap);
+
     apply_editor_font(g_fontFaceName, g_fontPointSize);
 
     g_documentCount = 1;
@@ -8685,6 +9117,7 @@ static void initialize_main_window(HWND hwnd) {
     memset(&g_documents[0], 0, sizeof(g_documents[0]));
     g_documents[0].sciDocument = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
     SendMessageA(g_hEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_documents[0].sciDocument);
+    SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[0].sciDocument);
     /* The sole blank startup tab is the unnumbered canonical document. */
     g_documents[0].untitledNumber = 0;
     TCITEMW firstTab = {0};
@@ -8744,6 +9177,7 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
         }
         update_brace_highlight();
         update_status_position();
+        update_minimap_viewport();
         return;
     }
     if (notification->code == SCN_MARGINCLICK) {
@@ -8818,6 +9252,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CREATE:
             initialize_main_window(hwnd);
             return 0;
+        case WM_NCPAINT: {
+            LRESULT result = DefWindowProcW(hwnd, msg, wParam, lParam);
+            erase_menu_bottom_seam(hwnd);
+            return result;
+        }
+        /* Regaining focus repaints the non-client area (active vs. inactive
+           caption colour) straight from DefWindowProc's own WM_NCACTIVATE
+           handling, without a separate WM_NCPAINT reaching this WndProc -
+           so the seam has to be re-painted here too, or it comes back every
+           time the window is refocused. */
+        case WM_NCACTIVATE: {
+            LRESULT result = DefWindowProcW(hwnd, msg, wParam, lParam);
+            erase_menu_bottom_seam(hwnd);
+            return result;
+        }
         case WM_CTLCOLORSTATIC: {
             if ((HWND)lParam == g_hPreview && g_previewBkBrush) {
                 HDC hdcStatic = (HDC)wParam;
@@ -9087,6 +9536,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, 'N', IDM_FILE_NEW },
         { FVIRTKEY | FCONTROL, 'O', IDM_FILE_OPEN },
         { FVIRTKEY | FCONTROL, 'K', IDM_FILE_QUICK_OPEN },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'G', IDM_FILE_GIT_CHANGES },
         { FVIRTKEY | FCONTROL | FSHIFT, 'P', IDM_EDIT_COMMAND_PALETTE },
         { FVIRTKEY | FCONTROL, 'S', IDM_FILE_SAVE },
         { FVIRTKEY | FCONTROL, 'P', IDM_FILE_PRINT },

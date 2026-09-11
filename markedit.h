@@ -9,6 +9,7 @@
 #define ID_TABS    103
 #define ID_STATUS  104
 #define ID_OUTLINE 105
+#define ID_MINIMAP 106
 
 /* ---- timer IDs ---- */
 #define IDT_PREVIEW_UPDATE 1
@@ -26,6 +27,7 @@
 #define SPLITTER_WIDTH 6
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
+#define MINIMAP_WIDTH 120
 
 /* ---- menu command IDs: File, Edit, View, Help ---- */
 #define IDM_FILE_NEW      201
@@ -140,6 +142,8 @@
 #define IDM_EDIT_EOL_LF          321
 #define IDM_EDIT_EOL_CR          322
 #define IDM_FILE_GO_BACK         323
+#define IDM_FILE_GIT_CHANGES     324
+#define IDM_VIEW_MINIMAP         325
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1
@@ -171,6 +175,8 @@ static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
 static int show_text_input(const WCHAR *title, const WCHAR *prompt,
                            const WCHAR *initial, WCHAR *output, int outputCapacity);
 static void toggle_preview(HWND hwnd);
+static void toggle_minimap(HWND hwnd);
+static void update_minimap_viewport(void);
 static void update_document_mapping(void);
 static void update_title(void);
 static void set_dirty(int dirty);
