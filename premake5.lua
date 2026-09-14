@@ -139,6 +139,8 @@ project "markedit"
         "markdown.c", "markdown.h",
         "recent_files.c", "recent_files.h",
         "workspace_files.c", "workspace_files.h",
+        "settings.c", "settings.h",
+        "help_reference.c", "help_reference.h",
         "markedit.rc",
     }
     cmark_gfm_settings()
