@@ -20,6 +20,7 @@
 #define IDT_OUTLINE_UPDATE 6
 #define IDT_PRINT_PREVIEW 7
 #define IDT_DEBUG_LOCATION 8
+#define IDT_STATUS_UPDATE 9
 
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
@@ -28,6 +29,7 @@
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
 #define MINIMAP_WIDTH 120
+#define MINIMAP_SPLITTER_WIDTH 1
 
 /* ---- menu command IDs: File, Edit, View, Help ---- */
 #define IDM_FILE_NEW      201
@@ -144,6 +146,7 @@
 #define IDM_FILE_GO_BACK         323
 #define IDM_FILE_GIT_CHANGES     324
 #define IDM_VIEW_MINIMAP         325
+#define IDM_FILE_INSERT          326
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1

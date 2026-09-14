@@ -14,6 +14,7 @@
 #include <windowsx.h>
 #include <commdlg.h>
 #include <commctrl.h>
+#include <dlgs.h> /* cmb1: the Font common dialog's font-name combo control ID, see do_choose_font() */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -60,7 +61,14 @@ static HWND g_hMainWnd;
    stops it acting on them but does not, by itself, deliver them to the
    host's message loop. Set once in WinMain. */
 static HACCEL g_hAccel = NULL;
-static WCHAR g_fontFaceName[LF_FACESIZE] = L"Consolas";
+/* Wider than LOGFONT's own LF_FACESIZE (32 WCHARs): that cap is a limit of
+   the classic ChooseFont/LOGFONT API's round-trip, not of anything this app
+   needs to store or hand to Scintilla (SCI_STYLESETFONT takes a plain
+   NUL-terminated string). do_choose_font() works around ChooseFontW's
+   truncation with a dialog hook so real font names longer than 31
+   characters (e.g. "Google Sans Code Medium Monospace") survive intact. */
+#define MAX_FONT_FACE_NAME 128
+static WCHAR g_fontFaceName[MAX_FONT_FACE_NAME] = L"Consolas";
 static int g_fontPointSize = 10;
 
 static ICoreWebView2 *g_webview = NULL;
@@ -1306,6 +1314,14 @@ static void apply_main_theme(HWND hwnd) {
     if (g_mainBkBrush) DeleteObject(g_mainBkBrush);
     g_mainBkBrush = CreateSolidBrush(g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
     if (hwnd) InvalidateRect(hwnd, NULL, FALSE);
+
+    /* The outline's own content is owner-drawn (see draw_themed_listbox_item()),
+       but its scrollbar is still system-drawn and needs the same explorer
+       dark-mode opt-in the editor gets in apply_editor_theme(). */
+    if (g_hOutline) {
+        SetWindowTheme(g_hOutline, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        InvalidateRect(g_hOutline, NULL, TRUE);
+    }
 }
 
 /* Popup menus need an explicit uxtheme opt-in to follow MarkEdit's theme.
@@ -1404,6 +1420,114 @@ static void apply_menu_theme(HWND hwnd, int dark) {
         DrawMenuBar(hwnd);
         erase_menu_bottom_seam(hwnd);
     }
+}
+
+/* The DWM dark-caption/AllowDarkModeForWindow/SetWindowTheme portion of
+   apply_menu_theme() above, generic enough to reuse on the app's other
+   top-level popup windows (Go to Line, the searchable picker, the plain
+   text prompt) - those aren't the main window, so the menu-bar-specific
+   parts of apply_menu_theme() (DrawMenuBar, SetMenuInfo, the seam erase)
+   don't apply to them. */
+static void apply_popup_titlebar_theme(HWND hwnd, int dark) {
+    if (!hwnd) return;
+    if (g_allowDarkModeForWindow) g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
+    BOOL useDark = dark ? TRUE : FALSE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                      &useDark, sizeof(useDark))))
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                               &useDark, sizeof(useDark));
+    SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+/* Shared background/text colors for the app's plain popup dialogs (Go to
+   Line, the searchable picker, the text-input prompt) - same GitHub
+   light/dark palette used everywhere else, so a themed popup doesn't read
+   as a different app from the window that opened it. */
+static COLORREF popup_bg_color(void) { return g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF); }
+static COLORREF popup_fg_color(void) { return g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28); }
+static COLORREF popup_border_color(void) { return g_previewDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE); }
+static COLORREF popup_accent_color(void) { return g_previewDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x09, 0x69, 0xDA); }
+
+/* One shared background brush for whichever of the three popup dialogs is
+   currently open. They run their own modal message loop (see
+   show_goto_line_dialog()/show_choice_dialog()/show_text_input()) and never
+   overlap, so a single brush created in WM_CREATE and freed in
+   WM_NCDESTROY is safe without per-dialog storage. */
+static HBRUSH g_popupBkBrush = NULL;
+
+static void popup_dialog_theme_created(HWND hwnd) {
+    apply_popup_titlebar_theme(hwnd, g_previewDarkMode);
+    if (g_popupBkBrush) DeleteObject(g_popupBkBrush);
+    g_popupBkBrush = CreateSolidBrush(popup_bg_color());
+}
+
+static void popup_dialog_theme_destroyed(void) {
+    if (g_popupBkBrush) { DeleteObject(g_popupBkBrush); g_popupBkBrush = NULL; }
+}
+
+/* Defined further down (with the outline panel's owner-draw, which they're
+   shared with); forward-declared here since ChoiceWndProc, above the
+   outline code in the file, needs them for its own result listbox. */
+static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis);
+static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis);
+
+/* Shared WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT handling for the
+   three popup dialogs below - factored out since all three need identical
+   theming for their STATIC labels and EDIT fields. Returns the brush/TRUE
+   the caller should return from its WndProc, or 0 if msg wasn't handled. */
+static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LRESULT *handled) {
+    *handled = 1;
+    if (msg == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wParam, &rc, g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        return 1;
+    }
+    if (msg == WM_CTLCOLORSTATIC) {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, popup_fg_color());
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+    }
+    if (msg == WM_CTLCOLOREDIT) {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, popup_fg_color());
+        SetBkColor(hdc, popup_bg_color());
+        return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+    }
+    *handled = 0;
+    return 0;
+}
+
+/* Owner-drawn OK/Cancel-style push button matching the popup dialogs'
+   theme - standard BUTTON controls are visual-styles-drawn regardless of
+   WM_CTLCOLORBTN, so getting a themed fill/border needs BS_OWNERDRAW. */
+static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
+    int pressed = (dis->itemState & ODS_SELECTED) != 0;
+    int isDefault = (GetWindowLongW(dis->hwndItem, GWL_STYLE) & BS_DEFPUSHBUTTON) != 0;
+    COLORREF fill = g_previewDarkMode
+        ? (pressed ? RGB(0x30, 0x36, 0x3D) : RGB(0x21, 0x26, 0x2D))
+        : (pressed ? RGB(0xE1, 0xE7, 0xEC) : RGB(0xF6, 0xF8, 0xFA));
+    HBRUSH fillBrush = CreateSolidBrush(fill);
+    FillRect(dis->hDC, &dis->rcItem, fillBrush);
+    DeleteObject(fillBrush);
+
+    HPEN pen = CreatePen(PS_SOLID, isDefault ? 2 : 1, isDefault ? popup_accent_color() : popup_border_color());
+    HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
+    SelectObject(dis->hDC, oldBrush);
+    SelectObject(dis->hDC, oldPen);
+    DeleteObject(pen);
+
+    WCHAR text[128];
+    GetWindowTextW(dis->hwndItem, text, 128);
+    SetTextColor(dis->hDC, popup_fg_color());
+    SetBkMode(dis->hDC, TRANSPARENT);
+    RECT textRect = dis->rcItem;
+    DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 /* Wrapped lines continue with a hanging indent so a wrapped list item or
@@ -1547,13 +1671,19 @@ static void apply_editor_font(const WCHAR *faceName, int pointSize) {
     free(faceUtf8);
 }
 
-/* ---- persisted settings, stored in markedit.ini next to the executable ---- */
+/* ---- persisted settings, stored in %APPDATA%\markedit\markedit.ini ---- */
 static WCHAR *get_settings_path(void) {
-    WCHAR *module = get_module_path();
-    if (!module) return NULL;
-    WCHAR *directory = path_directory(module);
-    free(module);
+    DWORD needed = GetEnvironmentVariableW(L"APPDATA", NULL, 0);
+    if (!needed) return NULL;
+    WCHAR *appData = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));
+    if (!appData || !GetEnvironmentVariableW(L"APPDATA", appData, needed)) {
+        free(appData);
+        return NULL;
+    }
+    WCHAR *directory = path_join(appData, L"markedit");
+    free(appData);
     if (!directory) return NULL;
+    CreateDirectoryW(directory, NULL);
     WCHAR *settings = path_join(directory, L"markedit.ini");
     free(directory);
     return settings;
@@ -1563,7 +1693,7 @@ static void load_font_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
     GetPrivateProfileStringW(L"Font", L"FaceName", L"Consolas",
-                             g_fontFaceName, LF_FACESIZE, path);
+                             g_fontFaceName, MAX_FONT_FACE_NAME, path);
     g_fontPointSize = GetPrivateProfileIntW(L"Font", L"PointSize", g_fontPointSize, path);
     if (g_fontPointSize < 1) g_fontPointSize = 1;
     free(path);
@@ -3402,6 +3532,41 @@ static void do_open(void) {
     free(path);
 }
 
+/* Inserts the contents of a chosen file at the current caret position in the
+   active editor, replacing any selection - the same semantics SCI_REPLACESEL
+   gives every other insert command in this file. */
+static void do_insert_file(void) {
+    if (!g_hEdit) return;
+    DWORD cap = 32768;
+    WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
+    if (!path) return;
+    OPENFILENAMEW ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hMainWnd;
+    ofn.lpstrFilter = L"Markdown Files (*.md;*.markdown)\0*.md;*.markdown\0Python Files (*.py;*.pyw)\0*.py;*.pyw\0C/C++ Files (*.c;*.cc;*.cpp;*.cxx)\0*.c;*.cc;*.cpp;*.cxx\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 5; /* "All Files (*.*)" - the dialog otherwise defaults to entry 1 */
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = cap;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    ofn.lpstrDefExt = L"md";
+    if (GetOpenFileNameW(&ofn)) {
+        int length = 0;
+        char *text = read_bytes_file(path, &length);
+        if (text) {
+            char *content = has_utf8_bom(text, length) ? text + 3 : text;
+            SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)content);
+            SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+            SetFocus(g_hEdit);
+        } else {
+            MessageBoxW(g_hMainWnd, L"Could not read the selected file.", L"MarkEdit",
+                        MB_OK | MB_ICONERROR);
+        }
+        free(text);
+    }
+    free(path);
+}
+
 static int is_image_file(const WCHAR *path) {
     const WCHAR *extension = PathFindExtensionW(path);
     return extension && (_wcsicmp(extension, L".png") == 0 ||
@@ -4112,9 +4277,10 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             g_hGotoEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
                 104, 11, 105, 24, hwnd, (HMENU)10, GetModuleHandleA(NULL), NULL);
-            CreateWindowExA(0, "BUTTON", "Go to", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            CreateWindowExA(0, "BUTTON", "Go to",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                 48, 50, 76, 25, hwnd, (HMENU)IDOK, GetModuleHandleA(NULL), NULL);
-            CreateWindowExA(0, "BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            CreateWindowExA(0, "BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 132, 50, 76, 25, hwnd, (HMENU)IDCANCEL, GetModuleHandleA(NULL), NULL);
             char current[32];
             int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION,
@@ -4123,7 +4289,19 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SetWindowTextA(g_hGotoEdit, current);
             SendMessageA(g_hGotoEdit, EM_SETSEL, 0, -1);
             SetFocus(g_hGotoEdit);
+            popup_dialog_theme_created(hwnd);
             return 0;
+        }
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: {
+            LRESULT handled = 0;
+            LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
+            if (handled) return result;
+            break;
+        }
+        case WM_DRAWITEM: {
+            const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+            if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
+            break;
         }
         case WM_COMMAND:
             if (LOWORD(wParam) == IDOK) {
@@ -4149,6 +4327,9 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
+        case WM_NCDESTROY:
+            popup_dialog_theme_destroyed();
+            break;
     }
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
@@ -4227,18 +4408,48 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             12, 32, 556, 25, hwnd, (HMENU)10, GetModuleHandleW(NULL), NULL);
         state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+            LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
             12, 64, 556, 286, hwnd, (HMENU)11, GetModuleHandleW(NULL), NULL);
-        CreateWindowExW(0, L"BUTTON", L"Open", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        CreateWindowExW(0, L"BUTTON", L"Open",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             404, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
-        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             490, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+        /* Item content is owner-drawn (draw_themed_listbox_item), but the
+           scrollbar itself is still system-drawn and needs the same
+           explorer dark-mode opt-in the editor/outline scrollbars get. */
+        SetWindowTheme(state->list, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
         refill_choice_list(state);
         SetFocus(state->edit);
+        popup_dialog_theme_created(hwnd);
         return 0;
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
     switch (msg) {
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: {
+            LRESULT handled = 0;
+            LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
+            if (handled) return result;
+            break;
+        }
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
+            if (mis->CtlType == ODT_LISTBOX) { measure_themed_listbox_item(state->list, mis); return TRUE; }
+            break;
+        }
+        case WM_DRAWITEM: {
+            const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+            if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
+            if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == state->list) {
+                draw_themed_listbox_item(state->list, dis);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_NCDESTROY:
+            popup_dialog_theme_destroyed();
+            break;
         case WM_COMMAND:
             if (LOWORD(wParam) == 10 && HIWORD(wParam) == EN_CHANGE) {
                 refill_choice_list(state);
@@ -4323,15 +4534,27 @@ static LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->initial,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             12, 38, 396, 25, hwnd, (HMENU)10, GetModuleHandleW(NULL), NULL);
-        CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        CreateWindowExW(0, L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             244, 76, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
-        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             330, 76, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
         SendMessageW(state->edit, EM_SETSEL, 0, -1);
         SetFocus(state->edit);
+        popup_dialog_theme_created(hwnd);
         return 0;
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (msg == WM_ERASEBKGND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLOREDIT) {
+        LRESULT handled = 0;
+        LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
+        if (handled) return result;
+    }
+    if (msg == WM_DRAWITEM) {
+        const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+        if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
+    }
+    if (msg == WM_NCDESTROY) popup_dialog_theme_destroyed();
     if (msg == WM_COMMAND && LOWORD(wParam) == IDOK) {
         GetWindowTextW(state->edit, state->output, state->outputCapacity);
         state->accepted = 1;
@@ -4512,6 +4735,31 @@ static void handle_findmsg(FINDREPLACEW *fr) {
     free(replaceUtf8);
 }
 
+/* ChooseFontW hands the chosen font back through LOGFONTW.lfFaceName, a
+   fixed WCHAR[LF_FACESIZE] (32) field - a hard limit of that struct, not of
+   anything downstream. A face name at or past that length (e.g. "Google
+   Sans Code Medium Monospace", 33 characters) comes back silently truncated
+   to 31 characters plus NUL, which then doesn't match any installed font:
+   Scintilla falls back to a default and the setting "resets" itself on
+   every restart. Reading the dialog's own font-name combo (control ID
+   cmb1, from <dlgs.h> - the font dialog's standard layout is cmb1 name/
+   cmb2 style/cmb3 size, with cmb4 for the color combo that only exists
+   when CF_EFFECTS is set, which this dialog doesn't use) via this hook
+   captures the real, untruncated name before ChooseFontW's return path
+   discards the extra characters. */
+static WCHAR g_choseFontFaceFull[MAX_FONT_FACE_NAME];
+static int g_choseFontFaceFullValid = 0;
+
+static UINT_PTR CALLBACK choose_font_hook(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;
+    if (msg == WM_COMMAND && LOWORD(wParam) == IDOK) {
+        int len = GetDlgItemTextW(hdlg, cmb1, g_choseFontFaceFull,
+                                   MAX_FONT_FACE_NAME);
+        g_choseFontFaceFullValid = len > 0;
+    }
+    return 0; /* let the dialog's own procedure handle every message as usual */
+}
+
 static void do_choose_font(void) {
     LOGFONTW lf;
     ZeroMemory(&lf, sizeof(lf));
@@ -4525,11 +4773,17 @@ static void do_choose_font(void) {
     cf.lStructSize = sizeof(cf);
     cf.hwndOwner = g_hMainWnd;
     cf.lpLogFont = &lf;
-    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOSCRIPTSEL;
+    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOSCRIPTSEL | CF_ENABLEHOOK;
+    cf.lpfnHook = choose_font_hook;
 
+    g_choseFontFaceFullValid = 0;
     if (ChooseFontW(&cf)) {
-        wcsncpy(g_fontFaceName, lf.lfFaceName, LF_FACESIZE - 1);
-        g_fontFaceName[LF_FACESIZE - 1] = 0;
+        if (g_choseFontFaceFullValid) {
+            wcsncpy(g_fontFaceName, g_choseFontFaceFull, MAX_FONT_FACE_NAME - 1);
+        } else {
+            wcsncpy(g_fontFaceName, lf.lfFaceName, LF_FACESIZE - 1);
+        }
+        g_fontFaceName[MAX_FONT_FACE_NAME - 1] = 0;
         g_fontPointSize = cf.iPointSize / 10;
         if (g_fontPointSize < 1) g_fontPointSize = 1;
         apply_editor_font(g_fontFaceName, g_fontPointSize);
@@ -4894,6 +5148,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN, "&Open...\tCtrl+O");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_QUICK_OPEN, "&Quick Open in Folder...\tCtrl+K");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_FIND_FOLDER, "Find in F&older...");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_INSERT, "&Insert File at Cursor...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_GIT_CHANGES, "&Git Changes...\tCtrl+Shift+G");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVE, "&Save\tCtrl+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVEAS, "Save &As...\tCtrl+Shift+S");
@@ -5628,13 +5883,21 @@ static void layout_editor_with_minimap(HWND hwnd, int x, int y, int width, int h
         MulDiv(MINIMAP_WIDTH, GetDpiForWindow(hwnd), 96) : 0;
     if (minimapWidth > width - 80) minimapWidth = 0; /* not enough room to keep the editor usable */
 
-    int editorWidth = width - minimapWidth;
+    /* With the preview pane also open, the minimap otherwise butts straight
+       up against the editor with nothing to mark the boundary between them -
+       leave a thin gap for the theme background to show through as a
+       splitter line, matching the wider one between the editor and preview. */
+    int minimapGap = (minimapWidth > 0 && g_previewVisible) ?
+        MulDiv(MINIMAP_SPLITTER_WIDTH, GetDpiForWindow(hwnd), 96) : 0;
+    if (minimapGap < 1 && minimapWidth > 0 && g_previewVisible) minimapGap = 1;
+
+    int editorWidth = width - minimapWidth - minimapGap;
     MoveWindow(g_hEdit, x, y, editorWidth, h, TRUE);
     ShowWindow(g_hEdit, SW_SHOW);
 
     if (!g_hMinimap) return;
     if (minimapWidth > 0) {
-        MoveWindow(g_hMinimap, x + editorWidth, y, minimapWidth, h, TRUE);
+        MoveWindow(g_hMinimap, x + editorWidth + minimapGap, y, minimapWidth, h, TRUE);
         ShowWindow(g_hMinimap, SW_SHOW);
         update_minimap_viewport();
     } else {
@@ -7519,10 +7782,15 @@ static void update_minimap_viewport(void) {
     int minimapFirstVisible = (int)SendMessageA(g_hMinimap, SCI_VISIBLEFROMDOCLINE, (WPARAM)minimapFirstDocLine, 0);
     SendMessageA(g_hMinimap, SCI_SETFIRSTVISIBLELINE, (WPARAM)minimapFirstVisible, 0);
 
-    g_minimapViewTop = (mainFirstDocLine - minimapFirstDocLine) * minimapLineHeight;
-    g_minimapViewHeight = mainLinesOnScreen * minimapLineHeight;
-    if (g_minimapViewHeight < 4) g_minimapViewHeight = 4;
+    int newViewTop = (mainFirstDocLine - minimapFirstDocLine) * minimapLineHeight;
+    int newViewHeight = mainLinesOnScreen * minimapLineHeight;
+    if (newViewHeight < 4) newViewHeight = 4;
 
+    /* This runs on every caret move/scroll tick (see SCN_UPDATEUI), so only
+       repaint the visible-region box when it actually moved or resized. */
+    if (newViewTop == g_minimapViewTop && newViewHeight == g_minimapViewHeight) return;
+    g_minimapViewTop = newViewTop;
+    g_minimapViewHeight = newViewHeight;
     InvalidateRect(g_hMinimap, NULL, FALSE);
 }
 
@@ -8103,6 +8371,7 @@ static void do_find_in_folder(void) {
 typedef struct PaletteCommand { const WCHAR *label; WORD command; } PaletteCommand;
 static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"File: New", IDM_FILE_NEW}, {L"File: Open", IDM_FILE_OPEN},
+    {L"File: Insert File at Cursor", IDM_FILE_INSERT},
     {L"File: Quick Open in Folder", IDM_FILE_QUICK_OPEN},
     {L"File: Git Changes", IDM_FILE_GIT_CHANGES},
     {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Save", IDM_FILE_SAVE},
@@ -8216,6 +8485,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
     switch (cmd) {
         case IDM_FILE_NEW: create_document_tab(); break;
         case IDM_FILE_OPEN: do_open(); break;
+        case IDM_FILE_INSERT: do_insert_file(); break;
         case IDM_FILE_QUICK_OPEN: do_quick_open(); break;
         case IDM_FILE_FIND_FOLDER: do_find_in_folder(); break;
         case IDM_FILE_GIT_CHANGES: do_git_changes(); break;
@@ -8389,6 +8659,59 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
         DeleteObject(changedPen);
         DeleteObject(changed);
     }
+}
+
+/* Shared owner-draw for the app's plain, single-column LISTBOX controls (the
+   outline panel and the searchable picker's result list) so both follow the
+   app's light/dark theme - a plain LISTBOX always paints in system colors
+   regardless of SetWindowTheme. Parameterized by HWND since both listboxes
+   need identical drawing. */
+static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis) {
+    HFONT font = (HFONT)SendMessageW(listbox, WM_GETFONT, 0, 0);
+    HDC hdc = GetDC(listbox);
+    HFONT oldFont = font ? (HFONT)SelectObject(hdc, font) : NULL;
+    TEXTMETRICW tm;
+    GetTextMetricsW(hdc, &tm);
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(listbox, hdc);
+    mis->itemHeight = (UINT)(tm.tmHeight + tm.tmExternalLeading + MulDiv(6, GetDpiForWindow(g_hMainWnd), 96));
+}
+
+static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis) {
+    if ((int)dis->itemID < 0) return;
+    int selected = (dis->itemState & ODS_SELECTED) != 0;
+    COLORREF bg = g_previewDarkMode
+        ? (selected ? RGB(0x26, 0x4F, 0x78) : RGB(0x0D, 0x11, 0x17))
+        : (selected ? RGB(0xB6, 0xD7, 0xFF) : RGB(0xFF, 0xFF, 0xFF));
+    COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    HBRUSH brush = CreateSolidBrush(bg);
+    FillRect(dis->hDC, &dis->rcItem, brush);
+    DeleteObject(brush);
+
+    /* LB_GETTEXT overflows whatever buffer it's given rather than truncating
+       to it, so the buffer has to be sized from LB_GETTEXTLEN first - a
+       heading line (or a long file path in the picker) can run well past
+       any fixed stack buffer. */
+    int textLen = (int)SendMessageW(listbox, LB_GETTEXTLEN, dis->itemID, 0);
+    if (textLen <= 0) return;
+    WCHAR stackLabel[256];
+    WCHAR *heapLabel = NULL;
+    WCHAR *label = stackLabel;
+    if (textLen >= (int)(sizeof(stackLabel) / sizeof(stackLabel[0]))) {
+        heapLabel = (WCHAR *)malloc(((size_t)textLen + 1) * sizeof(WCHAR));
+        if (!heapLabel) return;
+        label = heapLabel;
+    }
+    int length = (int)SendMessageW(listbox, LB_GETTEXT, dis->itemID, (LPARAM)label);
+    if (length > 0) {
+        RECT textRect = dis->rcItem;
+        textRect.left += 4;
+        SetTextColor(dis->hDC, fg);
+        SetBkMode(dis->hDC, TRANSPARENT);
+        DrawTextW(dis->hDC, label, length, &textRect,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    free(heapLabel);
 }
 
 static int line_has_list_marker(const char *line, int length) {
@@ -9076,8 +9399,14 @@ static void initialize_main_window(HWND hwnd) {
         0, 0, 0, 0, hwnd, (HMENU)ID_STATUS, GetModuleHandleW(NULL), NULL);
     SetWindowSubclass(g_hStatus, StatusSubclassProc, 1, 0);
 
+    /* LBS_HASSTRINGS keeps the listbox owning a copy of each LB_ADDSTRING
+       text (as before) so draw_themed_listbox_item() can fetch it back via
+       LB_GETTEXT - without it, an owner-draw listbox instead treats the
+       LB_ADDSTRING data as an opaque per-item value, which here is a
+       heap pointer that update_outline() frees right after inserting it. */
     g_hOutline = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-        WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+        WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+        LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
         0, 0, 0, 0, hwnd, (HMENU)ID_OUTLINE, GetModuleHandleW(NULL), NULL);
 
     g_hTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
@@ -9200,7 +9529,11 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
     if (!g_switchingDocument) g_recoverySnapshotStale = 1;
     if (g_previewVisible) SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
     schedule_spell_check();
-    update_status_bar();
+    /* update_status_bar() does a full-document SCI_GETTEXT copy plus an O(n)
+       word-count scan - too costly to run on every single keystroke.
+       Debounced like the outline update just below it, so a burst of typing
+       pays for one scan at the pause instead of one per character. */
+    SetTimer(hwnd, IDT_STATUS_UPDATE, 200, NULL);
     SetTimer(hwnd, IDT_OUTLINE_UPDATE, 500, NULL);
     if (scn->linesAdded != 0) update_linenumber_margin_width(g_hEdit);
 }
@@ -9213,6 +9546,7 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_SPELL_CHECK);
     KillTimer(hwnd, IDT_AUTOSAVE);
     KillTimer(hwnd, IDT_OUTLINE_UPDATE);
+    KillTimer(hwnd, IDT_STATUS_UPDATE);
     KillTimer(hwnd, IDT_PRINT_PREVIEW);
     stop_debug_location_tracking();
     if (g_webview && g_webMessageRegistered) {
@@ -9278,10 +9612,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             break;
         }
+        /* draw_themed_listbox_item() themes every item's own rectangle, but the
+           blank strip below the last item (and the whole control before any
+           items exist) is still erased by the system using this message's
+           returned brush - without handling it, that strip stays white in
+           dark mode regardless of the owner-draw above it. */
+        case WM_CTLCOLORLISTBOX: {
+            if ((HWND)lParam == g_hOutline && g_mainBkBrush) {
+                HDC hdcList = (HDC)wParam;
+                COLORREF bk = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
+                COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+                SetBkColor(hdcList, bk);
+                SetTextColor(hdcList, fg);
+                return (LRESULT)g_mainBkBrush;
+            }
+            break;
+        }
         case WM_MEASUREITEM: {
             MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
             if (mis->CtlType == ODT_MENU && mis->itemData) {
                 measure_main_menu_item(mis);
+                return TRUE;
+            }
+            if (mis->CtlType == ODT_LISTBOX && mis->CtlID == ID_OUTLINE) {
+                measure_themed_listbox_item(g_hOutline, mis);
                 return TRUE;
             }
             break;
@@ -9298,6 +9652,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             if (dis->CtlType == ODT_TAB && dis->hwndItem == g_hTabs) {
                 draw_tab_item(dis);
+                return TRUE;
+            }
+            if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == g_hOutline) {
+                draw_themed_listbox_item(g_hOutline, dis);
                 return TRUE;
             }
             break;
@@ -9339,6 +9697,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == IDT_OUTLINE_UPDATE) {
                 KillTimer(hwnd, IDT_OUTLINE_UPDATE);
                 update_outline();
+                return 0;
+            }
+            if (wParam == IDT_STATUS_UPDATE) {
+                KillTimer(hwnd, IDT_STATUS_UPDATE);
+                update_status_bar();
                 return 0;
             }
             if (wParam == IDT_PRINT_PREVIEW) {

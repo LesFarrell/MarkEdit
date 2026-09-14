@@ -6,7 +6,8 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library.
 - A formatting toolbar above the editor for bold, italic, strikethrough, inline code, fenced code blocks, headings, blockquotes, bullet/numbered/task lists, links, images, tables, footnotes, horizontal rules, alerts, toggling the preview pane, and swapping the panel sides.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
-- GitHub Light and GitHub Dark themes (View → Theme) apply to the editor and preview, are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
+- GitHub Light and GitHub Dark themes (View → Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
+- The window appears immediately on launch; spell-check activation, the WebView2 preview engine, and reopening the previous session's files happen in the background right after, instead of delaying the window's appearance.
 
 Launching with no arguments opens the editor with the saved workspace layout; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
 
@@ -14,6 +15,8 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 
 - CommonMark plus GFM tables, task lists, strikethrough, bare-URL autolinks, and footnotes, along with code-fence language classes used by syntax-aware preview features.
 - GitHub-style note, tip, important, warning, and caution alerts.
+- Emoji shortcodes (`:tada:`, `:rocket:`, and similar) render as their Unicode emoji in the preview; unrecognised shortcodes are left as plain text.
+- Wiki-style `[[Page Name]]` and `[[Page Name|label]]` links open the named Markdown file from the same folder as the current document, offering to create it if it doesn't exist yet. File → Go Back (Alt+Left) returns to wherever the jump was made from.
 - Local syntax highlighting for named code fences in the preview, and for Markdown source in the editor, with matching light and dark themes.
 - Editor syntax highlighting follows the file extension: Markdown, JSON, XML, HTML, YAML, C/C++/JavaScript/TypeScript, Python, Bash, PowerShell, and Lua. Unrecognised extensions fall back to Markdown.
 - Python files can be run with Ctrl+F5 or debugged with F5 through the standard `pdb` debugger. The current execution line is highlighted in MarkEdit and all local variables are printed at every stop. Use F10 to step over, Shift+F11 to step into, and F6 to continue from either the editor or the Run menu; `vars` and `globals` remain available in the console. MarkEdit prefers an activated virtual environment, then a project-local `.venv`/`venv`, then Python on `PATH`.
@@ -44,11 +47,12 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - The table editor resizes an existing GFM table while preserving its cells, or creates a new table with a chosen number of rows and columns.
 - A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, Refresh, and Git actions. Renaming a file updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
 - Quick Open searches file names in the active workspace, while Find in Folder searches supported text files and opens results at the matching line. If no workspace is open, either command first asks for a folder. Generated/dependency folders are skipped.
-- Git Changes lists modified, staged, deleted, and untracked workspace files and opens a side-by-side **HEAD** versus **working tree** preview. This feature uses `git.exe` from `PATH`; the editor itself remains fully usable without Git.
+- Git Changes lists modified, staged, deleted, conflicted, and untracked files from the current file's repository and opens the selected working-tree file. With no saved file open, it asks which repository folder to inspect. This feature uses `git.exe` from `PATH`; the editor itself remains fully usable without Git.
 - A searchable command palette (Ctrl+Shift+P) exposes the editor's commands without navigating menus.
 - Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.
 - Synchronized scrolling between the Markdown editor and rendered preview.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
+- Insert File at Cursor (File menu) reads a chosen file's contents and inserts them at the caret, replacing any selection.
 - Editor font is configurable (Format → Font) and remembered between sessions.
 - Editor zoom (View → Zoom In/Out/Reset or Ctrl+=/Ctrl+-/Ctrl+0) scales the editor text independently of the configured font size and is remembered between sessions.
 - Open Terminal Here (File menu or toolbar) opens Windows Terminal, falling back to Command Prompt, in the current file's folder. Show in Explorer (File menu) opens Explorer with the current file pre-selected.
@@ -76,6 +80,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | Ctrl+Shift+G | Git changes for the active workspace |
 | Ctrl+W | Close current tab |
 | Ctrl+Shift+T | Reopen last closed tab |
+| Alt+Left | Go back to where the last wiki-link jump was made from |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
 | Ctrl+X / Ctrl+C / Ctrl+V | Cut / Copy / Paste |
