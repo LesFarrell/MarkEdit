@@ -36,9 +36,11 @@
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
 #define DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 19
 #endif
+#include "help_reference.h"
 #include "json_formatter.h"
 #include "markdown.h"
 #include "path_utils.h"
+#include "settings.h"
 #include "text_codec.h"
 
 #include <WebView2.h>
@@ -54,22 +56,23 @@ static HWND g_hTabs;
 static HWND g_hStatus;
 static HWND g_hOutline;
 static HWND g_hMinimap; /* zoomed-out Scintilla view sharing g_hEdit's document */
-static HWND g_hMainWnd;
+HWND g_hMainWnd;
 /* The main window's accelerator table, forwarded into from the preview's
    AcceleratorKeyPressed handler - see AccelKey_Invoke() - since disabling
    WebView2's own browser accelerators (AreBrowserAcceleratorKeysEnabled)
    stops it acting on them but does not, by itself, deliver them to the
    host's message loop. Set once in WinMain. */
 static HACCEL g_hAccel = NULL;
-/* Wider than LOGFONT's own LF_FACESIZE (32 WCHARs): that cap is a limit of
-   the classic ChooseFont/LOGFONT API's round-trip, not of anything this app
-   needs to store or hand to Scintilla (SCI_STYLESETFONT takes a plain
-   NUL-terminated string). do_choose_font() works around ChooseFontW's
-   truncation with a dialog hook so real font names longer than 31
-   characters (e.g. "Google Sans Code Medium Monospace") survive intact. */
-#define MAX_FONT_FACE_NAME 128
-static WCHAR g_fontFaceName[MAX_FONT_FACE_NAME] = L"Consolas";
-static int g_fontPointSize = 10;
+/* Font face/weight/point-size: see settings.h for MAX_FONT_FACE_NAME's
+   LF_FACESIZE-related commentary. Weight/italic are captured separately
+   from the face name in do_choose_font() - a family that packages each
+   weight as a same-named style (e.g. "Google Sans Code Monospaced" with a
+   "Medium" style) needs the weight applied separately or the choice is
+   silently lost to Regular on every reload. */
+WCHAR g_fontFaceName[MAX_FONT_FACE_NAME] = L"Consolas";
+int g_fontPointSize = 10;
+int g_fontWeight = FW_NORMAL;
+int g_fontItalic = 0;
 
 static ICoreWebView2 *g_webview = NULL;
 static ICoreWebView2Controller *g_webviewController = NULL;
@@ -88,17 +91,13 @@ static char *g_pendingHtmlBody = NULL; /* set if update requested before webview
 static WCHAR *g_exportPath = NULL;
 static WCHAR *g_pendingPdfPath = NULL;
 static int g_pendingPrintAction = 0; /* 1 = print dialog, 2 = PDF export */
-static int g_previewDarkMode = 0;
-/* User-configurable Run/Debug C/C++ compiler backend; see load_compiler_settings()
+int g_previewDarkMode = 0;
+/* CompilerBackendPreference is declared in settings.h; see load_compiler_settings()
    and find_native_compiler() further down. Auto keeps the existing GCC/Clang/
    Zig/MSVC priority search; the others pin Run/Debug to just one of them. */
-typedef enum {
-    COMPILER_BACKEND_AUTO = 0, COMPILER_BACKEND_GCC, COMPILER_BACKEND_CLANG,
-    COMPILER_BACKEND_ZIG, COMPILER_BACKEND_MSVC
-} CompilerBackendPreference;
-static CompilerBackendPreference g_compilerBackend = COMPILER_BACKEND_AUTO;
-static WCHAR *g_vcvarsallOverridePath = NULL; /* [Compiler] VcvarsallPath override; skips auto-detection */
-static WCHAR *g_customCssPath = NULL;
+CompilerBackendPreference g_compilerBackend = COMPILER_BACKEND_AUTO;
+WCHAR *g_vcvarsallOverridePath = NULL; /* [Compiler] VcvarsallPath override; skips auto-detection */
+WCHAR *g_customCssPath = NULL;
 static WCHAR *g_debugLocationPath = NULL;
 static WCHAR *g_debugWorkingDirectory = NULL;
 static WCHAR *g_lastDebugSource = NULL;
@@ -154,33 +153,33 @@ static int g_wikiBackCount = 0;
 #define g_currentFile (g_documents[g_activeDocument].path)
 #define g_dirty       (g_documents[g_activeDocument].dirty)
 #define g_hasBom      (g_documents[g_activeDocument].hasBom)
-static int g_previewVisible = 0;
-static int g_editorVisible = 1;
-static int g_previewOnLeft = 0;
-static int g_splitterRatio = 500; /* left pane width as thousandths of the available split width */
-static int g_splitterPos = -1; /* pixel x of splitter, initialized from g_splitterRatio */
-static int g_commandLinePreviewMode = 0;
-static RECT g_savedWindowRect;
-static int g_haveSavedWindowRect = 0;
-static int g_startMaximized = 0;
+int g_previewVisible = 0;
+int g_editorVisible = 1;
+int g_previewOnLeft = 0;
+int g_splitterRatio = 500; /* left pane width as thousandths of the available split width */
+int g_splitterPos = -1; /* pixel x of splitter, initialized from g_splitterRatio */
+int g_commandLinePreviewMode = 0;
+RECT g_savedWindowRect;
+int g_haveSavedWindowRect = 0;
+int g_startMaximized = 0;
 /* File named on the command line, if any; handed off from WinMain to the
    deferred startup init that runs after the window is first shown (see
    run_deferred_startup_init()), and freed there. */
 static WCHAR *g_pendingCliFile = NULL;
 static int g_comInitialized = 0;
-static int g_focusMode = 0;
+int g_focusMode = 0;
 /* Markdown is prose: wrapping long paragraphs is the useful default. */
-static int g_wordWrap = 0;
-static int g_showWhitespace = 0;
-static int g_indentGuides = 0;
-static int g_spellCheckEnabled = 1;
-static int g_outlineVisible = 0;
-static int g_minimapVisible = 1;
+int g_wordWrap = 0;
+int g_showWhitespace = 0;
+int g_indentGuides = 0;
+int g_spellCheckEnabled = 1;
+int g_outlineVisible = 0;
+int g_minimapVisible = 1;
 static int g_minimapDragging = 0;
 static int g_minimapViewTop = 0; /* client-relative y (minimap coords) of the visible-region box */
 static int g_minimapViewHeight = 0;
-static int g_editorZoom = 0; /* Scintilla SCI_SETZOOM units: +1/-1 per level, 0 is 100%. */
-static WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH] = L"";
+int g_editorZoom = 0; /* Scintilla SCI_SETZOOM units: +1/-1 per level, 0 is 100%. */
+WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH] = L"";
 static int g_outlineLines[1024];
 static int g_outlineCount = 0;
 static int g_tabDragIndex = -1;
@@ -194,9 +193,9 @@ static int g_recentFileCount = 0;
 
 static HWND g_hFindDlg = NULL;
 static FINDREPLACEW g_fr;
-static WCHAR g_findWhat[256] = L"";
-static WCHAR g_replaceWith[256] = L"";
-static DWORD g_findFlags = FR_DOWN;
+WCHAR g_findWhat[256] = L"";
+WCHAR g_replaceWith[256] = L"";
+DWORD g_findFlags = FR_DOWN;
 static UINT g_msgFindReplace;
 
 /* ---- simple growable text buffer, used to pull text out of the Scintilla control ---- */
@@ -707,7 +706,7 @@ static void update_linenumber_margin_width(HWND hEdit) {
 
 typedef enum {
     LANG_MARKDOWN = 0, LANG_JSON, LANG_XML, LANG_HTML, LANG_YAML,
-    LANG_CPP, LANG_PYTHON, LANG_BASH, LANG_POWERSHELL, LANG_LUA
+    LANG_CPP, LANG_PYTHON, LANG_BASH, LANG_POWERSHELL, LANG_LUA, LANG_TEXT
 } Language;
 
 typedef struct LanguageInfo {
@@ -748,6 +747,11 @@ static const LanguageInfo LANGUAGES[] = {
     { LANG_LUA, "lua", L".lua",
       "and break do else elseif end false for function goto if in local nil not or repeat return"
       " then true until while", "lua", 1 },
+    /* "text" deliberately names no compiled-in lexer (see lexilla-sources.rsp) -
+       CreateLexer() returns NULL for it, apply_document_language() then skips
+       SCI_SETILEXER, and the document is left with no lexer at all: genuinely
+       unstyled plain text rather than a lexer that happens to add no colour. */
+    { LANG_TEXT, "text", L".txt", NULL, "text", 0 },
 };
 
 #define LANGUAGE_COUNT ((int)(sizeof(LANGUAGES) / sizeof(LANGUAGES[0])))
@@ -765,10 +769,15 @@ static int extension_in_list(const WCHAR *extension, const WCHAR *list) {
     return 0;
 }
 
-/* Picks the language for a document path. Markdown is the fallback, so an
-   unknown or missing extension keeps the original behaviour. */
+/* Picks the language for a document path. A document with no path yet (a
+   new, untitled tab) defaults to plain text rather than assuming Markdown -
+   see show_help_reference() for the one deliberate exception, which forces
+   Markdown for its own untitled tab since its content always is Markdown.
+   An unrecognized extension on an actual saved path still falls back to
+   Markdown, unchanged: that's a real file whose language merely isn't in
+   the table, not a blank document that hasn't been given one yet. */
 static const LanguageInfo *language_for_path(const WCHAR *path) {
-    if (!path) return &LANGUAGES[LANG_MARKDOWN];
+    if (!path) return &LANGUAGES[LANG_TEXT];
     const WCHAR *extension = PathFindExtensionW(path);
     if (!extension || !*extension) return &LANGUAGES[LANG_MARKDOWN];
 
@@ -1220,6 +1229,18 @@ static void schedule_spell_check(void) {
     SetTimer(g_hMainWnd, IDT_SPELL_CHECK, 350, NULL);
 }
 
+/* ISpellChecker_Check() below is a single synchronous COM call over the
+   *entire* document (there's no incremental/ranged spellcheck API), run
+   right on the UI thread with no chunking or background thread. That's
+   unnoticeable at normal typing volume, since each keystroke rechecks a
+   document that's already close to this size - but pasting a large block
+   makes the document balloon in one step, and the native spellchecker is
+   slow per byte, so the very next check after a big paste can block the UI
+   thread (and the whole app's message pump) for a long, visible stretch.
+   Skipping the check above this size trades spelling squiggles in huge
+   documents for not freezing on every large paste. */
+#define SPELLCHECK_MAX_LENGTH (256 * 1024)
+
 static void perform_spell_check(void) {
     if (!g_hEdit) return;
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
@@ -1228,7 +1249,8 @@ static void perform_spell_check(void) {
     SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
     SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
     if (!g_spellCheckEnabled || !g_spellChecker ||
-        g_activeLanguage != LANG_MARKDOWN || textLength <= 0) return;
+        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT) ||
+        textLength <= 0 || textLength > SPELLCHECK_MAX_LENGTH) return;
 
     /* Ensure the Markdown styles used to exclude code and links are current. */
     SendMessageA(g_hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
@@ -1265,9 +1287,13 @@ static void perform_spell_check(void) {
                     NULL, 0, NULL, NULL);
                 int byteSpan = WideCharToMultiByte(CP_UTF8, 0, wide + wideStart,
                     (int)wideSpan, NULL, 0, NULL, NULL);
+                /* Plain text has no lexer at all (see the LANG_TEXT entry in
+                   LANGUAGES) to distinguish code/links from prose the way
+                   Markdown's does, so every character in it is spellable. */
+                int spellable = g_activeLanguage == LANG_TEXT || markdown_style_is_prose(
+                    (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)byteStart, 0));
                 if (byteSpan > 0 && byteStart >= 0 && byteStart + byteSpan <= textLength &&
-                    markdown_style_is_prose((int)SendMessageA(
-                        g_hEdit, SCI_GETSTYLEAT, (WPARAM)byteStart, 0))) {
+                    spellable) {
                     SendMessageA(g_hEdit, SCI_SETINDICATORVALUE, 1, 0);
                     SendMessageA(g_hEdit, SCI_INDICATORFILLRANGE,
                                  (WPARAM)byteStart, (LPARAM)byteSpan);
@@ -1640,6 +1666,8 @@ static void apply_editor_font(const WCHAR *faceName, int pointSize) {
     if (!faceUtf8) return;
     SendMessageA(g_hEdit, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
     SendMessageA(g_hEdit, SCI_STYLESETSIZE, STYLE_DEFAULT, pointSize);
+    SendMessageA(g_hEdit, SCI_STYLESETWEIGHT, STYLE_DEFAULT, g_fontWeight);
+    SendMessageA(g_hEdit, SCI_STYLESETITALIC, STYLE_DEFAULT, g_fontItalic);
     SendMessageA(g_hEdit, SCI_STYLECLEARALL, 0, 0); /* copies STYLE_DEFAULT (fore/back included) to all other styles, including STYLE_LINENUMBER */
 
     /* STYLECLEARALL just overwrote STYLE_LINENUMBER's fore/back with
@@ -1669,239 +1697,6 @@ static void apply_editor_font(const WCHAR *faceName, int pointSize) {
         update_minimap_viewport();
     }
     free(faceUtf8);
-}
-
-/* ---- persisted settings, stored in %APPDATA%\markedit\markedit.ini ---- */
-static WCHAR *get_settings_path(void) {
-    DWORD needed = GetEnvironmentVariableW(L"APPDATA", NULL, 0);
-    if (!needed) return NULL;
-    WCHAR *appData = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));
-    if (!appData || !GetEnvironmentVariableW(L"APPDATA", appData, needed)) {
-        free(appData);
-        return NULL;
-    }
-    WCHAR *directory = path_join(appData, L"markedit");
-    free(appData);
-    if (!directory) return NULL;
-    CreateDirectoryW(directory, NULL);
-    WCHAR *settings = path_join(directory, L"markedit.ini");
-    free(directory);
-    return settings;
-}
-
-static void load_font_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    GetPrivateProfileStringW(L"Font", L"FaceName", L"Consolas",
-                             g_fontFaceName, MAX_FONT_FACE_NAME, path);
-    g_fontPointSize = GetPrivateProfileIntW(L"Font", L"PointSize", g_fontPointSize, path);
-    if (g_fontPointSize < 1) g_fontPointSize = 1;
-    free(path);
-}
-
-static void load_theme_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    WCHAR value[32];
-    GetPrivateProfileStringW(L"Preview", L"Theme", L"", value, 32, path);
-    if (_wcsicmp(value, L"github-dark") == 0) {
-        g_previewDarkMode = 1;
-    } else if (_wcsicmp(value, L"github-light") == 0) {
-        g_previewDarkMode = 0;
-    } else {
-        /* Migrate settings written by releases that exposed a DarkMode toggle. */
-        GetPrivateProfileStringW(L"Preview", L"DarkMode", L"0", value, 32, path);
-        g_previewDarkMode = (value[0] == L'1' || value[0] == L't' || value[0] == L'T' ||
-                             value[0] == L'y' || value[0] == L'Y');
-    }
-    DWORD cap = 512, n = 0;
-    WCHAR *cssPath = NULL;
-    do {
-        free(cssPath);
-        cssPath = (WCHAR *)calloc(cap, sizeof(WCHAR));
-        if (!cssPath) break;
-        n = GetPrivateProfileStringW(L"Preview", L"CustomCSS", L"", cssPath, cap, path);
-        if (n < cap - 1) break;
-        cap *= 2;
-    } while (cap <= 32768);
-    if (cssPath && cssPath[0]) g_customCssPath = cssPath;
-    else free(cssPath);
-    free(path);
-}
-
-static void save_theme_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    WritePrivateProfileStringW(L"Preview", L"Theme",
-                               g_previewDarkMode ? L"github-dark" : L"github-light", path);
-    WritePrivateProfileStringW(L"Preview", L"DarkMode", NULL, path);
-    WritePrivateProfileStringW(L"Preview", L"CustomCSS",
-                               g_customCssPath ? g_customCssPath : L"", path);
-    free(path);
-}
-
-static int read_profile_int(const WCHAR *section, const WCHAR *key, int defaultValue,
-                            const WCHAR *path) {
-    WCHAR fallback[32], value[32], *end = NULL;
-    swprintf(fallback, 32, L"%d", defaultValue);
-    GetPrivateProfileStringW(section, key, fallback, value, 32, path);
-    long parsed = wcstol(value, &end, 10);
-    return end && end != value && *end == 0 ? (int)parsed : defaultValue;
-}
-
-static void write_profile_int(const WCHAR *section, const WCHAR *key, int value,
-                              const WCHAR *path) {
-    WCHAR buffer[32];
-    swprintf(buffer, 32, L"%d", value);
-    WritePrivateProfileStringW(section, key, buffer, path);
-}
-
-static void load_layout_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    g_previewOnLeft = read_profile_int(L"View", L"PreviewOnLeft", 0, path) != 0;
-    g_previewVisible = read_profile_int(L"View", L"PreviewVisible", g_previewVisible, path) != 0;
-    g_editorVisible = read_profile_int(L"View", L"EditorVisible", g_editorVisible, path) != 0;
-    g_focusMode = read_profile_int(L"View", L"FocusMode", 0, path) != 0;
-    g_wordWrap = read_profile_int(L"View", L"WordWrap", g_wordWrap, path) != 0;
-    g_spellCheckEnabled = read_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path) != 0;
-    g_showWhitespace = read_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path) != 0;
-    g_indentGuides = read_profile_int(L"View", L"IndentGuides", g_indentGuides, path) != 0;
-    g_outlineVisible = read_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path) != 0;
-    g_minimapVisible = read_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path) != 0;
-    g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
-    if (g_editorZoom < -10) g_editorZoom = -10;
-    if (g_editorZoom > 20) g_editorZoom = 20;
-    GetPrivateProfileStringW(L"SpellCheck", L"Language", L"en-GB", g_spellLanguage,
-                             LOCALE_NAME_MAX_LENGTH, path);
-    if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
-
-    g_splitterRatio = read_profile_int(L"View", L"SplitterRatio", 500, path);
-    if (g_splitterRatio < 50) g_splitterRatio = 50;
-    if (g_splitterRatio > 950) g_splitterRatio = 950;
-
-    int left = read_profile_int(L"Window", L"Left", 0, path);
-    int top = read_profile_int(L"Window", L"Top", 0, path);
-    int width = read_profile_int(L"Window", L"Width", 0, path);
-    int height = read_profile_int(L"Window", L"Height", 0, path);
-    RECT candidate = { left, top, left + width, top + height };
-    if (width >= 400 && height >= 300 &&
-        MonitorFromRect(&candidate, MONITOR_DEFAULTTONULL) != NULL) {
-        g_savedWindowRect = candidate;
-        g_haveSavedWindowRect = 1;
-    }
-    g_startMaximized = read_profile_int(L"Window", L"Maximized", 0, path) != 0;
-    free(path);
-}
-
-static void save_layout_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    write_profile_int(L"View", L"PreviewOnLeft", g_previewOnLeft, path);
-    write_profile_int(L"View", L"FocusMode", g_focusMode, path);
-    write_profile_int(L"View", L"WordWrap", g_wordWrap, path);
-    write_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path);
-    write_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path);
-    write_profile_int(L"View", L"IndentGuides", g_indentGuides, path);
-    write_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path);
-    write_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path);
-    write_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
-    WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
-    if (!g_commandLinePreviewMode) {
-        write_profile_int(L"View", L"PreviewVisible", g_previewVisible, path);
-        write_profile_int(L"View", L"EditorVisible", g_editorVisible, path);
-    }
-
-    if (g_hMainWnd && g_splitterPos >= 0) {
-        RECT client;
-        GetClientRect(g_hMainWnd, &client);
-        int available = client.right - SPLITTER_WIDTH;
-        if (available > 0) {
-            g_splitterRatio = MulDiv(g_splitterPos, 1000, available);
-            if (g_splitterRatio < 50) g_splitterRatio = 50;
-            if (g_splitterRatio > 950) g_splitterRatio = 950;
-        }
-    }
-    write_profile_int(L"View", L"SplitterRatio", g_splitterRatio, path);
-
-    WINDOWPLACEMENT placement = {0};
-    placement.length = sizeof(placement);
-    if (g_hMainWnd && GetWindowPlacement(g_hMainWnd, &placement)) {
-        RECT normal = placement.rcNormalPosition;
-        int maximized = placement.showCmd == SW_SHOWMAXIMIZED ||
-            (placement.showCmd == SW_SHOWMINIMIZED &&
-             (placement.flags & WPF_RESTORETOMAXIMIZED) != 0);
-        write_profile_int(L"Window", L"Left", normal.left, path);
-        write_profile_int(L"Window", L"Top", normal.top, path);
-        write_profile_int(L"Window", L"Width", normal.right - normal.left, path);
-        write_profile_int(L"Window", L"Height", normal.bottom - normal.top, path);
-        write_profile_int(L"Window", L"Maximized", maximized, path);
-    }
-    free(path);
-}
-
-static void save_font_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    WritePrivateProfileStringW(L"Font", L"FaceName", g_fontFaceName, path);
-    WCHAR sizeBuf[16];
-    swprintf(sizeBuf, 16, L"%d", g_fontPointSize);
-    WritePrivateProfileStringW(L"Font", L"PointSize", sizeBuf, path);
-    free(path);
-}
-
-static void load_find_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    GetPrivateProfileStringW(L"Find", L"FindWhat", L"", g_findWhat,
-                             sizeof(g_findWhat) / sizeof(g_findWhat[0]), path);
-    GetPrivateProfileStringW(L"Find", L"ReplaceWith", L"", g_replaceWith,
-                             sizeof(g_replaceWith) / sizeof(g_replaceWith[0]), path);
-    g_findFlags = read_profile_int(L"Find", L"MatchCase", 0, path) ? FR_MATCHCASE : 0;
-    if (read_profile_int(L"Find", L"SearchDown", 1, path)) g_findFlags |= FR_DOWN;
-    free(path);
-}
-
-static void save_find_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    WritePrivateProfileStringW(L"Find", L"FindWhat", g_findWhat, path);
-    WritePrivateProfileStringW(L"Find", L"ReplaceWith", g_replaceWith, path);
-    write_profile_int(L"Find", L"MatchCase", (g_findFlags & FR_MATCHCASE) != 0, path);
-    write_profile_int(L"Find", L"SearchDown", (g_findFlags & FR_DOWN) != 0, path);
-    free(path);
-}
-
-/* [Compiler] is hand-edited in markedit.ini rather than exposed through a
-   menu: Backend pins Run/Debug C/C++ to one compiler instead of the default
-   Auto priority search (GCC, Clang, Zig, then MSVC as a Run-only fallback),
-   and VcvarsallPath points at a specific vcvarsall.bat when MSVC isn't
-   installed in one of the standard Program Files locations find_vcvarsall()
-   checks. */
-static void load_compiler_settings(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    WCHAR value[16];
-    GetPrivateProfileStringW(L"Compiler", L"Backend", L"Auto", value, 16, path);
-    if (_wcsicmp(value, L"GCC") == 0) g_compilerBackend = COMPILER_BACKEND_GCC;
-    else if (_wcsicmp(value, L"Clang") == 0) g_compilerBackend = COMPILER_BACKEND_CLANG;
-    else if (_wcsicmp(value, L"Zig") == 0) g_compilerBackend = COMPILER_BACKEND_ZIG;
-    else if (_wcsicmp(value, L"MSVC") == 0) g_compilerBackend = COMPILER_BACKEND_MSVC;
-    else g_compilerBackend = COMPILER_BACKEND_AUTO;
-
-    DWORD cap = 512, n = 0;
-    WCHAR *vcvarsall = NULL;
-    do {
-        free(vcvarsall);
-        vcvarsall = (WCHAR *)calloc(cap, sizeof(WCHAR));
-        if (!vcvarsall) break;
-        n = GetPrivateProfileStringW(L"Compiler", L"VcvarsallPath", L"", vcvarsall, cap, path);
-        if (n < cap - 1) break;
-        cap *= 2;
-    } while (cap <= 32768);
-    if (vcvarsall && vcvarsall[0]) g_vcvarsallOverridePath = vcvarsall;
-    else free(vcvarsall);
-    free(path);
 }
 
 /* ---- autosave recovery -------------------------------------------------
@@ -3154,6 +2949,14 @@ static void update_preview(void) {
        preview is hidden. Showing the pane calls update_preview(), and export
        sets g_exportPath first to force a current off-screen render. */
     if (!g_previewVisible && !g_exportPath) return;
+    /* The preview renders Markdown; running markdown_to_html() over a JSON/
+       C/Python/etc. document would misinterpret ordinary source lines (a
+       leading '#' comment, for instance) as Markdown syntax. Show a plain
+       explanation instead of a nonsensical render. */
+    if (g_activeLanguage != LANG_MARKDOWN) {
+        push_html_to_webview("<p>Preview is only available for Markdown documents.</p>");
+        return;
+    }
     int len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
@@ -3196,7 +2999,7 @@ static void format_document_label(const Document *doc, WCHAR *label, size_t capa
     } else if (shortName && shortName[0]) {
         swprintf(label, capacity, L"%ls%ls", shortName, doc->dirty ? L" *" : L"");
     } else if (doc->untitledNumber == 0) {
-        swprintf(label, capacity, L"Untitled.md%ls", doc->dirty ? L" *" : L"");
+        swprintf(label, capacity, L"Untitled.txt%ls", doc->dirty ? L" *" : L"");
     } else {
         swprintf(label, capacity, L"Untitled %u%ls",
                  doc->untitledNumber, doc->dirty ? L" *" : L"");
@@ -3310,7 +3113,7 @@ static void update_title(void) {
     const Document *active = &g_documents[g_activeDocument];
     const WCHAR *name = g_currentFile ? g_currentFile
         : active->isReference ? L"Markdown Reference"
-        : (active->untitledNumber == 0 ? L"Untitled.md" : L"Untitled");
+        : (active->untitledNumber == 0 ? L"Untitled.txt" : L"Untitled");
     size_t cap = wcslen(name) + 32;
     WCHAR *title = (WCHAR *)malloc(cap * sizeof(WCHAR));
     if (!title) return;
@@ -3897,7 +3700,16 @@ static int do_saveas(void) {
     ofn.lpstrFile = path;
     ofn.nMaxFile = cap;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-    ofn.lpstrDefExt = L"md";
+    if (!g_currentFile && g_activeLanguage == LANG_TEXT) {
+        /* An untitled document defaults to plain text now (see
+           language_for_path()); default Save As to match instead of always
+           offering "Untitled.md", which would contradict the plain-text tab
+           label and preview the user has been shown all along. */
+        ofn.nFilterIndex = 4; /* "Text Files (*.txt)", the 4th filter entry above */
+        ofn.lpstrDefExt = L"txt";
+    } else {
+        ofn.lpstrDefExt = L"md";
+    }
     int result = GetSaveFileNameW(&ofn) ? save_to_path(path) : 0;
     free(path);
     return result;
@@ -4752,7 +4564,16 @@ static int g_choseFontFaceFullValid = 0;
 
 static UINT_PTR CALLBACK choose_font_hook(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
     (void)lParam;
-    if (msg == WM_COMMAND && LOWORD(wParam) == IDOK) {
+    if (msg == WM_INITDIALOG) {
+        /* CF_INITTOLOGFONTSTRUCT seeded the dialog from lf.lfFaceName, a
+           WCHAR[32] LOGFONTW field truncated at do_choose_font()'s call
+           site - so a saved name at or past that length shows up here
+           mangled, looking like the previous choice was forgotten even
+           though g_fontFaceName itself is intact. The default dialog
+           procedure has already populated the combo by the time the hook
+           sees WM_INITDIALOG, so overwrite it with the untruncated name. */
+        SetDlgItemTextW(hdlg, cmb1, g_fontFaceName);
+    } else if (msg == WM_COMMAND && LOWORD(wParam) == IDOK) {
         int len = GetDlgItemTextW(hdlg, cmb1, g_choseFontFaceFull,
                                    MAX_FONT_FACE_NAME);
         g_choseFontFaceFullValid = len > 0;
@@ -4764,6 +4585,8 @@ static void do_choose_font(void) {
     LOGFONTW lf;
     ZeroMemory(&lf, sizeof(lf));
     wcsncpy(lf.lfFaceName, g_fontFaceName, LF_FACESIZE - 1);
+    lf.lfWeight = g_fontWeight;
+    lf.lfItalic = (BYTE)g_fontItalic;
     HDC hdc = GetDC(g_hEdit);
     lf.lfHeight = -MulDiv(g_fontPointSize, GetDeviceCaps(hdc, LOGPIXELSY), 72);
     ReleaseDC(g_hEdit, hdc);
@@ -4786,6 +4609,8 @@ static void do_choose_font(void) {
         g_fontFaceName[MAX_FONT_FACE_NAME - 1] = 0;
         g_fontPointSize = cf.iPointSize / 10;
         if (g_fontPointSize < 1) g_fontPointSize = 1;
+        g_fontWeight = lf.lfWeight ? lf.lfWeight : FW_NORMAL;
+        g_fontItalic = lf.lfItalic ? 1 : 0;
         apply_editor_font(g_fontFaceName, g_fontPointSize);
         save_font_settings();
     }
@@ -4831,211 +4656,8 @@ static void clear_custom_css(void) {
     refresh_menu(g_hMainWnd);
 }
 
-/* ---- Help > Markdown Reference: a plain-text syntax cheat sheet. ---- */
-
-/* The Markdown reference is itself Markdown: opening it in a tab renders it
-   through the normal preview pipeline, so it demonstrates every construct it
-   documents. Kept read-only-ish by being untitled - saving prompts for a path. */
-static const char *HELP_REFERENCE_MARKDOWN =
-"# MarkEdit Markdown Reference\r\n"
-"\r\n"
-"CommonMark with GitHub-flavoured extensions and MarkEdit preview features.\r\n"
-"Edit this document freely to experiment - it is unsaved, so nothing is\r\n"
-"overwritten.\r\n"
-"\r\n"
-"## Headings\r\n"
-"\r\n"
-"```\r\n"
-"# Heading 1\r\n"
-"## Heading 2\r\n"
-"### Heading 3\r\n"
-"###### Heading 6\r\n"
-"```\r\n"
-"\r\n"
-"H1 and H2 can also be made by underlining the preceding text:\r\n"
-"\r\n"
-"```\r\n"
-"Heading 1\r\n"
-"=========\r\n"
-"Heading 2\r\n"
-"---------\r\n"
-"```\r\n"
-"\r\n"
-"Headings receive link anchors; two or more also show an Outline control.\r\n"
-"\r\n"
-"## Paragraphs and line breaks\r\n"
-"\r\n"
-"Separate paragraphs with a blank line.\r\n"
-"End a line with two spaces or a backslash for a hard line break.\r\n"
-"\r\n"
-"## Emphasis and inline code\r\n"
-"\r\n"
-"| Markdown | Result |\r\n"
-"| :--- | :--- |\r\n"
-"| `**bold**` or `__bold__` | **bold** |\r\n"
-"| `*italic*` or `_italic_` | *italic* |\r\n"
-"| `***bold italic***` | ***bold italic*** |\r\n"
-"| `~~strikethrough~~` | ~~strikethrough~~ |\r\n"
-"| `` `inline code` `` | `inline code` |\r\n"
-"\r\n"
-"Escape Markdown punctuation with a backslash: \\*literal asterisks\\*\r\n"
-"\r\n"
-"## Links, images, autolinks\r\n"
-"\r\n"
-"```\r\n"
-"[link text](https://example.com)\r\n"
-"[link with title](https://example.com \"Optional title\")\r\n"
-"![alt text](images/photo.png)\r\n"
-"[relative link](docs/guide.md)\r\n"
-"<https://example.com>\r\n"
-"https://example.com (bare URLs are linked automatically)\r\n"
-"```\r\n"
-"\r\n"
-"Relative links and images resolve from the Markdown file's folder.\r\n"
-"Pasting an image, or dropping one onto the editor, copies it into an\r\n"
-"`images` folder beside the document and inserts a relative link.\r\n"
-"\r\n"
-"Reference-style links:\r\n"
-"\r\n"
-"```\r\n"
-"[link text][id]\r\n"
-"\r\n"
-"[id]: https://example.com\r\n"
-"```\r\n"
-"\r\n"
-"## Wiki-links\r\n"
-"\r\n"
-"```\r\n"
-"[[Other Note]]\r\n"
-"[[Other Note|custom label]]\r\n"
-"```\r\n"
-"\r\n"
-"Click a wiki-link to open that note from the current document's folder (a\r\n"
-"`.md` extension is assumed unless one is given), or offer to create it if\r\n"
-"it doesn't exist yet. File > Go Back (Alt+Left) returns to wherever the\r\n"
-"jump was made from.\r\n"
-"\r\n"
-"## Emoji shortcodes\r\n"
-"\r\n"
-"| Markdown | Result |\r\n"
-"| :--- | :--- |\r\n"
-"| `:tada:` | :tada: |\r\n"
-"| `:rocket:` | :rocket: |\r\n"
-"| `:+1:` | :+1: |\r\n"
-"| `:100:` | :100: |\r\n"
-"| `:fire:` | :fire: |\r\n"
-"\r\n"
-"An unrecognised shortcode such as `:not_a_real_shortcode:` is left as\r\n"
-"plain text.\r\n"
-"\r\n"
-"## Lists\r\n"
-"\r\n"
-"- bullet item\r\n"
-"- another item\r\n"
-"  - nested item\r\n"
-"\r\n"
-"1. first\r\n"
-"2. second\r\n"
-"   1. nested\r\n"
-"\r\n"
-"Ordered lists may start at any number. Indent items to nest them.\r\n"
-"Pressing Enter continues a list and Tab nests the current item.\r\n"
-"\r\n"
-"Task lists:\r\n"
-"\r\n"
-"- [ ] an unchecked task\r\n"
-"- [x] a checked task\r\n"
-"\r\n"
-"## Blockquotes and alerts\r\n"
-"\r\n"
-"> a quoted line\r\n"
-"\r\n"
-"> [!NOTE]\r\n"
-"> Useful information for the reader.\r\n"
-"\r\n"
-"> [!TIP]\r\n"
-"> An optional suggestion.\r\n"
-"\r\n"
-"> [!IMPORTANT]\r\n"
-"> Something the reader must not miss.\r\n"
-"\r\n"
-"> [!WARNING]\r\n"
-"> A consequence the reader should be careful of.\r\n"
-"\r\n"
-"> [!CAUTION]\r\n"
-"> A risk that needs care.\r\n"
-"\r\n"
-"## Code blocks\r\n"
-"\r\n"
-"Indent with 4 spaces, or fence with triple backticks. Add a language for\r\n"
-"syntax highlighting, such as `c`, `python`, `javascript`, `powershell`,\r\n"
-"or `yaml`.\r\n"
-"\r\n"
-"```c\r\n"
-"int main(void) {\r\n"
-"    return 0;\r\n"
-"}\r\n"
-"```\r\n"
-"\r\n"
-"## Mermaid diagrams\r\n"
-"\r\n"
-"Fence diagram source with the `mermaid` language. Use the preview toolbar\r\n"
-"or Ctrl+mouse wheel to zoom; drag to pan.\r\n"
-"\r\n"
-"```mermaid\r\n"
-"graph TD\r\n"
-"  A[Write Markdown] --> B[Live preview]\r\n"
-"  B --> C[Export HTML]\r\n"
-"```\r\n"
-"\r\n"
-"## Maths\r\n"
-"\r\n"
-"Inline: Euler's identity is $e^{i\\pi} + 1 = 0$.\r\n"
-"\r\n"
-"Display: $$\\int_0^1 x^2 dx = \\frac{1}{3}$$\r\n"
-"\r\n"
-"Fenced display maths:\r\n"
-"\r\n"
-"```math\r\n"
-"\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\r\n"
-"```\r\n"
-"\r\n"
-"## Tables\r\n"
-"\r\n"
-"Colons in the separator row set column alignment.\r\n"
-"\r\n"
-"| Left | Centre | Right |\r\n"
-"| :--- | :----: | ----: |\r\n"
-"| A | B | C |\r\n"
-"| longer cell | centred | 42 |\r\n"
-"\r\n"
-"## Footnotes\r\n"
-"\r\n"
-"A sentence with a note.[^1]\r\n"
-"\r\n"
-"[^1]: The footnote text.\r\n"
-"\r\n"
-"## YAML front matter\r\n"
-"\r\n"
-"A metadata block must start on the document's first line. It is omitted\r\n"
-"from the preview and may close with either `---` or `...`\r\n"
-"\r\n"
-"```\r\n"
-"---\r\n"
-"title: Example\r\n"
-"tags: [notes, demo]\r\n"
-"---\r\n"
-"```\r\n"
-"\r\n"
-"## Horizontal rules\r\n"
-"\r\n"
-"Three or more `-`, `*`, or `_` on their own line:\r\n"
-"\r\n"
-"---\r\n"
-"\r\n"
-"## Preview safety\r\n"
-"\r\n"
-"Raw HTML is omitted. Unsafe `javascript:` and `data:` URLs are not linked.\r\n";
+/* ---- Help > Markdown Reference: a plain-text syntax cheat sheet. ----
+   The reference text itself lives in help_reference.c/.h. */
 
 /* Opens the reference as an ordinary unsaved document, so the live preview
    renders it and every construct in it can be edited and experimented with. */
@@ -5048,8 +4670,14 @@ static void show_help_reference(void) {
     }
     if (!create_document_tab()) return;
     g_documents[g_activeDocument].isReference = 1;
+    /* create_document_tab() just defaulted this untitled tab's language to
+       plain text (language_for_path(NULL)). This tab's content is always
+       Markdown regardless, so force it back - passing any name that merely
+       *ends* in ".md" is enough, since language_for_path only inspects the
+       extension and never treats this string as a real path. */
+    apply_document_language(g_hEdit, L"markdown-reference.md");
     g_switchingDocument = 1;
-    set_edit_text(g_hEdit, HELP_REFERENCE_MARKDOWN);
+    set_edit_text(g_hEdit, help_reference_markdown());
     SendMessageA(g_hEdit, SCI_SETSEL, 0, 0);
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
@@ -7881,7 +7509,12 @@ static char *editor_line_text(int lineNumber, int *outLength) {
     return line;
 }
 
-static int table_row_cells(const char *line, char cells[][256], int maximum) {
+/* Cells are heap-allocated to the trimmed cell's exact length rather than
+   copied into a fixed-size slot, so a cell wider than some arbitrary cap
+   isn't silently truncated - and, since show_table_editor() writes these
+   cells straight back into the document, truncation here would otherwise
+   permanently lose part of the user's table content on every re-edit. */
+static int table_row_cells(const char *line, char *cells[], int maximum) {
     int count = 0;
     const char *cursor = line;
     while (*cursor == ' ' || *cursor == '\t') cursor++;
@@ -7893,15 +7526,24 @@ static int table_row_cells(const char *line, char cells[][256], int maximum) {
         while (start < end && (*start == ' ' || *start == '\t')) start++;
         while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
         size_t length = (size_t)(end - start);
-        if (length > 255) length = 255;
-        memcpy(cells[count], start, length);
-        cells[count][length] = 0;
+        char *cell = (char *)malloc(length + 1);
+        if (cell) {
+            memcpy(cell, start, length);
+            cell[length] = 0;
+        }
+        cells[count] = cell;
         count++;
         if (!*end) break;
         cursor = end + 1;
         if (!*cursor) break;
     }
     return count;
+}
+
+static void free_table_cells(char *cells[51][20]) {
+    for (int row = 0; row < 51; row++)
+        for (int column = 0; column < 20; column++)
+            free(cells[row][column]);
 }
 
 static int append_dynamic(char **buffer, size_t *length, size_t *capacity, const char *text) {
@@ -7944,7 +7586,7 @@ static void show_table_editor(void) {
     }
     free(line);
 
-    char cells[51][20][256] = {{{0}}};
+    char *cells[51][20] = {0};
     int existingRows = 0, columns = 3;
     if (existing) {
         char *header = editor_line_text(first, NULL);
@@ -7963,15 +7605,22 @@ static void show_table_editor(void) {
     WCHAR value[32], rowsText[32], columnsText[32];
     swprintf(value, sizeof(value) / sizeof(value[0]), L"%d", existingRows > 0 ? existingRows - 1 : 3);
     if (!show_text_input(L"Table Editor", L"Data rows (excluding the header):", value,
-                         rowsText, sizeof(rowsText) / sizeof(rowsText[0]))) return;
+                         rowsText, sizeof(rowsText) / sizeof(rowsText[0]))) {
+        free_table_cells(cells);
+        return;
+    }
     swprintf(value, sizeof(value) / sizeof(value[0]), L"%d", columns);
     if (!show_text_input(L"Table Editor", L"Columns:", value,
-                         columnsText, sizeof(columnsText) / sizeof(columnsText[0]))) return;
+                         columnsText, sizeof(columnsText) / sizeof(columnsText[0]))) {
+        free_table_cells(cells);
+        return;
+    }
     int dataRows = (int)wcstol(rowsText, NULL, 10);
     int requestedColumns = (int)wcstol(columnsText, NULL, 10);
     if (dataRows < 1 || dataRows > 50 || requestedColumns < 1 || requestedColumns > 20) {
         MessageBoxW(g_hMainWnd, L"Use 1–50 data rows and 1–20 columns.", L"Table Editor",
                     MB_OK | MB_ICONWARNING);
+        free_table_cells(cells);
         return;
     }
     columns = requestedColumns;
@@ -7982,16 +7631,17 @@ static void show_table_editor(void) {
         for (int column = 0; column < columns; column++) {
             char fallback[64]; const char *cell = "";
             if (row == 0) {
-                if (existing && column < 20 && cells[0][column][0]) cell = cells[0][column];
+                if (existing && column < 20 && cells[0][column] && cells[0][column][0]) cell = cells[0][column];
                 else { snprintf(fallback, sizeof(fallback), "Header %d", column + 1); cell = fallback; }
             } else if (row == 1) cell = "---";
-            else if (existing && row - 1 < existingRows && column < 20) cell = cells[row - 1][column];
+            else if (existing && row - 1 < existingRows && column < 20 && cells[row - 1][column]) cell = cells[row - 1][column];
             if (!append_dynamic(&table, &length, &capacity, " ") ||
                 !append_dynamic(&table, &length, &capacity, cell) ||
                 !append_dynamic(&table, &length, &capacity, " |")) break;
         }
         append_dynamic(&table, &length, &capacity, eol);
     }
+    free_table_cells(cells);
     if (!table) return;
     int replaceStart, replaceEnd;
     if (existing) {
@@ -9144,7 +8794,8 @@ static int smart_pair_backspace(void) {
 }
 
 static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
-    if (!g_spellCheckEnabled || !g_spellChecker || g_activeLanguage != LANG_MARKDOWN)
+    if (!g_spellCheckEnabled || !g_spellChecker ||
+        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT))
         return 0;
 
     POINT screenPoint;
@@ -9884,7 +9535,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ? g_savedWindowRect.bottom - g_savedWindowRect.top : 750;
     /* WS_CLIPCHILDREN stops the themed parent background repainting underneath
        the editor and preview panes, which otherwise flashes while resizing. */
-    HWND hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"MarkEditWndClass", L"Untitled.md - MarkEdit",
+    HWND hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"MarkEditWndClass", L"Untitled.txt - MarkEdit",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         windowX, windowY, windowWidth, windowHeight,
         NULL, NULL, hInstance, NULL);

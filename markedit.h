@@ -3,6 +3,8 @@
 
 #include <windows.h>
 
+#include "settings.h" /* SPLITTER_WIDTH is used by save_layout_settings() too */
+
 /* ---- child control IDs ---- */
 #define ID_EDIT    101
 #define ID_PREVIEW 102
@@ -25,7 +27,6 @@
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
 #define WM_APP_DEFERRED_INIT (WM_APP + 2)
-#define SPLITTER_WIDTH 6
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
 #define MINIMAP_WIDTH 120
@@ -189,7 +190,6 @@ static int create_document_tab(void);
 static int active_document_is_reusable(void);
 static void check_external_file_change(void);
 static void prompt_reload_active_external_change(void);
-static WCHAR *get_settings_path(void);
 static void do_close_document_at(int index);
 static void do_reopen_closed_tab(void);
 static void save_session_documents(void);

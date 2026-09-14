@@ -1,0 +1,246 @@
+#include "settings.h"
+
+#include <stdlib.h>
+#include <wchar.h>
+
+#include "path_utils.h"
+
+/* ---- persisted settings, stored in %APPDATA%\markedit\markedit.ini ---- */
+WCHAR *get_settings_path(void) {
+    DWORD needed = GetEnvironmentVariableW(L"APPDATA", NULL, 0);
+    if (!needed) return NULL;
+    WCHAR *appData = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));
+    if (!appData || !GetEnvironmentVariableW(L"APPDATA", appData, needed)) {
+        free(appData);
+        return NULL;
+    }
+    WCHAR *directory = path_join(appData, L"markedit");
+    free(appData);
+    if (!directory) return NULL;
+    CreateDirectoryW(directory, NULL);
+    WCHAR *settings = path_join(directory, L"markedit.ini");
+    free(directory);
+    return settings;
+}
+
+void load_font_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    GetPrivateProfileStringW(L"Font", L"FaceName", L"Consolas",
+                             g_fontFaceName, MAX_FONT_FACE_NAME, path);
+    g_fontPointSize = GetPrivateProfileIntW(L"Font", L"PointSize", g_fontPointSize, path);
+    if (g_fontPointSize < 1) g_fontPointSize = 1;
+    g_fontWeight = GetPrivateProfileIntW(L"Font", L"Weight", FW_NORMAL, path);
+    if (g_fontWeight < 1) g_fontWeight = FW_NORMAL;
+    g_fontItalic = GetPrivateProfileIntW(L"Font", L"Italic", 0, path) ? 1 : 0;
+    free(path);
+}
+
+void load_theme_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WCHAR value[32];
+    GetPrivateProfileStringW(L"Preview", L"Theme", L"", value, 32, path);
+    if (_wcsicmp(value, L"github-dark") == 0) {
+        g_previewDarkMode = 1;
+    } else if (_wcsicmp(value, L"github-light") == 0) {
+        g_previewDarkMode = 0;
+    } else {
+        /* Migrate settings written by releases that exposed a DarkMode toggle. */
+        GetPrivateProfileStringW(L"Preview", L"DarkMode", L"0", value, 32, path);
+        g_previewDarkMode = (value[0] == L'1' || value[0] == L't' || value[0] == L'T' ||
+                             value[0] == L'y' || value[0] == L'Y');
+    }
+    DWORD cap = 512, n = 0;
+    WCHAR *cssPath = NULL;
+    do {
+        free(cssPath);
+        cssPath = (WCHAR *)calloc(cap, sizeof(WCHAR));
+        if (!cssPath) break;
+        n = GetPrivateProfileStringW(L"Preview", L"CustomCSS", L"", cssPath, cap, path);
+        if (n < cap - 1) break;
+        cap *= 2;
+    } while (cap <= 32768);
+    if (cssPath && cssPath[0]) g_customCssPath = cssPath;
+    else free(cssPath);
+    free(path);
+}
+
+void save_theme_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WritePrivateProfileStringW(L"Preview", L"Theme",
+                               g_previewDarkMode ? L"github-dark" : L"github-light", path);
+    WritePrivateProfileStringW(L"Preview", L"DarkMode", NULL, path);
+    WritePrivateProfileStringW(L"Preview", L"CustomCSS",
+                               g_customCssPath ? g_customCssPath : L"", path);
+    free(path);
+}
+
+static int read_profile_int(const WCHAR *section, const WCHAR *key, int defaultValue,
+                            const WCHAR *path) {
+    WCHAR fallback[32], value[32], *end = NULL;
+    swprintf(fallback, 32, L"%d", defaultValue);
+    GetPrivateProfileStringW(section, key, fallback, value, 32, path);
+    long parsed = wcstol(value, &end, 10);
+    return end && end != value && *end == 0 ? (int)parsed : defaultValue;
+}
+
+static void write_profile_int(const WCHAR *section, const WCHAR *key, int value,
+                              const WCHAR *path) {
+    WCHAR buffer[32];
+    swprintf(buffer, 32, L"%d", value);
+    WritePrivateProfileStringW(section, key, buffer, path);
+}
+
+void load_layout_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    g_previewOnLeft = read_profile_int(L"View", L"PreviewOnLeft", 0, path) != 0;
+    g_previewVisible = read_profile_int(L"View", L"PreviewVisible", g_previewVisible, path) != 0;
+    g_editorVisible = read_profile_int(L"View", L"EditorVisible", g_editorVisible, path) != 0;
+    g_focusMode = read_profile_int(L"View", L"FocusMode", 0, path) != 0;
+    g_wordWrap = read_profile_int(L"View", L"WordWrap", g_wordWrap, path) != 0;
+    g_spellCheckEnabled = read_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path) != 0;
+    g_showWhitespace = read_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path) != 0;
+    g_indentGuides = read_profile_int(L"View", L"IndentGuides", g_indentGuides, path) != 0;
+    g_outlineVisible = read_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path) != 0;
+    g_minimapVisible = read_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path) != 0;
+    g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
+    if (g_editorZoom < -10) g_editorZoom = -10;
+    if (g_editorZoom > 20) g_editorZoom = 20;
+    GetPrivateProfileStringW(L"SpellCheck", L"Language", L"en-GB", g_spellLanguage,
+                             LOCALE_NAME_MAX_LENGTH, path);
+    if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
+
+    g_splitterRatio = read_profile_int(L"View", L"SplitterRatio", 500, path);
+    if (g_splitterRatio < 50) g_splitterRatio = 50;
+    if (g_splitterRatio > 950) g_splitterRatio = 950;
+
+    int left = read_profile_int(L"Window", L"Left", 0, path);
+    int top = read_profile_int(L"Window", L"Top", 0, path);
+    int width = read_profile_int(L"Window", L"Width", 0, path);
+    int height = read_profile_int(L"Window", L"Height", 0, path);
+    RECT candidate = { left, top, left + width, top + height };
+    if (width >= 400 && height >= 300 &&
+        MonitorFromRect(&candidate, MONITOR_DEFAULTTONULL) != NULL) {
+        g_savedWindowRect = candidate;
+        g_haveSavedWindowRect = 1;
+    }
+    g_startMaximized = read_profile_int(L"Window", L"Maximized", 0, path) != 0;
+    free(path);
+}
+
+void save_layout_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    write_profile_int(L"View", L"PreviewOnLeft", g_previewOnLeft, path);
+    write_profile_int(L"View", L"FocusMode", g_focusMode, path);
+    write_profile_int(L"View", L"WordWrap", g_wordWrap, path);
+    write_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path);
+    write_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path);
+    write_profile_int(L"View", L"IndentGuides", g_indentGuides, path);
+    write_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path);
+    write_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path);
+    write_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
+    WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
+    if (!g_commandLinePreviewMode) {
+        write_profile_int(L"View", L"PreviewVisible", g_previewVisible, path);
+        write_profile_int(L"View", L"EditorVisible", g_editorVisible, path);
+    }
+
+    if (g_hMainWnd && g_splitterPos >= 0) {
+        RECT client;
+        GetClientRect(g_hMainWnd, &client);
+        int available = client.right - SPLITTER_WIDTH;
+        if (available > 0) {
+            g_splitterRatio = MulDiv(g_splitterPos, 1000, available);
+            if (g_splitterRatio < 50) g_splitterRatio = 50;
+            if (g_splitterRatio > 950) g_splitterRatio = 950;
+        }
+    }
+    write_profile_int(L"View", L"SplitterRatio", g_splitterRatio, path);
+
+    WINDOWPLACEMENT placement = {0};
+    placement.length = sizeof(placement);
+    if (g_hMainWnd && GetWindowPlacement(g_hMainWnd, &placement)) {
+        RECT normal = placement.rcNormalPosition;
+        int maximized = placement.showCmd == SW_SHOWMAXIMIZED ||
+            (placement.showCmd == SW_SHOWMINIMIZED &&
+             (placement.flags & WPF_RESTORETOMAXIMIZED) != 0);
+        write_profile_int(L"Window", L"Left", normal.left, path);
+        write_profile_int(L"Window", L"Top", normal.top, path);
+        write_profile_int(L"Window", L"Width", normal.right - normal.left, path);
+        write_profile_int(L"Window", L"Height", normal.bottom - normal.top, path);
+        write_profile_int(L"Window", L"Maximized", maximized, path);
+    }
+    free(path);
+}
+
+void save_font_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WritePrivateProfileStringW(L"Font", L"FaceName", g_fontFaceName, path);
+    WCHAR sizeBuf[16];
+    swprintf(sizeBuf, 16, L"%d", g_fontPointSize);
+    WritePrivateProfileStringW(L"Font", L"PointSize", sizeBuf, path);
+    WCHAR weightBuf[16];
+    swprintf(weightBuf, 16, L"%d", g_fontWeight);
+    WritePrivateProfileStringW(L"Font", L"Weight", weightBuf, path);
+    WritePrivateProfileStringW(L"Font", L"Italic", g_fontItalic ? L"1" : L"0", path);
+    free(path);
+}
+
+void load_find_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    GetPrivateProfileStringW(L"Find", L"FindWhat", L"", g_findWhat,
+                             sizeof(g_findWhat) / sizeof(g_findWhat[0]), path);
+    GetPrivateProfileStringW(L"Find", L"ReplaceWith", L"", g_replaceWith,
+                             sizeof(g_replaceWith) / sizeof(g_replaceWith[0]), path);
+    g_findFlags = read_profile_int(L"Find", L"MatchCase", 0, path) ? FR_MATCHCASE : 0;
+    if (read_profile_int(L"Find", L"SearchDown", 1, path)) g_findFlags |= FR_DOWN;
+    free(path);
+}
+
+void save_find_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WritePrivateProfileStringW(L"Find", L"FindWhat", g_findWhat, path);
+    WritePrivateProfileStringW(L"Find", L"ReplaceWith", g_replaceWith, path);
+    write_profile_int(L"Find", L"MatchCase", (g_findFlags & FR_MATCHCASE) != 0, path);
+    write_profile_int(L"Find", L"SearchDown", (g_findFlags & FR_DOWN) != 0, path);
+    free(path);
+}
+
+/* [Compiler] is hand-edited in markedit.ini rather than exposed through a
+   menu: Backend pins Run/Debug C/C++ to one compiler instead of the default
+   Auto priority search (GCC, Clang, Zig, then MSVC as a Run-only fallback),
+   and VcvarsallPath points at a specific vcvarsall.bat when MSVC isn't
+   installed in one of the standard Program Files locations find_vcvarsall()
+   checks. */
+void load_compiler_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WCHAR value[16];
+    GetPrivateProfileStringW(L"Compiler", L"Backend", L"Auto", value, 16, path);
+    if (_wcsicmp(value, L"GCC") == 0) g_compilerBackend = COMPILER_BACKEND_GCC;
+    else if (_wcsicmp(value, L"Clang") == 0) g_compilerBackend = COMPILER_BACKEND_CLANG;
+    else if (_wcsicmp(value, L"Zig") == 0) g_compilerBackend = COMPILER_BACKEND_ZIG;
+    else if (_wcsicmp(value, L"MSVC") == 0) g_compilerBackend = COMPILER_BACKEND_MSVC;
+    else g_compilerBackend = COMPILER_BACKEND_AUTO;
+
+    DWORD cap = 512, n = 0;
+    WCHAR *vcvarsall = NULL;
+    do {
+        free(vcvarsall);
+        vcvarsall = (WCHAR *)calloc(cap, sizeof(WCHAR));
+        if (!vcvarsall) break;
+        n = GetPrivateProfileStringW(L"Compiler", L"VcvarsallPath", L"", vcvarsall, cap, path);
+        if (n < cap - 1) break;
+        cap *= 2;
+    } while (cap <= 32768);
+    if (vcvarsall && vcvarsall[0]) g_vcvarsallOverridePath = vcvarsall;
+    else free(vcvarsall);
+    free(path);
+}
