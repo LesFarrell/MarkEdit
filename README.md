@@ -45,9 +45,8 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Export of the enhanced preview—including highlighted code, rendered math, and available rendered diagrams—to an HTML document.
 - Printing and PDF export of the enhanced rendered preview through WebView2.
 - The table editor resizes an existing GFM table while preserving its cells, or creates a new table with a chosen number of rows and columns.
-- A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, Refresh, and Git actions. Renaming a file updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
+- A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, and Refresh actions. Renaming a file updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
 - Quick Open searches file names in the active workspace, while Find in Folder searches supported text files and opens results at the matching line. If no workspace is open, either command first asks for a folder. Generated/dependency folders are skipped.
-- Git Changes lists modified, staged, deleted, conflicted, and untracked files from the current file's repository and opens the selected working-tree file. With no saved file open, it asks which repository folder to inspect. This feature uses `git.exe` from `PATH`; the editor itself remains fully usable without Git.
 - A searchable command palette (Ctrl+Shift+P) exposes the editor's commands without navigating menus.
 - Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.
 - Synchronized scrolling between the Markdown editor and rendered preview.
@@ -77,7 +76,6 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | Ctrl+Shift+S | Save As |
 | Ctrl+P | Print rendered preview |
 | Ctrl+Shift+P | Command palette |
-| Ctrl+Shift+G | Git changes for the active workspace |
 | Ctrl+W | Close current tab |
 | Ctrl+Shift+T | Reopen last closed tab |
 | Alt+Left | Go back to where the last wiki-link jump was made from |

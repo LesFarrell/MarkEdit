@@ -145,7 +145,6 @@
 #define IDM_EDIT_EOL_LF          321
 #define IDM_EDIT_EOL_CR          322
 #define IDM_FILE_GO_BACK         323
-#define IDM_FILE_GIT_CHANGES     324
 #define IDM_VIEW_MINIMAP         325
 #define IDM_FILE_INSERT          326
 #define IDM_FMT_TABLE_ROW_ABOVE  327

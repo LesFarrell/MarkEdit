@@ -6,3 +6,5 @@ json_formatter.c
 markdown.c
 recent_files.c
 workspace_files.c
+settings.c
+help_reference.c

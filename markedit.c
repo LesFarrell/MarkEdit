@@ -4788,7 +4788,6 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_STRING, IDM_FILE_QUICK_OPEN, "&Quick Open in Folder...\tCtrl+K");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_FIND_FOLDER, "Find in F&older...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_INSERT, "&Insert File at Cursor...");
-    AppendMenuA(hFile, MF_STRING, IDM_FILE_GIT_CHANGES, "&Git Changes...\tCtrl+Shift+G");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVE, "&Save\tCtrl+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVEAS, "Save &As...\tCtrl+Shift+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_HTML, "Export Rendered &HTML...");
@@ -8306,7 +8305,6 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"File: New", IDM_FILE_NEW}, {L"File: Open", IDM_FILE_OPEN},
     {L"File: Insert File at Cursor", IDM_FILE_INSERT},
     {L"File: Quick Open in Folder", IDM_FILE_QUICK_OPEN},
-    {L"File: Git Changes", IDM_FILE_GIT_CHANGES},
     {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Save", IDM_FILE_SAVE},
     {L"File: Save As", IDM_FILE_SAVEAS}, {L"File: Export Rendered HTML", IDM_FILE_EXPORT_HTML},
     {L"File: Export Rendered PDF", IDM_FILE_EXPORT_PDF}, {L"File: Print Rendered Preview", IDM_FILE_PRINT},
@@ -8427,7 +8425,6 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FILE_INSERT: do_insert_file(); break;
         case IDM_FILE_QUICK_OPEN: do_quick_open(); break;
         case IDM_FILE_FIND_FOLDER: do_find_in_folder(); break;
-        case IDM_FILE_GIT_CHANGES: do_git_changes(); break;
         case IDM_FILE_SAVE: do_save(); break;
         case IDM_FILE_SAVEAS: do_saveas(); break;
         case IDM_FILE_EXPORT_HTML: do_export_html(); break;
@@ -9845,7 +9842,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, 'N', IDM_FILE_NEW },
         { FVIRTKEY | FCONTROL, 'O', IDM_FILE_OPEN },
         { FVIRTKEY | FCONTROL, 'K', IDM_FILE_QUICK_OPEN },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'G', IDM_FILE_GIT_CHANGES },
         { FVIRTKEY | FCONTROL | FSHIFT, 'P', IDM_EDIT_COMMAND_PALETTE },
         { FVIRTKEY | FCONTROL, 'S', IDM_FILE_SAVE },
         { FVIRTKEY | FCONTROL, 'P', IDM_FILE_PRINT },
