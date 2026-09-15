@@ -191,6 +191,11 @@ static ISpellChecker *g_spellChecker = NULL;
 static WCHAR *g_recentFiles[MAX_RECENT_FILES];
 static int g_recentFileCount = 0;
 
+#define MAX_RECENT_FOLDERS 10
+static WCHAR *g_recentFolders[MAX_RECENT_FOLDERS];
+static int g_recentFolderCount = 0;
+static WCHAR *g_currentWorkspaceFolder = NULL;
+
 static HWND g_hFindDlg = NULL;
 static FINDREPLACEW g_fr;
 WCHAR g_findWhat[256] = L"";
@@ -2089,6 +2094,114 @@ static void prune_missing_recent_files(void) {
     }
 }
 
+/* ---- recently opened workspace folders, same shape as recent files ---- */
+static void load_recent_folders(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    for (int i = 0; i < g_recentFolderCount; i++) free(g_recentFolders[i]);
+    g_recentFolderCount = 0;
+    for (int i = 0; i < MAX_RECENT_FOLDERS; i++) {
+        WCHAR key[16];
+        swprintf(key, 16, L"Folder%d", i);
+        DWORD cap = 512, n = 0;
+        WCHAR *value = NULL;
+        do {
+            free(value);
+            value = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
+            if (!value) break;
+            n = GetPrivateProfileStringW(L"RecentFolders", key, L"", value, cap, path);
+            if (n < cap - 1) break;
+            cap *= 2;
+        } while (cap <= 32768);
+        if (n == 0) { free(value); break; }
+        g_recentFolders[g_recentFolderCount++] = value;
+        value = NULL;
+    }
+    free(path);
+}
+
+static void save_recent_folders(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WritePrivateProfileStringW(L"RecentFolders", NULL, NULL, path);
+    for (int i = 0; i < g_recentFolderCount; i++) {
+        WCHAR key[16];
+        swprintf(key, 16, L"Folder%d", i);
+        WritePrivateProfileStringW(L"RecentFolders", key, g_recentFolders[i], path);
+    }
+    free(path);
+}
+
+/* Move (or insert) path to the front of the recent-folders list, deduping
+   case-insensitively, capping at MAX_RECENT_FOLDERS - mirrors add_recent_file(). */
+static void add_recent_folder(const WCHAR *path) {
+    WCHAR *copy = wcsdup_heap(path);
+    if (!copy) return;
+    int existing = -1;
+    for (int i = 0; i < g_recentFolderCount; i++) {
+        if (_wcsicmp(g_recentFolders[i], path) == 0) { existing = i; break; }
+    }
+    int start = (existing >= 0) ? existing : (g_recentFolderCount < MAX_RECENT_FOLDERS ? g_recentFolderCount : MAX_RECENT_FOLDERS - 1);
+    if (existing >= 0) free(g_recentFolders[existing]);
+    else if (g_recentFolderCount == MAX_RECENT_FOLDERS) free(g_recentFolders[MAX_RECENT_FOLDERS - 1]);
+    for (int i = start; i > 0; i--) {
+        g_recentFolders[i] = g_recentFolders[i - 1];
+    }
+    g_recentFolders[0] = copy;
+    if (existing < 0 && g_recentFolderCount < MAX_RECENT_FOLDERS) g_recentFolderCount++;
+    save_recent_folders();
+}
+
+static void clear_recent_folders(void) {
+    for (int i = 0; i < g_recentFolderCount; i++) {
+        free(g_recentFolders[i]);
+        g_recentFolders[i] = NULL;
+    }
+    g_recentFolderCount = 0;
+    save_recent_folders();
+}
+
+/* Remove path from the recent-folders list (e.g. because it no longer
+   exists on disk) and persist the change. */
+static void remove_recent_folder(const WCHAR *path) {
+    int idx = -1;
+    for (int i = 0; i < g_recentFolderCount; i++) {
+        if (_wcsicmp(g_recentFolders[i], path) == 0) { idx = i; break; }
+    }
+    if (idx < 0) return;
+    free(g_recentFolders[idx]);
+    for (int i = idx; i < g_recentFolderCount - 1; i++) g_recentFolders[i] = g_recentFolders[i + 1];
+    g_recentFolderCount--;
+    g_recentFolders[g_recentFolderCount] = NULL;
+    save_recent_folders();
+}
+
+static void load_workspace_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    DWORD cap = 512, n = 0;
+    WCHAR *value = NULL;
+    do {
+        free(value);
+        value = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
+        if (!value) break;
+        n = GetPrivateProfileStringW(L"Workspace", L"CurrentFolder", L"", value, cap, path);
+        if (n < cap - 1) break;
+        cap *= 2;
+    } while (cap <= 32768);
+    if (value && value[0]) replace_wstring(&g_currentWorkspaceFolder, value);
+    free(value);
+    free(path);
+}
+
+static void save_workspace_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    WritePrivateProfileStringW(L"Workspace", L"CurrentFolder",
+                               g_currentWorkspaceFolder ? g_currentWorkspaceFolder : L"", path);
+    free(path);
+}
+
 
 
 /* ================= WebView2 host page ================= */
@@ -3459,9 +3572,9 @@ static int create_image_destination(const WCHAR *preferredName, const WCHAR *def
     return 0;
 }
 
-static int insert_markdown_image(const WCHAR *relativePath, const WCHAR *altText) {
+static int insert_markdown_reference(const WCHAR *relativePath, const WCHAR *altText, int isImage) {
     char *relative = to_utf8(relativePath);
-    char *alt = to_utf8(altText && altText[0] ? altText : L"image");
+    char *alt = to_utf8(altText && altText[0] ? altText : (isImage ? L"image" : L"file"));
     if (!relative || !alt) { free(relative); free(alt); return 0; }
     size_t escapedCap = strlen(alt) * 2 + 1;
     char *escapedAlt = (char *)malloc(escapedCap);
@@ -3476,13 +3589,47 @@ static int insert_markdown_image(const WCHAR *relativePath, const WCHAR *altText
     char *markdown = (char *)malloc(cap);
     int inserted = markdown != NULL;
     if (markdown) {
-        snprintf(markdown, cap, "![%s](<%s>)", escapedAlt, relative);
+        snprintf(markdown, cap, "%s[%s](<%s>)", isImage ? "!" : "", escapedAlt, relative);
         SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)markdown);
         SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
     }
     free(markdown);
     free(escapedAlt);
     free(relative);
+    free(alt);
+    return inserted;
+}
+
+static int insert_markdown_image(const WCHAR *relativePath, const WCHAR *altText) {
+    return insert_markdown_reference(relativePath, altText, 1);
+}
+
+/* Links to a dropped file where it already sits on disk (relative to the
+   current document's directory) instead of copying it into images/ - used
+   for Shift+drop, which is meant for "point at this file" rather than
+   "import this image into the document". Images still get an image link;
+   everything else gets a plain link. */
+static int shift_drop_link(const WCHAR *path) {
+    WCHAR relative[MAX_PATH];
+    const WCHAR *target = path;
+    if (g_currentFile) {
+        WCHAR *documentDirectory = path_directory(g_currentFile);
+        if (documentDirectory &&
+            PathRelativePathToW(relative, documentDirectory, FILE_ATTRIBUTE_DIRECTORY,
+                                 path, FILE_ATTRIBUTE_NORMAL)) {
+            target = relative;
+        }
+        free(documentDirectory);
+    }
+    WCHAR normalized[MAX_PATH];
+    wcscpy(normalized, target);
+    for (WCHAR *p = normalized; *p; p++) if (*p == L'\\') *p = L'/';
+    if (normalized[0] == L'.' && normalized[1] == L'/')
+        memmove(normalized, normalized + 2, (wcslen(normalized + 2) + 1) * sizeof(WCHAR));
+
+    WCHAR *alt = wcsdup_heap(PathFindFileNameW(path));
+    if (alt) PathRemoveExtensionW(alt);
+    int inserted = insert_markdown_reference(normalized, alt, is_image_file(path));
     free(alt);
     return inserted;
 }
@@ -3583,6 +3730,11 @@ static int paste_image_from_clipboard(void) {
 }
 
 static void handle_dropfiles(HDROP hDrop) {
+    /* Held at message-processing time, which in practice still reflects the
+       physical key held through the drop gesture - not a hard real-time
+       guarantee, but Shift-drop is a deliberate two-handed action so the
+       window is wide enough to be reliable. */
+    int shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
     int insertedImage = 0;
     int undoActive = 0;
@@ -3590,7 +3742,14 @@ static void handle_dropfiles(HDROP hDrop) {
         UINT cap = DragQueryFileW(hDrop, i, NULL, 0) + 1;
         WCHAR *path = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
         if (path && DragQueryFileW(hDrop, i, path, cap)) {
-            if (g_editorVisible && is_image_file(path)) {
+            if (g_editorVisible && shiftHeld) {
+                if (!undoActive) {
+                    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+                    undoActive = 1;
+                }
+                if (insertedImage) SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)editor_eol_sequence());
+                if (shift_drop_link(path)) insertedImage = 1;
+            } else if (g_editorVisible && is_image_file(path)) {
                 if (!undoActive) {
                     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
                     undoActive = 1;
@@ -3612,16 +3771,13 @@ static void handle_dropfiles(HDROP hDrop) {
     DragFinish(hDrop);
 }
 
-static int save_to_path(const WCHAR *path) {
-    int len;
-    char *text = get_edit_text(g_hEdit, &len);
-    if (!text) {
-        MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
-        return 0;
-    }
-    WCHAR *displayPath = absolute_path(path);
-    WCHAR *ioPath = extended_path(path);
-    const WCHAR *target = ioPath ? ioPath : path;
+/* Crash-safe write: content goes to a sibling temp file first, which then
+   replaces `target` in one filesystem operation (ReplaceFileW, or a plain
+   move for a file that doesn't exist yet), so a failure partway through
+   never leaves a half-written document on disk. `target` must already be
+   an I/O-ready (extended-length) path. Shared by save_to_path() and
+   workspace-wide replace. */
+static int write_file_atomic(const WCHAR *target, const char *text, size_t len, int hasBom) {
     size_t pathLen = wcslen(target);
     WCHAR *temporary = (WCHAR *)malloc((pathLen + 64) * sizeof(WCHAR));
     HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -3635,28 +3791,23 @@ static int save_to_path(const WCHAR *path) {
     }
     if (hFile == INVALID_HANDLE_VALUE) {
         free(temporary);
-        free(displayPath);
-        free(ioPath);
-        free(text);
-        MessageBoxW(g_hMainWnd, L"Could not create a temporary file for saving.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
     static const char bom[3] = { (char)0xEF, (char)0xBB, (char)0xBF };
     size_t total = 0;
     BOOL ok = TRUE;
-    if (g_hasBom) {
+    if (hasBom) {
         DWORD written = 0;
         if (!WriteFile(hFile, bom, 3, &written, NULL) || written != 3) ok = FALSE;
     }
-    while (ok && total < (size_t)len) {
-        DWORD chunk = (DWORD)(((size_t)len - total) > 1024 * 1024 ? 1024 * 1024 : ((size_t)len - total));
+    while (ok && total < len) {
+        DWORD chunk = (DWORD)((len - total) > 1024 * 1024 ? 1024 * 1024 : (len - total));
         DWORD written = 0;
         if (!WriteFile(hFile, text + total, chunk, &written, NULL) || written != chunk) { ok = FALSE; break; }
         total += written;
     }
     if (ok) ok = FlushFileBuffers(hFile);
     if (!CloseHandle(hFile)) ok = FALSE;
-    free(text);
     if (ok) {
         DWORD attrs = GetFileAttributesW(target);
         if (attrs != INVALID_FILE_ATTRIBUTES)
@@ -3664,15 +3815,29 @@ static int save_to_path(const WCHAR *path) {
         else
             ok = MoveFileExW(temporary, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
     }
+    if (!ok) DeleteFileW(temporary);
+    free(temporary);
+    return ok;
+}
+
+static int save_to_path(const WCHAR *path) {
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) {
+        MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        return 0;
+    }
+    WCHAR *displayPath = absolute_path(path);
+    WCHAR *ioPath = extended_path(path);
+    const WCHAR *target = ioPath ? ioPath : path;
+    int ok = write_file_atomic(target, text, (size_t)len, g_hasBom);
+    free(text);
     if (!ok) {
-        DeleteFileW(temporary);
-        free(temporary);
         free(displayPath);
         free(ioPath);
         MessageBoxW(g_hMainWnd, L"Could not write the complete file; the original was left unchanged.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
-    free(temporary);
     /* Record the path before replace_wstring(): when saving the current file,
        `path` may alias g_currentFile, which replace_wstring() can free. */
     add_recent_file(displayPath ? displayPath : path);
@@ -3721,6 +3886,20 @@ void do_save(void) {
     } else {
         do_saveas();
     }
+}
+
+/* Saves every dirty tab in turn, the same switch-to-it-then-act pattern
+   do_exit() uses to visit every document through the single shared editor.
+   An untitled dirty document still prompts for a path via do_save()'s own
+   Save As fallback, same as saving it individually would. */
+static void do_save_all(void) {
+    int original = g_activeDocument;
+    for (int i = 0; i < g_documentCount; i++) {
+        if (!g_documents[i].dirty) continue;
+        switch_document(i);
+        do_save();
+    }
+    if (original < g_documentCount) switch_document(original);
 }
 
 static void do_export_html(void) {
@@ -4428,6 +4607,219 @@ static int show_text_input(const WCHAR *title, const WCHAR *prompt,
     return state.accepted;
 }
 
+/* One line matched by a workspace-wide Find/Replace search - see
+   do_replace_in_workspace() below. `label` is the "path:line — snippet"
+   text shown for the match (without the checkbox prefix ReplaceReviewWndProc
+   adds); `accepted` is whether the review dialog's checkbox is ticked. */
+typedef struct ReplaceMatch {
+    WCHAR *path;
+    WCHAR *label;
+    int line; /* 1-based */
+    int accepted;
+} ReplaceMatch;
+
+typedef struct ReplaceReviewState {
+    ReplaceMatch *matches;
+    int count;
+    HWND list;
+    HWND countLabel;
+    int confirmed;
+} ReplaceReviewState;
+
+static void update_replace_count_label(ReplaceReviewState *state) {
+    if (!state->countLabel) return;
+    int checked = 0;
+    for (int i = 0; i < state->count; i++) if (state->matches[i].accepted) checked++;
+    WCHAR text[64];
+    swprintf(text, 64, L"%d of %d matches selected", checked, state->count);
+    SetWindowTextW(state->countLabel, text);
+}
+
+static void refill_replace_list(ReplaceReviewState *state) {
+    SendMessageW(state->list, LB_RESETCONTENT, 0, 0);
+    for (int i = 0; i < state->count; i++) {
+        size_t cap = wcslen(state->matches[i].label) + 8;
+        WCHAR *row = (WCHAR *)malloc(cap * sizeof(WCHAR));
+        if (!row) continue;
+        swprintf(row, cap, L"[%lc] %ls", state->matches[i].accepted ? L'x' : L' ', state->matches[i].label);
+        int idx = (int)SendMessageW(state->list, LB_ADDSTRING, 0, (LPARAM)row);
+        if (idx >= 0) SendMessageW(state->list, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)i);
+        free(row);
+    }
+    if (SendMessageW(state->list, LB_GETCOUNT, 0, 0) > 0)
+        SendMessageW(state->list, LB_SETCURSEL, 0, 0);
+    update_replace_count_label(state);
+}
+
+/* Flips the checked state of the match shown at listbox row `row` and
+   rewrites just that row's text in place, preserving its selection. */
+static void toggle_replace_row(ReplaceReviewState *state, int row) {
+    if (row == LB_ERR) return;
+    int matchIndex = (int)SendMessageW(state->list, LB_GETITEMDATA, (WPARAM)row, 0);
+    if (matchIndex < 0 || matchIndex >= state->count) return;
+    state->matches[matchIndex].accepted = !state->matches[matchIndex].accepted;
+    size_t cap = wcslen(state->matches[matchIndex].label) + 8;
+    WCHAR *text = (WCHAR *)malloc(cap * sizeof(WCHAR));
+    if (text) {
+        swprintf(text, cap, L"[%lc] %ls", state->matches[matchIndex].accepted ? L'x' : L' ',
+                 state->matches[matchIndex].label);
+        SendMessageW(state->list, LB_DELETESTRING, (WPARAM)row, 0);
+        SendMessageW(state->list, LB_INSERTSTRING, (WPARAM)row, (LPARAM)text);
+        SendMessageW(state->list, LB_SETITEMDATA, (WPARAM)row, (LPARAM)matchIndex);
+        SendMessageW(state->list, LB_SETCURSEL, (WPARAM)row, 0);
+        free(text);
+    }
+    update_replace_count_label(state);
+}
+
+/* Space toggles the selected row's checkbox, the same convention as a
+   Windows Explorer checkbox listbox - listboxes don't offer this by
+   themselves, so it's added via the same safe-subclassing API already used
+   for g_hTabs/g_hEdit/g_hMinimap elsewhere in this file. */
+static LRESULT CALLBACK ReplaceListSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                                 UINT_PTR subclassId, DWORD_PTR refData) {
+    (void)subclassId;
+    if (msg == WM_KEYDOWN && wParam == VK_SPACE) {
+        toggle_replace_row((ReplaceReviewState *)refData, (int)SendMessageW(hwnd, LB_GETCURSEL, 0, 0));
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, ReplaceListSubclassProc, subclassId);
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    ReplaceReviewState *state = (ReplaceReviewState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_CREATE) {
+        state = (ReplaceReviewState *)((CREATESTRUCTW *)lParam)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+        CreateWindowExW(0, L"STATIC", L"Uncheck any matches you don't want replaced:",
+            WS_CHILD | WS_VISIBLE, 12, 10, 440, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
+        state->countLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            456, 10, 112, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
+        state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+            LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+            12, 34, 556, 316, hwnd, (HMENU)11, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Select All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            12, 360, 96, 26, hwnd, (HMENU)12, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Select None", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            114, 360, 96, 26, hwnd, (HMENU)13, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Replace",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+            412, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            496, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+        SetWindowTheme(state->list, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        SetWindowSubclass(state->list, ReplaceListSubclassProc, 1, (DWORD_PTR)state);
+        refill_replace_list(state);
+        SetFocus(state->list);
+        popup_dialog_theme_created(hwnd);
+        return 0;
+    }
+    if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    switch (msg) {
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: {
+            LRESULT handled = 0;
+            LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
+            if (handled) return result;
+            break;
+        }
+        case WM_CTLCOLORLISTBOX: {
+            HDC hdc = (HDC)wParam;
+            SetTextColor(hdc, popup_fg_color());
+            SetBkColor(hdc, popup_bg_color());
+            return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        }
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
+            if (mis->CtlType == ODT_LISTBOX) { measure_themed_listbox_item(state->list, mis); return TRUE; }
+            break;
+        }
+        case WM_DRAWITEM: {
+            const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+            if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
+            if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == state->list) {
+                draw_themed_listbox_item(state->list, dis);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_NCDESTROY:
+            popup_dialog_theme_destroyed();
+            break;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == 11 && HIWORD(wParam) == LBN_DBLCLK) {
+                toggle_replace_row(state, (int)SendMessageW(state->list, LB_GETCURSEL, 0, 0));
+                return 0;
+            }
+            if (LOWORD(wParam) == 12) { /* Select All */
+                for (int i = 0; i < state->count; i++) state->matches[i].accepted = 1;
+                refill_replace_list(state);
+                return 0;
+            }
+            if (LOWORD(wParam) == 13) { /* Select None */
+                for (int i = 0; i < state->count; i++) state->matches[i].accepted = 0;
+                refill_replace_list(state);
+                return 0;
+            }
+            if (LOWORD(wParam) == IDOK) {
+                state->confirmed = 1;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            if (LOWORD(wParam) == IDCANCEL) { DestroyWindow(hwnd); return 0; }
+            break;
+        case WM_SIZE: {
+            int width = LOWORD(lParam), height = HIWORD(lParam);
+            MoveWindow(state->countLabel, width - 124, 10, 112, 20, TRUE);
+            MoveWindow(state->list, 12, 34, width - 24, height - 78, TRUE);
+            return 0;
+        }
+        case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/* Shows the checkbox review list for a workspace-wide replace; `matches`
+   is edited in place (accepted flags) and the function returns 1 if the
+   user clicked Replace, 0 if they cancelled. */
+static int show_replace_review_dialog(ReplaceMatch *matches, int count) {
+    static int registered = 0;
+    if (!registered) {
+        WNDCLASSW wc = {0};
+        wc.lpfnWndProc = ReplaceReviewWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"MarkEditReplaceDialog";
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 0;
+        registered = 1;
+    }
+    ReplaceReviewState state = { matches, count, NULL, NULL, 0 };
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditReplaceDialog", L"Replace in Folder",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+        CW_USEDEFAULT, CW_USEDEFAULT, 600, 440, g_hMainWnd, NULL,
+        GetModuleHandleW(NULL), &state);
+    if (!dialog) return 0;
+    RECT owner, rc;
+    GetWindowRect(g_hMainWnd, &owner); GetWindowRect(dialog, &rc);
+    SetWindowPos(dialog, HWND_TOP,
+        owner.left + ((owner.right - owner.left) - (rc.right - rc.left)) / 2,
+        owner.top + ((owner.bottom - owner.top) - (rc.bottom - rc.top)) / 2,
+        0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    EnableWindow(g_hMainWnd, FALSE);
+    MSG message = {0}; int loopResult = -1;
+    while (IsWindow(dialog) && (loopResult = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(g_hMainWnd, TRUE);
+    SetForegroundWindow(g_hMainWnd);
+    if (loopResult == 0) PostQuitMessage((int)message.wParam);
+    return state.confirmed;
+}
+
 static void find_in_edit(const char *needle, int matchCase, int down) {
     if (!needle || !needle[0]) return;
     int len = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
@@ -4787,9 +5179,12 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN, "&Open...\tCtrl+O");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_QUICK_OPEN, "&Quick Open in Folder...\tCtrl+K");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_FIND_FOLDER, "Find in F&older...");
+    AppendMenuA(hFile, MF_STRING, IDM_REPLACE_WORKSPACE, "Replace in Fol&der...");
+    AppendMenuA(hFile, MF_STRING, IDM_OPEN_WORKSPACE, "Open &Workspace Folder...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_INSERT, "&Insert File at Cursor...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVE, "&Save\tCtrl+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVEAS, "Save &As...\tCtrl+Shift+S");
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_SAVE_ALL, "Save A&ll\tCtrl+Alt+S");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_HTML, "Export Rendered &HTML...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXPORT_PDF, "Export Rendered &PDF...");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_PRINT, "&Print Rendered Preview...\tCtrl+P");
@@ -4822,8 +5217,31 @@ static HMENU build_menu(void) {
         AppendMenuA(hRecent, MF_STRING, IDM_FILE_RECENT_CLEAR, "&Clear Recent Files");
     }
     AppendMenuA(hFile, MF_POPUP, (UINT_PTR)hRecent, "Recent &Files");
+
+    HMENU hRecentWorkspaces = CreatePopupMenu();
+    if (g_recentFolderCount == 0) {
+        AppendMenuA(hRecentWorkspaces, MF_STRING | MF_GRAYED, 0, "(no recent workspaces)");
+    } else {
+        for (int i = 0; i < g_recentFolderCount; i++) {
+            size_t cap = wcslen(g_recentFolders[i]) * 2 + 16;
+            WCHAR *escaped = (WCHAR *)malloc(cap * sizeof(WCHAR));
+            WCHAR *label = (WCHAR *)malloc((cap + 16) * sizeof(WCHAR));
+            if (escaped && label) {
+                escape_ampersands(g_recentFolders[i], escaped, cap);
+                swprintf(label, cap + 16, L"&%d %ls", i + 1, escaped);
+                AppendMenuW(hRecentWorkspaces, MF_STRING, IDM_RECENT_WORKSPACE + i, label);
+            }
+            free(escaped);
+            free(label);
+        }
+        AppendMenuA(hRecentWorkspaces, MF_SEPARATOR, 0, NULL);
+        AppendMenuA(hRecentWorkspaces, MF_STRING, IDM_RECENT_WORKSPACE_CLEAR, "&Clear Recent Workspaces");
+    }
+    AppendMenuA(hFile, MF_POPUP, (UINT_PTR)hRecentWorkspaces, "Recent Wor&kspaces");
     AppendMenuA(hFile, MF_SEPARATOR, 0, NULL);
 
+    AppendMenuA(hFile, MF_STRING, IDM_SETTINGS, "Settin&gs...");
+    AppendMenuA(hFile, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXIT, "E&xit");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFile, "&File");
 
@@ -4911,6 +5329,15 @@ static HMENU build_menu(void) {
     AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_COL_LEFT, "Insert Column &Left");
     AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_COL_RIGHT, "Insert Column &Right");
     AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_COL_DELETE, "Delete Colu&mn");
+    AppendMenuA(hTableOps, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hTableOps, MF_STRING, IDM_TABLE_SORT_ASC, "&Sort Rows by This Column (Ascending)");
+    AppendMenuA(hTableOps, MF_STRING, IDM_TABLE_SORT_DESC, "Sort Rows by This Column (Descending)");
+    AppendMenuA(hTableOps, MF_SEPARATOR, 0, NULL);
+    HMENU hTableAlign = CreatePopupMenu();
+    AppendMenuA(hTableAlign, MF_STRING, IDM_TABLE_ALIGN_LEFT, "&Left");
+    AppendMenuA(hTableAlign, MF_STRING, IDM_TABLE_ALIGN_CENTER, "&Center");
+    AppendMenuA(hTableAlign, MF_STRING, IDM_TABLE_ALIGN_RIGHT, "&Right");
+    AppendMenuA(hTableOps, MF_POPUP, (UINT_PTR)hTableAlign, "Align Colu&mn");
     AppendMenuA(hMarkdown, MF_POPUP, (UINT_PTR)hTableOps, "Table Row/Colu&mn");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_CODEBLOCK, "Code Bl&ock");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_FOOTNOTE, "&Footnote");
@@ -4945,6 +5372,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hView, MF_STRING, IDM_VIEW_NEXT_TAB, "&Next Tab\tCtrl+Tab");
     AppendMenuA(hView, MF_STRING, IDM_VIEW_PREVIOUS_TAB, "&Previous Tab\tCtrl+Shift+Tab");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_CYCLE_PANE, "Cycle &Panes\tCtrl+F6");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     HMENU hTheme = CreatePopupMenu();
     AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_LIGHT, "GitHub &Light");
@@ -5698,6 +6126,34 @@ static void toggle_focus_mode(HWND hwnd) {
        the editor where the accelerator is reachable - WebView2 claims F11 for
        its own fullscreen whenever the preview has focus. */
     if (g_editorVisible) SetFocus(g_hEdit);
+}
+
+/* Cycles keyboard focus between the editor, preview, outline panel (when
+   visible), and tab strip - Ctrl+F6 / Ctrl+Shift+F6, the same pane-cycling
+   convention several other Windows apps use for keyboard-only navigation
+   between major regions. WebView2 hosts its own separate HWND hierarchy, so
+   giving it focus takes its own MoveFocus call rather than a plain
+   SetFocus() on g_hPreview. */
+static void cycle_pane_focus(int reverse) {
+    HWND panes[4];
+    int count = 0;
+    if (g_editorVisible && g_hEdit) panes[count++] = g_hEdit;
+    if (g_previewVisible && g_hPreview) panes[count++] = g_hPreview;
+    if (g_outlineVisible && g_editorVisible && g_hOutline) panes[count++] = g_hOutline;
+    if (g_hTabs) panes[count++] = g_hTabs;
+    if (count == 0) return;
+
+    HWND focused = GetFocus();
+    int current = -1;
+    for (int i = 0; i < count; i++) {
+        if (panes[i] == focused || IsChild(panes[i], focused)) { current = i; break; }
+    }
+    HWND target = panes[current < 0 ? 0 : (current + (reverse ? count - 1 : 1)) % count];
+    if (target == g_hPreview && g_webviewController) {
+        ICoreWebView2Controller_MoveFocus(g_webviewController, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    } else {
+        SetFocus(target);
+    }
 }
 
 static void toggle_word_wrap(HWND hwnd) {
@@ -7952,6 +8408,142 @@ static void delete_table_column_at_cursor(void) {
     SetFocus(g_hEdit);
 }
 
+/* ---- caret-relative table sort and column alignment --------------------- */
+
+typedef struct TableSortRow { char *lineText; char *key; } TableSortRow;
+static int g_tableSortNumeric = 0, g_tableSortDescending = 0;
+
+static int table_cell_is_numeric(const char *cell) {
+    while (*cell == ' ' || *cell == '\t') cell++;
+    if (!*cell) return 0;
+    char *end = NULL;
+    strtod(cell, &end);
+    if (end == cell) return 0;
+    while (*end == ' ' || *end == '\t') end++;
+    return *end == 0;
+}
+
+static int compare_table_sort_rows(const void *a, const void *b) {
+    const char *keyA = ((const TableSortRow *)a)->key;
+    const char *keyB = ((const TableSortRow *)b)->key;
+    if (!keyA) keyA = ""; if (!keyB) keyB = "";
+    int result;
+    if (g_tableSortNumeric) {
+        double valueA = strtod(keyA, NULL), valueB = strtod(keyB, NULL);
+        result = valueA < valueB ? -1 : (valueA > valueB ? 1 : 0);
+    } else {
+        result = StrCmpIA(keyA, keyB);
+    }
+    return g_tableSortDescending ? -result : result;
+}
+
+/* Reorders the data rows of the table the caret is in by the cell in the
+   caret's column - numerically if every data row's cell there parses as a
+   plain number, case-insensitively as text otherwise. The header and
+   separator rows are left exactly where they are. */
+static void sort_table_rows(int descending) {
+    TableCaretInfo info;
+    if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
+    int dataRowCount = info.lastLine - info.firstLine - 1;
+    if (dataRowCount < 2) return; /* nothing to reorder */
+
+    TableSortRow *rows = (TableSortRow *)calloc((size_t)dataRowCount, sizeof(TableSortRow));
+    if (!rows) return;
+    int numeric = 1;
+    for (int i = 0; i < dataRowCount; i++) {
+        rows[i].lineText = editor_line_text(info.firstLine + 2 + i, NULL);
+        char *cells[128];
+        int count = table_row_cells(rows[i].lineText ? rows[i].lineText : "", cells, 128);
+        const char *cell = info.column < count && cells[info.column] ? cells[info.column] : "";
+        rows[i].key = _strdup(cell);
+        if (numeric && !table_cell_is_numeric(cell)) numeric = 0;
+        free_row_cells(cells, count);
+    }
+
+    g_tableSortNumeric = numeric;
+    g_tableSortDescending = descending;
+    qsort(rows, (size_t)dataRowCount, sizeof(TableSortRow), compare_table_sort_rows);
+
+    char *header = editor_line_text(info.firstLine, NULL);
+    char *separator = editor_line_text(info.firstLine + 1, NULL);
+    const char *eol = editor_eol_sequence();
+    char *out = NULL; size_t outLength = 0, outCapacity = 0;
+    /* Every row (including the last) gets a trailing eol, the same shape
+       insert_table_column_at()/delete_table_column_at_cursor() above build -
+       the SCI_REPLACETARGET range below always extends through the original
+       last row's own trailing eol (or the end of file), matching that. */
+    int ok = append_dynamic(&out, &outLength, &outCapacity, header ? header : "") &&
+             append_dynamic(&out, &outLength, &outCapacity, eol) &&
+             append_dynamic(&out, &outLength, &outCapacity, separator ? separator : "") &&
+             append_dynamic(&out, &outLength, &outCapacity, eol);
+    for (int i = 0; ok && i < dataRowCount; i++) {
+        ok = append_dynamic(&out, &outLength, &outCapacity, rows[i].lineText ? rows[i].lineText : "") &&
+             append_dynamic(&out, &outLength, &outCapacity, eol);
+    }
+    free(header);
+    free(separator);
+    for (int i = 0; i < dataRowCount; i++) { free(rows[i].lineText); free(rows[i].key); }
+    free(rows);
+    if (!ok || !out) { free(out); return; }
+
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
+    int replaceEnd = info.lastLine + 1 < lineCount
+        ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0)
+        : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
+    SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)outLength, (LPARAM)out);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(out);
+    SetFocus(g_hEdit);
+}
+
+/* Sets the GFM alignment marker (":---", ":---:", "---:", or plain "---")
+   of the caret's column in the table's separator row, leaving every other
+   column's existing alignment untouched. Re-running with the same marker is
+   idempotent since the existing colons are replaced outright, not toggled. */
+static void set_table_column_alignment(const char *marker) {
+    TableCaretInfo info;
+    if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
+
+    int separatorLine = info.firstLine + 1;
+    char *separator = editor_line_text(separatorLine, NULL);
+    char *cells[128];
+    int count = table_row_cells(separator ? separator : "", cells, 128);
+    if (info.column < 0 || info.column >= count) {
+        free_row_cells(cells, count);
+        free(separator);
+        report_not_in_table();
+        return;
+    }
+    free(cells[info.column]);
+    cells[info.column] = _strdup(marker);
+
+    char *out = NULL; size_t outLength = 0, outCapacity = 0;
+    int ok = append_dynamic(&out, &outLength, &outCapacity, "|");
+    for (int c = 0; ok && c < count; c++) {
+        const char *cell = cells[c] ? cells[c] : "---";
+        ok = append_dynamic(&out, &outLength, &outCapacity, " ") &&
+             append_dynamic(&out, &outLength, &outCapacity, cell) &&
+             append_dynamic(&out, &outLength, &outCapacity, " |");
+    }
+    free_row_cells(cells, count);
+    free(separator);
+    if (!ok || !out) { free(out); return; }
+
+    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)separatorLine, 0);
+    int replaceEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)separatorLine, 0);
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
+    SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)outLength, (LPARAM)out);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(out);
+    SetFocus(g_hEdit);
+}
+
 /* ---- folder tools and command palette ---------------------------------- */
 
 typedef struct WorkspaceFiles {
@@ -8075,12 +8667,20 @@ static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *direct
     FindClose(search);
 }
 
-static int collect_workspace_files(WorkspaceFiles *files) {
+static int collect_workspace_files_at(WorkspaceFiles *files, const WCHAR *root) {
     memset(files, 0, sizeof(*files));
-    files->root = choose_workspace_folder();
+    files->root = wcsdup_heap(root);
     if (!files->root) return 0;
     enumerate_workspace_files(files, files->root, 0);
     return 1;
+}
+
+static int collect_workspace_files(WorkspaceFiles *files) {
+    WCHAR *root = choose_workspace_folder();
+    if (!root) { memset(files, 0, sizeof(*files)); return 0; }
+    int ok = collect_workspace_files_at(files, root);
+    free(root);
+    return ok;
 }
 
 /* Run Git directly and capture stdout/stderr without cmd.exe re-parsing the
@@ -8221,9 +8821,9 @@ static void do_git_changes(void) {
     free_workspace_files(&changes);
 }
 
-static void do_quick_open(void) {
+static void do_quick_open_in(const WCHAR *root) {
     WorkspaceFiles files;
-    if (!collect_workspace_files(&files)) return;
+    if (!collect_workspace_files_at(&files, root)) return;
     if (!files.count) {
         MessageBoxW(g_hMainWnd, L"No supported text files were found in that folder.",
                     L"Quick Open", MB_OK | MB_ICONINFORMATION);
@@ -8234,6 +8834,47 @@ static void do_quick_open(void) {
                                       files.labels, files.count);
     if (selected >= 0 && selected < files.count) open_file_in_tab(files.paths[selected]);
     free_workspace_files(&files);
+}
+
+static void do_quick_open(void) {
+    WCHAR *root = choose_workspace_folder();
+    if (!root) return;
+    do_quick_open_in(root);
+    free(root);
+}
+
+/* Opens a workspace folder and immediately lets the user fuzzy-pick a file
+   from it, same as Quick Open - the folder is remembered so Recent
+   Workspaces can return to it without browsing for it again. */
+static void do_open_workspace(void) {
+    WCHAR *root = choose_workspace_folder();
+    if (!root) return;
+    replace_wstring(&g_currentWorkspaceFolder, root);
+    add_recent_folder(root);
+    save_workspace_settings();
+    refresh_menu(g_hMainWnd);
+    do_quick_open_in(root);
+    free(root);
+}
+
+static void do_open_recent_workspace(int index) {
+    if (index < 0 || index >= g_recentFolderCount) return;
+    WCHAR *root = wcsdup_heap(g_recentFolders[index]);
+    if (!root) return;
+    DWORD attrs = GetFileAttributesW(root);
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        MessageBoxW(g_hMainWnd, L"That folder could not be found.", L"MarkEdit",
+                    MB_OK | MB_ICONINFORMATION);
+        remove_recent_folder(root);
+        refresh_menu(g_hMainWnd);
+        free(root);
+        return;
+    }
+    replace_wstring(&g_currentWorkspaceFolder, root);
+    add_recent_folder(root);
+    save_workspace_settings();
+    do_quick_open_in(root);
+    free(root);
 }
 
 static void do_find_in_folder(void) {
@@ -8300,13 +8941,275 @@ static void do_find_in_folder(void) {
     free_workspace_files(&results);
 }
 
+/* Finds the open tab (if any) showing `path`, the same case-insensitive
+   comparison open_file_in_tab() uses to detect an already-open document. */
+static int find_open_document_for_path(const WCHAR *path) {
+    for (int i = 0; i < g_documentCount; i++) {
+        if (g_documents[i].path && _wcsicmp(g_documents[i].path, path) == 0) return i;
+    }
+    return -1;
+}
+
+/* Silently replaces a clean (non-dirty) document's buffer with freshly
+   written content - used after a workspace replace changes a file that's
+   open in a tab but has no unsaved edits to lose, so the tab reflects the
+   new content instead of going stale. Swaps the shared editor's document
+   pointer the same transient way get_document_text() does, so this works
+   for a background tab without visibly switching to it. */
+static void reload_document_buffer(int index, const char *content) {
+    if (!g_hEdit || index < 0 || index >= g_documentCount) return;
+    sptr_t current = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    int oldSwitching = g_switchingDocument;
+    g_switchingDocument = 1;
+    if (current != g_documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    set_edit_text(g_hEdit, content);
+    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    if (current != g_documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)current);
+    g_switchingDocument = oldSwitching;
+    g_documents[index].dirty = 0;
+    record_document_file_time(index);
+    update_tab_label(index);
+    update_document_mapping();
+    if (index == g_activeDocument) {
+        update_preview();
+        update_title();
+        update_outline();
+    }
+}
+
+/* Returns a newly allocated copy of `line` with every case-insensitive
+   occurrence of `find` replaced by `replace`, or NULL if `find` doesn't
+   occur (or is empty - callers must not pass one, since StrStrIA would
+   "find" it at every position and loop forever). */
+static char *replace_all_in_line(const char *line, const char *find, const char *replace) {
+    if (!find[0] || !StrStrIA(line, find)) return NULL;
+    size_t findLen = strlen(find), replaceLen = strlen(replace);
+    size_t cap = strlen(line) + replaceLen + 64;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    size_t outLen = 0;
+    const char *cursor = line;
+    const char *hit;
+    while ((hit = StrStrIA(cursor, find)) != NULL) {
+        size_t prefixLen = (size_t)(hit - cursor);
+        size_t needed = outLen + prefixLen + replaceLen + 1;
+        if (needed > cap) {
+            cap = needed * 2;
+            char *grown = (char *)realloc(out, cap);
+            if (!grown) { free(out); return NULL; }
+            out = grown;
+        }
+        memcpy(out + outLen, cursor, prefixLen); outLen += prefixLen;
+        memcpy(out + outLen, replace, replaceLen); outLen += replaceLen;
+        cursor = hit + findLen;
+    }
+    size_t restLen = strlen(cursor);
+    size_t needed = outLen + restLen + 1;
+    if (needed > cap) {
+        char *grown = (char *)realloc(out, needed);
+        if (!grown) { free(out); return NULL; }
+        out = grown;
+    }
+    memcpy(out + outLen, cursor, restLen); outLen += restLen;
+    out[outLen] = 0;
+    return out;
+}
+
+/* Applies the checked matches: one file at a time, replaces every
+   occurrence of `find` with `replace` on each accepted line only (matching
+   the line-level granularity the review checklist offers), then writes the
+   result with write_file_atomic(). `matches` must be sorted by path, which
+   the scan in do_replace_in_workspace() below already produces. */
+static void apply_workspace_replace(ReplaceMatch *matches, int count, const char *find, const char *replace) {
+    int filesChanged = 0;
+    int i = 0;
+    while (i < count) {
+        const WCHAR *path = matches[i].path;
+        int fileEnd = i;
+        while (fileEnd < count && _wcsicmp(matches[fileEnd].path, path) == 0) fileEnd++;
+
+        int anyAccepted = 0;
+        for (int j = i; j < fileEnd; j++) if (matches[j].accepted) { anyAccepted = 1; break; }
+        if (!anyAccepted) { i = fileEnd; continue; }
+
+        int openIndex = find_open_document_for_path(path);
+        int length = 0;
+        char *content = (openIndex >= 0) ? get_document_text(openIndex, &length) : read_bytes_file(path, &length);
+        if (!content) { i = fileEnd; continue; }
+        int hasBom = openIndex >= 0 ? g_documents[openIndex].hasBom : has_utf8_bom(content, length);
+        char *body = content + (openIndex < 0 && hasBom ? 3 : 0);
+
+        size_t outCapacity = (size_t)length + 256;
+        char *out = (char *)malloc(outCapacity);
+        size_t outLength = 0;
+        int changed = 0;
+        if (out) {
+            char *cursor = body;
+            int lineNumber = 1;
+            while (*cursor) {
+                char *end = strchr(cursor, '\n');
+                if (end) *end = 0;
+                int accept = 0;
+                for (int j = i; j < fileEnd; j++)
+                    if (matches[j].line == lineNumber && matches[j].accepted) { accept = 1; break; }
+                char *lineOut = accept ? replace_all_in_line(cursor, find, replace) : NULL;
+                const char *piece = lineOut ? lineOut : cursor;
+                size_t pieceLen = strlen(piece);
+                if (lineOut) changed = 1;
+                size_t needed = outLength + pieceLen + 2;
+                if (needed > outCapacity) {
+                    outCapacity = needed * 2;
+                    char *grown = (char *)realloc(out, outCapacity);
+                    if (!grown) { free(lineOut); free(out); out = NULL; break; }
+                    out = grown;
+                }
+                memcpy(out + outLength, piece, pieceLen); outLength += pieceLen;
+                free(lineOut);
+                if (!end) break;
+                *end = '\n';
+                out[outLength++] = '\n';
+                cursor = end + 1;
+                lineNumber++;
+            }
+            if (out) out[outLength] = 0;
+        }
+
+        if (out && changed) {
+            WCHAR *ioPath = extended_path(path);
+            const WCHAR *target = ioPath ? ioPath : path;
+            if (write_file_atomic(target, out, outLength, hasBom)) {
+                filesChanged++;
+                if (openIndex >= 0) {
+                    if (g_documents[openIndex].dirty) {
+                        g_documents[openIndex].externalChanged = 1;
+                        if (g_hTabs) InvalidateRect(g_hTabs, NULL, FALSE);
+                    } else {
+                        reload_document_buffer(openIndex, out);
+                    }
+                }
+            } else {
+                MessageBoxW(g_hMainWnd, L"Could not write one of the files; its matches were skipped.",
+                            L"Replace in Folder", MB_OK | MB_ICONWARNING);
+            }
+            free(ioPath);
+        }
+        free(out);
+        free(content);
+        i = fileEnd;
+    }
+    if (filesChanged == 0) {
+        MessageBoxW(g_hMainWnd, L"No files were changed.", L"Replace in Folder", MB_OK | MB_ICONINFORMATION);
+    } else {
+        WCHAR message[128];
+        swprintf(message, 128, L"Updated %d file%ls.", filesChanged, filesChanged == 1 ? L"" : L"s");
+        MessageBoxW(g_hMainWnd, message, L"Replace in Folder", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+/* Same folder enumeration and line scan as do_find_in_folder(), but every
+   match is collected up front (as a ReplaceMatch, sorted by path since the
+   file loop produces them that way) and reviewed with checkboxes before
+   anything is written - see show_replace_review_dialog(). */
+static void do_replace_in_workspace(void) {
+    WorkspaceFiles files;
+    if (!collect_workspace_files(&files)) return;
+
+    WCHAR findWide[256];
+    if (!show_text_input(L"Replace in Folder", L"Text to find (case-insensitive):", L"",
+                         findWide, sizeof(findWide) / sizeof(findWide[0])) || !findWide[0]) {
+        free_workspace_files(&files); return;
+    }
+    WCHAR replaceWide[256];
+    if (!show_text_input(L"Replace in Folder", L"Replace with:", L"",
+                         replaceWide, sizeof(replaceWide) / sizeof(replaceWide[0]))) {
+        free_workspace_files(&files); return;
+    }
+    char *find = to_utf8(findWide);
+    char *replace = to_utf8(replaceWide);
+    if (!find || !replace) { free(find); free(replace); free_workspace_files(&files); return; }
+
+    ReplaceMatch *matches = NULL;
+    int matchCount = 0, matchCapacity = 0;
+    for (int i = 0; i < files.count && matchCount < 2000; i++) {
+        WIN32_FILE_ATTRIBUTE_DATA attributes;
+        if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes) ||
+            attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) continue;
+        int length = 0;
+        char *content = read_bytes_file(files.paths[i], &length);
+        if (!content) continue;
+        char *cursor = content;
+        if (has_utf8_bom(cursor, length)) cursor += 3;
+        int lineNumber = 1;
+        while (*cursor && matchCount < 2000) {
+            char *end = strchr(cursor, '\n');
+            if (end) *end = 0;
+            if (StrStrIA(cursor, find)) {
+                char snippet[181];
+                size_t snippetLength = strlen(cursor);
+                if (snippetLength > 180) snippetLength = 180;
+                memcpy(snippet, cursor, snippetLength); snippet[snippetLength] = 0;
+                while (snippetLength && (snippet[snippetLength - 1] == '\r' ||
+                       snippet[snippetLength - 1] == '\n')) snippet[--snippetLength] = 0;
+                WCHAR *wideSnippet = to_wide(snippet);
+                size_t capacity = wcslen(files.labels[i]) + (wideSnippet ? wcslen(wideSnippet) : 0) + 48;
+                WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+                if (label) {
+                    swprintf(label, capacity, L"%ls:%d — %ls", files.labels[i], lineNumber,
+                             wideSnippet ? wideSnippet : L"");
+                    if (matchCount >= matchCapacity) {
+                        int next = matchCapacity ? matchCapacity * 2 : 128;
+                        ReplaceMatch *grown = (ReplaceMatch *)realloc(matches, (size_t)next * sizeof(ReplaceMatch));
+                        if (grown) { matches = grown; matchCapacity = next; }
+                    }
+                    if (matchCount < matchCapacity) {
+                        matches[matchCount].path = wcsdup_heap(files.paths[i]);
+                        matches[matchCount].label = label;
+                        matches[matchCount].line = lineNumber;
+                        matches[matchCount].accepted = 1;
+                        matchCount++;
+                        label = NULL;
+                    }
+                }
+                free(label);
+                free(wideSnippet);
+            }
+            if (!end) break;
+            *end = '\n'; cursor = end + 1; lineNumber++;
+        }
+        free(content);
+    }
+    free_workspace_files(&files);
+
+    if (matchCount == 0) {
+        MessageBoxW(g_hMainWnd, L"No matches were found in that folder.", L"Replace in Folder",
+                    MB_OK | MB_ICONINFORMATION);
+        free(find); free(replace);
+        return;
+    }
+
+    if (show_replace_review_dialog(matches, matchCount))
+        apply_workspace_replace(matches, matchCount, find, replace);
+
+    for (int i = 0; i < matchCount; i++) { free(matches[i].path); free(matches[i].label); }
+    free(matches);
+    free(find);
+    free(replace);
+}
+
 typedef struct PaletteCommand { const WCHAR *label; WORD command; } PaletteCommand;
 static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"File: New", IDM_FILE_NEW}, {L"File: Open", IDM_FILE_OPEN},
     {L"File: Insert File at Cursor", IDM_FILE_INSERT},
     {L"File: Quick Open in Folder", IDM_FILE_QUICK_OPEN},
-    {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Save", IDM_FILE_SAVE},
-    {L"File: Save As", IDM_FILE_SAVEAS}, {L"File: Export Rendered HTML", IDM_FILE_EXPORT_HTML},
+    {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Replace in Folder", IDM_REPLACE_WORKSPACE},
+    {L"File: Open Workspace Folder", IDM_OPEN_WORKSPACE},
+    {L"File: Settings", IDM_SETTINGS},
+    {L"File: Save", IDM_FILE_SAVE},
+    {L"File: Save As", IDM_FILE_SAVEAS}, {L"File: Save All", IDM_FILE_SAVE_ALL},
+    {L"File: Export Rendered HTML", IDM_FILE_EXPORT_HTML},
     {L"File: Export Rendered PDF", IDM_FILE_EXPORT_PDF}, {L"File: Print Rendered Preview", IDM_FILE_PRINT},
     {L"File: Open Terminal Here", IDM_FILE_OPEN_TERMINAL}, {L"File: Show in Explorer", IDM_FILE_SHOW_EXPLORER},
     {L"File: Close Tab", IDM_FILE_CLOSE},
@@ -8348,6 +9251,11 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Format: Insert Table Column Left", IDM_FMT_TABLE_COL_LEFT},
     {L"Format: Insert Table Column Right", IDM_FMT_TABLE_COL_RIGHT},
     {L"Format: Delete Table Column", IDM_FMT_TABLE_COL_DELETE},
+    {L"Format: Sort Table Rows Ascending", IDM_TABLE_SORT_ASC},
+    {L"Format: Sort Table Rows Descending", IDM_TABLE_SORT_DESC},
+    {L"Format: Align Table Column Left", IDM_TABLE_ALIGN_LEFT},
+    {L"Format: Align Table Column Center", IDM_TABLE_ALIGN_CENTER},
+    {L"Format: Align Table Column Right", IDM_TABLE_ALIGN_RIGHT},
     {L"Format: Format JSON", IDM_FMT_JSON_PRETTY},
     {L"Format: Minify JSON", IDM_FMT_JSON_MINIFY}, {L"Format: Font", IDM_FORMAT_FONT},
     {L"Run: Run File", IDM_RUN_FILE}, {L"Run: Debug File", IDM_DEBUG_FILE},
@@ -8359,6 +9267,7 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"View: Toggle Outline", IDM_VIEW_OUTLINE}, {L"View: Toggle Minimap", IDM_VIEW_MINIMAP},
     {L"View: Focus Mode", IDM_VIEW_FOCUS_MODE},
     {L"View: Next Tab", IDM_VIEW_NEXT_TAB}, {L"View: Previous Tab", IDM_VIEW_PREVIOUS_TAB},
+    {L"View: Cycle Panes", IDM_VIEW_CYCLE_PANE},
     {L"View: Preview on Left", IDM_VIEW_PREVIEW_ON_LEFT},
     {L"View: Word Wrap", IDM_VIEW_WORD_WRAP}, {L"View: Spell Check", IDM_VIEW_SPELL_CHECK},
     {L"View: Spell Check Language", IDM_VIEW_SPELL_LANGUAGE}, {L"View: Show Whitespace", IDM_VIEW_SHOW_WHITESPACE},
@@ -8409,9 +9318,291 @@ static void select_theme(HWND hwnd, int darkMode) {
     refresh_menu(hwnd);
 }
 
+static int g_highContrastActive = 0;
+
+/* Detects whether Windows' high-contrast accessibility mode is on and, if
+   it just changed, picks whichever of the app's own two themes better
+   matches the system's window background - high contrast is a distinct
+   system setting from this app's own light/dark toggle, and this app has no
+   dedicated third palette for it, so the closest pragmatic response is to
+   follow the OS's own light/dark leaning rather than build a whole separate
+   rendering path. Wired to WM_SYSCOLORCHANGE and the "ImmersiveColorSet"
+   WM_SETTINGCHANGE notification, the two ways Windows announces a system
+   theme/contrast change, plus once at startup. Turning high contrast back
+   off leaves whichever theme was already selected alone. */
+static void detect_high_contrast(void) {
+    HIGHCONTRASTW hc = {0};
+    hc.cbSize = sizeof(hc);
+    int active = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) &&
+                 (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    if (active == g_highContrastActive) return;
+    g_highContrastActive = active;
+    if (!active || !g_hMainWnd) return;
+    COLORREF windowColor = GetSysColor(COLOR_WINDOW);
+    int luminance = (GetRValue(windowColor) * 299 + GetGValue(windowColor) * 587 +
+                     GetBValue(windowColor) * 114) / 1000;
+    select_theme(g_hMainWnd, luminance < 128);
+}
+
+/* ---- Settings dialog ----------------------------------------------------
+   A single window over five categories (left-hand list, one panel of
+   controls shown at a time) that just launches or toggles the same actions
+   already reachable from the View menu one at a time - do_choose_font(),
+   select_theme(), toggle_word_wrap(), etc. Every control applies and
+   persists immediately via whichever of those it calls, the same as
+   clicking the equivalent menu item would, so there's nothing to commit or
+   revert: Close (and Esc) just dismiss the window. */
+typedef struct SettingsDialogState {
+    HWND categoryList;
+    int activeCategory;
+    HWND themeLightRadio, themeDarkRadio;
+    HWND fontLabel, fontChooseButton;
+    HWND wordWrapCheck;
+    HWND previewOnLeftCheck, customCssCaption, customCssLabel, customCssChooseButton, customCssClearButton;
+    HWND spellCheckCheck, showWhitespaceCheck, indentGuidesCheck, minimapCheck;
+} SettingsDialogState;
+
+static void update_settings_font_label(SettingsDialogState *state) {
+    WCHAR text[MAX_FONT_FACE_NAME + 32];
+    swprintf(text, sizeof(text) / sizeof(text[0]), L"%ls, %dpt", g_fontFaceName, g_fontPointSize);
+    SetWindowTextW(state->fontLabel, text);
+}
+
+static void update_settings_css_label(SettingsDialogState *state) {
+    SetWindowTextW(state->customCssLabel, g_customCssPath && g_customCssPath[0] ? g_customCssPath : L"(none)");
+    EnableWindow(state->customCssClearButton, g_customCssPath && g_customCssPath[0]);
+}
+
+static void update_settings_category(SettingsDialogState *state) {
+    HWND all[] = {
+        state->themeLightRadio, state->themeDarkRadio,
+        state->fontLabel, state->fontChooseButton,
+        state->wordWrapCheck,
+        state->previewOnLeftCheck, state->customCssCaption, state->customCssLabel,
+        state->customCssChooseButton, state->customCssClearButton,
+        state->spellCheckCheck, state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
+    };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
+        if (all[i]) ShowWindow(all[i], SW_HIDE);
+    switch (state->activeCategory) {
+        case 0:
+            ShowWindow(state->themeLightRadio, SW_SHOW);
+            ShowWindow(state->themeDarkRadio, SW_SHOW);
+            break;
+        case 1:
+            ShowWindow(state->fontLabel, SW_SHOW);
+            ShowWindow(state->fontChooseButton, SW_SHOW);
+            break;
+        case 2:
+            ShowWindow(state->wordWrapCheck, SW_SHOW);
+            break;
+        case 3:
+            ShowWindow(state->previewOnLeftCheck, SW_SHOW);
+            ShowWindow(state->customCssCaption, SW_SHOW);
+            ShowWindow(state->customCssLabel, SW_SHOW);
+            ShowWindow(state->customCssChooseButton, SW_SHOW);
+            ShowWindow(state->customCssClearButton, SW_SHOW);
+            break;
+        case 4:
+            ShowWindow(state->spellCheckCheck, SW_SHOW);
+            ShowWindow(state->showWhitespaceCheck, SW_SHOW);
+            ShowWindow(state->indentGuidesCheck, SW_SHOW);
+            ShowWindow(state->minimapCheck, SW_SHOW);
+            break;
+    }
+}
+
+/* The shared g_popupBkBrush is normally created once when a popup dialog
+   opens and never changes for that dialog's lifetime (see its own comment
+   above) - a fine assumption for every other popup here, none of which can
+   change the theme while they're open. This one can (the Appearance
+   radios), so picking a theme needs to also recreate that brush and re-skin
+   the controls that were themed at creation time, then force everything to
+   repaint with the new colors instead of leaving stale ones on screen. */
+static void refresh_settings_dialog_theme(HWND hwnd, SettingsDialogState *state) {
+    popup_dialog_theme_created(hwnd);
+    HWND themedControls[] = { state->categoryList, state->wordWrapCheck, state->previewOnLeftCheck,
+                              state->spellCheckCheck, state->showWhitespaceCheck, state->indentGuidesCheck,
+                              state->minimapCheck, state->themeLightRadio, state->themeDarkRadio };
+    for (size_t i = 0; i < sizeof(themedControls) / sizeof(themedControls[0]); i++)
+        SetWindowTheme(themedControls[i], g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    RedrawWindow(hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    SettingsDialogState *state = (SettingsDialogState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_CREATE) {
+        state = (SettingsDialogState *)((CREATESTRUCTW *)lParam)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+        HINSTANCE inst = GetModuleHandleW(NULL);
+        const WCHAR *categories[] = { L"Appearance", L"Font", L"Word Wrap", L"Preview", L"Editor" };
+        state->categoryList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+            LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+            12, 12, 140, 300, hwnd, (HMENU)10, inst, NULL);
+        for (int i = 0; i < 5; i++) SendMessageW(state->categoryList, LB_ADDSTRING, 0, (LPARAM)categories[i]);
+        SetWindowTheme(state->categoryList, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+
+        int px = 168, py = 16;
+        state->themeLightRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Light",
+            WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+            px, py, 220, 22, hwnd, (HMENU)20, inst, NULL);
+        state->themeDarkRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Dark",
+            WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+            px, py + 28, 220, 22, hwnd, (HMENU)21, inst, NULL);
+        SendMessageW(g_previewDarkMode ? state->themeDarkRadio : state->themeLightRadio, BM_SETCHECK, BST_CHECKED, 0);
+
+        state->fontLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD, px, py, 320, 20, hwnd, NULL, inst, NULL);
+        state->fontChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose Font...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px, py + 28, 140, 26, hwnd, (HMENU)30, inst, NULL);
+
+        state->wordWrapCheck = CreateWindowExW(0, L"BUTTON", L"Wrap long lines in the editor",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py, 320, 22, hwnd, (HMENU)40, inst, NULL);
+        SendMessageW(state->wordWrapCheck, BM_SETCHECK, g_wordWrap ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        state->previewOnLeftCheck = CreateWindowExW(0, L"BUTTON", L"Show preview on the left",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py, 320, 22, hwnd, (HMENU)50, inst, NULL);
+        SendMessageW(state->previewOnLeftCheck, BM_SETCHECK, g_previewOnLeft ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->customCssCaption = CreateWindowExW(0, L"STATIC", L"Custom preview CSS:", WS_CHILD,
+            px, py + 36, 320, 20, hwnd, NULL, inst, NULL);
+        state->customCssLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD, px, py + 58, 320, 20, hwnd, NULL, inst, NULL);
+        state->customCssChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose CSS...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px, py + 84, 120, 26, hwnd, (HMENU)51, inst, NULL);
+        state->customCssClearButton = CreateWindowExW(0, L"BUTTON", L"Clear",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 128, py + 84, 90, 26, hwnd, (HMENU)52, inst, NULL);
+
+        state->spellCheckCheck = CreateWindowExW(0, L"BUTTON", L"Spell check",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py, 320, 22, hwnd, (HMENU)60, inst, NULL);
+        SendMessageW(state->spellCheckCheck, BM_SETCHECK, g_spellCheckEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnableWindow(state->spellCheckCheck, g_spellChecker != NULL);
+        state->showWhitespaceCheck = CreateWindowExW(0, L"BUTTON", L"Show whitespace",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py + 28, 320, 22, hwnd, (HMENU)61, inst, NULL);
+        SendMessageW(state->showWhitespaceCheck, BM_SETCHECK, g_showWhitespace ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->indentGuidesCheck = CreateWindowExW(0, L"BUTTON", L"Indent guides",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py + 56, 320, 22, hwnd, (HMENU)62, inst, NULL);
+        SendMessageW(state->indentGuidesCheck, BM_SETCHECK, g_indentGuides ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->minimapCheck = CreateWindowExW(0, L"BUTTON", L"Minimap",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py + 84, 320, 22, hwnd, (HMENU)63, inst, NULL);
+        SendMessageW(state->minimapCheck, BM_SETCHECK, g_minimapVisible ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        HWND checkboxes[] = { state->wordWrapCheck, state->previewOnLeftCheck, state->spellCheckCheck,
+                              state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
+                              state->themeLightRadio, state->themeDarkRadio };
+        for (size_t i = 0; i < sizeof(checkboxes) / sizeof(checkboxes[0]); i++)
+            SetWindowTheme(checkboxes[i], g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+
+        CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+            496, 330, 78, 26, hwnd, (HMENU)IDCANCEL, inst, NULL);
+
+        update_settings_font_label(state);
+        update_settings_css_label(state);
+        SendMessageW(state->categoryList, LB_SETCURSEL, 0, 0);
+        update_settings_category(state);
+        SetFocus(state->categoryList);
+        popup_dialog_theme_created(hwnd);
+        return 0;
+    }
+    if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    switch (msg) {
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORBTN: {
+            LRESULT handled = 0;
+            LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
+            if (handled) return result;
+            break;
+        }
+        case WM_CTLCOLORLISTBOX: {
+            HDC hdc = (HDC)wParam;
+            SetTextColor(hdc, popup_fg_color());
+            SetBkColor(hdc, popup_bg_color());
+            return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        }
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
+            if (mis->CtlType == ODT_LISTBOX) { measure_themed_listbox_item(state->categoryList, mis); return TRUE; }
+            break;
+        }
+        case WM_DRAWITEM: {
+            const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+            if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
+            if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == state->categoryList) {
+                draw_themed_listbox_item(state->categoryList, dis);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_NCDESTROY:
+            popup_dialog_theme_destroyed();
+            break;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == 10 && HIWORD(wParam) == LBN_SELCHANGE) {
+                int selection = (int)SendMessageW(state->categoryList, LB_GETCURSEL, 0, 0);
+                if (selection != LB_ERR) { state->activeCategory = selection; update_settings_category(state); }
+                return 0;
+            }
+            if (HIWORD(wParam) != BN_CLICKED) break;
+            switch (LOWORD(wParam)) {
+                case 20: select_theme(g_hMainWnd, 0); refresh_settings_dialog_theme(hwnd, state); break;
+                case 21: select_theme(g_hMainWnd, 1); refresh_settings_dialog_theme(hwnd, state); break;
+                case 30: do_choose_font(); update_settings_font_label(state); break;
+                case 40: toggle_word_wrap(g_hMainWnd); break;
+                case 50: toggle_panel_sides(g_hMainWnd); break;
+                case 51: do_choose_custom_css(); update_settings_css_label(state); break;
+                case 52: clear_custom_css(); update_settings_css_label(state); break;
+                case 60: toggle_spell_check(g_hMainWnd); break;
+                case 61: toggle_show_whitespace(g_hMainWnd); break;
+                case 62: toggle_indent_guides(g_hMainWnd); break;
+                case 63: toggle_minimap(g_hMainWnd); break;
+                case IDCANCEL: DestroyWindow(hwnd); break;
+            }
+            return 0;
+        case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void show_settings_dialog(void) {
+    static int registered = 0;
+    if (!registered) {
+        WNDCLASSW wc = {0};
+        wc.lpfnWndProc = SettingsWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"MarkEditSettingsDialog";
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+        registered = 1;
+    }
+    SettingsDialogState state = {0};
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditSettingsDialog", L"Settings",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 600, 400, g_hMainWnd, NULL,
+        GetModuleHandleW(NULL), &state);
+    if (!dialog) return;
+    RECT owner, rc;
+    GetWindowRect(g_hMainWnd, &owner); GetWindowRect(dialog, &rc);
+    SetWindowPos(dialog, HWND_TOP,
+        owner.left + ((owner.right - owner.left) - (rc.right - rc.left)) / 2,
+        owner.top + ((owner.bottom - owner.top) - (rc.bottom - rc.top)) / 2,
+        0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    EnableWindow(g_hMainWnd, FALSE);
+    MSG message = {0}; int loopResult = -1;
+    while (IsWindow(dialog) && (loopResult = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(g_hMainWnd, TRUE);
+    SetForegroundWindow(g_hMainWnd);
+    if (loopResult == 0) PostQuitMessage((int)message.wParam);
+}
+
 static void handle_main_command(HWND hwnd, WORD cmd) {
     if (cmd >= IDM_FILE_RECENT_0 && cmd < IDM_FILE_RECENT_0 + MAX_RECENT_FILES) {
         do_open_recent(cmd - IDM_FILE_RECENT_0);
+        return;
+    }
+    if (cmd >= IDM_RECENT_WORKSPACE && cmd < IDM_RECENT_WORKSPACE + MAX_RECENT_FOLDERS) {
+        do_open_recent_workspace(cmd - IDM_RECENT_WORKSPACE);
         return;
     }
     if (cmd >= IDM_FMT_BOLD && cmd <= IDM_FMT_ALERT) {
@@ -8425,8 +9616,15 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FILE_INSERT: do_insert_file(); break;
         case IDM_FILE_QUICK_OPEN: do_quick_open(); break;
         case IDM_FILE_FIND_FOLDER: do_find_in_folder(); break;
+        case IDM_REPLACE_WORKSPACE: do_replace_in_workspace(); break;
+        case IDM_OPEN_WORKSPACE: do_open_workspace(); break;
+        case IDM_RECENT_WORKSPACE_CLEAR:
+            clear_recent_folders();
+            refresh_menu(hwnd);
+            break;
         case IDM_FILE_SAVE: do_save(); break;
         case IDM_FILE_SAVEAS: do_saveas(); break;
+        case IDM_FILE_SAVE_ALL: do_save_all(); break;
         case IDM_FILE_EXPORT_HTML: do_export_html(); break;
         case IDM_FILE_EXPORT_PDF: prepare_rendered_print(1); break;
         case IDM_FILE_PRINT: prepare_rendered_print(0); break;
@@ -8439,6 +9637,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
             clear_recent_files();
             refresh_menu(hwnd);
             break;
+        case IDM_SETTINGS: show_settings_dialog(); break;
         case IDM_FILE_EXIT: do_exit(); break;
         case IDM_EDIT_UNDO: SendMessageA(g_hEdit, SCI_UNDO, 0, 0); break;
         case IDM_EDIT_REDO: SendMessageA(g_hEdit, SCI_REDO, 0, 0); break;
@@ -8495,6 +9694,11 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FMT_TABLE_COL_LEFT: insert_table_column_relative(0); break;
         case IDM_FMT_TABLE_COL_RIGHT: insert_table_column_relative(1); break;
         case IDM_FMT_TABLE_COL_DELETE: delete_table_column_at_cursor(); break;
+        case IDM_TABLE_SORT_ASC: sort_table_rows(0); break;
+        case IDM_TABLE_SORT_DESC: sort_table_rows(1); break;
+        case IDM_TABLE_ALIGN_LEFT: set_table_column_alignment(":---"); break;
+        case IDM_TABLE_ALIGN_CENTER: set_table_column_alignment(":---:"); break;
+        case IDM_TABLE_ALIGN_RIGHT: set_table_column_alignment("---:"); break;
         case IDM_RUN_FILE: launch_active_source_file(0); break;
         case IDM_DEBUG_FILE: launch_active_source_file(1); break;
         case IDM_DEBUG_CONTINUE: run_debugger_command(IDM_DEBUG_CONTINUE); break;
@@ -8527,6 +9731,8 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_PREVIOUS_TAB:
             if (g_documentCount > 1) switch_document((g_activeDocument + g_documentCount - 1) % g_documentCount);
             break;
+        case IDM_VIEW_CYCLE_PANE: cycle_pane_focus(0); break;
+        case IDM_VIEW_CYCLE_PANE_PREV: cycle_pane_focus(1); break;
         case IDM_VIEW_THEME_GITHUB_LIGHT:
         case IDM_VIEW_THEME_GITHUB_DARK:
             select_theme(hwnd, cmd == IDM_VIEW_THEME_GITHUB_DARK);
@@ -9427,6 +10633,7 @@ static void initialize_main_window(HWND hwnd) {
    after the window is already shown - rather than stretching out the
    startup wait cursor while nothing is on screen yet. */
 static void run_deferred_startup_init(void) {
+    detect_high_contrast();
     if (g_comInitialized) init_spell_checker();
     init_webview();
     if (g_pendingCliFile) {
@@ -9697,6 +10904,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_DROPFILES:
             handle_dropfiles((HDROP)wParam);
             return 0;
+        case WM_SYSCOLORCHANGE:
+            detect_high_contrast();
+            return 0;
+        case WM_SETTINGCHANGE:
+            if (lParam && wcscmp((const WCHAR *)lParam, L"ImmersiveColorSet") == 0) detect_high_contrast();
+            break;
         case WM_NOTIFY: {
             NMHDR *notification = (NMHDR *)lParam;
             if (notification->hwndFrom == g_hTabs && notification->code == TCN_SELCHANGE) {
@@ -9796,6 +11009,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     load_recent_files();
     prune_missing_recent_files();
+    load_recent_folders();
+    load_workspace_settings();
 
     HRESULT comResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     g_comInitialized = SUCCEEDED(comResult);
@@ -9846,6 +11061,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, 'S', IDM_FILE_SAVE },
         { FVIRTKEY | FCONTROL, 'P', IDM_FILE_PRINT },
         { FVIRTKEY | FCONTROL | FSHIFT, 'S', IDM_FILE_SAVEAS },
+        { FVIRTKEY | FCONTROL | FALT, 'S', IDM_FILE_SAVE_ALL },
         { FVIRTKEY | FCONTROL, 'A', IDM_EDIT_SELECTALL },
         { FVIRTKEY | FCONTROL, 'V', IDM_EDIT_PASTE },
         { FVIRTKEY | FCONTROL, 'Y', IDM_EDIT_REDO },
@@ -9874,6 +11090,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, VK_F5, IDM_RUN_FILE },
         { FVIRTKEY, VK_F5, IDM_DEBUG_FILE },
         { FVIRTKEY, VK_F6, IDM_DEBUG_CONTINUE },
+        { FVIRTKEY | FCONTROL, VK_F6, IDM_VIEW_CYCLE_PANE },
+        { FVIRTKEY | FCONTROL | FSHIFT, VK_F6, IDM_VIEW_CYCLE_PANE_PREV },
         { FVIRTKEY, VK_F10, IDM_DEBUG_STEP_OVER },
         { FVIRTKEY | FSHIFT, VK_F11, IDM_DEBUG_STEP_INTO },
         { FVIRTKEY, VK_F9, IDM_DEBUG_BREAKPOINT },
