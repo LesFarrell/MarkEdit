@@ -148,6 +148,12 @@
 #define IDM_FILE_GIT_CHANGES     324
 #define IDM_VIEW_MINIMAP         325
 #define IDM_FILE_INSERT          326
+#define IDM_FMT_TABLE_ROW_ABOVE  327
+#define IDM_FMT_TABLE_ROW_BELOW  328
+#define IDM_FMT_TABLE_ROW_DELETE 329
+#define IDM_FMT_TABLE_COL_LEFT   330
+#define IDM_FMT_TABLE_COL_RIGHT  331
+#define IDM_FMT_TABLE_COL_DELETE 332
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1

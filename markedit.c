@@ -4245,6 +4245,17 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (handled) return result;
             break;
         }
+        /* The results listbox owner-draws its items (WM_DRAWITEM below), but
+           Windows still asks for this to paint whatever the items don't
+           cover - the blank area below the last row, or the whole box when
+           there are only a few results - so without it that space stays the
+           default white regardless of theme. */
+        case WM_CTLCOLORLISTBOX: {
+            HDC hdc = (HDC)wParam;
+            SetTextColor(hdc, popup_fg_color());
+            SetBkColor(hdc, popup_bg_color());
+            return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        }
         case WM_MEASUREITEM: {
             MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
             if (mis->CtlType == ODT_LISTBOX) { measure_themed_listbox_item(state->list, mis); return TRUE; }
@@ -4893,6 +4904,15 @@ static HMENU build_menu(void) {
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_IMAGE, "I&mage");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_TABLE, "&Table");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_TABLE_EDITOR, "Table &Editor...");
+    HMENU hTableOps = CreatePopupMenu();
+    AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_ROW_ABOVE, "Insert Row &Above");
+    AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_ROW_BELOW, "Insert Row &Below");
+    AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_ROW_DELETE, "&Delete Row");
+    AppendMenuA(hTableOps, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_COL_LEFT, "Insert Column &Left");
+    AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_COL_RIGHT, "Insert Column &Right");
+    AppendMenuA(hTableOps, MF_STRING, IDM_FMT_TABLE_COL_DELETE, "Delete Colu&mn");
+    AppendMenuA(hMarkdown, MF_POPUP, (UINT_PTR)hTableOps, "Table Row/Colu&mn");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_CODEBLOCK, "Code Bl&ock");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_FOOTNOTE, "&Footnote");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_HRULE, "&Horizontal Rule");
@@ -7519,13 +7539,21 @@ static int table_row_cells(const char *line, char *cells[], int maximum) {
     const char *cursor = line;
     while (*cursor == ' ' || *cursor == '\t') cursor++;
     if (*cursor == '|') cursor++;
-    while (*cursor && count < maximum) {
-        const char *end = strchr(cursor, '|');
-        if (!end) end = cursor + strlen(cursor);
+
+    /* Trailing whitespace after the row's closing pipe (common when a table
+       was hand-padded or pasted in) is insignificant and must not become a
+       phantom extra cell, so the scan is bounded to strip it up front. */
+    const char *limit = cursor + strlen(cursor);
+    while (limit > cursor && (limit[-1] == ' ' || limit[-1] == '\t')) limit--;
+
+    while (cursor < limit && count < maximum) {
+        const char *end = memchr(cursor, '|', (size_t)(limit - cursor));
+        if (!end) end = limit;
         const char *start = cursor;
         while (start < end && (*start == ' ' || *start == '\t')) start++;
-        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
-        size_t length = (size_t)(end - start);
+        const char *cellEnd = end;
+        while (cellEnd > start && (cellEnd[-1] == ' ' || cellEnd[-1] == '\t')) cellEnd--;
+        size_t length = (size_t)(cellEnd - start);
         char *cell = (char *)malloc(length + 1);
         if (cell) {
             memcpy(cell, start, length);
@@ -7533,9 +7561,8 @@ static int table_row_cells(const char *line, char *cells[], int maximum) {
         }
         cells[count] = cell;
         count++;
-        if (!*end) break;
+        if (end >= limit) break;
         cursor = end + 1;
-        if (!*cursor) break;
     }
     return count;
 }
@@ -7667,6 +7694,262 @@ static void show_table_editor(void) {
     SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)length, (LPARAM)table);
     SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
     free(table);
+    SetFocus(g_hEdit);
+}
+
+/* ---- caret-relative table row/column insert and delete -----------------
+   Quicker alternatives to the Table Editor dialog above: these act directly
+   on whichever table the caret is currently in, and where in it, rather than
+   prompting for a whole new row/column count and rebuilding the table from
+   scratch. */
+
+typedef struct TableCaretInfo {
+    int firstLine, lastLine; /* inclusive line range of the whole table */
+    int row;                 /* 0 = header, 1 = separator, 2+ = data row */
+    int column;               /* 0-based column the caret is in */
+} TableCaretInfo;
+
+/* How many pipe-delimited cells of `line` end strictly before byte `offset`,
+   using the same leading-whitespace/leading-pipe skipping table_row_cells()
+   uses, so the result lines up with that function's own cell indexing. */
+static int table_column_at_offset(const char *line, int offset) {
+    const char *cursor = line;
+    while (*cursor == ' ' || *cursor == '\t') cursor++;
+    if (*cursor == '|') cursor++;
+    int column = 0;
+    for (const char *p = line; p < line + offset && *p; p++) {
+        if (p >= cursor && *p == '|') column++;
+    }
+    return column;
+}
+
+static void free_row_cells(char *cells[], int count) {
+    for (int i = 0; i < count; i++) free(cells[i]);
+}
+
+/* Locates the Markdown table (if any) containing the caret the same way
+   show_table_editor() does, plus which row and column the caret is in.
+   Returns 0 (leaving *info untouched) if the caret isn't in a table with at
+   least a header and a separator row. */
+static int find_table_caret_info(TableCaretInfo *info) {
+    int caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int caretLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    char *line = editor_line_text(caretLine, NULL);
+    if (!line || !strchr(line, '|')) { free(line); return 0; }
+
+    int first = caretLine, last = caretLine;
+    while (first > 0) {
+        char *previous = editor_line_text(first - 1, NULL);
+        int belongs = previous && strchr(previous, '|');
+        free(previous);
+        if (!belongs) break;
+        first--;
+    }
+    while (last + 1 < lineCount) {
+        char *next = editor_line_text(last + 1, NULL);
+        int belongs = next && strchr(next, '|');
+        free(next);
+        if (!belongs) break;
+        last++;
+    }
+    if (last - first < 1) { free(line); return 0; } /* need a header and a separator row */
+
+    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)caretLine, 0);
+    info->firstLine = first;
+    info->lastLine = last;
+    info->row = caretLine - first;
+    info->column = table_column_at_offset(line, caret - lineStart);
+    free(line);
+    return 1;
+}
+
+static void report_not_in_table(void) {
+    MessageBoxW(g_hMainWnd, L"Place the caret inside a Markdown table.", L"Table",
+                MB_OK | MB_ICONINFORMATION);
+}
+
+/* Inserts a new, empty data row either immediately above or below the
+   caret's current row. From the header or separator row - where "above"/
+   "below" would mean inserting before the header or between header and
+   separator, neither a valid table shape - the new row always lands as the
+   first data row instead. */
+static void insert_table_row_relative(int below) {
+    TableCaretInfo info;
+    if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
+
+    char *header = editor_line_text(info.firstLine, NULL);
+    char *headerCells[128];
+    int columns = header ? table_row_cells(header, headerCells, 128) : 0;
+    free_row_cells(headerCells, columns);
+    free(header);
+    if (columns < 1) columns = 1;
+
+    int targetLine = info.row <= 1
+        ? info.firstLine + 2 /* first data row, right after the separator */
+        : info.firstLine + info.row + (below ? 1 : 0);
+
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int appendAtEnd = targetLine >= lineCount;
+    int insertPos = appendAtEnd
+        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)targetLine, 0);
+
+    const char *eol = editor_eol_sequence();
+    char *rowText = NULL; size_t rowLength = 0, rowCapacity = 0;
+    if (appendAtEnd && position_needs_leading_eol(insertPos))
+        append_dynamic(&rowText, &rowLength, &rowCapacity, eol);
+    for (int c = 0; c < columns; c++)
+        append_dynamic(&rowText, &rowLength, &rowCapacity, "|  ");
+    append_dynamic(&rowText, &rowLength, &rowCapacity, "|");
+    if (!appendAtEnd) append_dynamic(&rowText, &rowLength, &rowCapacity, eol);
+    if (!rowText) return;
+
+    SendMessageA(g_hEdit, SCI_INSERTTEXT, (WPARAM)insertPos, (LPARAM)rowText);
+    free(rowText);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)insertPos, (LPARAM)insertPos);
+    SetFocus(g_hEdit);
+}
+
+/* Deletes the data row the caret is in. The header and separator rows can't
+   be deleted this way - the Table Editor is the tool for reshaping those. */
+static void delete_table_row_at_cursor(void) {
+    TableCaretInfo info;
+    if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
+    if (info.row <= 1) {
+        MessageBoxW(g_hMainWnd, L"Place the caret in a data row to delete it.", L"Table",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    int line = info.firstLine + info.row;
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int start, end;
+    if (line + 1 < lineCount) {
+        start = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        end = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(line + 1), 0);
+    } else {
+        /* Deleting the document's very last line: remove the EOL before it
+           instead of one that doesn't exist after it, so no blank line is
+           left behind at the end of the table. */
+        end = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+        start = line > 0
+            ? (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(line - 1), 0)
+            : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    }
+    SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)start, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)end, 0);
+    SendMessageA(g_hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)start);
+    SetFocus(g_hEdit);
+}
+
+/* Rewrites every row of the table (header, separator, and every data row) as
+   one undo step, inserting a new cell at `at` in each - shared by insert-
+   column-left/right below. */
+static void insert_table_column_at(const TableCaretInfo *info, int at) {
+    const char *eol = editor_eol_sequence();
+    char *out = NULL; size_t outLength = 0, outCapacity = 0;
+    int ok = 1;
+    for (int lineNumber = info->firstLine; ok && lineNumber <= info->lastLine; lineNumber++) {
+        char *lineText = editor_line_text(lineNumber, NULL);
+        char *cells[128];
+        int count = table_row_cells(lineText ? lineText : "", cells, 128);
+        free(lineText);
+        int rowKind = lineNumber - info->firstLine; /* 0 header, 1 separator, 2+ data */
+        int insertAt = at > count ? count : at;
+        const char *newCell = rowKind == 1 ? "---" : rowKind == 0 ? "New" : "";
+
+        if (!append_dynamic(&out, &outLength, &outCapacity, "|")) ok = 0;
+        for (int c = 0; ok && c <= count; c++) {
+            if (c == insertAt) {
+                if (!append_dynamic(&out, &outLength, &outCapacity, " ") ||
+                    !append_dynamic(&out, &outLength, &outCapacity, newCell) ||
+                    !append_dynamic(&out, &outLength, &outCapacity, " |")) { ok = 0; break; }
+            }
+            if (c < count) {
+                const char *cell = cells[c] ? cells[c] : "";
+                if (!append_dynamic(&out, &outLength, &outCapacity, " ") ||
+                    !append_dynamic(&out, &outLength, &outCapacity, cell) ||
+                    !append_dynamic(&out, &outLength, &outCapacity, " |")) { ok = 0; break; }
+            }
+        }
+        free_row_cells(cells, count);
+        if (ok) append_dynamic(&out, &outLength, &outCapacity, eol);
+    }
+    if (!ok || !out) { free(out); return; }
+
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info->firstLine, 0);
+    int replaceEnd = info->lastLine + 1 < lineCount
+        ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info->lastLine + 1), 0)
+        : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
+    SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)outLength, (LPARAM)out);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(out);
+    SetFocus(g_hEdit);
+}
+
+static void insert_table_column_relative(int rightSide) {
+    TableCaretInfo info;
+    if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
+    insert_table_column_at(&info, info.column + (rightSide ? 1 : 0));
+}
+
+/* Deletes the column the caret is in, from every row of the table. Refuses
+   on a table's last remaining column, since a table needs at least one. */
+static void delete_table_column_at_cursor(void) {
+    TableCaretInfo info;
+    if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
+
+    char *header = editor_line_text(info.firstLine, NULL);
+    char *headerCells[128];
+    int headerCount = header ? table_row_cells(header, headerCells, 128) : 0;
+    free_row_cells(headerCells, headerCount);
+    free(header);
+    if (headerCount <= 1) {
+        MessageBoxW(g_hMainWnd, L"A table needs at least one column.", L"Table",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    int removeAt = info.column >= headerCount ? headerCount - 1 : info.column;
+
+    const char *eol = editor_eol_sequence();
+    char *out = NULL; size_t outLength = 0, outCapacity = 0;
+    int ok = 1;
+    for (int lineNumber = info.firstLine; ok && lineNumber <= info.lastLine; lineNumber++) {
+        char *lineText = editor_line_text(lineNumber, NULL);
+        char *cells[128];
+        int count = table_row_cells(lineText ? lineText : "", cells, 128);
+        free(lineText);
+
+        if (!append_dynamic(&out, &outLength, &outCapacity, "|")) ok = 0;
+        for (int c = 0; ok && c < count; c++) {
+            if (c == removeAt) continue;
+            const char *cell = cells[c] ? cells[c] : "";
+            if (!append_dynamic(&out, &outLength, &outCapacity, " ") ||
+                !append_dynamic(&out, &outLength, &outCapacity, cell) ||
+                !append_dynamic(&out, &outLength, &outCapacity, " |")) { ok = 0; break; }
+        }
+        free_row_cells(cells, count);
+        if (ok) append_dynamic(&out, &outLength, &outCapacity, eol);
+    }
+    if (!ok || !out) { free(out); return; }
+
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
+    int replaceEnd = info.lastLine + 1 < lineCount
+        ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0)
+        : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
+    SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
+    SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)outLength, (LPARAM)out);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(out);
     SetFocus(g_hEdit);
 }
 
@@ -8061,6 +8344,12 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Format: Image", IDM_FMT_IMAGE}, {L"Format: Table", IDM_FMT_TABLE},
     {L"Format: Footnote", IDM_FMT_FOOTNOTE}, {L"Format: Horizontal Rule", IDM_FMT_HRULE},
     {L"Format: Alert", IDM_FMT_ALERT}, {L"Format: Table Editor", IDM_FMT_TABLE_EDITOR},
+    {L"Format: Insert Table Row Above", IDM_FMT_TABLE_ROW_ABOVE},
+    {L"Format: Insert Table Row Below", IDM_FMT_TABLE_ROW_BELOW},
+    {L"Format: Delete Table Row", IDM_FMT_TABLE_ROW_DELETE},
+    {L"Format: Insert Table Column Left", IDM_FMT_TABLE_COL_LEFT},
+    {L"Format: Insert Table Column Right", IDM_FMT_TABLE_COL_RIGHT},
+    {L"Format: Delete Table Column", IDM_FMT_TABLE_COL_DELETE},
     {L"Format: Format JSON", IDM_FMT_JSON_PRETTY},
     {L"Format: Minify JSON", IDM_FMT_JSON_MINIFY}, {L"Format: Font", IDM_FORMAT_FONT},
     {L"Run: Run File", IDM_RUN_FILE}, {L"Run: Debug File", IDM_DEBUG_FILE},
@@ -8203,6 +8492,12 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FMT_JSON_PRETTY: format_json(1); break;
         case IDM_FMT_JSON_MINIFY: format_json(0); break;
         case IDM_FMT_TABLE_EDITOR: show_table_editor(); break;
+        case IDM_FMT_TABLE_ROW_ABOVE: insert_table_row_relative(0); break;
+        case IDM_FMT_TABLE_ROW_BELOW: insert_table_row_relative(1); break;
+        case IDM_FMT_TABLE_ROW_DELETE: delete_table_row_at_cursor(); break;
+        case IDM_FMT_TABLE_COL_LEFT: insert_table_column_relative(0); break;
+        case IDM_FMT_TABLE_COL_RIGHT: insert_table_column_relative(1); break;
+        case IDM_FMT_TABLE_COL_DELETE: delete_table_column_at_cursor(); break;
         case IDM_RUN_FILE: launch_active_source_file(0); break;
         case IDM_DEBUG_FILE: launch_active_source_file(1); break;
         case IDM_DEBUG_CONTINUE: run_debugger_command(IDM_DEBUG_CONTINUE); break;
