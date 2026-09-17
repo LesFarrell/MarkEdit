@@ -12,6 +12,7 @@
 #define ID_STATUS  104
 #define ID_OUTLINE 105
 #define ID_MINIMAP 106
+#define ID_SPLIT_EDIT 107
 
 /* ---- timer IDs ---- */
 #define IDT_PREVIEW_UPDATE 1
@@ -31,6 +32,7 @@
 #define TAB_HEIGHT 28
 #define MINIMAP_WIDTH 120
 #define MINIMAP_SPLITTER_WIDTH 1
+#define SPLIT_EDITOR_SPLITTER_HEIGHT 6
 
 /* ---- menu command IDs: File, Edit, View, Help ---- */
 #define IDM_FILE_NEW      201
@@ -166,6 +168,8 @@
 #define IDM_RECENT_WORKSPACE_CLEAR 360
 #define IDM_VIEW_CYCLE_PANE 361
 #define IDM_VIEW_CYCLE_PANE_PREV 362
+#define IDM_VIEW_TOGGLESPLIT 363
+#define IDM_VIEW_RESET_SPLIT_EDITOR 364
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1

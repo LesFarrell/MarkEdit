@@ -117,6 +117,11 @@ void load_layout_settings(void) {
     if (g_splitterRatio < 50) g_splitterRatio = 50;
     if (g_splitterRatio > 950) g_splitterRatio = 950;
 
+    g_splitEditorVisible = read_profile_int(L"View", L"SplitEditorVisible", 0, path) != 0;
+    g_splitEditorRatio = read_profile_int(L"View", L"SplitEditorRatio", 500, path);
+    if (g_splitEditorRatio < 50) g_splitEditorRatio = 50;
+    if (g_splitEditorRatio > 950) g_splitEditorRatio = 950;
+
     int left = read_profile_int(L"Window", L"Left", 0, path);
     int top = read_profile_int(L"Window", L"Top", 0, path);
     int width = read_profile_int(L"Window", L"Width", 0, path);
@@ -160,6 +165,8 @@ void save_layout_settings(void) {
         }
     }
     write_profile_int(L"View", L"SplitterRatio", g_splitterRatio, path);
+    write_profile_int(L"View", L"SplitEditorVisible", g_splitEditorVisible, path);
+    write_profile_int(L"View", L"SplitEditorRatio", g_splitEditorRatio, path);
 
     WINDOWPLACEMENT placement = {0};
     placement.length = sizeof(placement);

@@ -56,6 +56,7 @@ static HWND g_hTabs;
 static HWND g_hStatus;
 static HWND g_hOutline;
 static HWND g_hMinimap; /* zoomed-out Scintilla view sharing g_hEdit's document */
+static HWND g_hSplitEdit; /* fully-interactive second view sharing g_hEdit's document, stacked below it */
 HWND g_hMainWnd;
 /* The main window's accelerator table, forwarded into from the preview's
    AcceleratorKeyPressed handler - see AccelKey_Invoke() - since disabling
@@ -158,6 +159,13 @@ int g_editorVisible = 1;
 int g_previewOnLeft = 0;
 int g_splitterRatio = 500; /* left pane width as thousandths of the available split width */
 int g_splitterPos = -1; /* pixel x of splitter, initialized from g_splitterRatio */
+int g_splitEditorVisible = 0;
+int g_splitEditorRatio = 500; /* main pane height as thousandths of the editor region's height */
+int g_splitEditorPos = -1; /* pixel y of the split-editor splitter, local to the editor region */
+static RECT g_splitEditorSplitterRect = {0};
+static RECT g_splitterRect = {0}; /* the main editor/preview splitter's own bounds, for drawing its line */
+static int g_splitEditorRegionY = 0; /* window-relative y the editor region starts at, refreshed every layout() */
+static int g_draggingSplitEditor = 0;
 int g_commandLinePreviewMode = 0;
 RECT g_savedWindowRect;
 int g_haveSavedWindowRect = 0;
@@ -285,14 +293,14 @@ static void toolbar_wrap_inline(const char *marker) {
 
 /* Returns the 0-based [firstLine, lastLine] range touched by the current
    selection (a single line if there is no selection). */
-static void toolbar_selected_line_range(int *firstLine, int *lastLine) {
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-    *firstLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)selStart, 0);
-    *lastLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)selEnd, 0);
+static void toolbar_selected_line_range(HWND hEdit, int *firstLine, int *lastLine) {
+    int selStart = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    *firstLine = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selStart, 0);
+    *lastLine = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selEnd, 0);
     /* A selection ending exactly at the start of a line (e.g. after pressing
        Home then Shift+Down once) shouldn't pull that line into the range. */
-    if (*lastLine > *firstLine && selEnd == (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)*lastLine, 0))
+    if (*lastLine > *firstLine && selEnd == (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)*lastLine, 0))
         (*lastLine)--;
 }
 
@@ -349,7 +357,7 @@ static int toolbar_prefix_length(const char *line, int lineLen) {
    is ignored and "N. " is generated per line instead. */
 static void toolbar_apply_line_prefix(const char *prefix, int numbered) {
     int firstLine, lastLine;
-    toolbar_selected_line_range(&firstLine, &lastLine);
+    toolbar_selected_line_range(g_hEdit, &firstLine, &lastLine);
 
     int len;
     char *text = get_edit_text(g_hEdit, &len);
@@ -688,16 +696,22 @@ static void set_edit_text(HWND hEdit, const char *text) {
 #define FOLD_MARGIN_WIDTH 14
 #define INDICATOR_SPELLING 20
 static int g_lineNumberDigits = 0;
+static int g_splitLineNumberDigits = 0; /* separate cache for g_hSplitEdit - see update_linenumber_margin_width() */
 
 /* Widen/narrow the line-number margin to fit the current line count (so "9"
    and "9999" both have comfortably-sized gutters, and it grows as the
-   document grows past another power of ten). */
+   document grows past another power of ten). Cached per-view (g_hEdit and
+   g_hSplitEdit each get their own digit count remembered) so two views of
+   the same document - which therefore usually recompute the same digit
+   count on the same edit - don't cause one view's cache hit to skip the
+   other view's still-needed SCI_SETMARGINWIDTHN call. */
 static void update_linenumber_margin_width(HWND hEdit) {
+    int *cache = (hEdit == g_hSplitEdit) ? &g_splitLineNumberDigits : &g_lineNumberDigits;
     int lineCount = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
     int digitCount = 1;
     for (int n = lineCount; n >= 10; n /= 10) digitCount++;
-    if (digitCount == g_lineNumberDigits) return;
-    g_lineNumberDigits = digitCount;
+    if (digitCount == *cache) return;
+    *cache = digitCount;
     char digits[16];
     wsprintfA(digits, "_%d", lineCount); /* leading '_' gives a little breathing room */
     int width = (int)SendMessageA(hEdit, SCI_TEXTWIDTH, STYLE_LINENUMBER, (LPARAM)digits);
@@ -1344,7 +1358,7 @@ static void apply_preview_host_theme(void) {
 static void apply_main_theme(HWND hwnd) {
     if (g_mainBkBrush) DeleteObject(g_mainBkBrush);
     g_mainBkBrush = CreateSolidBrush(g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
-    if (hwnd) InvalidateRect(hwnd, NULL, FALSE);
+    if (hwnd) InvalidateRect(hwnd, NULL, TRUE);
 
     /* The outline's own content is owner-drawn (see draw_themed_listbox_item()),
        but its scrollbar is still system-drawn and needs the same explorer
@@ -1701,6 +1715,22 @@ static void apply_editor_font(const WCHAR *faceName, int pointSize) {
         SendMessageA(g_hMinimap, SCI_SETZOOM, 0, 0);
         update_minimap_viewport();
     }
+
+    /* The split pane is a second fully-interactive view onto the same
+       document (unlike the minimap), so it gets the real point size, not a
+       fixed fraction of it. */
+    if (g_hSplitEdit) {
+        SendMessageA(g_hSplitEdit, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
+        SendMessageA(g_hSplitEdit, SCI_STYLESETSIZE, STYLE_DEFAULT, pointSize);
+        SendMessageA(g_hSplitEdit, SCI_STYLESETWEIGHT, STYLE_DEFAULT, g_fontWeight);
+        SendMessageA(g_hSplitEdit, SCI_STYLESETITALIC, STYLE_DEFAULT, g_fontItalic);
+        SendMessageA(g_hSplitEdit, SCI_STYLECLEARALL, 0, 0);
+        apply_editor_theme(g_hSplitEdit);
+        SendMessageA(g_hSplitEdit, SCI_STYLESETFONT, STYLE_LINENUMBER, (LPARAM)faceUtf8);
+        SendMessageA(g_hSplitEdit, SCI_STYLESETSIZE, STYLE_LINENUMBER, pointSize);
+        g_splitLineNumberDigits = 0; /* font metrics changed even if the line count did not */
+        update_linenumber_margin_width(g_hSplitEdit);
+    }
     free(faceUtf8);
 }
 
@@ -1891,6 +1921,7 @@ static int restore_recovery_snapshot(void) {
         swprintf(key, sizeof(key) / sizeof(key[0]), L"Bom%d", i);
         g_hasBom = GetPrivateProfileIntW(L"Recovery", key, 0, manifest) != 0;
         apply_document_language(g_hEdit, g_currentFile);
+        if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
         set_dirty(1);
         restored++;
     }
@@ -3156,15 +3187,16 @@ static void record_document_file_time(int index) {
     free(ioPath);
 }
 
-/* Swaps the shared document pointer for both the main editor and its
-   minimap, keeping the minimap's overview in sync with whichever tab is
+/* Swaps the shared document pointer for the main editor, its minimap, and
+   its split pane (if any), keeping all of them in sync with whichever tab is
    active. Not used for the transient peeks in get_document_text() and
    clear_debug_execution_markers(), which restore the original pointer
-   before returning and would otherwise flash the minimap at an unrelated
-   document. */
+   before returning and would otherwise flash the minimap/split pane at an
+   unrelated document. */
 static void set_active_editor_document(sptr_t doc) {
     SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
     if (g_hMinimap) SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
+    if (g_hSplitEdit) SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
 }
 
 static void switch_document(int index) {
@@ -3179,6 +3211,18 @@ static void switch_document(int index) {
     SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)g_documents[index].firstVisibleLine, 0);
     SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)g_documents[index].xOffset, 0);
     update_linenumber_margin_width(g_hEdit);
+    if (g_hSplitEdit) {
+        apply_document_language(g_hSplitEdit, g_documents[index].path);
+        if (g_splitEditorVisible) {
+            /* Starts wherever the main pane starts; the user can then scroll
+               it independently - the split pane doesn't persist its own
+               per-document view state (see set_active_editor_document()). */
+            SendMessageA(g_hSplitEdit, SCI_SETSEL, (WPARAM)g_documents[index].anchor, (LPARAM)g_documents[index].caret);
+            SendMessageA(g_hSplitEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)g_documents[index].firstVisibleLine, 0);
+            SendMessageA(g_hSplitEdit, SCI_SETXOFFSET, (WPARAM)g_documents[index].xOffset, 0);
+            update_linenumber_margin_width(g_hSplitEdit);
+        }
+    }
     g_switchingDocument = 0;
     if (g_hTabs) TabCtrl_SetCurSel(g_hTabs, index);
     update_document_mapping();
@@ -3290,6 +3334,7 @@ static int load_file(const WCHAR *path) {
         g_switchingDocument = 0;
         replace_wstring(&g_currentFile, displayPath ? displayPath : path);
         apply_document_language(g_hEdit, g_currentFile);
+        if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
         record_document_file_time(g_activeDocument);
         update_document_mapping();
         update_preview();
@@ -3843,6 +3888,7 @@ static int save_to_path(const WCHAR *path) {
     add_recent_file(displayPath ? displayPath : path);
     replace_wstring(&g_currentFile, displayPath ? displayPath : path);
     apply_document_language(g_hEdit, g_currentFile);
+    if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
     free(ioPath);
     record_document_file_time(g_activeDocument);
     update_document_mapping();
@@ -5079,6 +5125,7 @@ static void show_help_reference(void) {
        *ends* in ".md" is enough, since language_for_path only inspects the
        extension and never treats this string as a real path. */
     apply_document_language(g_hEdit, L"markdown-reference.md");
+    if (g_hSplitEdit) apply_document_language(g_hSplitEdit, L"markdown-reference.md");
     g_switchingDocument = 1;
     set_edit_text(g_hEdit, help_reference_markdown());
     SendMessageA(g_hEdit, SCI_SETSEL, 0, 0);
@@ -5398,6 +5445,10 @@ static HMENU build_menu(void) {
                 IDM_VIEW_OUTLINE, "Document &Outline");
     AppendMenuA(hView, MF_STRING | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_MINIMAP, "Mini&map");
+    AppendMenuA(hView, MF_STRING | (g_splitEditorVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_TOGGLESPLIT, "Split &Editor\tCtrl+\\");
+    AppendMenuA(hView, MF_STRING | (g_splitEditorVisible ? 0 : MF_GRAYED),
+                IDM_VIEW_RESET_SPLIT_EDITOR, "&Reset Split Editor");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hView, MF_STRING | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_SHOW_WHITESPACE, "Show W&hitespace");
@@ -5747,6 +5798,31 @@ static void toolbar_icon_togglepreview(HDC hdc, const RECT *rc, COLORREF fg) {
     DeleteObject(pen);
 }
 
+/* A box with a horizontal divider and the bottom half filled - the same
+   idea as toolbar_icon_togglepreview() above, just split top/bottom instead
+   of left/right, for the toolbar's split-editor toggle button. */
+static void toolbar_icon_splitview(HDC hdc, const RECT *rc, COLORREF fg) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    RECT box = { rc->left + w * 8 / 100, rc->top + h * 12 / 100, rc->right - w * 8 / 100, rc->bottom - h * 12 / 100 };
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, box.left, box.top, box.right, box.bottom);
+
+    int midY = box.top + (box.bottom - box.top) / 2;
+    MoveToEx(hdc, box.left, midY, NULL);
+    LineTo(hdc, box.right, midY);
+
+    RECT bottomPane = { box.left + 1, midY + 1, box.right - 1, box.bottom };
+    HBRUSH fillBrush = CreateSolidBrush(fg);
+    FillRect(hdc, &bottomPane, fillBrush);
+    DeleteObject(fillBrush);
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+}
+
 /* Two opposing arrows represent exchanging the left and right panes. */
 static void toolbar_icon_swappanels(HDC hdc, const RECT *rc, COLORREF fg) {
     int w = rc->right - rc->left, h = rc->bottom - rc->top;
@@ -5868,6 +5944,7 @@ static const struct ToolbarButtonDef TOOLBAR_BUTTONS[] = {
     { 0, NULL, NULL },
     { IDM_VIEW_TOGGLEPREVIEW, toolbar_icon_togglepreview, "Toggle preview" },
     { IDM_VIEW_PREVIEW_ON_LEFT, toolbar_icon_swappanels, "Swap panel sides" },
+    { IDM_VIEW_TOGGLESPLIT, toolbar_icon_splitview, "Toggle split editor" },
     { 0, NULL, NULL },
     { IDM_FILE_OPEN_TERMINAL, toolbar_icon_terminal, "Open terminal here" },
 };
@@ -5880,9 +5957,13 @@ static void create_toolbar(HWND hwnd) {
         if (!TOOLBAR_BUTTONS[i].paint) continue;
         WCHAR *tip = to_wide(TOOLBAR_BUTTONS[i].tip);
         g_hToolbarButtons[i] = CreateWindowExW(0, L"BUTTON", tip ? tip : L"",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
             0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)TOOLBAR_BUTTONS[i].id, GetModuleHandleA(NULL), NULL);
-        /* The window text isn't displayed (owner-drawn), but is kept as the
+        /* WS_CLIPSIBLINGS: these buttons sit edge-to-edge and get MoveWindow'd
+           on every layout() (including mid-drag during a live resize, where
+           layout_toolbar()'s row-wrap can shift several at once) - without it,
+           one button's owner-draw paint can bleed into a neighbour's area.
+           The window text isn't displayed (owner-drawn), but is kept as the
            accessible name / tooltip-eligible text for the button. */
         free(tip);
     }
@@ -5954,6 +6035,7 @@ static int layout_toolbar(int width, int top) {
    which side of the splitter the editor itself is on, so the minimap always
    sits immediately next to the text it overviews. */
 static void layout_editor_with_minimap(HWND hwnd, int x, int y, int width, int h) {
+    g_splitEditorRegionY = y;
     int minimapWidth = (g_hMinimap && g_minimapVisible && !g_focusMode) ?
         MulDiv(MINIMAP_WIDTH, GetDpiForWindow(hwnd), 96) : 0;
     if (minimapWidth > width - 80) minimapWidth = 0; /* not enough room to keep the editor usable */
@@ -5967,8 +6049,50 @@ static void layout_editor_with_minimap(HWND hwnd, int x, int y, int width, int h
     if (minimapGap < 1 && minimapWidth > 0 && g_previewVisible) minimapGap = 1;
 
     int editorWidth = width - minimapWidth - minimapGap;
-    MoveWindow(g_hEdit, x, y, editorWidth, h, TRUE);
-    ShowWindow(g_hEdit, SW_SHOW);
+
+    /* The split pane stacks below the main editor, inside the same column
+       the minimap sits beside (the minimap always spans the full height on
+       the right - it's an overview of the whole document, not tied to
+       either sub-pane). */
+    if (g_hSplitEdit && g_splitEditorVisible && !g_focusMode) {
+        int splitterHeight = MulDiv(SPLIT_EDITOR_SPLITTER_HEIGHT, GetDpiForWindow(hwnd), 96);
+        if (splitterHeight < 1) splitterHeight = 1;
+        if (g_splitEditorPos < 0)
+            g_splitEditorPos = MulDiv(h - splitterHeight, g_splitEditorRatio, 1000);
+        if (g_splitEditorPos < 60) g_splitEditorPos = 60;
+        if (g_splitEditorPos > h - 60 - splitterHeight)
+            g_splitEditorPos = (h - 60 - splitterHeight > 60) ? h - 60 - splitterHeight : 60;
+        int mainHeight = g_splitEditorPos;
+        int splitHeight = h - mainHeight - splitterHeight;
+
+        /* Set before the MoveWindow calls below, not after: MoveWindow can
+           trigger a synchronous repaint of this window before returning, and
+           WM_ERASEBKGND (which draws this rect - see WM_ERASEBKGND in
+           WndProc) would otherwise run against the stale pre-layout value. */
+        g_splitEditorSplitterRect.left = x;
+        g_splitEditorSplitterRect.right = x + editorWidth;
+        g_splitEditorSplitterRect.top = y + mainHeight;
+        g_splitEditorSplitterRect.bottom = y + mainHeight + splitterHeight;
+
+        MoveWindow(g_hEdit, x, y, editorWidth, mainHeight, TRUE);
+        ShowWindow(g_hEdit, SW_SHOW);
+        MoveWindow(g_hSplitEdit, x, y + mainHeight + splitterHeight, editorWidth, splitHeight, TRUE);
+        ShowWindow(g_hSplitEdit, SW_SHOW);
+
+        /* Keep the persisted ratio in sync with the live pixel position, the
+           same relationship save_layout_settings() maintains for the main
+           editor/preview splitter's own ratio. */
+        if (h - splitterHeight > 0) {
+            g_splitEditorRatio = MulDiv(g_splitEditorPos, 1000, h - splitterHeight);
+            if (g_splitEditorRatio < 50) g_splitEditorRatio = 50;
+            if (g_splitEditorRatio > 950) g_splitEditorRatio = 950;
+        }
+    } else {
+        g_splitEditorSplitterRect = (RECT){0, 0, 0, 0};
+        MoveWindow(g_hEdit, x, y, editorWidth, h, TRUE);
+        ShowWindow(g_hEdit, SW_SHOW);
+        if (g_hSplitEdit) ShowWindow(g_hSplitEdit, SW_HIDE);
+    }
 
     if (!g_hMinimap) return;
     if (minimapWidth > 0) {
@@ -5984,6 +6108,7 @@ static void layout(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
     int w = rc.right, h = rc.bottom;
+    g_splitterRect = (RECT){0, 0, 0, 0}; /* only the "both visible" branch below sets this */
 
     int statusHeight = 22;
     if (g_hStatus) {
@@ -6034,6 +6159,7 @@ static void layout(HWND hwnd) {
     if (!g_editorVisible && g_previewVisible) {
         ShowWindow(g_hEdit, SW_HIDE);
         if (g_hMinimap) ShowWindow(g_hMinimap, SW_HIDE);
+        if (g_hSplitEdit) ShowWindow(g_hSplitEdit, SW_HIDE);
         ShowWindow(g_hPreview, SW_SHOW);
         MoveWindow(g_hPreview, 0, y, paneWidth, h, TRUE);
         /* WebView2 controller bounds are relative to g_hPreview's own client
@@ -6051,6 +6177,7 @@ static void layout(HWND hwnd) {
         g_splitterPos = (paneWidth - 100 > 100) ? paneWidth - 100 : 100;
 
     ShowWindow(g_hPreview, SW_SHOW);
+    g_splitterRect = (RECT){ g_splitterPos, y, g_splitterPos + SPLITTER_WIDTH, y + h };
     int rightWidth = paneWidth - g_splitterPos - SPLITTER_WIDTH;
     RECT wvRc;
     if (g_previewOnLeft) {
@@ -6079,6 +6206,8 @@ static void update_view_menu(HWND hwnd) {
     CheckMenuItem(hView, IDM_VIEW_INDENT_GUIDES, MF_BYCOMMAND | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_OUTLINE, MF_BYCOMMAND | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_MINIMAP, MF_BYCOMMAND | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_TOGGLESPLIT, MF_BYCOMMAND | (g_splitEditorVisible ? MF_CHECKED : MF_UNCHECKED));
+    EnableMenuItem(hView, IDM_VIEW_RESET_SPLIT_EDITOR, MF_BYCOMMAND | (g_splitEditorVisible ? MF_ENABLED : MF_GRAYED));
     HMENU hTheme = GetSubMenu(hView, 6);
     if (hTheme) {
         CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
@@ -6092,6 +6221,7 @@ static void toggle_preview(HWND hwnd) {
     g_previewVisible = !g_previewVisible;
     update_view_menu(hwnd);
     layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
     if (g_previewVisible) update_preview();
     else KillTimer(hwnd, IDT_PREVIEW_UPDATE);
     save_layout_settings();
@@ -6102,6 +6232,7 @@ static void toggle_editor(HWND hwnd) {
     g_editorVisible = !g_editorVisible;
     update_view_menu(hwnd);
     layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
     save_layout_settings();
 }
 
@@ -6115,12 +6246,14 @@ static void toggle_panel_sides(HWND hwnd) {
     save_layout_settings();
     update_view_menu(hwnd);
     layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
 }
 
 static void toggle_focus_mode(HWND hwnd) {
     g_focusMode = !g_focusMode;
     refresh_menu(hwnd);
     layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
     save_layout_settings();
     /* Focus mode hides the menu, so F11 is the only way back out. Keep it on
        the editor where the accelerator is reachable - WebView2 claims F11 for
@@ -6135,9 +6268,10 @@ static void toggle_focus_mode(HWND hwnd) {
    giving it focus takes its own MoveFocus call rather than a plain
    SetFocus() on g_hPreview. */
 static void cycle_pane_focus(int reverse) {
-    HWND panes[4];
+    HWND panes[5];
     int count = 0;
     if (g_editorVisible && g_hEdit) panes[count++] = g_hEdit;
+    if (g_editorVisible && g_splitEditorVisible && g_hSplitEdit) panes[count++] = g_hSplitEdit;
     if (g_previewVisible && g_hPreview) panes[count++] = g_hPreview;
     if (g_outlineVisible && g_editorVisible && g_hOutline) panes[count++] = g_hOutline;
     if (g_hTabs) panes[count++] = g_hTabs;
@@ -6154,6 +6288,16 @@ static void cycle_pane_focus(int reverse) {
     } else {
         SetFocus(target);
     }
+}
+
+/* Edit-menu commands and their accelerators act on whichever editor pane has
+   focus, so that Ctrl+C/Ctrl+Z/etc. do what the caret the user is actually
+   looking at implies, rather than always reaching past a focused split pane
+   to the main one. Menu clicks and accelerator keys don't change window
+   focus in Win32, so GetFocus() here still reflects whichever pane the user
+   was last typing in. */
+static HWND active_edit_view(void) {
+    return (g_hSplitEdit && GetFocus() == g_hSplitEdit) ? g_hSplitEdit : g_hEdit;
 }
 
 static void toggle_word_wrap(HWND hwnd) {
@@ -6198,12 +6342,14 @@ static void adjust_editor_zoom(int delta) {
     if (zoom > 20) zoom = 20;
     g_editorZoom = zoom;
     SendMessageA(g_hEdit, SCI_SETZOOM, (WPARAM)g_editorZoom, 0);
+    if (g_hSplitEdit) SendMessageA(g_hSplitEdit, SCI_SETZOOM, (WPARAM)g_editorZoom, 0);
     save_layout_settings();
 }
 
 static void reset_editor_zoom(void) {
     g_editorZoom = 0;
     SendMessageA(g_hEdit, SCI_SETZOOM, 0, 0);
+    if (g_hSplitEdit) SendMessageA(g_hSplitEdit, SCI_SETZOOM, 0, 0);
     save_layout_settings();
 }
 
@@ -6220,8 +6366,8 @@ static void fold_all_lines(int expand) {
 
 /* Sublime/VSCode-style Ctrl+D: selects the word under the caret, or extends
    the multi-selection to the next occurrence of the current selection. */
-static void select_next_occurrence(void) {
-    SendMessageA(g_hEdit, SCI_MULTIPLESELECTADDNEXT, 0, 0);
+static void select_next_occurrence(HWND hEdit) {
+    SendMessageA(hEdit, SCI_MULTIPLESELECTADDNEXT, 0, 0);
 }
 
 static int is_brace_char(char c) {
@@ -6231,11 +6377,11 @@ static int is_brace_char(char c) {
 /* The position of the brace adjacent to the caret - preferring the character
    just before it, so the match follows the caret the way editors expect -
    or -1 if the caret isn't next to one. */
-static int brace_position_near_caret(void) {
-    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    if (pos > 0 && is_brace_char((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(pos - 1), 0)))
+static int brace_position_near_caret(HWND hEdit) {
+    int pos = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    if (pos > 0 && is_brace_char((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(pos - 1), 0)))
         return pos - 1;
-    if (is_brace_char((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)pos, 0)))
+    if (is_brace_char((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)pos, 0)))
         return pos;
     return -1;
 }
@@ -6243,7 +6389,7 @@ static int brace_position_near_caret(void) {
 /* Keeps the matching-brace highlight (STYLE_BRACELIGHT/STYLE_BRACEBAD, set up
    in apply_editor_theme) in sync with the caret. Called on every SCN_UPDATEUI. */
 static void update_brace_highlight(void) {
-    int bracePos = brace_position_near_caret();
+    int bracePos = brace_position_near_caret(g_hEdit);
     if (bracePos < 0) {
         SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
         return;
@@ -6253,26 +6399,26 @@ static void update_brace_highlight(void) {
     else SendMessageA(g_hEdit, SCI_BRACEBADLIGHT, (WPARAM)bracePos, 0);
 }
 
-static void jump_to_matching_brace(void) {
-    int bracePos = brace_position_near_caret();
+static void jump_to_matching_brace(HWND hEdit) {
+    int bracePos = brace_position_near_caret(hEdit);
     if (bracePos < 0) return;
-    int match = (int)SendMessageA(g_hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
+    int match = (int)SendMessageA(hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
     if (match < 0) return;
-    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)match, (LPARAM)match);
-    SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)match, (LPARAM)match);
+    SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
 }
 
 /* Uppercases the first letter of each word in the selection and lowercases
    the rest. Non-ASCII bytes (including UTF-8 continuation bytes) are left
    untouched rather than mangled. */
-static void apply_title_case(void) {
-    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+static void apply_title_case(HWND hEdit) {
+    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     int length = end - start;
     if (length <= 0) return;
     char *text = (char *)malloc((size_t)length + 1);
     if (!text) return;
-    SendMessageA(g_hEdit, SCI_GETSELTEXT, 0, (LPARAM)text);
+    SendMessageA(hEdit, SCI_GETSELTEXT, 0, (LPARAM)text);
     int atWordStart = 1;
     for (int i = 0; i < length; i++) {
         unsigned char c = (unsigned char)text[i];
@@ -6283,11 +6429,11 @@ static void apply_title_case(void) {
             atWordStart = 1;
         }
     }
-    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)end);
-    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)text);
-    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)(start + length));
-    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)end);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)text);
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)(start + length));
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     free(text);
 }
 
@@ -6302,13 +6448,13 @@ static int compare_lines_desc(const void *a, const void *b) {
 /* mode: 0 = sort ascending, 1 = sort descending, 2 = remove duplicate lines
    (first occurrence kept, order otherwise preserved). Operates on the lines
    touched by the current selection, as one undo step. */
-static void transform_selected_lines(int mode) {
+static void transform_selected_lines(HWND hEdit, int mode) {
     int firstLine, lastLine;
-    toolbar_selected_line_range(&firstLine, &lastLine);
+    toolbar_selected_line_range(hEdit, &firstLine, &lastLine);
     if (lastLine <= firstLine) return;
 
-    int rangeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-    int rangeEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    int rangeStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    int rangeEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
     int totalLength = rangeEnd - rangeStart;
     char *buffer = (char *)malloc((size_t)totalLength + 1);
     if (!buffer) return;
@@ -6316,7 +6462,7 @@ static void transform_selected_lines(int mode) {
     tr.chrg.cpMin = rangeStart;
     tr.chrg.cpMax = rangeEnd;
     tr.lpstrText = buffer;
-    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&tr);
+    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&tr);
 
     int lineCount = lastLine - firstLine + 1;
     char **lines = (char **)malloc((size_t)lineCount * sizeof(char *));
@@ -6365,8 +6511,8 @@ static void transform_selected_lines(int mode) {
             strcat(out, lines[i]);
             if (i < n - 1) strcat(out, eol);
         }
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)rangeStart, (LPARAM)rangeEnd);
-        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)rangeStart, (LPARAM)rangeEnd);
+        SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
         free(out);
     }
     for (int i = 0; i < n; i++) free(lines[i]);
@@ -6377,18 +6523,18 @@ static void transform_selected_lines(int mode) {
 /* Rewrites each line's leading indentation between tabs and spaces, using the
    editor's configured tab width. Only leading whitespace is touched - tabs or
    spaces elsewhere on the line (inside a string, say) are left alone. */
-static void convert_indentation(int toSpaces) {
-    int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+static void convert_indentation(HWND hEdit, int toSpaces) {
+    int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
     if (tabWidth <= 0) tabWidth = 4;
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    int lineCount = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
     for (int line = lineCount - 1; line >= 0; line--) {
-        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
         int indentEnd = lineStart;
         int column = 0;
         while (indentEnd < lineEnd) {
-            char ch = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)indentEnd, 0);
+            char ch = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)indentEnd, 0);
             if (ch == ' ') { column++; indentEnd++; }
             else if (ch == '\t') { column += tabWidth - (column % tabWidth); indentEnd++; }
             else break;
@@ -6411,25 +6557,25 @@ static void convert_indentation(int toSpaces) {
             memset(newIndent + tabs, ' ', (size_t)spaces);
         }
         newIndent[newLen] = 0;
-        SendMessageA(g_hEdit, SCI_SETTARGETRANGE, (WPARAM)lineStart, (LPARAM)indentEnd);
-        SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)newLen, (LPARAM)newIndent);
+        SendMessageA(hEdit, SCI_SETTARGETRANGE, (WPARAM)lineStart, (LPARAM)indentEnd);
+        SendMessageA(hEdit, SCI_REPLACETARGET, (WPARAM)newLen, (LPARAM)newIndent);
         free(newIndent);
     }
-    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
 }
 
 /* Rewrites every line ending to eolMode (SC_EOL_CRLF/CR/LF) and switches the
    document's own EOL mode to match, so newly typed newlines follow suit. */
-static void convert_line_endings(int eolMode) {
-    SendMessageA(g_hEdit, SCI_CONVERTEOLS, (WPARAM)eolMode, 0);
-    SendMessageA(g_hEdit, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
+static void convert_line_endings(HWND hEdit, int eolMode) {
+    SendMessageA(hEdit, SCI_CONVERTEOLS, (WPARAM)eolMode, 0);
+    SendMessageA(hEdit, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
     update_status_position();
 }
 
 /* Sublime/VSCode-style Ctrl+Shift+L: every occurrence of the word under the
    caret (or of the current selection) becomes its own selection at once. */
-static void select_all_occurrences(void) {
-    SendMessageA(g_hEdit, SCI_MULTIPLESELECTADDEACH, 0, 0);
+static void select_all_occurrences(HWND hEdit) {
+    SendMessageA(hEdit, SCI_MULTIPLESELECTADDEACH, 0, 0);
 }
 
 /* Bookmarks are Scintilla markers on MARKER_BOOKMARK, which live on the
@@ -6443,29 +6589,29 @@ static void toggle_bookmark_at_line(int line) {
         SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)line, (LPARAM)MARKER_BOOKMARK);
 }
 
-static void toggle_bookmark_at_cursor(void) {
-    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    toggle_bookmark_at_line((int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0));
+static void toggle_bookmark_at_cursor(HWND hEdit) {
+    int pos = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    toggle_bookmark_at_line((int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0));
 }
 
-static void goto_bookmark(int forward) {
-    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+static void goto_bookmark(HWND hEdit, int forward) {
+    int pos = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int line = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
     int found;
     if (forward) {
-        found = (int)SendMessageA(g_hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1), (LPARAM)(1 << MARKER_BOOKMARK));
-        if (found < 0) found = (int)SendMessageA(g_hEdit, SCI_MARKERNEXT, 0, (LPARAM)(1 << MARKER_BOOKMARK));
+        found = (int)SendMessageA(hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1), (LPARAM)(1 << MARKER_BOOKMARK));
+        if (found < 0) found = (int)SendMessageA(hEdit, SCI_MARKERNEXT, 0, (LPARAM)(1 << MARKER_BOOKMARK));
     } else {
-        found = (int)SendMessageA(g_hEdit, SCI_MARKERPREVIOUS, (WPARAM)(line - 1), (LPARAM)(1 << MARKER_BOOKMARK));
+        found = (int)SendMessageA(hEdit, SCI_MARKERPREVIOUS, (WPARAM)(line - 1), (LPARAM)(1 << MARKER_BOOKMARK));
         if (found < 0) {
-            int lastLine = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0) - 1;
-            found = (int)SendMessageA(g_hEdit, SCI_MARKERPREVIOUS, (WPARAM)lastLine, (LPARAM)(1 << MARKER_BOOKMARK));
+            int lastLine = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0) - 1;
+            found = (int)SendMessageA(hEdit, SCI_MARKERPREVIOUS, (WPARAM)lastLine, (LPARAM)(1 << MARKER_BOOKMARK));
         }
     }
     if (found < 0) return;
-    int gotoPos = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)found, 0);
-    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)gotoPos, (LPARAM)gotoPos);
-    SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
+    int gotoPos = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)found, 0);
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)gotoPos, (LPARAM)gotoPos);
+    SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
 }
 
 static void clear_all_bookmarks(void) {
@@ -7566,33 +7712,33 @@ static void launch_active_source_file(int debug) {
 
 /* Strip trailing spaces and tabs from every line, as one undo action. Lines
    are rewritten back to front so earlier line positions stay valid. */
-static void trim_trailing_whitespace(void) {
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    int caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+static void trim_trailing_whitespace(HWND hEdit) {
+    int lineCount = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
+    int caret = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
     int trimmed = 0;
 
-    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
     for (int line = lineCount - 1; line >= 0; line--) {
-        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
         int cut = lineEnd;
         while (cut > lineStart) {
-            char ch = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(cut - 1), 0);
+            char ch = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(cut - 1), 0);
             if (ch != ' ' && ch != '\t') break;
             cut--;
         }
         if (cut == lineEnd) continue;
 
-        SendMessageA(g_hEdit, SCI_SETTARGETRANGE, (WPARAM)cut, (LPARAM)lineEnd);
-        SendMessageA(g_hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
+        SendMessageA(hEdit, SCI_SETTARGETRANGE, (WPARAM)cut, (LPARAM)lineEnd);
+        SendMessageA(hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
         if (caret > lineEnd) caret -= lineEnd - cut;
         else if (caret > cut) caret = cut;
         trimmed = 1;
     }
-    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
 
-    if (trimmed) SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
-    SetFocus(g_hEdit);
+    if (trimmed) SendMessageA(hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
+    SetFocus(hEdit);
 }
 
 /* True when `line` (length lineLen) is exactly an HTML comment delimiter,
@@ -7608,41 +7754,41 @@ static int line_is_comment_delimiter(const char *line, int lineLen, const char *
 /* Markdown has no line-comment syntax, so the selected line range is wrapped
    in an HTML comment on its own lines - and unwrapped when already exactly
    that. */
-static void toggle_comment(void) {
+static void toggle_comment(HWND hEdit) {
     int firstLine, lastLine;
-    toolbar_selected_line_range(&firstLine, &lastLine);
+    toolbar_selected_line_range(hEdit, &firstLine, &lastLine);
 
     int length;
-    char *text = get_edit_text(g_hEdit, &length);
+    char *text = get_edit_text(hEdit, &length);
     if (!text) return;
-    int blockStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-    int blockEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    int blockStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    int blockEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
 
-    int openEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)firstLine, 0);
-    int closeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lastLine, 0);
+    int openEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)firstLine, 0);
+    int closeStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lastLine, 0);
     if (lastLine - firstLine >= 1 &&
         line_is_comment_delimiter(text + blockStart, openEnd - blockStart, "<!--") &&
         line_is_comment_delimiter(text + closeStart, blockEnd - closeStart, "-->")) {
-        int innerStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(firstLine + 1), 0);
+        int innerStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)(firstLine + 1), 0);
         /* lastLine == firstLine + 1 means the delimiters are on adjacent
            lines with nothing between them - the inner content is empty
            rather than computed from a line range (which would go negative). */
         int innerLength = lastLine - firstLine >= 2
-            ? (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(lastLine - 1), 0) - innerStart
+            ? (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(lastLine - 1), 0) - innerStart
             : 0;
         char *inner = (char *)malloc((size_t)innerLength + 1);
         if (inner) {
             memcpy(inner, text + innerStart, (size_t)innerLength);
             inner[innerLength] = 0;
-            SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)blockEnd);
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)inner);
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)(blockStart + innerLength));
-            SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+            SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+            SendMessageA(hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)blockEnd);
+            SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)inner);
+            SendMessageA(hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)(blockStart + innerLength));
+            SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
             free(inner);
         }
         free(text);
-        SetFocus(g_hEdit);
+        SetFocus(hEdit);
         return;
     }
 
@@ -7659,15 +7805,15 @@ static void toggle_comment(void) {
         memcpy(wrapped + openLen + bodyLen, eol, eolLen);
         memcpy(wrapped + openLen + bodyLen + eolLen, "-->", 3);
         wrapped[wrappedLen] = 0;
-        SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)blockEnd);
-        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)(blockStart + (int)wrappedLen));
-        SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+        SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)blockEnd);
+        SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)blockStart, (LPARAM)(blockStart + (int)wrappedLen));
+        SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
         free(wrapped);
     }
     free(text);
-    SetFocus(g_hEdit);
+    SetFocus(hEdit);
 }
 
 /* True when the line begins a fenced code block delimiter (``` or ~~~,
@@ -7826,6 +7972,7 @@ static void toggle_outline(HWND hwnd) {
     update_outline();
     update_view_menu(hwnd);
     layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
     save_layout_settings();
 }
 
@@ -7967,6 +8114,28 @@ static void toggle_minimap(HWND hwnd) {
     g_minimapVisible = !g_minimapVisible;
     update_view_menu(hwnd);
     layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
+    save_layout_settings();
+}
+
+static void toggle_split_editor(HWND hwnd) {
+    g_splitEditorVisible = !g_splitEditorVisible;
+    update_view_menu(hwnd);
+    layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
+    save_layout_settings();
+}
+
+/* Puts the split-editor divider back at an even 50/50, the same default
+   layout() falls back to for a brand-new profile. g_splitEditorPos is the
+   live pixel value layout() actually drags around; resetting only the ratio
+   would leave it untouched until the next resize recomputed a position from
+   it (see layout_editor_with_minimap()). */
+static void reset_split_editor(HWND hwnd) {
+    g_splitEditorRatio = 500;
+    g_splitEditorPos = -1;
+    layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
     save_layout_settings();
 }
 
@@ -9265,6 +9434,8 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Run: Clear All Breakpoints", IDM_DEBUG_CLEAR_BREAKPOINTS},
     {L"View: Toggle Preview", IDM_VIEW_TOGGLEPREVIEW}, {L"View: Toggle Editor", IDM_VIEW_TOGGLEEDITOR},
     {L"View: Toggle Outline", IDM_VIEW_OUTLINE}, {L"View: Toggle Minimap", IDM_VIEW_MINIMAP},
+    {L"View: Toggle Split Editor", IDM_VIEW_TOGGLESPLIT},
+    {L"View: Reset Split Editor", IDM_VIEW_RESET_SPLIT_EDITOR},
     {L"View: Focus Mode", IDM_VIEW_FOCUS_MODE},
     {L"View: Next Tab", IDM_VIEW_NEXT_TAB}, {L"View: Previous Tab", IDM_VIEW_PREVIOUS_TAB},
     {L"View: Cycle Panes", IDM_VIEW_CYCLE_PANE},
@@ -9296,6 +9467,15 @@ static int splitter_contains_x(int x) {
            x >= g_splitterPos && x <= g_splitterPos + SPLITTER_WIDTH;
 }
 
+/* Unlike splitter_contains_x() above (which only needs an x-range, since
+   that splitter spans the full client height), the split-editor splitter
+   is nested inside the editor region and needs both x and y bounds. */
+static int split_editor_splitter_contains(int x, int y) {
+    return g_hSplitEdit && g_splitEditorVisible &&
+           x >= g_splitEditorSplitterRect.left && x <= g_splitEditorSplitterRect.right &&
+           y >= g_splitEditorSplitterRect.top && y <= g_splitEditorSplitterRect.bottom;
+}
+
 static void select_theme(HWND hwnd, int darkMode) {
     g_previewDarkMode = darkMode;
     save_theme_settings();
@@ -9308,6 +9488,7 @@ static void select_theme(HWND hwnd, int darkMode) {
         strip_minimap_bold();
         SendMessageA(g_hMinimap, SCI_SETZOOM, 0, 0);
     }
+    if (g_hSplitEdit) apply_editor_theme(g_hSplitEdit);
     apply_preview_host_theme();
     apply_main_theme(hwnd);
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
@@ -9639,40 +9820,43 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
             break;
         case IDM_SETTINGS: show_settings_dialog(); break;
         case IDM_FILE_EXIT: do_exit(); break;
-        case IDM_EDIT_UNDO: SendMessageA(g_hEdit, SCI_UNDO, 0, 0); break;
-        case IDM_EDIT_REDO: SendMessageA(g_hEdit, SCI_REDO, 0, 0); break;
-        case IDM_EDIT_CUT: SendMessageA(g_hEdit, SCI_CUT, 0, 0); break;
-        case IDM_EDIT_COPY: SendMessageA(g_hEdit, SCI_COPY, 0, 0); break;
+        case IDM_EDIT_UNDO: SendMessageA(active_edit_view(), SCI_UNDO, 0, 0); break;
+        case IDM_EDIT_REDO: SendMessageA(active_edit_view(), SCI_REDO, 0, 0); break;
+        case IDM_EDIT_CUT: SendMessageA(active_edit_view(), SCI_CUT, 0, 0); break;
+        case IDM_EDIT_COPY: SendMessageA(active_edit_view(), SCI_COPY, 0, 0); break;
         case IDM_EDIT_PASTE:
-            if (!paste_image_from_clipboard()) SendMessageA(g_hEdit, SCI_PASTE, 0, 0);
+            /* Image paste always lands in the main pane - it can prompt to
+               save the document first, which isn't worth threading through
+               to the split pane for what's a rare combination. */
+            if (!paste_image_from_clipboard()) SendMessageA(active_edit_view(), SCI_PASTE, 0, 0);
             break;
-        case IDM_EDIT_DELETE: SendMessageA(g_hEdit, SCI_CLEAR, 0, 0); break;
-        case IDM_EDIT_SELECTALL: SendMessageA(g_hEdit, SCI_SELECTALL, 0, 0); break;
-        case IDM_EDIT_DUPLICATE_LINE: SendMessageA(g_hEdit, SCI_LINEDUPLICATE, 0, 0); break;
-        case IDM_EDIT_MOVE_LINE_UP: SendMessageA(g_hEdit, SCI_MOVESELECTEDLINESUP, 0, 0); break;
-        case IDM_EDIT_MOVE_LINE_DOWN: SendMessageA(g_hEdit, SCI_MOVESELECTEDLINESDOWN, 0, 0); break;
-        case IDM_EDIT_DELETE_LINE: SendMessageA(g_hEdit, SCI_LINEDELETE, 0, 0); break;
-        case IDM_EDIT_JOIN_LINES: SendMessageA(g_hEdit, SCI_LINESJOIN, 0, 0); break;
-        case IDM_EDIT_TOGGLE_COMMENT: toggle_comment(); break;
-        case IDM_EDIT_TRIM_WHITESPACE: trim_trailing_whitespace(); break;
-        case IDM_EDIT_SELECT_NEXT: select_next_occurrence(); break;
-        case IDM_EDIT_SELECT_ALL_OCCURRENCES: select_all_occurrences(); break;
-        case IDM_EDIT_MATCH_BRACE: jump_to_matching_brace(); break;
-        case IDM_EDIT_BOOKMARK_TOGGLE: toggle_bookmark_at_cursor(); break;
-        case IDM_EDIT_BOOKMARK_NEXT: goto_bookmark(1); break;
-        case IDM_EDIT_BOOKMARK_PREV: goto_bookmark(0); break;
+        case IDM_EDIT_DELETE: SendMessageA(active_edit_view(), SCI_CLEAR, 0, 0); break;
+        case IDM_EDIT_SELECTALL: SendMessageA(active_edit_view(), SCI_SELECTALL, 0, 0); break;
+        case IDM_EDIT_DUPLICATE_LINE: SendMessageA(active_edit_view(), SCI_LINEDUPLICATE, 0, 0); break;
+        case IDM_EDIT_MOVE_LINE_UP: SendMessageA(active_edit_view(), SCI_MOVESELECTEDLINESUP, 0, 0); break;
+        case IDM_EDIT_MOVE_LINE_DOWN: SendMessageA(active_edit_view(), SCI_MOVESELECTEDLINESDOWN, 0, 0); break;
+        case IDM_EDIT_DELETE_LINE: SendMessageA(active_edit_view(), SCI_LINEDELETE, 0, 0); break;
+        case IDM_EDIT_JOIN_LINES: SendMessageA(active_edit_view(), SCI_LINESJOIN, 0, 0); break;
+        case IDM_EDIT_TOGGLE_COMMENT: toggle_comment(active_edit_view()); break;
+        case IDM_EDIT_TRIM_WHITESPACE: trim_trailing_whitespace(active_edit_view()); break;
+        case IDM_EDIT_SELECT_NEXT: select_next_occurrence(active_edit_view()); break;
+        case IDM_EDIT_SELECT_ALL_OCCURRENCES: select_all_occurrences(active_edit_view()); break;
+        case IDM_EDIT_MATCH_BRACE: jump_to_matching_brace(active_edit_view()); break;
+        case IDM_EDIT_BOOKMARK_TOGGLE: toggle_bookmark_at_cursor(active_edit_view()); break;
+        case IDM_EDIT_BOOKMARK_NEXT: goto_bookmark(active_edit_view(), 1); break;
+        case IDM_EDIT_BOOKMARK_PREV: goto_bookmark(active_edit_view(), 0); break;
         case IDM_EDIT_BOOKMARK_CLEAR: clear_all_bookmarks(); break;
-        case IDM_EDIT_UPPERCASE: SendMessageA(g_hEdit, SCI_UPPERCASE, 0, 0); break;
-        case IDM_EDIT_LOWERCASE: SendMessageA(g_hEdit, SCI_LOWERCASE, 0, 0); break;
-        case IDM_EDIT_TITLECASE: apply_title_case(); break;
-        case IDM_EDIT_SORT_ASC: transform_selected_lines(0); break;
-        case IDM_EDIT_SORT_DESC: transform_selected_lines(1); break;
-        case IDM_EDIT_SORT_DEDUPE: transform_selected_lines(2); break;
-        case IDM_EDIT_TABS_TO_SPACES: convert_indentation(1); break;
-        case IDM_EDIT_SPACES_TO_TABS: convert_indentation(0); break;
-        case IDM_EDIT_EOL_CRLF: convert_line_endings(SC_EOL_CRLF); break;
-        case IDM_EDIT_EOL_LF: convert_line_endings(SC_EOL_LF); break;
-        case IDM_EDIT_EOL_CR: convert_line_endings(SC_EOL_CR); break;
+        case IDM_EDIT_UPPERCASE: SendMessageA(active_edit_view(), SCI_UPPERCASE, 0, 0); break;
+        case IDM_EDIT_LOWERCASE: SendMessageA(active_edit_view(), SCI_LOWERCASE, 0, 0); break;
+        case IDM_EDIT_TITLECASE: apply_title_case(active_edit_view()); break;
+        case IDM_EDIT_SORT_ASC: transform_selected_lines(active_edit_view(), 0); break;
+        case IDM_EDIT_SORT_DESC: transform_selected_lines(active_edit_view(), 1); break;
+        case IDM_EDIT_SORT_DEDUPE: transform_selected_lines(active_edit_view(), 2); break;
+        case IDM_EDIT_TABS_TO_SPACES: convert_indentation(active_edit_view(), 1); break;
+        case IDM_EDIT_SPACES_TO_TABS: convert_indentation(active_edit_view(), 0); break;
+        case IDM_EDIT_EOL_CRLF: convert_line_endings(active_edit_view(), SC_EOL_CRLF); break;
+        case IDM_EDIT_EOL_LF: convert_line_endings(active_edit_view(), SC_EOL_LF); break;
+        case IDM_EDIT_EOL_CR: convert_line_endings(active_edit_view(), SC_EOL_CR); break;
         case IDM_EDIT_FIND: show_find_dialog(0); break;
         case IDM_EDIT_REPLACE: show_find_dialog(1); break;
         case IDM_EDIT_GOTOLINE: show_goto_line_dialog(); break;
@@ -9722,6 +9906,8 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
         case IDM_VIEW_OUTLINE: toggle_outline(hwnd); break;
         case IDM_VIEW_MINIMAP: toggle_minimap(hwnd); break;
+        case IDM_VIEW_TOGGLESPLIT: toggle_split_editor(hwnd); break;
+        case IDM_VIEW_RESET_SPLIT_EDITOR: reset_split_editor(hwnd); break;
         case IDM_VIEW_ZOOM_IN: adjust_editor_zoom(1); break;
         case IDM_VIEW_ZOOM_OUT: adjust_editor_zoom(-1); break;
         case IDM_VIEW_ZOOM_RESET: reset_editor_zoom(); break;
@@ -9876,19 +10062,19 @@ static int line_has_list_marker(const char *line, int length) {
 /* Preserve real tabs for indentation, but use spaces for alignment after
    ordinary text. A collapsed caret anywhere in a Markdown list item indents
    the entire item, which makes nesting work without first moving the caret. */
-static int smart_tab(int reverse) {
-    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+static int smart_tab(HWND hEdit, int reverse) {
+    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (start != end) return 0; /* retain Scintilla's block-selection behavior */
 
-    int lineNumber = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
-    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
-    int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    int lineNumber = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
     int lineLength = lineEnd - lineStart;
     char *line = (char *)malloc((size_t)lineLength + 1);
     if (!line) return 0;
     struct Sci_TextRange range = { { lineStart, lineEnd }, line };
-    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
     line[lineLength] = 0;
 
     int leadingLength = 0;
@@ -9898,20 +10084,20 @@ static int smart_tab(int reverse) {
 
     if (reverse && leadingLength > 0) {
         int remove = 0;
-        int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+        int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
         if (tabWidth < 1) tabWidth = 4;
         if (line[0] == '\t') remove = 1;
         else while (remove < leadingLength && remove < tabWidth && line[remove] == ' ') remove++;
-        SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)lineStart, 0);
-        SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)(lineStart + remove), 0);
-        SendMessageA(g_hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
+        SendMessageA(hEdit, SCI_SETTARGETSTART, (WPARAM)lineStart, 0);
+        SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)(lineStart + remove), 0);
+        SendMessageA(hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
         free(line);
         return 1;
     }
 
     if (!reverse && listItem) {
-        SendMessageA(g_hEdit, SCI_INSERTTEXT, (WPARAM)lineStart, (LPARAM)"\t");
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
+        SendMessageA(hEdit, SCI_INSERTTEXT, (WPARAM)lineStart, (LPARAM)"\t");
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
         free(line);
         return 1;
     }
@@ -9919,27 +10105,27 @@ static int smart_tab(int reverse) {
     free(line);
     if (reverse || start <= lineStart + leadingLength) return 0;
 
-    int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+    int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
     if (tabWidth < 1) tabWidth = 4;
-    int column = (int)SendMessageA(g_hEdit, SCI_GETCOLUMN, (WPARAM)start, 0);
+    int column = (int)SendMessageA(hEdit, SCI_GETCOLUMN, (WPARAM)start, 0);
     int spaces = tabWidth - column % tabWidth;
     char padding[32];
     if (spaces >= (int)sizeof(padding)) spaces = (int)sizeof(padding) - 1;
     memset(padding, ' ', (size_t)spaces);
     padding[spaces] = 0;
-    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)padding);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)padding);
     return 1;
 }
 
-static int smart_markdown_newline(void) {
-    int selectionStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selectionEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+static int smart_markdown_newline(HWND hEdit) {
+    int selectionStart = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selectionEnd = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (selectionStart != selectionEnd) return 0;
     int caret = selectionEnd;
-    if (caret > 0 && (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)(caret - 1), 0) == SCE_MARKDOWN_CODEBK)
+    if (caret > 0 && (int)SendMessageA(hEdit, SCI_GETSTYLEAT, (WPARAM)(caret - 1), 0) == SCE_MARKDOWN_CODEBK)
         return 0;
-    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    int line = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
     int beforeLength = caret - lineStart;
     if (beforeLength <= 0) return 0;
     char *before = (char *)malloc((size_t)beforeLength + 1);
@@ -9948,7 +10134,7 @@ static int smart_markdown_newline(void) {
     range.chrg.cpMin = lineStart;
     range.chrg.cpMax = caret;
     range.lpstrText = before;
-    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
     before[beforeLength] = 0;
 
     int i = 0;
@@ -9998,13 +10184,13 @@ static int smart_markdown_newline(void) {
         if (before[p] != ' ' && before[p] != '\t') { contentEmpty = 0; break; }
     }
 
-    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
     if (contentEmpty) {
         /* An empty list item or quote terminates that construct. Nested quote
            prefixes remain when terminating a list nested inside a quote. */
         int keep = hasMarker ? quoteEnd : indentEnd;
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(lineStart + keep), (LPARAM)caret);
-        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(lineStart + keep), (LPARAM)caret);
+        SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
     } else {
         const char *eol = editor_eol_sequence();
         char orderedMarker[48] = "";
@@ -10034,11 +10220,11 @@ static int smart_markdown_newline(void) {
             } else {
                 insert[insertLength] = 0;
             }
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
+            SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
             free(insert);
         }
     }
-    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     free(before);
     return 1;
 }
@@ -10051,8 +10237,8 @@ static int ends_with_word(const char *text, int length, const char *word) {
                                       text[length - wordLength - 1] == '_');
 }
 
-static int style_allows_indent(int position) {
-    int style = (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)position, 0);
+static int style_allows_indent(HWND hEdit, int position) {
+    int style = (int)SendMessageA(hEdit, SCI_GETSTYLEAT, (WPARAM)position, 0);
     switch (g_activeLanguage) {
         case LANG_CPP:
             return !(style == SCE_C_COMMENT || style == SCE_C_COMMENTLINE ||
@@ -10090,11 +10276,11 @@ static int style_allows_indent(int position) {
     }
 }
 
-static int line_opens_indent(const char *before, int contentStart, int trimmedEnd,
+static int line_opens_indent(HWND hEdit, const char *before, int contentStart, int trimmedEnd,
                              int lineStart, char *closingOut) {
     if (closingOut) *closingOut = 0;
     if (trimmedEnd <= contentStart || before[contentStart] == '#') return 0;
-    if (!style_allows_indent(lineStart + trimmedEnd - 1)) return 0;
+    if (!style_allows_indent(hEdit, lineStart + trimmedEnd - 1)) return 0;
     char last = before[trimmedEnd - 1];
     switch (g_activeLanguage) {
         case LANG_CPP:
@@ -10122,20 +10308,20 @@ static int line_opens_indent(const char *before, int contentStart, int trimmedEn
 /* Carry the current line's leading whitespace onto the next line and add one
    real tab after language-specific block openers. When the caret is between a
    paired opener and closer, expand both onto properly aligned lines at once. */
-static int smart_indented_newline(void) {
-    int selectionStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selectionEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+static int smart_indented_newline(HWND hEdit) {
+    int selectionStart = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selectionEnd = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (selectionStart != selectionEnd) return 0;
     int caret = selectionEnd;
-    int lineNumber = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
-    int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    int lineNumber = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
     int beforeLength = caret - lineStart;
     if (beforeLength < 0) return 0;
     char *before = (char *)malloc((size_t)beforeLength + 1);
     if (!before) return 0;
     struct Sci_TextRange range = { { lineStart, caret }, before };
-    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
     before[beforeLength] = 0;
 
     int indentLength = 0;
@@ -10145,20 +10331,20 @@ static int smart_indented_newline(void) {
     while (trimmedEnd > indentLength &&
            (before[trimmedEnd - 1] == ' ' || before[trimmedEnd - 1] == '\t')) trimmedEnd--;
     char closing = 0;
-    int addIndent = line_opens_indent(before, indentLength, trimmedEnd, lineStart, &closing);
+    int addIndent = line_opens_indent(hEdit, before, indentLength, trimmedEnd, lineStart, &closing);
 
     int after = caret;
     while (after < lineEnd) {
-        char character = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)after, 0);
+        char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)after, 0);
         if (character != ' ' && character != '\t') break;
         after++;
     }
     int pairedClose = addIndent && closing && after < lineEnd &&
-        (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)after, 0) == closing;
+        (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)after, 0) == closing;
     if (pairedClose) {
         int rest = after + 1;
         while (rest < lineEnd) {
-            char character = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)rest, 0);
+            char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)rest, 0);
             if (character != ' ' && character != '\t') { pairedClose = 0; break; }
             rest++;
         }
@@ -10180,78 +10366,78 @@ static int smart_indented_newline(void) {
         memcpy(insert + used, before, (size_t)indentLength); used += (size_t)indentLength;
     }
     insert[used] = 0;
-    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
     if (pairedClose && after > caret)
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)after);
-    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)after);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
     if (pairedClose)
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(caret + (int)firstLength),
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(caret + (int)firstLength),
                      (LPARAM)(caret + (int)firstLength));
-    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     free(insert);
     free(before);
     return 1;
 }
 
-static int smart_newline(void) {
-    if (g_activeLanguage == LANG_MARKDOWN && smart_markdown_newline()) return 1;
-    return smart_indented_newline();
+static int smart_newline(HWND hEdit) {
+    if (g_activeLanguage == LANG_MARKDOWN && smart_markdown_newline(hEdit)) return 1;
+    return smart_indented_newline(hEdit);
 }
 
 /* Typing a closing brace on an otherwise blank indented line brings it back
    one indentation level. Existing auto-paired closers are still skipped by
    smart_pair_character() instead of being replaced. */
-static int smart_closing_indent(char typed) {
+static int smart_closing_indent(HWND hEdit, char typed) {
     int valid = typed == '}' && (g_activeLanguage == LANG_CPP ||
         g_activeLanguage == LANG_BASH || g_activeLanguage == LANG_POWERSHELL ||
         g_activeLanguage == LANG_JSON);
     if (typed == ']' && g_activeLanguage == LANG_JSON) valid = 1;
     if (!valid) return 0;
-    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-    if (start != end || (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed)
+    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (start != end || (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed)
         return 0;
-    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
-    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    int line = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
     for (int position = lineStart; position < start; position++) {
-        char character = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)position, 0);
+        char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)position, 0);
         if (character != ' ' && character != '\t') return 0;
     }
     if (start == lineStart) return 0;
     int removeStart = start;
-    if ((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '\t') {
+    if ((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '\t') {
         removeStart--;
     } else {
-        int tabWidth = (int)SendMessageA(g_hEdit, SCI_GETTABWIDTH, 0, 0);
+        int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
         if (tabWidth < 1) tabWidth = 4;
         while (removeStart > lineStart && start - removeStart < tabWidth &&
-               (char)SendMessageA(g_hEdit, SCI_GETCHARAT,
+               (char)SendMessageA(hEdit, SCI_GETCHARAT,
                                   (WPARAM)(removeStart - 1), 0) == ' ') removeStart--;
     }
     char replacement[2] = { typed, 0 };
-    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)removeStart, (LPARAM)start);
-    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
-    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)removeStart, (LPARAM)start);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     return 1;
 }
 
-static int smart_pair_character(char typed) {
+static int smart_pair_character(HWND hEdit, char typed) {
     char closing = typed == '(' ? ')' : typed == '[' ? ']' : typed == '{' ? '}' : typed == '`' ? '`' : 0;
-    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (typed == '`' && start == end) {
-        if ((char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == '`') {
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
+        if ((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == '`') {
+            SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
             return 1;
         }
-        if (start >= 2 && (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '`' &&
-            (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 2), 0) == '`') return 0;
+        if (start >= 2 && (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '`' &&
+            (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 2), 0) == '`') return 0;
     }
     if (!closing) {
         if ((typed == ')' || typed == ']' || typed == '}') && start == end &&
-            (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed) {
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
+            (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed) {
+            SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
             return 1;
         }
         return 0;
@@ -10259,7 +10445,7 @@ static int smart_pair_character(char typed) {
     int length = end - start;
     char *selected = (char *)malloc((size_t)length + 1);
     if (!selected) return 0;
-    if (length > 0) SendMessageA(g_hEdit, SCI_GETSELTEXT, 0, (LPARAM)selected);
+    if (length > 0) SendMessageA(hEdit, SCI_GETSELTEXT, 0, (LPARAM)selected);
     else selected[0] = 0;
     size_t cap = (size_t)length + 3;
     char *replacement = (char *)malloc(cap);
@@ -10268,26 +10454,26 @@ static int smart_pair_character(char typed) {
     if (length > 0) memcpy(replacement + 1, selected, (size_t)length);
     replacement[length + 1] = closing;
     replacement[length + 2] = 0;
-    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
-    if (length > 0) SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1 + length));
-    else SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
-    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
+    if (length > 0) SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1 + length));
+    else SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     free(replacement);
     free(selected);
     return 1;
 }
 
-static int smart_pair_backspace(void) {
-    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+static int smart_pair_backspace(HWND hEdit) {
+    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (start != end || start <= 0) return 0;
-    char before = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0);
-    char after = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)start, 0);
+    char before = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0);
+    char after = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)start, 0);
     if (!((before == '(' && after == ')') || (before == '[' && after == ']') ||
           (before == '{' && after == '}') || (before == '`' && after == '`'))) return 0;
-    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(start - 1), (LPARAM)(start + 1));
-    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start - 1), (LPARAM)(start + 1));
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
     return 1;
 }
 
@@ -10400,19 +10586,76 @@ static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
     return 1;
 }
 
+/* Ctrl+Alt+click jumps to the next occurrence of the word under the pointer -
+   a lightweight stand-in for "go to definition" without a real per-language
+   symbol index: for an identifier this typically lands on its declaration,
+   and repeated Ctrl+Alt+clicks cycle through every other use in the file.
+   (Plain Ctrl+click is already Scintilla's native gesture for adding a
+   multi-cursor selection - see SCI_SETMULTIPLESELECTION in configure_scintilla()
+   - so this needs its own modifier combination instead.)
+   Returns 0 (unhandled, so the caller falls back to a normal click) when
+   there's no word under the pointer to jump from. */
+static int ctrl_click_jump_to_occurrence(HWND hEdit, int x, int y) {
+    int position = (int)SendMessageA(hEdit, SCI_POSITIONFROMPOINTCLOSE, (WPARAM)x, (LPARAM)y);
+    if (position < 0) return 0;
+
+    int wordStart = (int)SendMessageA(hEdit, SCI_WORDSTARTPOSITION, (WPARAM)position, (LPARAM)1);
+    int wordEnd = (int)SendMessageA(hEdit, SCI_WORDENDPOSITION, (WPARAM)position, (LPARAM)1);
+    if (wordEnd <= wordStart) return 0;
+
+    int wordLength = wordEnd - wordStart;
+    char *word = (char *)malloc((size_t)wordLength + 1);
+    if (!word) return 1;
+    struct Sci_TextRange range = { { wordStart, wordEnd }, word };
+    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    word[wordLength] = 0;
+
+    int docLength = (int)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(hEdit, SCI_SETSEARCHFLAGS, SCFIND_WHOLEWORD | SCFIND_MATCHCASE, 0);
+
+    /* Search past the clicked word first, wrapping back to the start of the
+       document if nothing turns up after it - the same wrap-around shape
+       find_in_edit() uses for its "down" search. */
+    SendMessageA(hEdit, SCI_SETTARGETSTART, (WPARAM)wordEnd, 0);
+    SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
+    int foundAt = (int)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
+    if (foundAt < 0) {
+        SendMessageA(hEdit, SCI_SETTARGETSTART, 0, 0);
+        SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)wordStart, 0);
+        foundAt = (int)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
+    }
+    free(word);
+
+    if (foundAt >= 0) {
+        int foundEnd = (int)SendMessageA(hEdit, SCI_GETTARGETEND, 0, 0);
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)foundAt, (LPARAM)foundEnd);
+        SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
+    } else {
+        MessageBeep(MB_ICONASTERISK); /* only occurrence in the file */
+    }
+    return 1;
+}
+
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                          UINT_PTR id, DWORD_PTR data) {
-    (void)id; (void)data;
+    (void)data;
     if (msg == WM_CHAR) {
-        if (wParam == '\t' && smart_tab((GetKeyState(VK_SHIFT) & 0x8000) != 0)) return 0;
-        if (wParam == '\r' && smart_newline()) return 0;
-        if (wParam == '\b' && smart_pair_backspace()) return 0;
-        if (wParam < 128 && smart_closing_indent((char)wParam)) return 0;
-        if (wParam < 128 && smart_pair_character((char)wParam)) return 0;
+        if (wParam == '\t' && smart_tab(hwnd, (GetKeyState(VK_SHIFT) & 0x8000) != 0)) return 0;
+        if (wParam == '\r' && smart_newline(hwnd)) return 0;
+        if (wParam == '\b' && smart_pair_backspace(hwnd)) return 0;
+        if (wParam < 128 && smart_closing_indent(hwnd, (char)wParam)) return 0;
+        if (wParam < 128 && smart_pair_character(hwnd, (char)wParam)) return 0;
     } else if (msg == WM_CONTEXTMENU) {
         if (show_spelling_context_menu(hwnd, lParam)) return 0;
+    } else if (msg == WM_LBUTTONDOWN) {
+        if ((wParam & MK_CONTROL) && (GetKeyState(VK_MENU) & 0x8000) &&
+            ctrl_click_jump_to_occurrence(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+            return 0;
     } else if (msg == WM_NCDESTROY) {
-        RemoveWindowSubclass(hwnd, EditSubclassProc, 2);
+        /* This proc is shared by both g_hEdit (subclass id 2) and
+           g_hSplitEdit (id 3) - remove whichever one this hwnd was actually
+           registered under rather than a hardcoded id. */
+        RemoveWindowSubclass(hwnd, EditSubclassProc, id);
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
@@ -10588,6 +10831,12 @@ static void initialize_main_window(HWND hwnd) {
     SetWindowSubclass(g_hMinimap, MinimapSubclassProc, 1, 0);
     configure_minimap(g_hMinimap);
 
+    g_hSplitEdit = CreateWindowExA(0, "Scintilla", "",
+        WS_CHILD | (g_splitEditorVisible ? WS_VISIBLE : 0),
+        0, 0, 0, 0, hwnd, (HMENU)ID_SPLIT_EDIT, GetModuleHandleA(NULL), NULL);
+    SetWindowSubclass(g_hSplitEdit, EditSubclassProc, 3, 0);
+    configure_scintilla(g_hSplitEdit);
+
     apply_editor_font(g_fontFaceName, g_fontPointSize);
 
     g_documentCount = 1;
@@ -10596,6 +10845,7 @@ static void initialize_main_window(HWND hwnd) {
     g_documents[0].sciDocument = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
     SendMessageA(g_hEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_documents[0].sciDocument);
     SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[0].sciDocument);
+    SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[0].sciDocument);
     /* The sole blank startup tab is the unnumbered canonical document. */
     g_documents[0].untitledNumber = 0;
     TCITEMW firstTab = {0};
@@ -10646,10 +10896,17 @@ static void run_deferred_startup_init(void) {
 }
 
 static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
-    if (notification->hwndFrom != g_hEdit) return;
+    int fromMain = notification->hwndFrom == g_hEdit;
+    int fromSplit = g_hSplitEdit && notification->hwndFrom == g_hSplitEdit;
+    if (!fromMain && !fromSplit) return;
 
     struct SCNotification *scn = (struct SCNotification *)notification;
     if (notification->code == SCN_UPDATEUI) {
+        /* Scroll-sync-to-preview, brace highlighting, and the minimap
+           viewport box all stay tied to the main pane - a known v1 scope
+           limit for the split pane, alongside Edit-menu commands (see
+           EditSubclassProc's smart-input parity, which IS shared). */
+        if (!fromMain) return;
         if ((scn->updated & SC_UPDATE_V_SCROLL) && g_editorVisible && g_previewVisible) {
             if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
             else SetTimer(hwnd, IDT_SCROLL_SYNC, 35, NULL);
@@ -10660,6 +10917,9 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
         return;
     }
     if (notification->code == SCN_MARGINCLICK) {
+        /* scn->position is a document offset, and bookmarks/breakpoints are
+           markers on the shared document - shared by both panes - so this
+           works the same regardless of which pane the click came from. */
         if (scn->margin == MARGIN_BOOKMARKS) {
             int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)scn->position, 0);
             /* Debuggable files default the margin to breakpoints, but Shift+Click
@@ -10675,6 +10935,11 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
     if (notification->code != SCN_MODIFIED) return;
     if (!(scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT))) return;
 
+    /* Everything below is document-level bookkeeping, not view-level, so it
+       applies regardless of which pane the edit came from - both panes are
+       views of the same shared document (without this, typing only in the
+       split pane would never mark the tab dirty or stale the recovery
+       snapshot, silently losing track of real unsaved edits). */
     if (!g_switchingDocument && !g_dirty) set_dirty(1);
     if (!g_switchingDocument) g_recoverySnapshotStale = 1;
     if (g_previewVisible) SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
@@ -10685,7 +10950,10 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
        pays for one scan at the pause instead of one per character. */
     SetTimer(hwnd, IDT_STATUS_UPDATE, 200, NULL);
     SetTimer(hwnd, IDT_OUTLINE_UPDATE, 500, NULL);
-    if (scn->linesAdded != 0) update_linenumber_margin_width(g_hEdit);
+    if (scn->linesAdded != 0) {
+        update_linenumber_margin_width(g_hEdit);
+        if (g_hSplitEdit) update_linenumber_margin_width(g_hSplitEdit);
+    }
 }
 
 static void destroy_main_window(HWND hwnd) {
@@ -10821,6 +11089,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             RECT rc;
             GetClientRect(hwnd, &rc);
             FillRect((HDC)wParam, &rc, g_mainBkBrush);
+            /* The splitter gaps are otherwise the same colour as the panes
+               either side of them (both share the main background), so
+               without this they're invisible rather than reading as
+               draggable dividers. */
+            if (g_splitterRect.right > g_splitterRect.left) {
+                HBRUSH borderBrush = CreateSolidBrush(popup_border_color());
+                FillRect((HDC)wParam, &g_splitterRect, borderBrush);
+                DeleteObject(borderBrush);
+            }
+            if (g_hSplitEdit && g_splitEditorVisible &&
+                g_splitEditorSplitterRect.bottom > g_splitEditorSplitterRect.top) {
+                HBRUSH borderBrush = CreateSolidBrush(popup_border_color());
+                FillRect((HDC)wParam, &g_splitEditorSplitterRect, borderBrush);
+                DeleteObject(borderBrush);
+            }
             return 1;
         }
         case WM_TIMER:
@@ -10865,6 +11148,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         case WM_SIZE:
             layout(hwnd);
+            /* layout() recomputes g_splitterRect, but resizing doesn't
+               automatically re-run WM_ERASEBKGND (which is what actually
+               paints the splitter gap) for its new position/size. */
+            InvalidateRect(hwnd, NULL, TRUE);
             return 0;
         case WM_SETCURSOR: {
             POINT pt;
@@ -10874,12 +11161,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetCursor(LoadCursorA(NULL, (LPCSTR)IDC_SIZEWE));
                 return TRUE;
             }
+            if (split_editor_splitter_contains(pt.x, pt.y)) {
+                SetCursor(LoadCursorA(NULL, (LPCSTR)IDC_SIZENS));
+                return TRUE;
+            }
             break;
         }
         case WM_LBUTTONDOWN: {
             int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             if (splitter_contains_x(x)) {
                 g_dragging = 1;
+                SetCapture(hwnd);
+            } else if (split_editor_splitter_contains(x, y)) {
+                g_draggingSplitEditor = 1;
                 SetCapture(hwnd);
             }
             return 0;
@@ -10890,12 +11185,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_dragging && GET_X_LPARAM(lParam) != g_splitterPos) {
                 g_splitterPos = GET_X_LPARAM(lParam);
                 layout(hwnd);
+                /* See the WM_SIZE handler: layout() alone doesn't re-run
+                   WM_ERASEBKGND, which is what paints the splitter gap. */
+                InvalidateRect(hwnd, NULL, TRUE);
+            } else if (g_draggingSplitEditor) {
+                int localY = GET_Y_LPARAM(lParam) - g_splitEditorRegionY;
+                if (localY != g_splitEditorPos) {
+                    g_splitEditorPos = localY;
+                    layout(hwnd);
+                    InvalidateRect(hwnd, NULL, TRUE);
+                }
             }
             return 0;
         }
         case WM_LBUTTONUP: {
             if (g_dragging) {
                 g_dragging = 0;
+                ReleaseCapture();
+                save_layout_settings();
+            } else if (g_draggingSplitEditor) {
+                g_draggingSplitEditor = 0;
                 ReleaseCapture();
                 save_layout_settings();
             }
@@ -11090,6 +11399,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, VK_F5, IDM_RUN_FILE },
         { FVIRTKEY, VK_F5, IDM_DEBUG_FILE },
         { FVIRTKEY, VK_F6, IDM_DEBUG_CONTINUE },
+        { FVIRTKEY | FCONTROL, VK_OEM_5, IDM_VIEW_TOGGLESPLIT }, /* Ctrl+\ */
         { FVIRTKEY | FCONTROL, VK_F6, IDM_VIEW_CYCLE_PANE },
         { FVIRTKEY | FCONTROL | FSHIFT, VK_F6, IDM_VIEW_CYCLE_PANE_PREV },
         { FVIRTKEY, VK_F10, IDM_DEBUG_STEP_OVER },
