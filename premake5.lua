@@ -132,13 +132,10 @@ project "markedit"
 
     files {
         "markedit.c",
-        "editor_language.c", "editor_language.h",
         "path_utils.c", "path_utils.h",
         "text_codec.c", "text_codec.h",
         "json_formatter.c", "json_formatter.h",
         "markdown.c", "markdown.h",
-        "recent_files.c", "recent_files.h",
-        "workspace_files.c", "workspace_files.h",
         "settings.c", "settings.h",
         "help_reference.c", "help_reference.h",
         "markedit.rc",

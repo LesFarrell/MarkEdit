@@ -2050,16 +2050,25 @@ static void load_recent_files(void) {
     free(path);
 }
 
+/* WritePrivateProfileSectionW replaces the whole section in one file
+   read-modify-write pass, rather than the N+1 passes that clearing the
+   section and then calling WritePrivateProfileStringW once per entry would
+   cost - this runs on every single file open, so it isn't a one-off. */
 static void save_recent_files(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    /* clear the whole section first so a shrinking list doesn't leave stale
-       trailing entries from a previous, longer run */
-    WritePrivateProfileStringW(L"RecentFiles", NULL, NULL, path);
-    for (int i = 0; i < g_recentFileCount; i++) {
-        WCHAR key[16];
-        swprintf(key, 16, L"File%d", i);
-        WritePrivateProfileStringW(L"RecentFiles", key, g_recentFiles[i], path);
+    size_t cap = 1;
+    for (int i = 0; i < g_recentFileCount; i++) cap += 16 + wcslen(g_recentFiles[i]);
+    WCHAR *section = (WCHAR *)malloc(cap * sizeof(WCHAR));
+    if (section) {
+        size_t pos = 0;
+        for (int i = 0; i < g_recentFileCount; i++) {
+            int written = swprintf(section + pos, cap - pos, L"File%d=%ls", i, g_recentFiles[i]);
+            pos += (size_t)written + 1; /* step past the entry's own NUL */
+        }
+        section[pos] = 0; /* second, block-terminating NUL */
+        WritePrivateProfileSectionW(L"RecentFiles", g_recentFileCount ? section : NULL, path);
+        free(section);
     }
     free(path);
 }
@@ -2151,14 +2160,22 @@ static void load_recent_folders(void) {
     free(path);
 }
 
+/* See save_recent_files() - same one-pass-instead-of-N+1 rationale. */
 static void save_recent_folders(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WritePrivateProfileStringW(L"RecentFolders", NULL, NULL, path);
-    for (int i = 0; i < g_recentFolderCount; i++) {
-        WCHAR key[16];
-        swprintf(key, 16, L"Folder%d", i);
-        WritePrivateProfileStringW(L"RecentFolders", key, g_recentFolders[i], path);
+    size_t cap = 1;
+    for (int i = 0; i < g_recentFolderCount; i++) cap += 16 + wcslen(g_recentFolders[i]);
+    WCHAR *section = (WCHAR *)malloc(cap * sizeof(WCHAR));
+    if (section) {
+        size_t pos = 0;
+        for (int i = 0; i < g_recentFolderCount; i++) {
+            int written = swprintf(section + pos, cap - pos, L"Folder%d=%ls", i, g_recentFolders[i]);
+            pos += (size_t)written + 1;
+        }
+        section[pos] = 0;
+        WritePrivateProfileSectionW(L"RecentFolders", g_recentFolderCount ? section : NULL, path);
+        free(section);
     }
     free(path);
 }
@@ -3655,6 +3672,12 @@ static int insert_markdown_image(const WCHAR *relativePath, const WCHAR *altText
    "import this image into the document". Images still get an image link;
    everything else gets a plain link. */
 static int shift_drop_link(const WCHAR *path) {
+    /* PathRelativePathToW() guarantees a MAX_PATH-bounded write into
+       `relative`, but `path` itself (the fallback `target` below, used
+       whenever there's no current document or the two paths don't share a
+       drive) comes from DragQueryFileW() and is NOT MAX_PATH-limited - so
+       `normalized` is sized off the actual target length rather than a
+       fixed stack buffer. */
     WCHAR relative[MAX_PATH];
     const WCHAR *target = path;
     if (g_currentFile) {
@@ -3666,7 +3689,8 @@ static int shift_drop_link(const WCHAR *path) {
         }
         free(documentDirectory);
     }
-    WCHAR normalized[MAX_PATH];
+    WCHAR *normalized = (WCHAR *)malloc((wcslen(target) + 1) * sizeof(WCHAR));
+    if (!normalized) return 0;
     wcscpy(normalized, target);
     for (WCHAR *p = normalized; *p; p++) if (*p == L'\\') *p = L'/';
     if (normalized[0] == L'.' && normalized[1] == L'/')
@@ -3676,6 +3700,7 @@ static int shift_drop_link(const WCHAR *path) {
     if (alt) PathRemoveExtensionW(alt);
     int inserted = insert_markdown_reference(normalized, alt, is_image_file(path));
     free(alt);
+    free(normalized);
     return inserted;
 }
 
@@ -7329,7 +7354,11 @@ static WCHAR *find_vcvarsall(void) {
     static const WCHAR *envNames[] = { L"ProgramFiles(x86)", L"ProgramFiles" };
     for (int e = 0; e < 2; e++) {
         WCHAR programFiles[MAX_PATH];
-        if (!GetEnvironmentVariableW(envNames[e], programFiles, MAX_PATH)) continue;
+        /* A return of 0 is "not set"; a return >= the buffer size means the
+           value didn't fit and the buffer's contents are left undefined -
+           both mean "skip this one", not just the zero case. */
+        DWORD len = GetEnvironmentVariableW(envNames[e], programFiles, MAX_PATH);
+        if (len == 0 || len >= MAX_PATH) continue;
         for (int y = 0; y < (int)(sizeof(years) / sizeof(years[0])); y++) {
             for (int ed = 0; ed < (int)(sizeof(editions) / sizeof(editions[0])); ed++) {
                 WCHAR path[MAX_PATH * 2];
@@ -8783,15 +8812,16 @@ static WCHAR *choose_workspace_folder(void) {
     return resultPath;
 }
 
+/* Reuses the same LANGUAGES table language_for_path() draws from, rather
+   than maintaining a second, separate extension list here that would
+   otherwise silently drift and hide files the app can actually open and
+   highlight (.lua, .cs, .java, .go, .rs, .php, etc.) from the workspace
+   tree/quick-open/find-in-folder. */
 static int workspace_file_extension(const WCHAR *name) {
     const WCHAR *extension = PathFindExtensionW(name);
-    static const WCHAR *allowed[] = {
-        L".md", L".markdown", L".mdown", L".mkd", L".txt", L".json", L".yaml", L".yml",
-        L".html", L".htm", L".xml", L".c", L".h", L".cpp", L".hpp", L".js", L".ts",
-        L".py", L".sh", L".bash", L".ps1"
-    };
-    for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++)
-        if (_wcsicmp(extension, allowed[i]) == 0) return 1;
+    if (!*extension) return 0;
+    for (int i = 0; i < LANGUAGE_COUNT; i++)
+        if (extension_in_list(extension, LANGUAGES[i].extensions)) return 1;
     return 0;
 }
 

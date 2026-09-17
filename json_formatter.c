@@ -94,10 +94,21 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
             case ':':
                 json_emit(&printer, indent ? ": " : ":", indent ? 2 : 1);
                 break;
-            case ',':
+            case ',': {
+                /* A comma directly followed by a closing bracket (a trailing
+                   comma) is invalid JSON - reject it here rather than
+                   formatting it, which would otherwise emit a stray blank
+                   line (this comma's own indent, then the closer's). */
+                int next = i + 1;
+                while (next < length && strchr(" \t\r\n", text[next])) next++;
+                if (next >= length || text[next] == '}' || text[next] == ']') {
+                    free(printer.output);
+                    return NULL;
+                }
                 json_emit(&printer, ",", 1);
                 if (indent) json_emit_indent(&printer, eol, depth);
                 break;
+            }
             default: {
                 int start = i;
                 while (i < length && !strchr(" \t\r\n,:{}[]\"", text[i])) i++;
