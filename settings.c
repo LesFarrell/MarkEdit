@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <wchar.h>
 
+#include "file_explorer.h"
 #include "path_utils.h"
 
 /* ---- persisted settings, stored in %APPDATA%\markedit\markedit.ini ---- */
@@ -93,6 +94,15 @@ static void write_profile_int(const WCHAR *section, const WCHAR *key, int value,
     WritePrivateProfileStringW(section, key, buffer, path);
 }
 
+/* Every persisted pane-split ratio (splitter, explorer width, split editor)
+   is a permille clamped to this same [50,950] range, both when read back at
+   startup and when re-derived from live pixel positions on save. */
+static int clamp_ratio(int value) {
+    if (value < 50) return 50;
+    if (value > 950) return 950;
+    return value;
+}
+
 void load_layout_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
@@ -106,6 +116,8 @@ void load_layout_settings(void) {
     g_indentGuides = read_profile_int(L"View", L"IndentGuides", g_indentGuides, path) != 0;
     g_outlineVisible = read_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path) != 0;
     g_minimapVisible = read_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path) != 0;
+    g_explorerVisible = read_profile_int(L"View", L"ExplorerVisible", g_explorerVisible, path) != 0;
+    g_explorerWidthRatio = clamp_ratio(read_profile_int(L"View", L"ExplorerWidthRatio", g_explorerWidthRatio, path));
     g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     if (g_editorZoom < -10) g_editorZoom = -10;
     if (g_editorZoom > 20) g_editorZoom = 20;
@@ -113,14 +125,10 @@ void load_layout_settings(void) {
                              LOCALE_NAME_MAX_LENGTH, path);
     if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
 
-    g_splitterRatio = read_profile_int(L"View", L"SplitterRatio", 500, path);
-    if (g_splitterRatio < 50) g_splitterRatio = 50;
-    if (g_splitterRatio > 950) g_splitterRatio = 950;
+    g_splitterRatio = clamp_ratio(read_profile_int(L"View", L"SplitterRatio", 500, path));
 
     g_splitEditorVisible = read_profile_int(L"View", L"SplitEditorVisible", 0, path) != 0;
-    g_splitEditorRatio = read_profile_int(L"View", L"SplitEditorRatio", 500, path);
-    if (g_splitEditorRatio < 50) g_splitEditorRatio = 50;
-    if (g_splitEditorRatio > 950) g_splitEditorRatio = 950;
+    g_splitEditorRatio = clamp_ratio(read_profile_int(L"View", L"SplitEditorRatio", 500, path));
 
     int left = read_profile_int(L"Window", L"Left", 0, path);
     int top = read_profile_int(L"Window", L"Top", 0, path);
@@ -147,6 +155,7 @@ void save_layout_settings(void) {
     write_profile_int(L"View", L"IndentGuides", g_indentGuides, path);
     write_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path);
     write_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path);
+    write_profile_int(L"View", L"ExplorerVisible", g_explorerVisible, path);
     write_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
     if (!g_commandLinePreviewMode) {
@@ -154,17 +163,24 @@ void save_layout_settings(void) {
         write_profile_int(L"View", L"EditorVisible", g_editorVisible, path);
     }
 
-    if (g_hMainWnd && g_splitterPos >= 0) {
+    if (g_hMainWnd) {
         RECT client;
         GetClientRect(g_hMainWnd, &client);
-        int available = client.right - SPLITTER_WIDTH;
-        if (available > 0) {
-            g_splitterRatio = MulDiv(g_splitterPos, 1000, available);
-            if (g_splitterRatio < 50) g_splitterRatio = 50;
-            if (g_splitterRatio > 950) g_splitterRatio = 950;
+        /* g_splitterPos is relative to the content area right of the
+           explorer panel, not the full client width - explorer_content_x()
+           is the same offset layout() shifts that content area by, so the
+           persisted ratio has to be measured against the same narrower
+           width or it drifts by however wide the panel currently is. */
+        int contentX = explorer_content_x(g_focusMode);
+        if (g_splitterPos >= 0) {
+            int available = client.right - contentX - SPLITTER_WIDTH;
+            if (available > 0) g_splitterRatio = clamp_ratio(MulDiv(g_splitterPos, 1000, available));
         }
+        if (g_explorerWidth >= 0 && client.right > 0)
+            g_explorerWidthRatio = clamp_ratio(MulDiv(g_explorerWidth, 1000, client.right));
     }
     write_profile_int(L"View", L"SplitterRatio", g_splitterRatio, path);
+    write_profile_int(L"View", L"ExplorerWidthRatio", g_explorerWidthRatio, path);
     write_profile_int(L"View", L"SplitEditorVisible", g_splitEditorVisible, path);
     write_profile_int(L"View", L"SplitEditorRatio", g_splitEditorRatio, path);
 

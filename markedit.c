@@ -36,6 +36,7 @@
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
 #define DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 19
 #endif
+#include "file_explorer.h"
 #include "help_reference.h"
 #include "json_formatter.h"
 #include "markdown.h"
@@ -1367,6 +1368,7 @@ static void apply_main_theme(HWND hwnd) {
         SetWindowTheme(g_hOutline, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
         InvalidateRect(g_hOutline, NULL, TRUE);
     }
+    explorer_apply_theme();
 }
 
 /* Popup menus need an explicit uxtheme opt-in to follow MarkEdit's theme.
@@ -1494,6 +1496,18 @@ static COLORREF popup_bg_color(void) { return g_previewDarkMode ? RGB(0x0D, 0x11
 static COLORREF popup_fg_color(void) { return g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28); }
 static COLORREF popup_border_color(void) { return g_previewDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE); }
 static COLORREF popup_accent_color(void) { return g_previewDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x09, 0x69, 0xDA); }
+
+/* Fills one splitter gap's rect with the border colour so it reads as a
+   draggable divider instead of just more of the pane background on either
+   side of it - shared by every splitter's WM_ERASEBKGND painting (main,
+   explorer, split-editor). A zeroed/empty rect (the splitter's own "not
+   currently shown" state) is a no-op. */
+static void paint_splitter_gap(HDC hdc, const RECT *rect) {
+    if (rect->right <= rect->left || rect->bottom <= rect->top) return;
+    HBRUSH borderBrush = CreateSolidBrush(popup_border_color());
+    FillRect(hdc, rect, borderBrush);
+    DeleteObject(borderBrush);
+}
 
 /* One shared background brush for whichever of the three popup dialogs is
    currently open. They run their own modal message loop (see
@@ -2947,6 +2961,18 @@ static void open_terminal_here(void) {
     free(directory);
 }
 
+/* Shared with the file explorer panel's "Reveal in Explorer" context-menu
+   command (passed to explorer_init() as a callback, since file_explorer.c
+   can't call a static markedit.c function by name). */
+static void reveal_path_in_explorer(const WCHAR *path) {
+    size_t capacity = wcslen(path) + 16;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"/select,\"%ls\"", path);
+    ShellExecuteW(g_hMainWnd, L"open", L"explorer.exe", parameters, NULL, SW_SHOWNORMAL);
+    free(parameters);
+}
+
 /* Opens Explorer with the current file pre-selected. Unlike Open Terminal
    Here, there's no reasonable fallback for an unsaved document - Explorer
    can't select a file that doesn't exist on disk yet. */
@@ -2956,12 +2982,7 @@ static void reveal_in_explorer(void) {
                     L"Show in Explorer", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    size_t capacity = wcslen(g_currentFile) + 16;
-    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (!parameters) return;
-    swprintf(parameters, capacity, L"/select,\"%ls\"", g_currentFile);
-    ShellExecuteW(g_hMainWnd, L"open", L"explorer.exe", parameters, NULL, SW_SHOWNORMAL);
-    free(parameters);
+    reveal_path_in_explorer(g_currentFile);
 }
 
 static void apply_preview_theme(void) {
@@ -5468,6 +5489,8 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_STRING, IDM_VIEW_SPELL_LANGUAGE, "Spell Check &Language...");
     AppendMenuA(hView, MF_STRING | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_OUTLINE, "Document &Outline");
+    AppendMenuA(hView, MF_STRING | (g_explorerVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_EXPLORER, "&File Explorer\tCtrl+Shift+X");
     AppendMenuA(hView, MF_STRING | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_MINIMAP, "Mini&map");
     AppendMenuA(hView, MF_STRING | (g_splitEditorVisible ? MF_CHECKED : MF_UNCHECKED),
@@ -5986,7 +6009,7 @@ static void create_toolbar(HWND hwnd) {
             0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)TOOLBAR_BUTTONS[i].id, GetModuleHandleA(NULL), NULL);
         /* WS_CLIPSIBLINGS: these buttons sit edge-to-edge and get MoveWindow'd
            on every layout() (including mid-drag during a live resize, where
-           layout_toolbar()'s row-wrap can shift several at once) - without it,
+           layout_toolbar_at()'s row-wrap can shift several at once) - without it,
            one button's owner-draw paint can bleed into a neighbour's area.
            The window text isn't displayed (owner-drawn), but is kept as the
            accessible name / tooltip-eligible text for the button. */
@@ -6035,18 +6058,19 @@ static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
 
 /* Lay the toolbar buttons out left-to-right along the reserved top strip,
    with a wider gap standing in for a separator between groups. All buttons
-   are the same size, sized to the toolbar's height. */
-static int layout_toolbar(int width, int top) {
-    int x = 4, y = top + 3;
+   are the same size, sized to the toolbar's height. xOffset shifts the whole
+   strip right of the file explorer panel, when one is docked. */
+static int layout_toolbar_at(int xOffset, int width, int top) {
+    int x = xOffset + 4, y = top + 3;
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (!TOOLBAR_BUTTONS[i].paint) {
-            if (x > 4) x += 10;
+            if (x > xOffset + 4) x += 10;
             continue;
         }
         HWND hBtn = g_hToolbarButtons[i];
         if (!hBtn) continue;
-        if (x > 4 && x + TOOLBAR_BUTTON_SIZE > width - 4) {
-            x = 4;
+        if (x > xOffset + 4 && x + TOOLBAR_BUTTON_SIZE > xOffset + width - 4) {
+            x = xOffset + 4;
             y += TOOLBAR_BUTTON_SIZE + 4;
         }
         MoveWindow(hBtn, x, y, TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE, TRUE);
@@ -6149,8 +6173,11 @@ static void layout(HWND hwnd) {
         h -= statusHeight;
     }
 
-    /* The formatting toolbar edits Markdown source, so it's only useful (and
-       only shown) while the editor pane is visible. */
+    /* The tab strip and formatting toolbar span the full window width, above
+       both the file explorer panel and the editor/preview - the explorer
+       panel is docked below them, not beside them. The formatting toolbar
+       edits Markdown source, so it's only useful (and only shown) while the
+       editor pane is visible. */
     ShowWindow(g_hTabs, g_focusMode ? SW_HIDE : SW_SHOW);
     if (!g_focusMode) MoveWindow(g_hTabs, 0, 0, w, TAB_HEIGHT, TRUE);
     int y = g_focusMode ? 0 : TAB_HEIGHT;
@@ -6158,23 +6185,49 @@ static void layout(HWND hwnd) {
         if (g_hToolbarButtons[i])
             ShowWindow(g_hToolbarButtons[i], g_editorVisible && !g_focusMode ? SW_SHOW : SW_HIDE);
     }
-    if (g_editorVisible && !g_focusMode) y = layout_toolbar(w, y);
+    if (g_editorVisible && !g_focusMode) y = layout_toolbar_at(0, w, y);
     h -= y;
     if (h < 0) h = 0;
+
+    /* File explorer panel: docked at the left edge of the remaining content
+       area (below the tab strip/toolbar, above the status bar), opposite
+       side from the outline pane. Everything to its right shifts its
+       x-origin by contentX and lays out into the now-narrower w, the same
+       way the outline pane's own paneWidth carve-out works at the other
+       end. */
+    int contentX = 0;
+    if (g_hExplorerTree && g_explorerVisible && !g_focusMode) {
+        int dpi = GetDpiForWindow(hwnd);
+        if (g_explorerWidth < 0)
+            g_explorerWidth = MulDiv(w, g_explorerWidthRatio, 1000);
+        int minWidth = MulDiv(120, dpi, 96);
+        int maxWidth = w * 2 / 3;
+        if (g_explorerWidth < minWidth) g_explorerWidth = minWidth;
+        if (maxWidth > minWidth && g_explorerWidth > maxWidth) g_explorerWidth = maxWidth;
+        g_explorerSplitterRect = (RECT){ g_explorerWidth, y, g_explorerWidth + SPLITTER_WIDTH, y + h };
+        MoveWindow(g_hExplorerTree, 0, y, g_explorerWidth, h, TRUE);
+        ShowWindow(g_hExplorerTree, SW_SHOW);
+        contentX = g_explorerWidth + SPLITTER_WIDTH;
+    } else {
+        g_explorerSplitterRect = (RECT){0, 0, 0, 0};
+        if (g_hExplorerTree) ShowWindow(g_hExplorerTree, SW_HIDE);
+    }
+    w -= contentX;
+    if (w < 0) w = 0;
 
     int paneWidth = w;
     if (g_hOutline && g_outlineVisible && g_editorVisible && !g_focusMode) {
         int outlineWidth = MulDiv(230, GetDpiForWindow(hwnd), 96);
         if (outlineWidth > w / 3) outlineWidth = w / 3;
         paneWidth = w - outlineWidth;
-        MoveWindow(g_hOutline, paneWidth, y, outlineWidth, h, TRUE);
+        MoveWindow(g_hOutline, contentX + paneWidth, y, outlineWidth, h, TRUE);
         ShowWindow(g_hOutline, SW_SHOW);
     } else if (g_hOutline) {
         ShowWindow(g_hOutline, SW_HIDE);
     }
 
     if (g_editorVisible && !g_previewVisible) {
-        layout_editor_with_minimap(hwnd, 0, y, paneWidth, h);
+        layout_editor_with_minimap(hwnd, contentX, y, paneWidth, h);
         ShowWindow(g_hPreview, SW_HIDE);
         RECT zero = { 0, 0, 0, 0 };
         set_webview_bounds(zero, FALSE);
@@ -6186,7 +6239,7 @@ static void layout(HWND hwnd) {
         if (g_hMinimap) ShowWindow(g_hMinimap, SW_HIDE);
         if (g_hSplitEdit) ShowWindow(g_hSplitEdit, SW_HIDE);
         ShowWindow(g_hPreview, SW_SHOW);
-        MoveWindow(g_hPreview, 0, y, paneWidth, h, TRUE);
+        MoveWindow(g_hPreview, contentX, y, paneWidth, h, TRUE);
         /* WebView2 controller bounds are relative to g_hPreview's own client
            origin (which MoveWindow already positioned), not the main window. */
         RECT wvRc = { 0, 0, paneWidth, h };
@@ -6202,16 +6255,16 @@ static void layout(HWND hwnd) {
         g_splitterPos = (paneWidth - 100 > 100) ? paneWidth - 100 : 100;
 
     ShowWindow(g_hPreview, SW_SHOW);
-    g_splitterRect = (RECT){ g_splitterPos, y, g_splitterPos + SPLITTER_WIDTH, y + h };
+    g_splitterRect = (RECT){ contentX + g_splitterPos, y, contentX + g_splitterPos + SPLITTER_WIDTH, y + h };
     int rightWidth = paneWidth - g_splitterPos - SPLITTER_WIDTH;
     RECT wvRc;
     if (g_previewOnLeft) {
-        MoveWindow(g_hPreview, 0, y, g_splitterPos, h, TRUE);
-        layout_editor_with_minimap(hwnd, g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h);
+        MoveWindow(g_hPreview, contentX, y, g_splitterPos, h, TRUE);
+        layout_editor_with_minimap(hwnd, contentX + g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h);
         wvRc = (RECT){ 0, 0, g_splitterPos, h };
     } else {
-        layout_editor_with_minimap(hwnd, 0, y, g_splitterPos, h);
-        MoveWindow(g_hPreview, g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
+        layout_editor_with_minimap(hwnd, contentX, y, g_splitterPos, h);
+        MoveWindow(g_hPreview, contentX + g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
         wvRc = (RECT){ 0, 0, rightWidth, h };
     }
     set_webview_bounds(wvRc, TRUE);
@@ -6231,6 +6284,7 @@ static void update_view_menu(HWND hwnd) {
     CheckMenuItem(hView, IDM_VIEW_INDENT_GUIDES, MF_BYCOMMAND | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_OUTLINE, MF_BYCOMMAND | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_MINIMAP, MF_BYCOMMAND | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_EXPLORER, MF_BYCOMMAND | (g_explorerVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLESPLIT, MF_BYCOMMAND | (g_splitEditorVisible ? MF_CHECKED : MF_UNCHECKED));
     EnableMenuItem(hView, IDM_VIEW_RESET_SPLIT_EDITOR, MF_BYCOMMAND | (g_splitEditorVisible ? MF_ENABLED : MF_GRAYED));
     HMENU hTheme = GetSubMenu(hView, 6);
@@ -6264,8 +6318,12 @@ static void toggle_editor(HWND hwnd) {
 static void toggle_panel_sides(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    if (g_splitterPos >= 0 && rc.right > SPLITTER_WIDTH) {
-        g_splitterPos = rc.right - SPLITTER_WIDTH - g_splitterPos;
+    /* g_splitterPos is relative to the content area right of the explorer
+       panel, so the mirrored position has to be computed against that
+       narrower width, not the full client width. */
+    int contentWidth = rc.right - explorer_content_x(g_focusMode);
+    if (g_splitterPos >= 0 && contentWidth > SPLITTER_WIDTH) {
+        g_splitterPos = contentWidth - SPLITTER_WIDTH - g_splitterPos;
     }
     g_previewOnLeft = !g_previewOnLeft;
     save_layout_settings();
@@ -6368,6 +6426,16 @@ static void adjust_editor_zoom(int delta) {
     g_editorZoom = zoom;
     SendMessageA(g_hEdit, SCI_SETZOOM, (WPARAM)g_editorZoom, 0);
     if (g_hSplitEdit) SendMessageA(g_hSplitEdit, SCI_SETZOOM, (WPARAM)g_editorZoom, 0);
+    /* Zoom changes the rendered glyph width SCI_TEXTWIDTH measures, same as a
+       font face/size change does (see apply_editor_font()'s identical reset) -
+       without this the gutter can stay sized for the pre-zoom font until the
+       line count happens to cross a power-of-ten boundary. */
+    g_lineNumberDigits = 0;
+    update_linenumber_margin_width(g_hEdit);
+    if (g_hSplitEdit) {
+        g_splitLineNumberDigits = 0;
+        update_linenumber_margin_width(g_hSplitEdit);
+    }
     save_layout_settings();
 }
 
@@ -6375,6 +6443,12 @@ static void reset_editor_zoom(void) {
     g_editorZoom = 0;
     SendMessageA(g_hEdit, SCI_SETZOOM, 0, 0);
     if (g_hSplitEdit) SendMessageA(g_hSplitEdit, SCI_SETZOOM, 0, 0);
+    g_lineNumberDigits = 0;
+    update_linenumber_margin_width(g_hEdit);
+    if (g_hSplitEdit) {
+        g_splitLineNumberDigits = 0;
+        update_linenumber_margin_width(g_hSplitEdit);
+    }
     save_layout_settings();
 }
 
@@ -7645,7 +7719,9 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
             L"& %ls '-q' '-x' %ls %ls; ",
             quotedDebugger, quotedGdbCommands, quotedOutput);
         if (written < 0) goto native_parameters_cleanup;
-        used += (size_t)written;
+        /* `used` is advanced once, below, after this if/else - adding it here
+           too double-counted this segment's length, corrupting everything
+           swprintf'd after it (see the shared code review for the failure). */
     } else {
         written = swprintf(parameters + used, capacity - used,
             L"& %ls; $markeditExit = $LASTEXITCODE; Write-Host ''; "
@@ -8825,16 +8901,6 @@ static int workspace_file_extension(const WCHAR *name) {
     return 0;
 }
 
-static int skipped_workspace_directory(const WCHAR *name) {
-    static const WCHAR *skipped[] = {
-        L".git", L".svn", L".hg", L"node_modules", L"build", L"dist", L"Output",
-        L"webview2_data", L".vs", L".vscode"
-    };
-    for (size_t i = 0; i < sizeof(skipped) / sizeof(skipped[0]); i++)
-        if (_wcsicmp(name, skipped[i]) == 0) return 1;
-    return 0;
-}
-
 static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *directory, int depth) {
     if (depth > 24 || files->count >= 5000) return;
     WCHAR *pattern = path_join(directory, L"*");
@@ -9042,16 +9108,27 @@ static void do_quick_open(void) {
     free(root);
 }
 
+/* Records `root` as the current workspace folder: persists it, moves it to
+   the front of Recent Workspaces, refreshes the menu, and - if the explorer
+   panel is open - points it at the new folder. Shared by every place that
+   adopts a workspace folder so they can't drift out of sync with each other
+   (do_open_recent_workspace's own "folder no longer exists" early-out is
+   deliberately not part of this, since only that one caller needs it). */
+static void adopt_workspace_folder(HWND hwnd, const WCHAR *root) {
+    replace_wstring(&g_currentWorkspaceFolder, root);
+    add_recent_folder(root);
+    save_workspace_settings();
+    refresh_menu(hwnd);
+    if (g_explorerVisible) explorer_set_root(g_currentWorkspaceFolder);
+}
+
 /* Opens a workspace folder and immediately lets the user fuzzy-pick a file
    from it, same as Quick Open - the folder is remembered so Recent
    Workspaces can return to it without browsing for it again. */
 static void do_open_workspace(void) {
     WCHAR *root = choose_workspace_folder();
     if (!root) return;
-    replace_wstring(&g_currentWorkspaceFolder, root);
-    add_recent_folder(root);
-    save_workspace_settings();
-    refresh_menu(g_hMainWnd);
+    adopt_workspace_folder(g_hMainWnd, root);
     do_quick_open_in(root);
     free(root);
 }
@@ -9069,11 +9146,34 @@ static void do_open_recent_workspace(int index) {
         free(root);
         return;
     }
-    replace_wstring(&g_currentWorkspaceFolder, root);
-    add_recent_folder(root);
-    save_workspace_settings();
+    adopt_workspace_folder(g_hMainWnd, root);
     do_quick_open_in(root);
     free(root);
+}
+
+/* Mirrors toggle_outline()/toggle_preview(): flip the visibility flag, then
+   menu/layout/repaint/persist. Turning the panel on for the first time (no
+   workspace chosen yet) reuses the same folder-picker Quick Open already
+   falls back to, so there's no separate "no folder open" empty state to
+   design for. */
+static void toggle_explorer_panel(HWND hwnd) {
+    g_explorerVisible = !g_explorerVisible;
+    if (g_explorerVisible) {
+        if (g_currentWorkspaceFolder) {
+            explorer_set_root(g_currentWorkspaceFolder);
+        } else {
+            WCHAR *root = choose_workspace_folder();
+            if (!root) { g_explorerVisible = 0; update_view_menu(hwnd); return; }
+            adopt_workspace_folder(hwnd, root); /* g_explorerVisible is already true, so this also sets the root */
+            free(root);
+        }
+    } else {
+        explorer_stop_watch();
+    }
+    update_view_menu(hwnd);
+    layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
+    save_layout_settings();
 }
 
 static void do_find_in_folder(void) {
@@ -9224,6 +9324,7 @@ static char *replace_all_in_line(const char *line, const char *find, const char 
    the scan in do_replace_in_workspace() below already produces. */
 static void apply_workspace_replace(ReplaceMatch *matches, int count, const char *find, const char *replace) {
     int filesChanged = 0;
+    int filesFailed = 0;
     int i = 0;
     while (i < count) {
         const WCHAR *path = matches[i].path;
@@ -9281,17 +9382,17 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
             const WCHAR *target = ioPath ? ioPath : path;
             if (write_file_atomic(target, out, outLength, hasBom)) {
                 filesChanged++;
-                if (openIndex >= 0) {
-                    if (g_documents[openIndex].dirty) {
-                        g_documents[openIndex].externalChanged = 1;
-                        if (g_hTabs) InvalidateRect(g_hTabs, NULL, FALSE);
-                    } else {
-                        reload_document_buffer(openIndex, out);
-                    }
-                }
+                /* `out` was built from the live editor buffer (including any
+                   other unsaved edits), so it's exactly what was just written
+                   to disk regardless of the tab's prior dirty state - syncing
+                   the buffer to it (and clearing dirty) is correct either way.
+                   The previous dirty-only branch instead left the buffer
+                   holding the pre-replacement text, so the next Ctrl+S
+                   silently overwrote this file again, undoing the replacement
+                   that had just been written. */
+                if (openIndex >= 0) reload_document_buffer(openIndex, out);
             } else {
-                MessageBoxW(g_hMainWnd, L"Could not write one of the files; its matches were skipped.",
-                            L"Replace in Folder", MB_OK | MB_ICONWARNING);
+                filesFailed++;
             }
             free(ioPath);
         }
@@ -9299,13 +9400,22 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
         free(content);
         i = fileEnd;
     }
-    if (filesChanged == 0) {
-        MessageBoxW(g_hMainWnd, L"No files were changed.", L"Replace in Folder", MB_OK | MB_ICONINFORMATION);
+    WCHAR message[256];
+    if (filesChanged == 0 && filesFailed == 0) {
+        swprintf(message, 256, L"No files were changed.");
+    } else if (filesFailed == 0) {
+        swprintf(message, 256, L"Updated %d file%ls.", filesChanged, filesChanged == 1 ? L"" : L"s");
     } else {
-        WCHAR message[128];
-        swprintf(message, 128, L"Updated %d file%ls.", filesChanged, filesChanged == 1 ? L"" : L"s");
-        MessageBoxW(g_hMainWnd, message, L"Replace in Folder", MB_OK | MB_ICONINFORMATION);
+        /* Aggregated into one dialog rather than one per failed file, which
+           otherwise forced dismissing a modal for every read-only/locked file
+           in a row before a large batch replace could finish. */
+        swprintf(message, 256, L"Updated %d file%ls. %d file%ls could not be written and %ls skipped.",
+                 filesChanged, filesChanged == 1 ? L"" : L"s",
+                 filesFailed, filesFailed == 1 ? L"" : L"s",
+                 filesFailed == 1 ? L"was" : L"were");
     }
+    MessageBoxW(g_hMainWnd, message, L"Replace in Folder",
+               MB_OK | (filesFailed ? MB_ICONWARNING : MB_ICONINFORMATION));
 }
 
 /* Same folder enumeration and line scan as do_find_in_folder(), but every
@@ -9464,6 +9574,7 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Run: Clear All Breakpoints", IDM_DEBUG_CLEAR_BREAKPOINTS},
     {L"View: Toggle Preview", IDM_VIEW_TOGGLEPREVIEW}, {L"View: Toggle Editor", IDM_VIEW_TOGGLEEDITOR},
     {L"View: Toggle Outline", IDM_VIEW_OUTLINE}, {L"View: Toggle Minimap", IDM_VIEW_MINIMAP},
+    {L"View: Toggle File Explorer", IDM_VIEW_EXPLORER},
     {L"View: Toggle Split Editor", IDM_VIEW_TOGGLESPLIT},
     {L"View: Reset Split Editor", IDM_VIEW_RESET_SPLIT_EDITOR},
     {L"View: Focus Mode", IDM_VIEW_FOCUS_MODE},
@@ -9492,9 +9603,20 @@ static void show_command_palette(void) {
         PostMessageW(g_hMainWnd, WM_COMMAND, PALETTE_COMMANDS[selected].command, 0);
 }
 
+/* g_splitterPos is a width relative to the content area to the right of the
+   explorer panel, not an absolute client x - g_splitterRect (set by layout(),
+   already shifted by however much the explorer panel currently occupies) is
+   what's actually drawn, so hit-testing against it (rather than recomputing
+   from g_splitterPos, which used to be equivalent back when there was no
+   panel to shift past) keeps this in sync with what the user sees. */
 static int splitter_contains_x(int x) {
-    return g_previewVisible && g_editorVisible &&
-           x >= g_splitterPos && x <= g_splitterPos + SPLITTER_WIDTH;
+    return g_splitterRect.right > g_splitterRect.left &&
+           x >= g_splitterRect.left && x <= g_splitterRect.right;
+}
+
+static int explorer_splitter_contains_x(int x) {
+    return g_explorerVisible && !g_focusMode &&
+           x >= g_explorerSplitterRect.left && x <= g_explorerSplitterRect.right;
 }
 
 /* Unlike splitter_contains_x() above (which only needs an x-range, since
@@ -9936,6 +10058,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
         case IDM_VIEW_OUTLINE: toggle_outline(hwnd); break;
         case IDM_VIEW_MINIMAP: toggle_minimap(hwnd); break;
+        case IDM_VIEW_EXPLORER: toggle_explorer_panel(hwnd); break;
         case IDM_VIEW_TOGGLESPLIT: toggle_split_editor(hwnd); break;
         case IDM_VIEW_RESET_SPLIT_EDITOR: reset_split_editor(hwnd); break;
         case IDM_VIEW_ZOOM_IN: adjust_editor_zoom(1); break;
@@ -10802,6 +10925,12 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
+/* explorer_init()'s callback: file_explorer.c cannot call open_file_in_tab()
+   by name since it's static to this translation unit. */
+static void explorer_request_open(const WCHAR *path) {
+    open_file_in_tab(path);
+}
+
 static void initialize_main_window(HWND hwnd) {
     g_hMainWnd = hwnd;
 
@@ -10830,6 +10959,9 @@ static void initialize_main_window(HWND hwnd) {
         WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
         LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
         0, 0, 0, 0, hwnd, (HMENU)ID_OUTLINE, GetModuleHandleW(NULL), NULL);
+
+    explorer_init(hwnd, explorer_request_open, show_text_input, reveal_path_in_explorer);
+    if (g_explorerVisible && g_currentWorkspaceFolder) explorer_set_root(g_currentWorkspaceFolder);
 
     g_hTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_TOOLTIPS |
@@ -10996,6 +11128,8 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_OUTLINE_UPDATE);
     KillTimer(hwnd, IDT_STATUS_UPDATE);
     KillTimer(hwnd, IDT_PRINT_PREVIEW);
+    KillTimer(hwnd, IDT_EXPLORER_REFRESH);
+    explorer_shutdown();
     stop_debug_location_tracking();
     if (g_webview && g_webMessageRegistered) {
         ICoreWebView2_remove_WebMessageReceived(g_webview, g_webMessageToken);
@@ -11123,17 +11257,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                either side of them (both share the main background), so
                without this they're invisible rather than reading as
                draggable dividers. */
-            if (g_splitterRect.right > g_splitterRect.left) {
-                HBRUSH borderBrush = CreateSolidBrush(popup_border_color());
-                FillRect((HDC)wParam, &g_splitterRect, borderBrush);
-                DeleteObject(borderBrush);
-            }
-            if (g_hSplitEdit && g_splitEditorVisible &&
-                g_splitEditorSplitterRect.bottom > g_splitEditorSplitterRect.top) {
-                HBRUSH borderBrush = CreateSolidBrush(popup_border_color());
-                FillRect((HDC)wParam, &g_splitEditorSplitterRect, borderBrush);
-                DeleteObject(borderBrush);
-            }
+            paint_splitter_gap((HDC)wParam, &g_splitterRect);
+            paint_splitter_gap((HDC)wParam, &g_explorerSplitterRect);
+            if (g_hSplitEdit && g_splitEditorVisible)
+                paint_splitter_gap((HDC)wParam, &g_splitEditorSplitterRect);
             return 1;
         }
         case WM_TIMER:
@@ -11175,6 +11302,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 poll_debug_location();
                 return 0;
             }
+            if (wParam == IDT_EXPLORER_REFRESH) {
+                KillTimer(hwnd, IDT_EXPLORER_REFRESH);
+                explorer_handle_change_message();
+                return 0;
+            }
             break;
         case WM_SIZE:
             layout(hwnd);
@@ -11187,7 +11319,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
-            if (splitter_contains_x(pt.x)) {
+            if (splitter_contains_x(pt.x) || explorer_splitter_contains_x(pt.x)) {
                 SetCursor(LoadCursorA(NULL, (LPCSTR)IDC_SIZEWE));
                 return TRUE;
             }
@@ -11203,6 +11335,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (splitter_contains_x(x)) {
                 g_dragging = 1;
                 SetCapture(hwnd);
+            } else if (explorer_splitter_contains_x(x)) {
+                g_draggingExplorer = 1;
+                SetCapture(hwnd);
             } else if (split_editor_splitter_contains(x, y)) {
                 g_draggingSplitEditor = 1;
                 SetCapture(hwnd);
@@ -11211,12 +11346,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         case WM_MOUSEMOVE: {
             /* Mouse moves arrive far faster than the panes can be resized, so
-               skip the relayout when the splitter has not actually moved. */
-            if (g_dragging && GET_X_LPARAM(lParam) != g_splitterPos) {
-                g_splitterPos = GET_X_LPARAM(lParam);
+               skip the relayout when the splitter has not actually moved.
+               g_splitterPos is relative to the content area right of the
+               explorer panel, but the mouse position is an absolute client
+               x, so it needs the same offset subtracted back out. */
+            int splitterMouseX = GET_X_LPARAM(lParam) - explorer_content_x(g_focusMode);
+            if (g_dragging && splitterMouseX != g_splitterPos) {
+                g_splitterPos = splitterMouseX;
                 layout(hwnd);
                 /* See the WM_SIZE handler: layout() alone doesn't re-run
                    WM_ERASEBKGND, which is what paints the splitter gap. */
+                InvalidateRect(hwnd, NULL, TRUE);
+            } else if (g_draggingExplorer && GET_X_LPARAM(lParam) != g_explorerWidth) {
+                g_explorerWidth = GET_X_LPARAM(lParam);
+                layout(hwnd);
                 InvalidateRect(hwnd, NULL, TRUE);
             } else if (g_draggingSplitEditor) {
                 int localY = GET_Y_LPARAM(lParam) - g_splitEditorRegionY;
@@ -11229,12 +11372,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_LBUTTONUP: {
-            if (g_dragging) {
-                g_dragging = 0;
-                ReleaseCapture();
-                save_layout_settings();
-            } else if (g_draggingSplitEditor) {
-                g_draggingSplitEditor = 0;
+            /* At most one of these three is ever set at a time (WM_LBUTTONDOWN's
+               own if/else-if chain is mutually exclusive), so ending whichever
+               drag was in progress is the same three lines regardless of which. */
+            if (g_dragging || g_draggingExplorer || g_draggingSplitEditor) {
+                g_dragging = g_draggingExplorer = g_draggingSplitEditor = 0;
                 ReleaseCapture();
                 save_layout_settings();
             }
@@ -11266,6 +11408,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         sizeof(g_tabTooltipAnsi), NULL, NULL);
                     ((NMTTDISPINFOA *)notification)->lpszText = g_tabTooltipAnsi;
                 }
+            } else if (g_hExplorerTree && notification->hwndFrom == g_hExplorerTree) {
+                explorer_handle_notify(hwnd, notification);
             } else {
                 handle_editor_notification(hwnd, notification);
             }
@@ -11289,6 +11433,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_DEFERRED_INIT:
             run_deferred_startup_init();
             return 0;
+        case MARKEDIT_WM_EXPLORER_CHANGED:
+            /* Debounced rather than refreshing immediately: a burst of
+               changes (e.g. a git operation) collapses into one refresh
+               shortly after the burst ends, same idea as the outline/status
+               update timers above. */
+            SetTimer(hwnd, IDT_EXPLORER_REFRESH, 400, NULL);
+            return 0;
         case WM_CLOSE:
             do_exit();
             return 0;
@@ -11308,7 +11459,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     (void)hPrevInstance;
     (void)lpCmdLine;
 
-    INITCOMMONCONTROLSEX commonControls = { sizeof(commonControls), ICC_TAB_CLASSES | ICC_BAR_CLASSES };
+    INITCOMMONCONTROLSEX commonControls = { sizeof(commonControls),
+        ICC_TAB_CLASSES | ICC_BAR_CLASSES | ICC_TREEVIEW_CLASSES };
     InitCommonControlsEx(&commonControls);
 
     int argc = 0;
@@ -11415,6 +11567,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY, VK_F3, IDM_EDIT_FINDNEXT },
         { FVIRTKEY | FCONTROL | FSHIFT, 'V', IDM_VIEW_TOGGLEPREVIEW },
         { FVIRTKEY | FCONTROL | FSHIFT, 'E', IDM_VIEW_TOGGLEEDITOR },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'X', IDM_VIEW_EXPLORER },
         { FVIRTKEY, VK_F11, IDM_VIEW_FOCUS_MODE },
         { FVIRTKEY | FALT, 'Z', IDM_VIEW_WORD_WRAP },
         { FVIRTKEY | FCONTROL, 'D', IDM_EDIT_DUPLICATE_LINE },

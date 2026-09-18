@@ -86,3 +86,43 @@ WCHAR *extended_path(const WCHAR *path) {
     free(full);
     return extended;
 }
+
+/* Shared by the workspace-scoped file enumeration (Quick Open/Find-in-Folder,
+   in markedit.c) and the file explorer's live watcher (file_explorer.c), so
+   both agree on which directories are noisy/uninteresting to recurse into. */
+int skipped_workspace_directory(const WCHAR *name) {
+    static const WCHAR *skipped[] = {
+        L".git", L".svn", L".hg", L"node_modules", L"build", L"dist", L"Output",
+        L"webview2_data", L".vs", L".vscode"
+    };
+    for (size_t i = 0; i < sizeof(skipped) / sizeof(skipped[0]); i++)
+        if (_wcsicmp(name, skipped[i]) == 0) return 1;
+    return 0;
+}
+
+/* True if any path component (not just the last one) is a skipped
+   directory name - e.g. ".git\objects\ab\cdef" needs this to be caught by
+   the ".git" check even though the file's own immediate parent is "ab",
+   not ".git". Used by the file explorer's watcher to filter change
+   notifications from deep inside a skipped directory, where checking only
+   the immediate parent would miss almost everything git itself writes. */
+int path_has_skipped_component(const WCHAR *path) {
+    WCHAR *copy = wcsdup_heap(path);
+    if (!copy) return 0;
+    int found = 0;
+    WCHAR *context = NULL;
+    for (WCHAR *token = wcstok_s(copy, L"\\/", &context); token;
+         token = wcstok_s(NULL, L"\\/", &context)) {
+        if (skipped_workspace_directory(token)) { found = 1; break; }
+    }
+    free(copy);
+    return found;
+}
+
+/* Sort order for the file explorer's tree: directories before files, then
+   case-insensitive alphabetical within each group - matches Explorer. */
+int compare_explorer_entries(int aIsDirectory, const WCHAR *aName,
+                             int bIsDirectory, const WCHAR *bName) {
+    if (aIsDirectory != bIsDirectory) return aIsDirectory ? -1 : 1;
+    return _wcsicmp(aName, bName);
+}

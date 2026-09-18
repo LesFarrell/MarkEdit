@@ -24,6 +24,7 @@
 #define IDT_PRINT_PREVIEW 7
 #define IDT_DEBUG_LOCATION 8
 #define IDT_STATUS_UPDATE 9
+#define IDT_EXPLORER_REFRESH 10
 
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
@@ -170,6 +171,7 @@
 #define IDM_VIEW_CYCLE_PANE_PREV 362
 #define IDM_VIEW_TOGGLESPLIT 363
 #define IDM_VIEW_RESET_SPLIT_EDITOR 364
+#define IDM_VIEW_EXPLORER 365
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1

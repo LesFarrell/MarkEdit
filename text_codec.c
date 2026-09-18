@@ -46,7 +46,8 @@ WCHAR *decode_json_string(const WCHAR *json) {
     WCHAR *output = (WCHAR *)malloc((length + 1) * sizeof(WCHAR));
     if (!output) return NULL;
     size_t outputLength = 0;
-    for (size_t i = 1; i < length && json[i] != L'"'; i++) {
+    size_t i = 1;
+    for (; i < length && json[i] != L'"'; i++) {
         WCHAR character = json[i];
         if (character != L'\\') {
             output[outputLength++] = character;
@@ -79,6 +80,14 @@ WCHAR *decode_json_string(const WCHAR *json) {
             free(output);
             return NULL;
         }
+    }
+    /* The loop above also exits at end-of-string with no closing quote found -
+       that's truncated/malformed input, not a valid (possibly empty) string,
+       and returning the partial content instead of NULL would let a caller
+       treat garbage as a successful decode. */
+    if (i >= length) {
+        free(output);
+        return NULL;
     }
     output[outputLength] = 0;
     return output;

@@ -48,6 +48,11 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
     int containers = 0;
     int sawValue = 0;
     int closed = 0; /* the outermost container has closed - anything but trailing whitespace after this is invalid */
+    /* One opener per nesting level, so a closer is checked against the kind
+       of bracket that's actually open at this depth (a bare depth counter
+       would otherwise accept "[1,2}" as balanced, since ']' and '}' both
+       just decrement it). 256 levels is far past any realistic document. */
+    char openers[256];
 
     for (int i = 0; i < length;) {
         char character = text[i];
@@ -73,6 +78,11 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
         switch (character) {
             case '{':
             case '[':
+                if (depth >= (int)(sizeof(openers) / sizeof(openers[0]))) {
+                    free(printer.output);
+                    return NULL;
+                }
+                openers[depth] = character;
                 json_emit(&printer, &character, 1);
                 depth++;
                 containers++;
@@ -80,7 +90,7 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
                 break;
             case '}':
             case ']':
-                if (depth == 0) {
+                if (depth == 0 || openers[depth - 1] != (character == '}' ? '{' : '[')) {
                     free(printer.output);
                     return NULL;
                 }

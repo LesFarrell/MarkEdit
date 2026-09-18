@@ -78,4 +78,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\webview2_data"
-Type: files; Name: "{app}\markedit.ini"
+; get_settings_path() (settings.c) writes here, under %APPDATA%, not {app} -
+; the app is never installed with write access to Program Files, so settings
+; were never going to end up next to the exe.
+Type: files; Name: "{userappdata}\markedit\markedit.ini"

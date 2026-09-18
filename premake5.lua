@@ -138,6 +138,7 @@ project "markedit"
         "markdown.c", "markdown.h",
         "settings.c", "settings.h",
         "help_reference.c", "help_reference.h",
+        "file_explorer.c", "file_explorer.h",
         "markedit.rc",
     }
     cmark_gfm_settings()

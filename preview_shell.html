@@ -562,7 +562,13 @@ function setContent(html) {
 
 window.setContent = setContent;
 
-window.exportRenderedHTML = function(baseHref, title) {
+window.exportRenderedHTML = async function(baseHref, title) {
+  // Export/print can otherwise run before mermaid.run() finishes, cloning
+  // #content while a diagram is still an un-rendered code block. WebView2's
+  // ExecuteScript waits for a returned Promise to settle, so making this
+  // function async (and returning it in the end) is enough - no change
+  // needed on the native side.
+  if (window.__markeditRenderPromise) { try { await window.__markeditRenderPromise; } catch (_) {} }
   const source = document.querySelector('#content > .markdown-body');
   if (!source) return '';
   const article = source.cloneNode(true);
