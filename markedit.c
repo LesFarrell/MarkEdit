@@ -10198,8 +10198,8 @@ static RECT tab_close_rectangle(const RECT *tabRect) {
     RECT close = *tabRect;
     close.left = close.right - 23;
     close.right -= 5;
-    close.top += 5;
-    close.bottom -= 5;
+    close.top += 3;
+    close.bottom -= 3;
     return close;
 }
 
@@ -10235,14 +10235,26 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     if (oldFont) SelectObject(dis->hDC, oldFont);
 
+    /* tab_close_rectangle() is wider than it is tall (a roomier click
+       target), so inset-padding it directly for the X stretched the cross
+       into a near-flat bowtie instead of a diagonal. Draw the glyph in a
+       square centered on that rect instead, sized to its shorter side, so
+       the strokes stay a proper 45-degree X regardless of the hit box's
+       aspect ratio. */
     RECT close = tab_close_rectangle(&dis->rcItem);
-    int pad = 4;
+    int side = (close.right - close.left < close.bottom - close.top)
+        ? (close.right - close.left) : (close.bottom - close.top);
+    int cx = (close.left + close.right) / 2, cy = (close.top + close.bottom) / 2;
+    int pad = 2;
+    if (pad * 2 >= side) pad = side / 2 - 1;
+    if (pad < 1) pad = 1;
+    RECT glyph = { cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2 };
     HPEN closePen = CreatePen(PS_SOLID, 1, fg);
     SelectObject(dis->hDC, closePen);
-    MoveToEx(dis->hDC, close.left + pad, close.top + pad, NULL);
-    LineTo(dis->hDC, close.right - pad, close.bottom - pad);
-    MoveToEx(dis->hDC, close.right - pad, close.top + pad, NULL);
-    LineTo(dis->hDC, close.left + pad, close.bottom - pad);
+    MoveToEx(dis->hDC, glyph.left + pad, glyph.top + pad, NULL);
+    LineTo(dis->hDC, glyph.right - pad, glyph.bottom - pad);
+    MoveToEx(dis->hDC, glyph.right - pad, glyph.top + pad, NULL);
+    LineTo(dis->hDC, glyph.left + pad, glyph.bottom - pad);
     SelectObject(dis->hDC, oldPen);
     DeleteObject(closePen);
     DeleteObject(borderPen);
