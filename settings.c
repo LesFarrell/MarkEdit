@@ -114,6 +114,10 @@ void load_layout_settings(void) {
     g_spellCheckEnabled = read_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path) != 0;
     g_showWhitespace = read_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path) != 0;
     g_indentGuides = read_profile_int(L"View", L"IndentGuides", g_indentGuides, path) != 0;
+    g_indentUseSpaces = read_profile_int(L"View", L"UseSpacesForIndent", g_indentUseSpaces, path) != 0;
+    g_tabWidth = read_profile_int(L"View", L"TabWidth", g_tabWidth, path);
+    if (g_tabWidth < 1) g_tabWidth = 1;
+    if (g_tabWidth > 16) g_tabWidth = 16;
     g_outlineVisible = read_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path) != 0;
     g_minimapVisible = read_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path) != 0;
     g_explorerVisible = read_profile_int(L"View", L"ExplorerVisible", g_explorerVisible, path) != 0;
@@ -153,6 +157,8 @@ void save_layout_settings(void) {
     write_profile_int(L"View", L"SpellCheck", g_spellCheckEnabled, path);
     write_profile_int(L"View", L"ShowWhitespace", g_showWhitespace, path);
     write_profile_int(L"View", L"IndentGuides", g_indentGuides, path);
+    write_profile_int(L"View", L"UseSpacesForIndent", g_indentUseSpaces, path);
+    write_profile_int(L"View", L"TabWidth", g_tabWidth, path);
     write_profile_int(L"View", L"OutlineVisible", g_outlineVisible, path);
     write_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path);
     write_profile_int(L"View", L"ExplorerVisible", g_explorerVisible, path);

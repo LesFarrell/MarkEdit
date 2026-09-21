@@ -172,6 +172,7 @@
 #define IDM_VIEW_TOGGLESPLIT 363
 #define IDM_VIEW_RESET_SPLIT_EDITOR 364
 #define IDM_VIEW_EXPLORER 365
+#define IDM_VIEW_USE_SPACES_INDENT 366
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1

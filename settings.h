@@ -42,6 +42,8 @@ extern int g_wordWrap;
 extern int g_spellCheckEnabled;
 extern int g_showWhitespace;
 extern int g_indentGuides;
+extern int g_indentUseSpaces;
+extern int g_tabWidth;
 extern int g_outlineVisible;
 extern int g_minimapVisible;
 extern int g_editorZoom;

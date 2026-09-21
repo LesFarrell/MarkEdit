@@ -181,6 +181,8 @@ int g_focusMode = 0;
 int g_wordWrap = 0;
 int g_showWhitespace = 0;
 int g_indentGuides = 0;
+int g_indentUseSpaces = 0;
+int g_tabWidth = 4;
 int g_spellCheckEnabled = 1;
 int g_outlineVisible = 0;
 int g_minimapVisible = 1;
@@ -1532,10 +1534,11 @@ static void popup_dialog_theme_destroyed(void) {
 static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis);
 static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis);
 
-/* Shared WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT handling for the
-   three popup dialogs below - factored out since all three need identical
-   theming for their STATIC labels and EDIT fields. Returns the brush/TRUE
-   the caller should return from its WndProc, or 0 if msg wasn't handled. */
+/* Shared WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLORBTN/WM_CTLCOLOREDIT
+   handling for the popup dialogs below - factored out since they all need
+   identical theming for their STATIC labels, EDIT fields, and checkbox/radio
+   buttons. Returns the brush/TRUE the caller should return from its WndProc,
+   or 0 if msg wasn't handled. */
 static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LRESULT *handled) {
     *handled = 1;
     if (msg == WM_ERASEBKGND) {
@@ -1544,7 +1547,10 @@ static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LR
         FillRect((HDC)wParam, &rc, g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
         return 1;
     }
-    if (msg == WM_CTLCOLORSTATIC) {
+    /* Checkboxes send WM_CTLCOLORSTATIC for their label; radio buttons send
+       WM_CTLCOLORBTN instead - both need the same themed text colour, or the
+       radio labels stay stuck at the system default (near-black) in dark mode. */
+    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
         HDC hdc = (HDC)wParam;
         SetTextColor(hdc, popup_fg_color());
         SetBkMode(hdc, TRANSPARENT);
@@ -1606,11 +1612,15 @@ static void apply_indent_guides(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETINDENTATIONGUIDES, g_indentGuides ? SC_IV_LOOKBOTH : SC_IV_NONE, 0);
 }
 
+static void apply_indentation(HWND hEdit) {
+    SendMessageA(hEdit, SCI_SETUSETABS, g_indentUseSpaces ? FALSE : TRUE, 0);
+    SendMessageA(hEdit, SCI_SETTABWIDTH, g_tabWidth, 0);
+}
+
 static void configure_scintilla(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
     SendMessageA(hEdit, SCI_SETEOLMODE, SC_EOL_CRLF, 0);
-    SendMessageA(hEdit, SCI_SETUSETABS, TRUE, 0);
-    SendMessageA(hEdit, SCI_SETTABWIDTH, 4, 0);
+    apply_indentation(hEdit);
     SendMessageA(hEdit, SCI_SETINDENT, 0, 0); /* 0 = indent width follows tab width */
     SendMessageA(hEdit, SCI_SETMODEVENTMASK, SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT, 0);
     SendMessageA(hEdit, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
@@ -2804,6 +2814,7 @@ static WCHAR *decode_document_url(const WCHAR *uri) {
 }
 
 static int open_file_in_tab(const WCHAR *path);
+static void convert_indentation(HWND hEdit, int toSpaces);
 
 /* Records the current document as a "Go Back" target, called right before a
    wiki-link jump actually navigates away from it. Bounded and FIFO like
@@ -3367,6 +3378,13 @@ static int load_file(const WCHAR *path) {
         }
         g_switchingDocument = 1;
         set_edit_text(g_hEdit, content);
+        /* Matches toggle_indent_use_spaces(): when the setting is on, a
+           file opened (or dropped) with tab-indentation should come in
+           already converted rather than leaving a mix of tabs and spaces.
+           Done inside the g_switchingDocument window and before
+           SCI_EMPTYUNDOBUFFER so it's folded into the loaded state - no
+           spurious dirty flag and nothing to undo back into tabs. */
+        if (g_indentUseSpaces) convert_indentation(g_hEdit, 1);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
         g_switchingDocument = 0;
@@ -5502,6 +5520,8 @@ static HMENU build_menu(void) {
                 IDM_VIEW_SHOW_WHITESPACE, "Show W&hitespace");
     AppendMenuA(hView, MF_STRING | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_INDENT_GUIDES, "&Indent Guides");
+    AppendMenuA(hView, MF_STRING | (g_indentUseSpaces ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_USE_SPACES_INDENT, "&Use Spaces for Indentation");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_TOGGLE, "Toggle Fo&ld");
     AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_ALL, "Fold &All");
@@ -5999,8 +6019,30 @@ static const struct ToolbarButtonDef TOOLBAR_BUTTONS[] = {
 #define TOOLBAR_BUTTON_COUNT (int)(sizeof(TOOLBAR_BUTTONS) / sizeof(TOOLBAR_BUTTONS[0]))
 #define TOOLBAR_BUTTON_SIZE (TOOLBAR_HEIGHT - 6)
 static HWND g_hToolbarButtons[TOOLBAR_BUTTON_COUNT];
+static HWND g_hToolbarTooltip;
+
+/* Recolors the toolbar buttons' shared tooltip to match the current app
+   theme (same GitHub light/dark palette as popup_bg_color()/popup_fg_color()).
+   Visual styles are switched off for this control in create_toolbar() below,
+   since themed tooltips ignore TTM_SETTIPBKCOLOR/TTM_SETTIPTEXTCOLOR and
+   would otherwise stay the OS's light tooltip colors even in dark mode. */
+static void apply_toolbar_tooltip_theme(void) {
+    if (!g_hToolbarTooltip) return;
+    SendMessageW(g_hToolbarTooltip, TTM_SETTIPBKCOLOR, (WPARAM)popup_bg_color(), 0);
+    SendMessageW(g_hToolbarTooltip, TTM_SETTIPTEXTCOLOR, (WPARAM)popup_fg_color(), 0);
+}
 
 static void create_toolbar(HWND hwnd) {
+    g_hToolbarTooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        hwnd, NULL, GetModuleHandleA(NULL), NULL);
+    if (g_hToolbarTooltip) {
+        SetWindowPos(g_hToolbarTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowTheme(g_hToolbarTooltip, L"", L"");
+        apply_toolbar_tooltip_theme();
+    }
+
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (!TOOLBAR_BUTTONS[i].paint) continue;
         WCHAR *tip = to_wide(TOOLBAR_BUTTONS[i].tip);
@@ -6013,6 +6055,16 @@ static void create_toolbar(HWND hwnd) {
            one button's owner-draw paint can bleed into a neighbour's area.
            The window text isn't displayed (owner-drawn), but is kept as the
            accessible name / tooltip-eligible text for the button. */
+        if (g_hToolbarTooltip && tip) {
+            TOOLINFOW ti = { 0 };
+            ti.cbSize = sizeof(ti);
+            ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+            ti.hwnd = hwnd;
+            ti.uId = (UINT_PTR)g_hToolbarButtons[i];
+            ti.hinst = GetModuleHandleA(NULL);
+            ti.lpszText = tip;
+            SendMessageW(g_hToolbarTooltip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+        }
         free(tip);
     }
 }
@@ -6173,19 +6225,23 @@ static void layout(HWND hwnd) {
         h -= statusHeight;
     }
 
-    /* The tab strip and formatting toolbar span the full window width, above
+    /* The formatting toolbar and tab strip span the full window width, above
        both the file explorer panel and the editor/preview - the explorer
-       panel is docked below them, not beside them. The formatting toolbar
+       panel is docked below them, not beside them. The toolbar sits directly
+       under the menu bar, with the tab strip below it. The formatting toolbar
        edits Markdown source, so it's only useful (and only shown) while the
        editor pane is visible. */
-    ShowWindow(g_hTabs, g_focusMode ? SW_HIDE : SW_SHOW);
-    if (!g_focusMode) MoveWindow(g_hTabs, 0, 0, w, TAB_HEIGHT, TRUE);
-    int y = g_focusMode ? 0 : TAB_HEIGHT;
+    int y = 0;
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (g_hToolbarButtons[i])
             ShowWindow(g_hToolbarButtons[i], g_editorVisible && !g_focusMode ? SW_SHOW : SW_HIDE);
     }
     if (g_editorVisible && !g_focusMode) y = layout_toolbar_at(0, w, y);
+    ShowWindow(g_hTabs, g_focusMode ? SW_HIDE : SW_SHOW);
+    if (!g_focusMode) {
+        MoveWindow(g_hTabs, 0, y, w, TAB_HEIGHT, TRUE);
+        y += TAB_HEIGHT;
+    }
     h -= y;
     if (h < 0) h = 0;
 
@@ -6282,6 +6338,7 @@ static void update_view_menu(HWND hwnd) {
                   (g_spellCheckEnabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_SHOW_WHITESPACE, MF_BYCOMMAND | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_INDENT_GUIDES, MF_BYCOMMAND | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hView, IDM_VIEW_USE_SPACES_INDENT, MF_BYCOMMAND | (g_indentUseSpaces ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_OUTLINE, MF_BYCOMMAND | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_MINIMAP, MF_BYCOMMAND | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_EXPLORER, MF_BYCOMMAND | (g_explorerVisible ? MF_CHECKED : MF_UNCHECKED));
@@ -6413,6 +6470,29 @@ static void toggle_indent_guides(HWND hwnd) {
     g_indentGuides = !g_indentGuides;
     apply_indent_guides(g_hEdit);
     update_view_menu(hwnd);
+    save_layout_settings();
+}
+
+static void toggle_indent_use_spaces(HWND hwnd) {
+    g_indentUseSpaces = !g_indentUseSpaces;
+    apply_indentation(g_hEdit);
+    /* Switching to spaces only affects how Tab now types going forward
+       (apply_indentation() above) - without also converting what's already
+       there, the document is left with a mix of tabs and spaces even though
+       the setting says "spaces". g_hSplitEdit shares g_hEdit's document (see
+       its declaration), so converting through g_hEdit is enough for both
+       views. */
+    if (g_indentUseSpaces) convert_indentation(g_hEdit, 1);
+    update_view_menu(hwnd);
+    save_layout_settings();
+}
+
+static void set_tab_width(int width) {
+    if (width < 1) width = 1;
+    if (width > 16) width = 16;
+    if (width == g_tabWidth) return;
+    g_tabWidth = width;
+    apply_indentation(g_hEdit);
     save_layout_settings();
 }
 
@@ -9583,7 +9663,8 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"View: Preview on Left", IDM_VIEW_PREVIEW_ON_LEFT},
     {L"View: Word Wrap", IDM_VIEW_WORD_WRAP}, {L"View: Spell Check", IDM_VIEW_SPELL_CHECK},
     {L"View: Spell Check Language", IDM_VIEW_SPELL_LANGUAGE}, {L"View: Show Whitespace", IDM_VIEW_SHOW_WHITESPACE},
-    {L"View: Indent Guides", IDM_VIEW_INDENT_GUIDES}, {L"View: Zoom In", IDM_VIEW_ZOOM_IN},
+    {L"View: Indent Guides", IDM_VIEW_INDENT_GUIDES},
+    {L"View: Use Spaces for Indentation", IDM_VIEW_USE_SPACES_INDENT}, {L"View: Zoom In", IDM_VIEW_ZOOM_IN},
     {L"View: Zoom Out", IDM_VIEW_ZOOM_OUT}, {L"View: Reset Zoom", IDM_VIEW_ZOOM_RESET},
     {L"View: GitHub Light Theme", IDM_VIEW_THEME_GITHUB_LIGHT},
     {L"View: GitHub Dark Theme", IDM_VIEW_THEME_GITHUB_DARK}, {L"View: Custom Preview CSS", IDM_VIEW_CUSTOM_CSS},
@@ -9646,6 +9727,7 @@ static void select_theme(HWND hwnd, int darkMode) {
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (g_hToolbarButtons[i]) InvalidateRect(g_hToolbarButtons[i], NULL, TRUE);
     }
+    apply_toolbar_tooltip_theme();
     if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);
     if (g_hStatus) InvalidateRect(g_hStatus, NULL, TRUE);
     refresh_menu(hwnd);
@@ -9693,6 +9775,7 @@ typedef struct SettingsDialogState {
     HWND wordWrapCheck;
     HWND previewOnLeftCheck, customCssCaption, customCssLabel, customCssChooseButton, customCssClearButton;
     HWND spellCheckCheck, showWhitespaceCheck, indentGuidesCheck, minimapCheck;
+    HWND indentUseSpacesCheck, tabWidthCaption, tabWidthEdit;
 } SettingsDialogState;
 
 static void update_settings_font_label(SettingsDialogState *state) {
@@ -9714,6 +9797,7 @@ static void update_settings_category(SettingsDialogState *state) {
         state->previewOnLeftCheck, state->customCssCaption, state->customCssLabel,
         state->customCssChooseButton, state->customCssClearButton,
         state->spellCheckCheck, state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
+        state->indentUseSpacesCheck, state->tabWidthCaption, state->tabWidthEdit,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
         if (all[i]) ShowWindow(all[i], SW_HIDE);
@@ -9741,6 +9825,9 @@ static void update_settings_category(SettingsDialogState *state) {
             ShowWindow(state->showWhitespaceCheck, SW_SHOW);
             ShowWindow(state->indentGuidesCheck, SW_SHOW);
             ShowWindow(state->minimapCheck, SW_SHOW);
+            ShowWindow(state->indentUseSpacesCheck, SW_SHOW);
+            ShowWindow(state->tabWidthCaption, SW_SHOW);
+            ShowWindow(state->tabWidthEdit, SW_SHOW);
             break;
     }
 }
@@ -9754,11 +9841,9 @@ static void update_settings_category(SettingsDialogState *state) {
    repaint with the new colors instead of leaving stale ones on screen. */
 static void refresh_settings_dialog_theme(HWND hwnd, SettingsDialogState *state) {
     popup_dialog_theme_created(hwnd);
-    HWND themedControls[] = { state->categoryList, state->wordWrapCheck, state->previewOnLeftCheck,
-                              state->spellCheckCheck, state->showWhitespaceCheck, state->indentGuidesCheck,
-                              state->minimapCheck, state->themeLightRadio, state->themeDarkRadio };
-    for (size_t i = 0; i < sizeof(themedControls) / sizeof(themedControls[0]); i++)
-        SetWindowTheme(themedControls[i], g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    SetWindowTheme(state->categoryList, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    /* Checkboxes/radios stay unthemed (see the WM_CREATE block below for why);
+       nothing to redo here since that opt-out doesn't depend on light/dark. */
     RedrawWindow(hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
@@ -9817,12 +9902,31 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         state->minimapCheck = CreateWindowExW(0, L"BUTTON", L"Minimap",
             WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py + 84, 320, 22, hwnd, (HMENU)63, inst, NULL);
         SendMessageW(state->minimapCheck, BM_SETCHECK, g_minimapVisible ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->indentUseSpacesCheck = CreateWindowExW(0, L"BUTTON", L"Use spaces for indentation",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py + 112, 320, 22, hwnd, (HMENU)64, inst, NULL);
+        SendMessageW(state->indentUseSpacesCheck, BM_SETCHECK, g_indentUseSpaces ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->tabWidthCaption = CreateWindowExW(0, L"STATIC", L"Spaces per tab:", WS_CHILD,
+            px, py + 142, 120, 20, hwnd, NULL, inst, NULL);
+        state->tabWidthEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, px + 124, py + 140, 50, 24, hwnd, (HMENU)65, inst, NULL);
+        WCHAR tabWidthText[16];
+        swprintf(tabWidthText, sizeof(tabWidthText) / sizeof(tabWidthText[0]), L"%d", g_tabWidth);
+        SetWindowTextW(state->tabWidthEdit, tabWidthText);
 
+        /* Visual-styled BS_AUTOCHECKBOX/BS_AUTORADIOBUTTON controls draw their
+           label via UxTheme and ignore the WM_CTLCOLORSTATIC/BTN text colour
+           popup_dialog_theme_message() sets below - "DarkMode_Explorer" doesn't
+           change that for the Button window class, so in dark mode the label
+           stayed at the theme's default near-black regardless. Unthemeing
+           these (empty subapp/idlist names) drops back to classic button
+           rendering, which does draw the label through GDI with whatever
+           colour WM_CTLCOLORBTN/STATIC returns. */
         HWND checkboxes[] = { state->wordWrapCheck, state->previewOnLeftCheck, state->spellCheckCheck,
                               state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
+                              state->indentUseSpacesCheck,
                               state->themeLightRadio, state->themeDarkRadio };
         for (size_t i = 0; i < sizeof(checkboxes) / sizeof(checkboxes[0]); i++)
-            SetWindowTheme(checkboxes[i], g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+            SetWindowTheme(checkboxes[i], L"", L"");
 
         CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             496, 330, 78, 26, hwnd, (HMENU)IDCANCEL, inst, NULL);
@@ -9872,6 +9976,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 if (selection != LB_ERR) { state->activeCategory = selection; update_settings_category(state); }
                 return 0;
             }
+            if (LOWORD(wParam) == 65 && HIWORD(wParam) == EN_KILLFOCUS) {
+                WCHAR buf[16];
+                GetWindowTextW(state->tabWidthEdit, buf, sizeof(buf) / sizeof(buf[0]));
+                set_tab_width((int)wcstol(buf, NULL, 10));
+                swprintf(buf, sizeof(buf) / sizeof(buf[0]), L"%d", g_tabWidth);
+                SetWindowTextW(state->tabWidthEdit, buf);
+                return 0;
+            }
             if (HIWORD(wParam) != BN_CLICKED) break;
             switch (LOWORD(wParam)) {
                 case 20: select_theme(g_hMainWnd, 0); refresh_settings_dialog_theme(hwnd, state); break;
@@ -9885,6 +9997,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case 61: toggle_show_whitespace(g_hMainWnd); break;
                 case 62: toggle_indent_guides(g_hMainWnd); break;
                 case 63: toggle_minimap(g_hMainWnd); break;
+                case 64: toggle_indent_use_spaces(g_hMainWnd); break;
                 case IDCANCEL: DestroyWindow(hwnd); break;
             }
             return 0;
@@ -10053,6 +10166,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_SPELL_LANGUAGE: choose_spell_language(); break;
         case IDM_VIEW_SHOW_WHITESPACE: toggle_show_whitespace(hwnd); break;
         case IDM_VIEW_INDENT_GUIDES: toggle_indent_guides(hwnd); break;
+        case IDM_VIEW_USE_SPACES_INDENT: toggle_indent_use_spaces(hwnd); break;
         case IDM_VIEW_FOLD_TOGGLE: fold_toggle_at_cursor(); break;
         case IDM_VIEW_FOLD_ALL: fold_all_lines(0); break;
         case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
