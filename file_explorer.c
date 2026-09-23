@@ -714,9 +714,9 @@ void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptText
 
 void explorer_apply_theme(void) {
     if (!g_hExplorerTree) return;
-    SetWindowTheme(g_hExplorerTree, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
-    COLORREF bg = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-    COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    SetWindowTheme(g_hExplorerTree, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    COLORREF bg = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
+    COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
     TreeView_SetBkColor(g_hExplorerTree, bg);
     TreeView_SetTextColor(g_hExplorerTree, fg);
     InvalidateRect(g_hExplorerTree, NULL, TRUE);

@@ -52,6 +52,17 @@ void load_theme_settings(void) {
         g_previewDarkMode = (value[0] == L'1' || value[0] == L't' || value[0] == L'T' ||
                              value[0] == L'y' || value[0] == L'Y');
     }
+    GetPrivateProfileStringW(L"Editor", L"Theme", L"", value, 32, path);
+    if (_wcsicmp(value, L"github-dark") == 0) {
+        g_editorDarkMode = 1;
+    } else if (_wcsicmp(value, L"github-light") == 0) {
+        g_editorDarkMode = 0;
+    } else {
+        /* No Editor Theme key yet - upgrading from a release where the editor
+           and preview shared one theme, so start the editor matching whatever
+           the preview was already set to. */
+        g_editorDarkMode = g_previewDarkMode;
+    }
     DWORD cap = 512, n = 0;
     WCHAR *cssPath = NULL;
     do {
@@ -73,6 +84,8 @@ void save_theme_settings(void) {
     WritePrivateProfileStringW(L"Preview", L"Theme",
                                g_previewDarkMode ? L"github-dark" : L"github-light", path);
     WritePrivateProfileStringW(L"Preview", L"DarkMode", NULL, path);
+    WritePrivateProfileStringW(L"Editor", L"Theme",
+                               g_editorDarkMode ? L"github-dark" : L"github-light", path);
     WritePrivateProfileStringW(L"Preview", L"CustomCSS",
                                g_customCssPath ? g_customCssPath : L"", path);
     free(path);
@@ -242,12 +255,15 @@ void save_find_settings(void) {
     free(path);
 }
 
-/* [Compiler] is hand-edited in markedit.ini rather than exposed through a
-   menu: Backend pins Run/Debug C/C++ to one compiler instead of the default
-   Auto priority search (GCC, Clang, Zig, then MSVC as a Run-only fallback),
-   and VcvarsallPath points at a specific vcvarsall.bat when MSVC isn't
-   installed in one of the standard Program Files locations find_vcvarsall()
-   checks. */
+/* Backend and VcvarsallPath are hand-edited in markedit.ini rather than
+   exposed through a menu: Backend pins Run/Debug C/C++ to one compiler
+   instead of the default Auto priority search (GCC, Clang, Zig, then MSVC as
+   a Run-only fallback), and VcvarsallPath points at a specific
+   vcvarsall.bat when MSVC isn't installed in one of the standard Program
+   Files locations find_vcvarsall() checks. ExtraFlags is the one setting in
+   this section the Settings dialog (Compiler category) does expose, and
+   save_compiler_settings() round-trips the other two unchanged whenever it
+   writes ExtraFlags back out. */
 void load_compiler_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
@@ -271,5 +287,34 @@ void load_compiler_settings(void) {
     } while (cap <= 32768);
     if (vcvarsall && vcvarsall[0]) g_vcvarsallOverridePath = vcvarsall;
     else free(vcvarsall);
+
+    cap = 512; n = 0;
+    WCHAR *extraFlags = NULL;
+    do {
+        free(extraFlags);
+        extraFlags = (WCHAR *)calloc(cap, sizeof(WCHAR));
+        if (!extraFlags) break;
+        n = GetPrivateProfileStringW(L"Compiler", L"ExtraFlags", L"", extraFlags, cap, path);
+        if (n < cap - 1) break;
+        cap *= 2;
+    } while (cap <= 32768);
+    if (extraFlags && extraFlags[0]) g_compilerExtraFlags = extraFlags;
+    else free(extraFlags);
+    free(path);
+}
+
+void save_compiler_settings(void) {
+    WCHAR *path = get_settings_path();
+    if (!path) return;
+    const WCHAR *backend =
+        g_compilerBackend == COMPILER_BACKEND_GCC ? L"GCC" :
+        g_compilerBackend == COMPILER_BACKEND_CLANG ? L"Clang" :
+        g_compilerBackend == COMPILER_BACKEND_ZIG ? L"Zig" :
+        g_compilerBackend == COMPILER_BACKEND_MSVC ? L"MSVC" : L"Auto";
+    WritePrivateProfileStringW(L"Compiler", L"Backend", backend, path);
+    WritePrivateProfileStringW(L"Compiler", L"VcvarsallPath",
+                               g_vcvarsallOverridePath ? g_vcvarsallOverridePath : L"", path);
+    WritePrivateProfileStringW(L"Compiler", L"ExtraFlags",
+                               g_compilerExtraFlags ? g_compilerExtraFlags : L"", path);
     free(path);
 }

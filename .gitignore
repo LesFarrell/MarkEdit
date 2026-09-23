@@ -13,6 +13,14 @@ tests/test_parser.pdb
 /Lexilla.pdb
 /libLexilla.dll.a
 
+# Lexilla is linked straight into markedit.exe (see build.bat); its sources
+# are compiled to same-named .o files in the project root before linking.
+# markedit.lib is lld-link's side-effect companion import lib, produced
+# because Lexilla.cxx unconditionally __declspec(dllexport)s its API even
+# when compiled into an exe rather than a DLL.
+/*.o
+/markedit.lib
+
 # premake5-generated Makefiles (premake5.lua is the checked-in source)
 /build/
 

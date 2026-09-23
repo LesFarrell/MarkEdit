@@ -33,6 +33,7 @@ extern int g_fontPointSize;
 extern int g_fontWeight;
 extern int g_fontItalic;
 extern int g_previewDarkMode;
+extern int g_editorDarkMode;
 extern WCHAR *g_customCssPath;
 extern int g_previewOnLeft;
 extern int g_previewVisible;
@@ -61,6 +62,7 @@ extern WCHAR g_replaceWith[256];
 extern DWORD g_findFlags;
 extern CompilerBackendPreference g_compilerBackend;
 extern WCHAR *g_vcvarsallOverridePath;
+extern WCHAR *g_compilerExtraFlags;
 
 WCHAR *get_settings_path(void);
 
@@ -73,5 +75,6 @@ void save_layout_settings(void);
 void load_find_settings(void);
 void save_find_settings(void);
 void load_compiler_settings(void);
+void save_compiler_settings(void);
 
 #endif

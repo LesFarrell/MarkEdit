@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 set "PROJECT_DIR=%~dp0"
 set "DIST_DIR=%~dp0dist"
 set "DIST_BACKUP=%~dp0dist.previous"
@@ -16,16 +16,36 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-zig c++ -std=c++17 %COMMON_FLAGS% -shared -DNDEBUG %LINK_FLAGS% ^
-    -Wl,--out-implib,libLexilla.dll.a -o Lexilla.dll @lexilla-sources.rsp
-if %errorlevel% neq 0 (
-    echo Lexilla build failed.
-    exit /b 1
+rem Lexilla is linked straight into markedit.exe (static object files)
+rem rather than shipped as its own DLL beside it. WebView2Loader stays a
+rem dynamic DLL: Microsoft's WebView2LoaderStatic.lib is MSVC-ABI-only (MSVC
+rem name mangling, /GS stack-cookie symbols, MSVC CRT thread-init guards) and
+rem can't be linked into a GNU/MinGW-targeted build like this one - the
+rem dynamic loader's DLL boundary is plain C, so it's the only ABI-compatible
+rem option here. Scintilla.dll also stays external, since it self-registers
+rem its window class at runtime via LoadLibrary and isn't linked at build
+rem time at all.
+rem
+rem Each Lexilla source is compiled individually into a same-named .o in the
+rem project root (zig's cc/c++ driver, unlike plain clang, can't emit
+rem multiple named object files from one -c invocation targeting
+rem COFF/Windows) - the resulting .o list is kept in lexilla-objects.rsp for
+rem the final link below.
+for /f "usebackq delims=" %%S in (`findstr /i ".cxx" lexilla-sources.rsp`) do (
+    zig c++ -std=c++17 %COMMON_FLAGS% -DNDEBUG -Ithird_party\lexilla\include -Ithird_party\lexilla\lexlib -Ithird_party\scintilla\include -c "%%S" -o "%%~nS.o"
+    if !errorlevel! neq 0 (
+        echo Lexilla build failed compiling %%S.
+        exit /b 1
+    )
 )
 
-zig cc -std=c11 %COMMON_FLAGS% -Wall -Wextra -Wno-unknown-pragmas ^
-    -o markedit.exe @markedit-sources.rsp @cmark-gfm-sources.rsp markedit.res ^
-    third_party\webview2\x64\WebView2Loader.dll.lib libLexilla.dll.a ^
+rem zig c++ (not zig cc) so the C++ object code compiled above still gets its
+rem runtime auto-linked; the markedit/cmark-gfm sources are .c files and are
+rem still compiled as C - the driver choice only changes runtime auto-linking
+rem defaults, not per-file language detection.
+zig c++ -std=c11 %COMMON_FLAGS% -Wall -Wextra -Wno-unknown-pragmas ^
+    -o markedit.exe @markedit-sources.rsp @cmark-gfm-sources.rsp @lexilla-objects.rsp markedit.res ^
+    third_party\webview2\x64\WebView2Loader.dll.lib ^
     -isystem third_party\webview2\include -isystem third_party\lexilla\include ^
     -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -lshlwapi -lshell32 -lole32 ^
     -lwindowscodecs -luxtheme -ldwmapi -Wl,--subsystem,windows %LINK_FLAGS%
@@ -69,7 +89,6 @@ mkdir "%DIST_DIR%" || (echo Failed to create the distribution folder. & exit /b 
 
 for %%F in (
     markedit.exe
-    Lexilla.dll
     Scintilla.dll
     WebView2Loader.dll
     preview_shell.html

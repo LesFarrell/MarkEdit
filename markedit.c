@@ -93,12 +93,14 @@ static char *g_pendingHtmlBody = NULL; /* set if update requested before webview
 static WCHAR *g_exportPath = NULL;
 static WCHAR *g_pendingPdfPath = NULL;
 static int g_pendingPrintAction = 0; /* 1 = print dialog, 2 = PDF export */
-int g_previewDarkMode = 0;
+int g_previewDarkMode = 0; /* the rendered Markdown preview's own theme, independent of the editor/app chrome below */
+int g_editorDarkMode = 0; /* the Scintilla editor's colours, plus all surrounding app chrome (menus, dialogs, tabs, toolbar, title bar) */
 /* CompilerBackendPreference is declared in settings.h; see load_compiler_settings()
    and find_native_compiler() further down. Auto keeps the existing GCC/Clang/
    Zig/MSVC priority search; the others pin Run/Debug to just one of them. */
 CompilerBackendPreference g_compilerBackend = COMPILER_BACKEND_AUTO;
 WCHAR *g_vcvarsallOverridePath = NULL; /* [Compiler] VcvarsallPath override; skips auto-detection */
+WCHAR *g_compilerExtraFlags = NULL; /* [Compiler] ExtraFlags appended to Run/Debug C/C++ builds; set via Settings > Compiler */
 WCHAR *g_customCssPath = NULL;
 static WCHAR *g_debugLocationPath = NULL;
 static WCHAR *g_debugWorkingDirectory = NULL;
@@ -812,9 +814,9 @@ static void apply_editor_theme(HWND hEdit) {
     /* Scintilla draws its own client area but leaves the scrollbars to the
        system, which paints them light unless the window opts into the dark
        explorer theme. */
-    SetWindowTheme(hEdit, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    SetWindowTheme(hEdit, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
 
-    if (g_previewDarkMode) {
+    if (g_editorDarkMode) {
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0xE6, 0xED, 0xF3));
         SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0x0D, 0x11, 0x17));
         SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0);
@@ -842,18 +844,18 @@ static void apply_editor_theme(HWND hEdit) {
 
     /* These follow SCI_STYLECLEARALL above, which resets every style. The
        gutter colours match STYLE_LINENUMBER so the margins read as one strip. */
-    COLORREF faint = g_previewDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0xAF, 0xB8, 0xC1);
-    COLORREF gutter = g_previewDarkMode ? RGB(0x16, 0x1B, 0x22) : RGB(0xF6, 0xF8, 0xFA);
-    COLORREF text = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF faint = g_editorDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0xAF, 0xB8, 0xC1);
+    COLORREF gutter = g_editorDarkMode ? RGB(0x16, 0x1B, 0x22) : RGB(0xF6, 0xF8, 0xFA);
+    COLORREF text = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
 
     SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_INDENTGUIDE, (LPARAM)faint);
     SendMessageA(hEdit, SCI_SETWHITESPACEFORE, TRUE, (LPARAM)faint);
     SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_BRACELIGHT, (LPARAM)text);
     SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_BRACELIGHT,
-                 g_previewDarkMode ? RGB(0x3F, 0x46, 0x4F) : RGB(0xCF, 0xD8, 0xE3));
+                 g_editorDarkMode ? RGB(0x3F, 0x46, 0x4F) : RGB(0xCF, 0xD8, 0xE3));
     SendMessageA(hEdit, SCI_STYLESETBOLD, STYLE_BRACELIGHT, TRUE);
     SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_BRACEBAD,
-                 g_previewDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E));
+                 g_editorDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E));
     SendMessageA(hEdit, SCI_STYLESETBOLD, STYLE_BRACEBAD, TRUE);
 
     SendMessageA(hEdit, SCI_SETFOLDMARGINCOLOUR, TRUE, (LPARAM)gutter);
@@ -863,19 +865,19 @@ static void apply_editor_theme(HWND hEdit) {
         SendMessageA(hEdit, SCI_MARKERSETBACK, (WPARAM)marker, (LPARAM)faint);
     }
     SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_BOOKMARK,
-                 (LPARAM)(g_previewDarkMode ? RGB(0x1F, 0x6F, 0xEB) : RGB(0x09, 0x69, 0xDA)));
+                 (LPARAM)(g_editorDarkMode ? RGB(0x1F, 0x6F, 0xEB) : RGB(0x09, 0x69, 0xDA)));
     SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_BOOKMARK,
-                 (LPARAM)(g_previewDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x21, 0x8B, 0xFF)));
+                 (LPARAM)(g_editorDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x21, 0x8B, 0xFF)));
     SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_BREAKPOINT, RGB(0xFF, 0xFF, 0xFF));
     SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_BREAKPOINT,
-                 (LPARAM)(g_previewDarkMode ? RGB(0xF8, 0x51, 0x49) : RGB(0xCF, 0x22, 0x2E)));
+                 (LPARAM)(g_editorDarkMode ? RGB(0xF8, 0x51, 0x49) : RGB(0xCF, 0x22, 0x2E)));
     SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_DEBUG_LINE,
-                 (LPARAM)(g_previewDarkMode ? RGB(0x9E, 0x6A, 0x03) : RGB(0xFF, 0xDF, 0x5D)));
+                 (LPARAM)(g_editorDarkMode ? RGB(0x9E, 0x6A, 0x03) : RGB(0xFF, 0xDF, 0x5D)));
     SendMessageA(hEdit, SCI_MARKERSETALPHA, MARKER_DEBUG_LINE, 90);
 
     SendMessageA(hEdit, SCI_INDICSETSTYLE, INDICATOR_SPELLING, INDIC_SQUIGGLE);
     SendMessageA(hEdit, SCI_INDICSETFORE, INDICATOR_SPELLING,
-                 (LPARAM)(g_previewDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E)));
+                 (LPARAM)(g_editorDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E)));
     SendMessageA(hEdit, SCI_INDICSETUNDER, INDICATOR_SPELLING, TRUE);
 
     apply_language_styles(hEdit);
@@ -887,14 +889,14 @@ static void apply_editor_theme(HWND hEdit) {
    everywhere else in the app. Called from apply_editor_theme() after every
    SCI_STYLECLEARALL, since that resets every style back to STYLE_DEFAULT. */
 static void apply_markdown_lexer_styles(HWND hEdit) {
-    COLORREF text = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
-    COLORREF heading = g_previewDarkMode ? RGB(0x79, 0xC0, 0xFF) : RGB(0x09, 0x69, 0xDA);
-    COLORREF link = g_previewDarkMode ? RGB(0x58, 0xA6, 0xFF) : RGB(0x09, 0x69, 0xDA);
-    COLORREF code = g_previewDarkMode ? RGB(0xFF, 0xA6, 0x57) : RGB(0xB3, 0x53, 0x00);
-    COLORREF quote = g_previewDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
-    COLORREF list = g_previewDarkMode ? RGB(0xD2, 0xA8, 0xFF) : RGB(0x82, 0x50, 0xDF);
-    COLORREF strike = g_previewDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
-    COLORREF rule = g_previewDarkMode ? RGB(0x7D, 0x85, 0x90) : RGB(0x65, 0x6D, 0x76);
+    COLORREF text = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF heading = g_editorDarkMode ? RGB(0x79, 0xC0, 0xFF) : RGB(0x09, 0x69, 0xDA);
+    COLORREF link = g_editorDarkMode ? RGB(0x58, 0xA6, 0xFF) : RGB(0x09, 0x69, 0xDA);
+    COLORREF code = g_editorDarkMode ? RGB(0xFF, 0xA6, 0x57) : RGB(0xB3, 0x53, 0x00);
+    COLORREF quote = g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
+    COLORREF list = g_editorDarkMode ? RGB(0xD2, 0xA8, 0xFF) : RGB(0x82, 0x50, 0xDF);
+    COLORREF strike = g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
+    COLORREF rule = g_editorDarkMode ? RGB(0x7D, 0x85, 0x90) : RGB(0x65, 0x6D, 0x76);
 
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRONG1, text);
     SendMessageA(hEdit, SCI_STYLESETBOLD, SCE_MARKDOWN_STRONG1, TRUE);
@@ -935,8 +937,8 @@ typedef struct SyntaxPalette {
 
 static SyntaxPalette syntax_palette(void) {
     SyntaxPalette p;
-    if (g_previewDarkMode) {
-        p.comment = RGB(0x8B, 0x94, 0x9E);
+    if (g_editorDarkMode) {        
+        p.comment = RGB(0x1f,0x88,0x3d);
         p.keyword = RGB(0xFF, 0x7B, 0x72);
         p.string = RGB(0xA5, 0xD6, 0xFF);
         p.number = RGB(0x79, 0xC0, 0xFF);
@@ -946,7 +948,7 @@ static SyntaxPalette syntax_palette(void) {
         p.attribute = RGB(0x79, 0xC0, 0xFF);
         p.operatorColour = RGB(0xE6, 0xED, 0xF3);
     } else {
-        p.comment = RGB(0x6E, 0x77, 0x81);
+        p.comment = RGB(0x1f,0x88,0x3d);
         p.keyword = RGB(0xCF, 0x22, 0x2E);
         p.string = RGB(0x0A, 0x30, 0x69);
         p.number = RGB(0x09, 0x69, 0xDA);
@@ -1355,19 +1357,19 @@ static void apply_preview_host_theme(void) {
     if (g_hPreview) InvalidateRect(g_hPreview, NULL, TRUE);
 }
 
-/* (Re)creates g_mainBkBrush to match g_previewDarkMode, and repaints the
+/* (Re)creates g_mainBkBrush to match g_editorDarkMode, and repaints the
    parts of the main window's own background it's used for (the toolbar
    strip and the splitter gap - everywhere else is covered by child windows). */
 static void apply_main_theme(HWND hwnd) {
     if (g_mainBkBrush) DeleteObject(g_mainBkBrush);
-    g_mainBkBrush = CreateSolidBrush(g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+    g_mainBkBrush = CreateSolidBrush(g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
     if (hwnd) InvalidateRect(hwnd, NULL, TRUE);
 
     /* The outline's own content is owner-drawn (see draw_themed_listbox_item()),
        but its scrollbar is still system-drawn and needs the same explorer
        dark-mode opt-in the editor gets in apply_editor_theme(). */
     if (g_hOutline) {
-        SetWindowTheme(g_hOutline, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        SetWindowTheme(g_hOutline, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
         InvalidateRect(g_hOutline, NULL, TRUE);
     }
     explorer_apply_theme();
@@ -1405,7 +1407,7 @@ static void init_native_menu_theme_support(void) {
    finishes its own non-client painting. Only needed in dark mode; light
    mode's own separator already matches the rest of the light chrome. */
 static void erase_menu_bottom_seam(HWND hwnd) {
-    if (!g_previewDarkMode) return;
+    if (!g_editorDarkMode) return;
     RECT windowRect;
     if (!GetWindowRect(hwnd, &windowRect)) return;
     POINT clientTopLeft = {0, 0};
@@ -1494,10 +1496,10 @@ static void apply_popup_titlebar_theme(HWND hwnd, int dark) {
    Line, the searchable picker, the text-input prompt) - same GitHub
    light/dark palette used everywhere else, so a themed popup doesn't read
    as a different app from the window that opened it. */
-static COLORREF popup_bg_color(void) { return g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF); }
-static COLORREF popup_fg_color(void) { return g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28); }
-static COLORREF popup_border_color(void) { return g_previewDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE); }
-static COLORREF popup_accent_color(void) { return g_previewDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x09, 0x69, 0xDA); }
+static COLORREF popup_bg_color(void) { return g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF); }
+static COLORREF popup_fg_color(void) { return g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28); }
+static COLORREF popup_border_color(void) { return g_editorDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE); }
+static COLORREF popup_accent_color(void) { return g_editorDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x09, 0x69, 0xDA); }
 
 /* Fills one splitter gap's rect with the border colour so it reads as a
    draggable divider instead of just more of the pane background on either
@@ -1519,7 +1521,7 @@ static void paint_splitter_gap(HDC hdc, const RECT *rect) {
 static HBRUSH g_popupBkBrush = NULL;
 
 static void popup_dialog_theme_created(HWND hwnd) {
-    apply_popup_titlebar_theme(hwnd, g_previewDarkMode);
+    apply_popup_titlebar_theme(hwnd, g_editorDarkMode);
     if (g_popupBkBrush) DeleteObject(g_popupBkBrush);
     g_popupBkBrush = CreateSolidBrush(popup_bg_color());
 }
@@ -1572,7 +1574,7 @@ static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LR
 static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
     int pressed = (dis->itemState & ODS_SELECTED) != 0;
     int isDefault = (GetWindowLongW(dis->hwndItem, GWL_STYLE) & BS_DEFPUSHBUTTON) != 0;
-    COLORREF fill = g_previewDarkMode
+    COLORREF fill = g_editorDarkMode
         ? (pressed ? RGB(0x30, 0x36, 0x3D) : RGB(0x21, 0x26, 0x2D))
         : (pressed ? RGB(0xE1, 0xE7, 0xEC) : RGB(0xF6, 0xF8, 0xFA));
     HBRUSH fillBrush = CreateSolidBrush(fill);
@@ -2025,8 +2027,8 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         HDC dc = BeginPaint(hwnd, &ps);
         RECT client;
         GetClientRect(hwnd, &client);
-        COLORREF background = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-        COLORREF foreground = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+        COLORREF background = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
+        COLORREF foreground = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
         HBRUSH brush = CreateSolidBrush(background);
         FillRect(dc, &client, brush);
         DeleteObject(brush);
@@ -4520,7 +4522,7 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         /* Item content is owner-drawn (draw_themed_listbox_item), but the
            scrollbar itself is still system-drawn and needs the same
            explorer dark-mode opt-in the editor/outline scrollbars get. */
-        SetWindowTheme(state->list, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        SetWindowTheme(state->list, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
         refill_choice_list(state);
         SetFocus(state->edit);
         popup_dialog_theme_created(hwnd);
@@ -4819,7 +4821,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             412, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             496, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
-        SetWindowTheme(state->list, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        SetWindowTheme(state->list, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
         SetWindowSubclass(state->list, ReplaceListSubclassProc, 1, (DWORD_PTR)state);
         refill_replace_list(state);
         SetFocus(state->list);
@@ -5257,12 +5259,12 @@ static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
     if (!label) return;
 
     int active = (dis->itemState & (ODS_SELECTED | ODS_HOTLIGHT)) != 0;
-    COLORREF background = g_previewDarkMode
+    COLORREF background = g_editorDarkMode
         ? (active ? RGB(0x21, 0x26, 0x2D) : RGB(0x0D, 0x11, 0x17))
         : (active ? RGB(0xE8, 0xEC, 0xF1) : RGB(0xFF, 0xFF, 0xFF));
     COLORREF foreground = (dis->itemState & (ODS_DISABLED | ODS_GRAYED))
-        ? (g_previewDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x65, 0x6D, 0x76))
-        : (g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28));
+        ? (g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x65, 0x6D, 0x76))
+        : (g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28));
 
     HBRUSH brush = CreateSolidBrush(background);
     FillRect(dis->hDC, &dis->rcItem, brush);
@@ -5486,15 +5488,23 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_STRING, IDM_VIEW_CYCLE_PANE, "Cycle &Panes\tCtrl+F6");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     HMENU hTheme = CreatePopupMenu();
-    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_LIGHT, "GitHub &Light");
-    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_DARK, "GitHub &Dark");
+    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_LIGHT, "&Light");
+    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_DARK, "&Dark");
     CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
-                       g_previewDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
+                       g_editorDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
                        MF_BYCOMMAND);
-    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hTheme, "&Theme");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_CUSTOM_CSS, "Custom Preview &CSS...");
-    AppendMenuA(hView, MF_STRING | (g_customCssPath ? 0 : MF_GRAYED),
+    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hTheme, "&Editor Theme");
+    HMENU hPreviewTheme = CreatePopupMenu();
+    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_PREVIEW_THEME_LIGHT, "GitHub &Light");
+    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_PREVIEW_THEME_DARK, "GitHub &Dark");
+    CheckMenuRadioItem(hPreviewTheme, IDM_VIEW_PREVIEW_THEME_LIGHT, IDM_VIEW_PREVIEW_THEME_DARK,
+                       g_previewDarkMode ? IDM_VIEW_PREVIEW_THEME_DARK : IDM_VIEW_PREVIEW_THEME_LIGHT,
+                       MF_BYCOMMAND);
+    AppendMenuA(hPreviewTheme, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_CUSTOM_CSS, "Custom Preview &CSS...");
+    AppendMenuA(hPreviewTheme, MF_STRING | (g_customCssPath ? 0 : MF_GRAYED),
                 IDM_VIEW_CLEAR_CUSTOM_CSS, "C&lear Custom Preview CSS");
+    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hPreviewTheme, "&Markdown Theme");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hView, MF_STRING | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_PREVIEW_ON_LEFT, "Preview on &Left");
@@ -6082,9 +6092,9 @@ static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
     }
     if (index < 0 || !TOOLBAR_BUTTONS[index].paint) return;
 
-    COLORREF bg = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-    COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
-    COLORREF pressedBg = g_previewDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xE1, 0xE7, 0xEC);
+    COLORREF bg = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
+    COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF pressedBg = g_editorDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xE1, 0xE7, 0xEC);
 
     int pressed = (dis->itemState & ODS_SELECTED) != 0;
     COLORREF fillColor = pressed ? pressedBg : bg;
@@ -6347,7 +6357,7 @@ static void update_view_menu(HWND hwnd) {
     HMENU hTheme = GetSubMenu(hView, 6);
     if (hTheme) {
         CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
-                           g_previewDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
+                           g_editorDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
                            MF_BYCOMMAND);
     }
 }
@@ -6978,6 +6988,64 @@ static WCHAR *powershell_literal(const WCHAR *value) {
     literal[output++] = L'\'';
     literal[output] = 0;
     return literal;
+}
+
+typedef enum { FLAG_QUOTE_POWERSHELL, FLAG_QUOTE_CMD } FlagQuoteStyle;
+
+/* Re-quotes one already-tokenized extra-compiler-flag for the target build
+   command's shell: powershell_literal() above for the PowerShell console
+   launch_native_file() builds, or cmd.exe's own quoting (double quotes,
+   backslash-escaped) for the cmd /k chain launch_msvc_file() builds. */
+static WCHAR *quote_token_for_shell(const WCHAR *token, FlagQuoteStyle style) {
+    if (style == FLAG_QUOTE_POWERSHELL) return powershell_literal(token);
+    size_t length = wcslen(token);
+    int needsQuotes = length == 0;
+    for (size_t i = 0; i < length && !needsQuotes; i++)
+        if (token[i] == L' ' || token[i] == L'\t' || token[i] == L'"') needsQuotes = 1;
+    if (!needsQuotes) return wcsdup_heap(token);
+    WCHAR *quoted = (WCHAR *)malloc((length * 2 + 3) * sizeof(WCHAR));
+    if (!quoted) return NULL;
+    size_t out = 0;
+    quoted[out++] = L'"';
+    for (size_t i = 0; i < length; i++) {
+        if (token[i] == L'"') quoted[out++] = L'\\';
+        quoted[out++] = token[i];
+    }
+    quoted[out++] = L'"';
+    quoted[out] = 0;
+    return quoted;
+}
+
+/* Splits the free-form "extra compiler flags" text from Settings > Compiler
+   the way a shell would - via CommandLineToArgvW, so a quoted flag like
+   -D"FOO=bar baz" keeps its embedded space instead of being cut in two - and
+   re-quotes each token for the target command shell, so the text can't break
+   out of the generated build command. Returns NULL when there's nothing to
+   add, so callers can treat that the same as "no extra flags configured". */
+static WCHAR *quote_extra_compiler_flags(const WCHAR *flags, FlagQuoteStyle style) {
+    if (!flags || !flags[0]) return NULL;
+    int argc = 0;
+    WCHAR **argv = CommandLineToArgvW(flags, &argc);
+    if (!argv || argc == 0) {
+        if (argv) LocalFree(argv);
+        return NULL;
+    }
+    size_t capacity = 4;
+    for (int i = 0; i < argc; i++) capacity += wcslen(argv[i]) * 2 + 4;
+    WCHAR *joined = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (joined) {
+        joined[0] = 0;
+        size_t used = 0;
+        for (int i = 0; i < argc; i++) {
+            WCHAR *quoted = quote_token_for_shell(argv[i], style);
+            if (!quoted) continue;
+            int written = swprintf(joined + used, capacity - used, used ? L" %ls" : L"%ls", quoted);
+            free(quoted);
+            if (written > 0) used += (size_t)written;
+        }
+    }
+    LocalFree(argv);
+    return joined;
 }
 
 static WCHAR *debug_temporary_path(const WCHAR *extension) {
@@ -7660,10 +7728,12 @@ static void launch_msvc_file(DebugSourceKind kind, WCHAR *vcvarsallPath) {
     }
 
     const WCHAR *std = kind == DEBUG_SOURCE_C ? L"/std:c11" : L"/std:c++17";
-    size_t capacity = wcslen(vcvarsallPath) + wcslen(output) * 3 + wcslen(g_currentFile) + 512;
+    WCHAR *extraFlags = quote_extra_compiler_flags(g_compilerExtraFlags, FLAG_QUOTE_CMD);
+    size_t capacity = wcslen(vcvarsallPath) + wcslen(output) * 3 + wcslen(g_currentFile) +
+        (extraFlags ? wcslen(extraFlags) : 0) + 512;
     WCHAR *command = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!command) {
-        free(vcvarsallPath); free(output); free(directory);
+        free(vcvarsallPath); free(output); free(directory); free(extraFlags);
         return;
     }
     /* The leading/trailing quote wrapping the whole /k argument is cmd.exe's
@@ -7680,12 +7750,13 @@ static void launch_msvc_file(DebugSourceKind kind, WCHAR *vcvarsallPath) {
     int written = swprintf(command, capacity,
         L"/k \"setlocal enabledelayedexpansion && call \"%ls\" x64 >nul && "
         L"echo Building %ls... && "
-        L"cl.exe /nologo %ls /O2 /EHsc /Fe:\"%ls\" \"%ls\" && "
+        L"cl.exe /nologo %ls %ls /O2 /EHsc /Fe:\"%ls\" \"%ls\" && "
         L"(\"%ls\" & echo. & echo Process exited with code !errorlevel!) & "
         L"del /f /q \"%ls\" >nul 2>nul\"",
-        vcvarsallPath, kind == DEBUG_SOURCE_C ? L"C" : L"C++", std, output, g_currentFile,
-        output, output);
+        vcvarsallPath, kind == DEBUG_SOURCE_C ? L"C" : L"C++", std, extraFlags ? extraFlags : L"",
+        output, g_currentFile, output, output);
     free(vcvarsallPath);
+    free(extraFlags);
     if (written < 0) {
         free(command); free(output); free(directory);
         return;
@@ -7762,6 +7833,7 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
     }
 
     int commandFileHandedOff = 0;
+    WCHAR *extraFlags = quote_extra_compiler_flags(g_compilerExtraFlags, FLAG_QUOTE_POWERSHELL);
     int *breakpointLines = NULL;
     int breakpointCount = debug ? collect_breakpoint_lines(&breakpointLines) : 0;
     if (debug) {
@@ -7774,7 +7846,8 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
     size_t capacity = wcslen(quotedCompiler) + wcslen(quotedSource) +
                       wcslen(quotedOutput) + (quotedDebugger ? wcslen(quotedDebugger) : 0) +
                       (quotedGdbCommands ? wcslen(quotedGdbCommands) : 0) +
-                      (quotedDebugLocation ? wcslen(quotedDebugLocation) : 0) + 2048;
+                      (quotedDebugLocation ? wcslen(quotedDebugLocation) : 0) +
+                      (extraFlags ? wcslen(extraFlags) : 0) + 2048;
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) goto native_launch_cleanup;
 
@@ -7785,10 +7858,10 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
         ? L"'-g' '-O0' '-fno-omit-frame-pointer'" : L"'-O2'";
     int written = swprintf(parameters, capacity,
         L"-NoLogo -NoProfile -NoExit -Command \"Write-Host 'Building %ls...'; "
-        L"& %ls%ls '%ls' %ls '-o' %ls %ls; "
+        L"& %ls%ls '%ls' %ls %ls '-o' %ls %ls; "
         L"if ($LASTEXITCODE -eq 0) { ",
         kind == DEBUG_SOURCE_C ? L"C" : L"C++", quotedCompiler, compilerMode,
-        standard, buildFlags, quotedOutput, quotedSource);
+        standard, buildFlags, extraFlags ? extraFlags : L"", quotedOutput, quotedSource);
     if (written < 0) goto native_parameters_cleanup;
     size_t used = (size_t)written;
 
@@ -7866,6 +7939,7 @@ native_launch_cleanup:
     free(quotedDebugger);
     free(quotedSource);
     free(quotedOutput);
+    free(extraFlags);
 }
 
 static void launch_active_source_file(int debug) {
@@ -8281,7 +8355,7 @@ static LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, 
             if (box.bottom > rc.bottom) box.bottom = rc.bottom;
             if (box.bottom > box.top) {
                 HDC hdc = GetDC(hwnd);
-                HBRUSH brush = CreateSolidBrush(g_previewDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0x8B, 0x94, 0x9E));
+                HBRUSH brush = CreateSolidBrush(g_editorDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0x8B, 0x94, 0x9E));
                 FrameRect(hdc, &box, brush);
                 DeleteObject(brush);
                 ReleaseDC(hwnd, hdc);
@@ -8657,6 +8731,11 @@ static void delete_table_row_at_cursor(void) {
    one undo step, inserting a new cell at `at` in each - shared by insert-
    column-left/right below. */
 static void insert_table_column_at(const TableCaretInfo *info, int at) {
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    /* When the table is the last thing in the document, its last line may
+       have no trailing EOL of its own - so the rebuilt text mustn't add one
+       either, or every insert would tack on a newline the file never had. */
+    int atDocumentEnd = info->lastLine + 1 >= lineCount;
     const char *eol = editor_eol_sequence();
     char *out = NULL; size_t outLength = 0, outCapacity = 0;
     int ok = 1;
@@ -8684,15 +8763,15 @@ static void insert_table_column_at(const TableCaretInfo *info, int at) {
             }
         }
         free_row_cells(cells, count);
-        if (ok) append_dynamic(&out, &outLength, &outCapacity, eol);
+        if (ok && !(atDocumentEnd && lineNumber == info->lastLine))
+            append_dynamic(&out, &outLength, &outCapacity, eol);
     }
     if (!ok || !out) { free(out); return; }
 
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info->firstLine, 0);
-    int replaceEnd = info->lastLine + 1 < lineCount
-        ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info->lastLine + 1), 0)
-        : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    int replaceEnd = atDocumentEnd
+        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info->lastLine + 1), 0);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
@@ -8726,6 +8805,11 @@ static void delete_table_column_at_cursor(void) {
     }
     int removeAt = info.column >= headerCount ? headerCount - 1 : info.column;
 
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    /* When the table is the last thing in the document, its last line may
+       have no trailing EOL of its own - so the rebuilt text mustn't add one
+       either, or every delete would tack on a newline the file never had. */
+    int atDocumentEnd = info.lastLine + 1 >= lineCount;
     const char *eol = editor_eol_sequence();
     char *out = NULL; size_t outLength = 0, outCapacity = 0;
     int ok = 1;
@@ -8744,15 +8828,15 @@ static void delete_table_column_at_cursor(void) {
                 !append_dynamic(&out, &outLength, &outCapacity, " |")) { ok = 0; break; }
         }
         free_row_cells(cells, count);
-        if (ok) append_dynamic(&out, &outLength, &outCapacity, eol);
+        if (ok && !(atDocumentEnd && lineNumber == info.lastLine))
+            append_dynamic(&out, &outLength, &outCapacity, eol);
     }
     if (!ok || !out) { free(out); return; }
 
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
-    int replaceEnd = info.lastLine + 1 < lineCount
-        ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0)
-        : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    int replaceEnd = atDocumentEnd
+        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
@@ -8818,21 +8902,24 @@ static void sort_table_rows(int descending) {
     g_tableSortDescending = descending;
     qsort(rows, (size_t)dataRowCount, sizeof(TableSortRow), compare_table_sort_rows);
 
+    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    /* When the table is the last thing in the document, its last line may
+       have no trailing EOL of its own - so the rebuilt text mustn't add one
+       either, or every sort would tack on a newline the file never had. */
+    int atDocumentEnd = info.lastLine + 1 >= lineCount;
+
     char *header = editor_line_text(info.firstLine, NULL);
     char *separator = editor_line_text(info.firstLine + 1, NULL);
     const char *eol = editor_eol_sequence();
     char *out = NULL; size_t outLength = 0, outCapacity = 0;
-    /* Every row (including the last) gets a trailing eol, the same shape
-       insert_table_column_at()/delete_table_column_at_cursor() above build -
-       the SCI_REPLACETARGET range below always extends through the original
-       last row's own trailing eol (or the end of file), matching that. */
     int ok = append_dynamic(&out, &outLength, &outCapacity, header ? header : "") &&
              append_dynamic(&out, &outLength, &outCapacity, eol) &&
              append_dynamic(&out, &outLength, &outCapacity, separator ? separator : "") &&
              append_dynamic(&out, &outLength, &outCapacity, eol);
     for (int i = 0; ok && i < dataRowCount; i++) {
-        ok = append_dynamic(&out, &outLength, &outCapacity, rows[i].lineText ? rows[i].lineText : "") &&
-             append_dynamic(&out, &outLength, &outCapacity, eol);
+        ok = append_dynamic(&out, &outLength, &outCapacity, rows[i].lineText ? rows[i].lineText : "");
+        if (ok && !(atDocumentEnd && i == dataRowCount - 1))
+            ok = append_dynamic(&out, &outLength, &outCapacity, eol);
     }
     free(header);
     free(separator);
@@ -8840,11 +8927,10 @@ static void sort_table_rows(int descending) {
     free(rows);
     if (!ok || !out) { free(out); return; }
 
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
-    int replaceEnd = info.lastLine + 1 < lineCount
-        ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0)
-        : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    int replaceEnd = atDocumentEnd
+        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
@@ -9666,8 +9752,11 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"View: Indent Guides", IDM_VIEW_INDENT_GUIDES},
     {L"View: Use Spaces for Indentation", IDM_VIEW_USE_SPACES_INDENT}, {L"View: Zoom In", IDM_VIEW_ZOOM_IN},
     {L"View: Zoom Out", IDM_VIEW_ZOOM_OUT}, {L"View: Reset Zoom", IDM_VIEW_ZOOM_RESET},
-    {L"View: GitHub Light Theme", IDM_VIEW_THEME_GITHUB_LIGHT},
-    {L"View: GitHub Dark Theme", IDM_VIEW_THEME_GITHUB_DARK}, {L"View: Custom Preview CSS", IDM_VIEW_CUSTOM_CSS},
+    {L"View: Editor Theme: GitHub Light", IDM_VIEW_THEME_GITHUB_LIGHT},
+    {L"View: Editor Theme: GitHub Dark", IDM_VIEW_THEME_GITHUB_DARK},
+    {L"View: Markdown Theme: GitHub Light", IDM_VIEW_PREVIEW_THEME_LIGHT},
+    {L"View: Markdown Theme: GitHub Dark", IDM_VIEW_PREVIEW_THEME_DARK},
+    {L"View: Custom Preview CSS", IDM_VIEW_CUSTOM_CSS},
     {L"View: Clear Custom Preview CSS", IDM_VIEW_CLEAR_CUSTOM_CSS}, {L"View: Toggle Fold", IDM_VIEW_FOLD_TOGGLE},
     {L"View: Fold All", IDM_VIEW_FOLD_ALL}, {L"View: Unfold All", IDM_VIEW_UNFOLD_ALL},
     {L"Help: Markdown Reference", IDM_HELP_REFERENCE}
@@ -9709,12 +9798,29 @@ static int split_editor_splitter_contains(int x, int y) {
            y >= g_splitEditorSplitterRect.top && y <= g_splitEditorSplitterRect.bottom;
 }
 
-static void select_theme(HWND hwnd, int darkMode) {
+/* Applies g_previewDarkMode to the rendered Markdown preview only, leaving
+   the editor and app chrome (select_theme(), below) untouched. Used both as
+   the Markdown Theme control's own handler and by select_theme() itself to
+   keep the preview in step with the main light/dark toggle. */
+static void select_preview_theme(HWND hwnd, int darkMode) {
     g_previewDarkMode = darkMode;
     save_theme_settings();
-    apply_menu_theme(hwnd, darkMode);
     apply_preview_theme();
     apply_webview_background_colour();
+    apply_preview_host_theme();
+    refresh_menu(hwnd);
+}
+
+/* Applies darkMode to the editor and all the surrounding app chrome (menus,
+   dialogs, tabs, toolbar, title bar), then syncs the rendered Markdown
+   preview to match - this is the main light/dark toggle (View > Editor
+   Theme, Settings > Appearance). The separate Markdown Theme control
+   (select_preview_theme(), above) can still be used afterwards to override
+   just the preview on its own. */
+static void select_theme(HWND hwnd, int darkMode) {
+    g_editorDarkMode = darkMode;
+    save_theme_settings();
+    apply_menu_theme(hwnd, darkMode);
     apply_editor_theme(g_hEdit);
     if (g_hMinimap) {
         apply_editor_theme(g_hMinimap);
@@ -9722,7 +9828,6 @@ static void select_theme(HWND hwnd, int darkMode) {
         SendMessageA(g_hMinimap, SCI_SETZOOM, 0, 0);
     }
     if (g_hSplitEdit) apply_editor_theme(g_hSplitEdit);
-    apply_preview_host_theme();
     apply_main_theme(hwnd);
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
         if (g_hToolbarButtons[i]) InvalidateRect(g_hToolbarButtons[i], NULL, TRUE);
@@ -9730,7 +9835,7 @@ static void select_theme(HWND hwnd, int darkMode) {
     apply_toolbar_tooltip_theme();
     if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);
     if (g_hStatus) InvalidateRect(g_hStatus, NULL, TRUE);
-    refresh_menu(hwnd);
+    select_preview_theme(hwnd, darkMode);
 }
 
 static int g_highContrastActive = 0;
@@ -9760,7 +9865,7 @@ static void detect_high_contrast(void) {
 }
 
 /* ---- Settings dialog ----------------------------------------------------
-   A single window over five categories (left-hand list, one panel of
+   A single window over six categories (left-hand list, one panel of
    controls shown at a time) that just launches or toggles the same actions
    already reachable from the View menu one at a time - do_choose_font(),
    select_theme(), toggle_word_wrap(), etc. Every control applies and
@@ -9774,8 +9879,10 @@ typedef struct SettingsDialogState {
     HWND fontLabel, fontChooseButton;
     HWND wordWrapCheck;
     HWND previewOnLeftCheck, customCssCaption, customCssLabel, customCssChooseButton, customCssClearButton;
+    HWND previewThemeCaption, previewThemeLightRadio, previewThemeDarkRadio;
     HWND spellCheckCheck, showWhitespaceCheck, indentGuidesCheck, minimapCheck;
     HWND indentUseSpacesCheck, tabWidthCaption, tabWidthEdit;
+    HWND compilerFlagsCaption, compilerFlagsEdit;
 } SettingsDialogState;
 
 static void update_settings_font_label(SettingsDialogState *state) {
@@ -9789,6 +9896,39 @@ static void update_settings_css_label(SettingsDialogState *state) {
     EnableWindow(state->customCssClearButton, g_customCssPath && g_customCssPath[0]);
 }
 
+static int is_flag_edit_whitespace(WCHAR ch) {
+    return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+}
+
+/* Applied on EN_KILLFOCUS from the Compiler category's edit box, the same as
+   set_tab_width() is for the Editor category's - trims surrounding
+   whitespace, persists via save_compiler_settings(), and is a no-op when the
+   trimmed text hasn't actually changed so tabbing through the field without
+   editing it doesn't touch the ini file. quote_extra_compiler_flags() (see
+   launch_native_file()/launch_msvc_file()) re-splits this text into
+   individual flags at build time. */
+static void set_compiler_extra_flags(const WCHAR *text) {
+    size_t start = 0, end = text ? wcslen(text) : 0;
+    while (start < end && is_flag_edit_whitespace(text[start])) start++;
+    while (end > start && is_flag_edit_whitespace(text[end - 1])) end--;
+    WCHAR *value = NULL;
+    if (end > start) {
+        value = (WCHAR *)malloc((end - start + 1) * sizeof(WCHAR));
+        if (value) {
+            for (size_t i = 0; i < end - start; i++) value[i] = text[start + i];
+            value[end - start] = 0;
+        }
+    }
+    if (value && g_compilerExtraFlags && wcscmp(value, g_compilerExtraFlags) == 0) {
+        free(value);
+        return;
+    }
+    if (!value && !g_compilerExtraFlags) return;
+    free(g_compilerExtraFlags);
+    g_compilerExtraFlags = value;
+    save_compiler_settings();
+}
+
 static void update_settings_category(SettingsDialogState *state) {
     HWND all[] = {
         state->themeLightRadio, state->themeDarkRadio,
@@ -9796,8 +9936,10 @@ static void update_settings_category(SettingsDialogState *state) {
         state->wordWrapCheck,
         state->previewOnLeftCheck, state->customCssCaption, state->customCssLabel,
         state->customCssChooseButton, state->customCssClearButton,
+        state->previewThemeCaption, state->previewThemeLightRadio, state->previewThemeDarkRadio,
         state->spellCheckCheck, state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
         state->indentUseSpacesCheck, state->tabWidthCaption, state->tabWidthEdit,
+        state->compilerFlagsCaption, state->compilerFlagsEdit,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
         if (all[i]) ShowWindow(all[i], SW_HIDE);
@@ -9819,6 +9961,9 @@ static void update_settings_category(SettingsDialogState *state) {
             ShowWindow(state->customCssLabel, SW_SHOW);
             ShowWindow(state->customCssChooseButton, SW_SHOW);
             ShowWindow(state->customCssClearButton, SW_SHOW);
+            ShowWindow(state->previewThemeCaption, SW_SHOW);
+            ShowWindow(state->previewThemeLightRadio, SW_SHOW);
+            ShowWindow(state->previewThemeDarkRadio, SW_SHOW);
             break;
         case 4:
             ShowWindow(state->spellCheckCheck, SW_SHOW);
@@ -9828,6 +9973,10 @@ static void update_settings_category(SettingsDialogState *state) {
             ShowWindow(state->indentUseSpacesCheck, SW_SHOW);
             ShowWindow(state->tabWidthCaption, SW_SHOW);
             ShowWindow(state->tabWidthEdit, SW_SHOW);
+            break;
+        case 5:
+            ShowWindow(state->compilerFlagsCaption, SW_SHOW);
+            ShowWindow(state->compilerFlagsEdit, SW_SHOW);
             break;
     }
 }
@@ -9841,7 +9990,7 @@ static void update_settings_category(SettingsDialogState *state) {
    repaint with the new colors instead of leaving stale ones on screen. */
 static void refresh_settings_dialog_theme(HWND hwnd, SettingsDialogState *state) {
     popup_dialog_theme_created(hwnd);
-    SetWindowTheme(state->categoryList, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    SetWindowTheme(state->categoryList, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
     /* Checkboxes/radios stay unthemed (see the WM_CREATE block below for why);
        nothing to redo here since that opt-out doesn't depend on light/dark. */
     RedrawWindow(hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
@@ -9853,22 +10002,22 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         state = (SettingsDialogState *)((CREATESTRUCTW *)lParam)->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
         HINSTANCE inst = GetModuleHandleW(NULL);
-        const WCHAR *categories[] = { L"Appearance", L"Font", L"Word Wrap", L"Preview", L"Editor" };
+        const WCHAR *categories[] = { L"Appearance", L"Font", L"Word Wrap", L"Preview", L"Editor", L"Compiler" };
         state->categoryList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
             12, 12, 140, 300, hwnd, (HMENU)10, inst, NULL);
-        for (int i = 0; i < 5; i++) SendMessageW(state->categoryList, LB_ADDSTRING, 0, (LPARAM)categories[i]);
-        SetWindowTheme(state->categoryList, g_previewDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        for (int i = 0; i < 6; i++) SendMessageW(state->categoryList, LB_ADDSTRING, 0, (LPARAM)categories[i]);
+        SetWindowTheme(state->categoryList, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
 
         int px = 168, py = 16;
-        state->themeLightRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Light",
+        state->themeLightRadio = CreateWindowExW(0, L"BUTTON", L"Light",
             WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
             px, py, 220, 22, hwnd, (HMENU)20, inst, NULL);
-        state->themeDarkRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Dark",
+        state->themeDarkRadio = CreateWindowExW(0, L"BUTTON", L"Dark",
             WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
             px, py + 28, 220, 22, hwnd, (HMENU)21, inst, NULL);
-        SendMessageW(g_previewDarkMode ? state->themeDarkRadio : state->themeLightRadio, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(g_editorDarkMode ? state->themeDarkRadio : state->themeLightRadio, BM_SETCHECK, BST_CHECKED, 0);
 
         state->fontLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD, px, py, 320, 20, hwnd, NULL, inst, NULL);
         state->fontChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose Font...",
@@ -9881,13 +10030,23 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         state->previewOnLeftCheck = CreateWindowExW(0, L"BUTTON", L"Show preview on the left",
             WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py, 320, 22, hwnd, (HMENU)50, inst, NULL);
         SendMessageW(state->previewOnLeftCheck, BM_SETCHECK, g_previewOnLeft ? BST_CHECKED : BST_UNCHECKED, 0);
-        state->customCssCaption = CreateWindowExW(0, L"STATIC", L"Custom preview CSS:", WS_CHILD,
+        state->previewThemeCaption = CreateWindowExW(0, L"STATIC", L"Markdown theme:", WS_CHILD,
             px, py + 36, 320, 20, hwnd, NULL, inst, NULL);
-        state->customCssLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD, px, py + 58, 320, 20, hwnd, NULL, inst, NULL);
+        state->previewThemeLightRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Light",
+            WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+            px, py + 58, 220, 22, hwnd, (HMENU)53, inst, NULL);
+        state->previewThemeDarkRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Dark",
+            WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+            px, py + 86, 220, 22, hwnd, (HMENU)54, inst, NULL);
+        SendMessageW(g_previewDarkMode ? state->previewThemeDarkRadio : state->previewThemeLightRadio,
+                     BM_SETCHECK, BST_CHECKED, 0);
+        state->customCssCaption = CreateWindowExW(0, L"STATIC", L"Custom preview CSS:", WS_CHILD,
+            px, py + 122, 320, 20, hwnd, NULL, inst, NULL);
+        state->customCssLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD, px, py + 144, 320, 20, hwnd, NULL, inst, NULL);
         state->customCssChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose CSS...",
-            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px, py + 84, 120, 26, hwnd, (HMENU)51, inst, NULL);
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px, py + 170, 120, 26, hwnd, (HMENU)51, inst, NULL);
         state->customCssClearButton = CreateWindowExW(0, L"BUTTON", L"Clear",
-            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 128, py + 84, 90, 26, hwnd, (HMENU)52, inst, NULL);
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 128, py + 170, 90, 26, hwnd, (HMENU)52, inst, NULL);
 
         state->spellCheckCheck = CreateWindowExW(0, L"BUTTON", L"Spell check",
             WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, px, py, 320, 22, hwnd, (HMENU)60, inst, NULL);
@@ -9913,6 +10072,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         swprintf(tabWidthText, sizeof(tabWidthText) / sizeof(tabWidthText[0]), L"%d", g_tabWidth);
         SetWindowTextW(state->tabWidthEdit, tabWidthText);
 
+        state->compilerFlagsCaption = CreateWindowExW(0, L"STATIC",
+            L"Extra flags passed to Run/Debug C/C++ builds:", WS_CHILD,
+            px, py, 380, 20, hwnd, NULL, inst, NULL);
+        state->compilerFlagsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px, py + 24, 380, 24, hwnd, (HMENU)70, inst, NULL);
+        SetWindowTextW(state->compilerFlagsEdit, g_compilerExtraFlags ? g_compilerExtraFlags : L"");
+
         /* Visual-styled BS_AUTOCHECKBOX/BS_AUTORADIOBUTTON controls draw their
            label via UxTheme and ignore the WM_CTLCOLORSTATIC/BTN text colour
            popup_dialog_theme_message() sets below - "DarkMode_Explorer" doesn't
@@ -9924,7 +10090,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         HWND checkboxes[] = { state->wordWrapCheck, state->previewOnLeftCheck, state->spellCheckCheck,
                               state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
                               state->indentUseSpacesCheck,
-                              state->themeLightRadio, state->themeDarkRadio };
+                              state->themeLightRadio, state->themeDarkRadio,
+                              state->previewThemeLightRadio, state->previewThemeDarkRadio };
         for (size_t i = 0; i < sizeof(checkboxes) / sizeof(checkboxes[0]); i++)
             SetWindowTheme(checkboxes[i], L"", L"");
 
@@ -9984,6 +10151,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 SetWindowTextW(state->tabWidthEdit, buf);
                 return 0;
             }
+            if (LOWORD(wParam) == 70 && HIWORD(wParam) == EN_KILLFOCUS) {
+                WCHAR buf[1024];
+                GetWindowTextW(state->compilerFlagsEdit, buf, sizeof(buf) / sizeof(buf[0]));
+                set_compiler_extra_flags(buf);
+                SetWindowTextW(state->compilerFlagsEdit, g_compilerExtraFlags ? g_compilerExtraFlags : L"");
+                return 0;
+            }
             if (HIWORD(wParam) != BN_CLICKED) break;
             switch (LOWORD(wParam)) {
                 case 20: select_theme(g_hMainWnd, 0); refresh_settings_dialog_theme(hwnd, state); break;
@@ -9993,6 +10167,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case 50: toggle_panel_sides(g_hMainWnd); break;
                 case 51: do_choose_custom_css(); update_settings_css_label(state); break;
                 case 52: clear_custom_css(); update_settings_css_label(state); break;
+                case 53: select_preview_theme(g_hMainWnd, 0); break;
+                case 54: select_preview_theme(g_hMainWnd, 1); break;
                 case 60: toggle_spell_check(g_hMainWnd); break;
                 case 61: toggle_show_whitespace(g_hMainWnd); break;
                 case 62: toggle_indent_guides(g_hMainWnd); break;
@@ -10190,6 +10366,10 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_THEME_GITHUB_DARK:
             select_theme(hwnd, cmd == IDM_VIEW_THEME_GITHUB_DARK);
             break;
+        case IDM_VIEW_PREVIEW_THEME_LIGHT:
+        case IDM_VIEW_PREVIEW_THEME_DARK:
+            select_preview_theme(hwnd, cmd == IDM_VIEW_PREVIEW_THEME_DARK);
+            break;
         case IDM_HELP_REFERENCE: show_help_reference(); break;
     }
 }
@@ -10207,13 +10387,13 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
     int index = (int)dis->itemID;
     if (index < 0 || index >= g_documentCount) return;
     int selected = TabCtrl_GetCurSel(g_hTabs) == index;
-    COLORREF bg = g_previewDarkMode
+    COLORREF bg = g_editorDarkMode
         ? (selected ? RGB(0x0D, 0x11, 0x17) : RGB(0x16, 0x1B, 0x22))
         : (selected ? RGB(0xFF, 0xFF, 0xFF) : RGB(0xF0, 0xF3, 0xF6));
-    COLORREF fg = g_previewDarkMode
+    COLORREF fg = g_editorDarkMode
         ? (selected ? RGB(0xF0, 0xF6, 0xFC) : RGB(0xB1, 0xBA, 0xC4))
         : RGB(0x1F, 0x23, 0x28);
-    COLORREF border = g_previewDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE);
+    COLORREF border = g_editorDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE);
     HBRUSH brush = CreateSolidBrush(bg);
     FillRect(dis->hDC, &dis->rcItem, brush);
     DeleteObject(brush);
@@ -10245,16 +10425,17 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
     int side = (close.right - close.left < close.bottom - close.top)
         ? (close.right - close.left) : (close.bottom - close.top);
     int cx = (close.left + close.right) / 2, cy = (close.top + close.bottom) / 2;
-    int pad = 2;
+    int pad = 3;
     if (pad * 2 >= side) pad = side / 2 - 1;
     if (pad < 1) pad = 1;
     RECT glyph = { cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2 };
-    HPEN closePen = CreatePen(PS_SOLID, 1, fg);
+    int padTop = pad + 1, padBottom = pad;
+    HPEN closePen = CreatePen(PS_SOLID, 2, fg);
     SelectObject(dis->hDC, closePen);
-    MoveToEx(dis->hDC, glyph.left + pad, glyph.top + pad, NULL);
-    LineTo(dis->hDC, glyph.right - pad, glyph.bottom - pad);
-    MoveToEx(dis->hDC, glyph.right - pad, glyph.top + pad, NULL);
-    LineTo(dis->hDC, glyph.left + pad, glyph.bottom - pad);
+    MoveToEx(dis->hDC, glyph.left + pad, glyph.top + padTop, NULL);
+    LineTo(dis->hDC, glyph.right - pad, glyph.bottom - padBottom);
+    MoveToEx(dis->hDC, glyph.right - pad, glyph.top + padTop, NULL);
+    LineTo(dis->hDC, glyph.left + pad, glyph.bottom - padBottom);
     SelectObject(dis->hDC, oldPen);
     DeleteObject(closePen);
     DeleteObject(borderPen);
@@ -10293,10 +10474,10 @@ static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis) {
 static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis) {
     if ((int)dis->itemID < 0) return;
     int selected = (dis->itemState & ODS_SELECTED) != 0;
-    COLORREF bg = g_previewDarkMode
+    COLORREF bg = g_editorDarkMode
         ? (selected ? RGB(0x26, 0x4F, 0x78) : RGB(0x0D, 0x11, 0x17))
         : (selected ? RGB(0xB6, 0xD7, 0xFF) : RGB(0xFF, 0xFF, 0xFF));
-    COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
     HBRUSH brush = CreateSolidBrush(bg);
     FillRect(dis->hDC, &dis->rcItem, brush);
     DeleteObject(brush);
@@ -10981,7 +11162,7 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
         /* The recessed strip behind the tabs, matching the editor's
            line-number gutter immediately below it. */
-        HBRUSH brush = CreateSolidBrush(g_previewDarkMode
+        HBRUSH brush = CreateSolidBrush(g_editorDarkMode
             ? RGB(0x16, 0x1B, 0x22) : RGB(0xF6, 0xF8, 0xFA));
         FillRect(buffer, &client, brush);
         DeleteObject(brush);
@@ -11062,7 +11243,7 @@ static void initialize_main_window(HWND hwnd) {
 
     /* The process preference is selected before window creation; complete the
        per-window opt-in before attaching the menu so its first paint matches. */
-    apply_menu_theme(hwnd, g_previewDarkMode);
+    apply_menu_theme(hwnd, g_editorDarkMode);
 
     HDC hdc = GetDC(hwnd);
     int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
@@ -11328,8 +11509,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CTLCOLORLISTBOX: {
             if ((HWND)lParam == g_hOutline && g_mainBkBrush) {
                 HDC hdcList = (HDC)wParam;
-                COLORREF bk = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-                COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+                COLORREF bk = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
+                COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
                 SetBkColor(hdcList, bk);
                 SetTextColor(hdcList, fg);
                 return (LRESULT)g_mainBkBrush;
@@ -11375,7 +11556,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             /* The class has no background brush, so this must always paint. */
             if (!g_mainBkBrush)
                 g_mainBkBrush = CreateSolidBrush(
-                    g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+                    g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
             RECT rc;
             GetClientRect(hwnd, &rc);
             FillRect((HDC)wParam, &rc, g_mainBkBrush);
@@ -11614,7 +11795,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     load_font_settings();
     load_theme_settings();
     init_native_menu_theme_support();
-    apply_menu_theme(NULL, g_previewDarkMode);
+    apply_menu_theme(NULL, g_editorDarkMode);
     load_layout_settings();
     load_find_settings();
     load_compiler_settings();

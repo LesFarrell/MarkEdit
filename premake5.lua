@@ -3,7 +3,7 @@
 -- MinGW-w64 GCC toolchain.
 -- Generate Makefiles with:  premake5 gmake
 -- Then build with:          make config=release_x64
--- (builds markedit.exe, Lexilla.dll, and test_parser).
+-- (builds markedit.exe, statically linking Lexilla, and test_parser).
 --
 -- premake5 --help for other actions (e.g. `premake5 vs2022`), but this
 -- project's headers/libs are laid out for MinGW-w64-compatible toolchains, so
@@ -82,12 +82,13 @@ end
 
 -- Trimmed down from Lexilla's full catalogue to the languages supported by
 -- MarkEdit; keep this list aligned with lexilla-sources.rsp.
+-- A static lib rather than a SharedLib: linked straight into markedit.exe
+-- instead of shipped as its own Lexilla.dll (see the markedit project below).
 project "lexilla"
-    kind "SharedLib"
+    kind "StaticLib"
     language "C++"
     cppdialect "C++17"
     targetname "Lexilla"
-    targetdir "."
     objdir "build/obj/lexilla"
 
     files {
@@ -159,6 +160,11 @@ project "markedit"
 
     filter "toolset:gcc"
         buildoptions { "-Wno-unknown-pragmas" }
+        -- WebView2Loader.dll.lib rather than WebView2LoaderStatic.lib: the
+        -- static loader is MSVC-ABI-only (MSVC name mangling, /GS stack-
+        -- cookie symbols, MSVC CRT thread-init guards) and can't be linked
+        -- into this GNU/MinGW toolchain's output - the dynamic loader's DLL
+        -- boundary is plain C, so it's the only ABI-compatible option here.
         -- This vendor import library is named WebView2Loader.dll.lib rather
         -- than libWebView2Loader.a, so pass its path directly to GNU ld.
         linkoptions { "../"..WEBVIEW2_DIR.."/x64/WebView2Loader.dll.lib" }
@@ -185,7 +191,7 @@ project "markedit"
         "mkdir -p ../dist/katex ../dist/third_party/cmark-gfm ../dist/third_party/highlightjs "..
             "../dist/third_party/katex ../dist/third_party/lexilla ../dist/third_party/scintilla "..
             "../dist/third_party/webview2",
-        "cp -f ../markedit.exe ../Lexilla.dll ../Scintilla.dll ../WebView2Loader.dll "..
+        "cp -f ../markedit.exe ../Scintilla.dll ../WebView2Loader.dll "..
             "../preview_shell.html ../github-markdown.css ../mermaid.min.js ../highlight.min.js "..
             "../highlight-powershell.min.js ../highlight-github.min.css ../highlight-github-dark.min.css "..
             "../LICENSE ../THIRD_PARTY_NOTICES.md ../dist/",
