@@ -140,6 +140,7 @@ project "markedit"
         "settings.c", "settings.h",
         "help_reference.c", "help_reference.h",
         "file_explorer.c", "file_explorer.h",
+        "toolbar_icons.c", "toolbar_icons.h",
         "markedit.rc",
     }
     cmark_gfm_settings()
