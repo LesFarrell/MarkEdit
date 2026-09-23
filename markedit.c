@@ -5415,6 +5415,69 @@ static HMENU build_menu(void) {
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_COMMAND_PALETTE, "Command &Palette...\tCtrl+Shift+P");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hEditMenu, "&Edit");
 
+    HMENU hView = CreatePopupMenu();
+    AppendMenuA(hView, MF_STRING | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEPREVIEW, "Show &Preview\tCtrl+Shift+V");
+    AppendMenuA(hView, MF_STRING | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEEDITOR, "Show &Editor\tCtrl+Shift+E");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_NEXT_TAB, "&Next Tab\tCtrl+Tab");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_PREVIOUS_TAB, "&Previous Tab\tCtrl+Shift+Tab");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_CYCLE_PANE, "Cycle &Panes\tCtrl+F6");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    HMENU hTheme = CreatePopupMenu();
+    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_LIGHT, "&Light");
+    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_DARK, "&Dark");
+    CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
+                       g_editorDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
+                       MF_BYCOMMAND);
+    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hTheme, "&Editor Theme");
+    HMENU hPreviewTheme = CreatePopupMenu();
+    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_PREVIEW_THEME_LIGHT, "GitHub &Light");
+    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_PREVIEW_THEME_DARK, "GitHub &Dark");
+    CheckMenuRadioItem(hPreviewTheme, IDM_VIEW_PREVIEW_THEME_LIGHT, IDM_VIEW_PREVIEW_THEME_DARK,
+                       g_previewDarkMode ? IDM_VIEW_PREVIEW_THEME_DARK : IDM_VIEW_PREVIEW_THEME_LIGHT,
+                       MF_BYCOMMAND);
+    AppendMenuA(hPreviewTheme, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_CUSTOM_CSS, "Custom Preview &CSS...");
+    AppendMenuA(hPreviewTheme, MF_STRING | (g_customCssPath ? 0 : MF_GRAYED),
+                IDM_VIEW_CLEAR_CUSTOM_CSS, "C&lear Custom Preview CSS");
+    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hPreviewTheme, "&Markdown Theme");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_PREVIEW_ON_LEFT, "Preview on &Left");
+    AppendMenuA(hView, MF_STRING | (g_focusMode ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_FOCUS_MODE, "&Focus Mode\tF11");
+    AppendMenuA(hView, MF_STRING | (g_wordWrap ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_WORD_WRAP, "&Word Wrap\tAlt+Z");
+    AppendMenuA(hView, MF_STRING | (g_spellCheckEnabled ? MF_CHECKED : MF_UNCHECKED) |
+                (g_spellChecker ? 0 : MF_GRAYED), IDM_VIEW_SPELL_CHECK, "&Spell Check");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_SPELL_LANGUAGE, "Spell Check &Language...");
+    AppendMenuA(hView, MF_STRING | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_OUTLINE, "Document &Outline");
+    AppendMenuA(hView, MF_STRING | (g_explorerVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_EXPLORER, "&File Explorer\tCtrl+Shift+X");
+    AppendMenuA(hView, MF_STRING | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_MINIMAP, "Mini&map");
+    AppendMenuA(hView, MF_STRING | (g_splitEditorVisible ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_TOGGLESPLIT, "Split &Editor\tCtrl+\\");
+    AppendMenuA(hView, MF_STRING | (g_splitEditorVisible ? 0 : MF_GRAYED),
+                IDM_VIEW_RESET_SPLIT_EDITOR, "&Reset Split Editor");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_SHOW_WHITESPACE, "Show W&hitespace");
+    AppendMenuA(hView, MF_STRING | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_INDENT_GUIDES, "&Indent Guides");
+    AppendMenuA(hView, MF_STRING | (g_indentUseSpaces ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_USE_SPACES_INDENT, "&Use Spaces for Indentation");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_TOGGLE, "Toggle Fo&ld");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_ALL, "Fold &All");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_UNFOLD_ALL, "&Unfold All");
+    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_IN, "Zoom &In\tCtrl+=");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_OUT, "Zoom &Out\tCtrl+-");
+    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_RESET, "&Reset Zoom\tCtrl+0");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hView, "&View");
+
     HMENU hMarkdown = CreatePopupMenu();
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_BOLD, "&Bold");
     AppendMenuA(hMarkdown, MF_STRING, IDM_FMT_ITALIC, "&Italic");
@@ -5478,69 +5541,6 @@ static HMENU build_menu(void) {
     AppendMenuA(hRun, MF_STRING, IDM_DEBUG_BREAKPOINT, "Toggle &Breakpoint\tF9");
     AppendMenuA(hRun, MF_STRING, IDM_DEBUG_CLEAR_BREAKPOINTS, "&Clear All Breakpoints");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hRun, "&Run");
-
-    HMENU hView = CreatePopupMenu();
-    AppendMenuA(hView, MF_STRING | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEPREVIEW, "Show &Preview\tCtrl+Shift+V");
-    AppendMenuA(hView, MF_STRING | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_TOGGLEEDITOR, "Show &Editor\tCtrl+Shift+E");
-    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_NEXT_TAB, "&Next Tab\tCtrl+Tab");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_PREVIOUS_TAB, "&Previous Tab\tCtrl+Shift+Tab");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_CYCLE_PANE, "Cycle &Panes\tCtrl+F6");
-    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
-    HMENU hTheme = CreatePopupMenu();
-    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_LIGHT, "&Light");
-    AppendMenuA(hTheme, MF_STRING, IDM_VIEW_THEME_GITHUB_DARK, "&Dark");
-    CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
-                       g_editorDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
-                       MF_BYCOMMAND);
-    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hTheme, "&Editor Theme");
-    HMENU hPreviewTheme = CreatePopupMenu();
-    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_PREVIEW_THEME_LIGHT, "GitHub &Light");
-    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_PREVIEW_THEME_DARK, "GitHub &Dark");
-    CheckMenuRadioItem(hPreviewTheme, IDM_VIEW_PREVIEW_THEME_LIGHT, IDM_VIEW_PREVIEW_THEME_DARK,
-                       g_previewDarkMode ? IDM_VIEW_PREVIEW_THEME_DARK : IDM_VIEW_PREVIEW_THEME_LIGHT,
-                       MF_BYCOMMAND);
-    AppendMenuA(hPreviewTheme, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hPreviewTheme, MF_STRING, IDM_VIEW_CUSTOM_CSS, "Custom Preview &CSS...");
-    AppendMenuA(hPreviewTheme, MF_STRING | (g_customCssPath ? 0 : MF_GRAYED),
-                IDM_VIEW_CLEAR_CUSTOM_CSS, "C&lear Custom Preview CSS");
-    AppendMenuA(hView, MF_POPUP, (UINT_PTR)hPreviewTheme, "&Markdown Theme");
-    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hView, MF_STRING | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_PREVIEW_ON_LEFT, "Preview on &Left");
-    AppendMenuA(hView, MF_STRING | (g_focusMode ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_FOCUS_MODE, "&Focus Mode\tF11");
-    AppendMenuA(hView, MF_STRING | (g_wordWrap ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_WORD_WRAP, "&Word Wrap\tAlt+Z");
-    AppendMenuA(hView, MF_STRING | (g_spellCheckEnabled ? MF_CHECKED : MF_UNCHECKED) |
-                (g_spellChecker ? 0 : MF_GRAYED), IDM_VIEW_SPELL_CHECK, "&Spell Check");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_SPELL_LANGUAGE, "Spell Check &Language...");
-    AppendMenuA(hView, MF_STRING | (g_outlineVisible ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_OUTLINE, "Document &Outline");
-    AppendMenuA(hView, MF_STRING | (g_explorerVisible ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_EXPLORER, "&File Explorer\tCtrl+Shift+X");
-    AppendMenuA(hView, MF_STRING | (g_minimapVisible ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_MINIMAP, "Mini&map");
-    AppendMenuA(hView, MF_STRING | (g_splitEditorVisible ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_TOGGLESPLIT, "Split &Editor\tCtrl+\\");
-    AppendMenuA(hView, MF_STRING | (g_splitEditorVisible ? 0 : MF_GRAYED),
-                IDM_VIEW_RESET_SPLIT_EDITOR, "&Reset Split Editor");
-    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hView, MF_STRING | (g_showWhitespace ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_SHOW_WHITESPACE, "Show W&hitespace");
-    AppendMenuA(hView, MF_STRING | (g_indentGuides ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_INDENT_GUIDES, "&Indent Guides");
-    AppendMenuA(hView, MF_STRING | (g_indentUseSpaces ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_USE_SPACES_INDENT, "&Use Spaces for Indentation");
-    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_TOGGLE, "Toggle Fo&ld");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_FOLD_ALL, "Fold &All");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_UNFOLD_ALL, "&Unfold All");
-    AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_IN, "Zoom &In\tCtrl+=");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_OUT, "Zoom &Out\tCtrl+-");
-    AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOM_RESET, "&Reset Zoom\tCtrl+0");
-    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hView, "&View");
 
     HMENU hHelp = CreatePopupMenu();
     AppendMenuA(hHelp, MF_STRING, IDM_HELP_REFERENCE, "&Markdown Reference");
@@ -6339,7 +6339,7 @@ static void layout(HWND hwnd) {
 static void update_view_menu(HWND hwnd) {
     HMENU hMenuBar = GetMenu(hwnd);
     if (!hMenuBar) return;
-    HMENU hView = GetSubMenu(hMenuBar, 4); /* File, Edit, Format, Run, View */
+    HMENU hView = GetSubMenu(hMenuBar, 2); /* File, Edit, View, Format, Run, Help */
     CheckMenuItem(hView, IDM_VIEW_TOGGLEPREVIEW, MF_BYCOMMAND | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLEEDITOR, MF_BYCOMMAND | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_PREVIEW_ON_LEFT, MF_BYCOMMAND | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED));
@@ -9112,144 +9112,6 @@ static int collect_workspace_files(WorkspaceFiles *files) {
     int ok = collect_workspace_files_at(files, root);
     free(root);
     return ok;
-}
-
-/* Run Git directly and capture stdout/stderr without cmd.exe re-parsing the
-   repository path. The caller owns the returned byte buffer. */
-static char *capture_git_output(const WCHAR *directory, const WCHAR *arguments,
-                                DWORD *exitCode, size_t *outputLength) {
-    if (exitCode) *exitCode = (DWORD)-1;
-    if (outputLength) *outputLength = 0;
-    size_t commandCapacity = wcslen(directory) + wcslen(arguments) + 64;
-    WCHAR *command = (WCHAR *)malloc(commandCapacity * sizeof(WCHAR));
-    if (!command) return NULL;
-    swprintf(command, commandCapacity, L"git.exe -C \"%ls\" %ls", directory, arguments);
-    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
-    HANDLE readPipe = NULL, writePipe = NULL;
-    if (!CreatePipe(&readPipe, &writePipe, &security, 0)) { free(command); return NULL; }
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
-    STARTUPINFOW startup = {0};
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdOutput = writePipe;
-    startup.hStdError = writePipe;
-    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    PROCESS_INFORMATION process = {0};
-    BOOL started = CreateProcessW(NULL, command, NULL, NULL, TRUE,
-                                  CREATE_NO_WINDOW, NULL, directory, &startup, &process);
-    free(command);
-    CloseHandle(writePipe);
-    if (!started) { CloseHandle(readPipe); return NULL; }
-    size_t length = 0, capacity = 4096;
-    char *output = (char *)malloc(capacity);
-    BYTE chunk[4096];
-    DWORD got = 0;
-    while (output && ReadFile(readPipe, chunk, sizeof(chunk), &got, NULL) && got) {
-        if (length + got + 1 > capacity) {
-            size_t next = capacity;
-            while (next < length + got + 1) next *= 2;
-            char *grown = (char *)realloc(output, next);
-            if (!grown) { free(output); output = NULL; break; }
-            output = grown; capacity = next;
-        }
-        memcpy(output + length, chunk, got);
-        length += got;
-    }
-    CloseHandle(readPipe);
-    WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD code = (DWORD)-1;
-    GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    if (output) output[length] = 0;
-    if (exitCode) *exitCode = code;
-    if (outputLength) *outputLength = length;
-    return output;
-}
-
-static const WCHAR *git_status_description(char index, char worktree) {
-    if (index == '?' && worktree == '?') return L"Untracked";
-    if (index == 'U' || worktree == 'U' || (index == 'A' && worktree == 'A') ||
-        (index == 'D' && worktree == 'D')) return L"Conflict";
-    if (index != ' ' && worktree != ' ') return L"Staged + modified";
-    if (index != ' ') return L"Staged";
-    if (worktree == 'D') return L"Deleted";
-    return L"Modified";
-}
-
-static void do_git_changes(void) {
-    WCHAR *directory = g_currentFile ? path_directory(g_currentFile) : choose_workspace_folder();
-    if (!directory) return;
-    DWORD code = 0;
-    size_t rootBytes = 0;
-    char *rootOutput = capture_git_output(directory, L"rev-parse --show-toplevel", &code, &rootBytes);
-    if (!rootOutput) {
-        MessageBoxW(g_hMainWnd, L"Git could not be started. Make sure git.exe is available on PATH.",
-                    L"Git Changes", MB_OK | MB_ICONERROR);
-        free(directory); return;
-    }
-    if (code != 0) {
-        MessageBoxW(g_hMainWnd, L"The selected folder is not inside a Git repository.",
-                    L"Git Changes", MB_OK | MB_ICONINFORMATION);
-        free(rootOutput); free(directory); return;
-    }
-    while (rootBytes && (rootOutput[rootBytes - 1] == '\r' || rootOutput[rootBytes - 1] == '\n'))
-        rootOutput[--rootBytes] = 0;
-    WCHAR *root = to_wide(rootOutput);
-    free(rootOutput); free(directory);
-    if (!root) return;
-    size_t statusLength = 0;
-    char *status = capture_git_output(root, L"status --porcelain=v1 -z --untracked-files=all",
-                                      &code, &statusLength);
-    if (!status || code != 0) {
-        MessageBoxW(g_hMainWnd, L"Git could not read the repository status.", L"Git Changes",
-                    MB_OK | MB_ICONERROR);
-        free(status); free(root); return;
-    }
-    WorkspaceFiles changes = {0};
-    size_t position = 0;
-    while (position + 3 <= statusLength) {
-        char index = status[position], worktree = status[position + 1];
-        if (status[position + 2] != ' ') break;
-        char *name = status + position + 3;
-        size_t remaining = statusLength - position - 3;
-        size_t nameLength = strnlen(name, remaining);
-        if (nameLength == remaining) break;
-        WCHAR *wideName = to_wide(name);
-        if (!wideName) break;
-        for (WCHAR *p = wideName; *p; p++) if (*p == L'/') *p = L'\\';
-        WCHAR *full = path_join(root, wideName);
-        const WCHAR *description = git_status_description(index, worktree);
-        size_t labelCapacity = wcslen(wideName) + wcslen(description) + 8;
-        WCHAR *label = (WCHAR *)malloc(labelCapacity * sizeof(WCHAR));
-        if (full && label) {
-            swprintf(label, labelCapacity, L"%ls  %ls", description, wideName);
-            add_workspace_item(&changes, full, label, (worktree == 'D' || index == 'D') ? -1 : 0);
-        }
-        free(label); free(full); free(wideName);
-        position += 3 + nameLength + 1;
-        if ((index == 'R' || index == 'C') && position < statusLength) {
-            size_t oldLength = strnlen(status + position, statusLength - position);
-            position += oldLength + 1;
-        }
-    }
-    free(status); free(root);
-    if (!changes.count) {
-        MessageBoxW(g_hMainWnd, L"The working tree is clean.", L"Git Changes",
-                    MB_OK | MB_ICONINFORMATION);
-        free_workspace_files(&changes); return;
-    }
-    int selected = show_choice_dialog(L"Git Changes", L"Type to filter changed files:",
-                                      changes.labels, changes.count);
-    if (selected >= 0 && selected < changes.count) {
-        DWORD attributes = GetFileAttributesW(changes.paths[selected]);
-        if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY))
-            open_file_in_tab(changes.paths[selected]);
-        else
-            MessageBoxW(g_hMainWnd, L"This change has no working-tree file to open (it may be deleted).",
-                        L"Git Changes", MB_OK | MB_ICONINFORMATION);
-    }
-    free_workspace_files(&changes);
 }
 
 static void do_quick_open_in(const WCHAR *root) {
