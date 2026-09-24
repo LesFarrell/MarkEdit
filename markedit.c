@@ -1048,6 +1048,18 @@ static void apply_editor_theme(HWND hEdit) {
         SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0xE6, 0xED, 0xF3), 0);
         SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0x26, 0x4F, 0x78));
         SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0xFF, 0xFF, 0xFF));
+
+        /* The word-completion popup (see update_word_completions()) is drawn
+           by Scintilla itself via its Element colour API rather than styles,
+           and otherwise defaults to plain system list-box colors (always
+           white/black) regardless of editor theme. Mirrors STYLE_DEFAULT and
+           SETSEL* above. Element colours carry an alpha byte (bits 24-31,
+           unlike SCI_STYLESETFORE/BACK's plain COLORREF), hence the
+           0xFF000000 for fully opaque. */
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST, (LPARAM)(RGB(0xE6, 0xED, 0xF3) | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK, (LPARAM)(RGB(0x0D, 0x11, 0x17) | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED, (LPARAM)(RGB(0xFF, 0xFF, 0xFF) | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED_BACK, (LPARAM)(RGB(0x26, 0x4F, 0x78) | 0xFF000000));
     } else {
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0x1F, 0x23, 0x28));
         SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0xFF, 0xFF, 0xFF));
@@ -1060,6 +1072,11 @@ static void apply_editor_theme(HWND hEdit) {
         SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0x1F, 0x23, 0x28), 0);
         SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0xB6, 0xD7, 0xFF));
         SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0x1F, 0x23, 0x28));
+
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST, (LPARAM)(RGB(0x1F, 0x23, 0x28) | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK, (LPARAM)(RGB(0xFF, 0xFF, 0xFF) | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED, (LPARAM)(RGB(0x1F, 0x23, 0x28) | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED_BACK, (LPARAM)(RGB(0xB6, 0xD7, 0xFF) | 0xFF000000));
     }
 
     /* These follow SCI_STYLECLEARALL above, which resets every style. The
@@ -1906,6 +1923,15 @@ static void configure_scintilla(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETCARETLINEVISIBLE, TRUE, 0);
     SendMessageA(hEdit, SCI_SETCARETLINEVISIBLEALWAYS, TRUE, 0); /* keep it visible even without focus */
     SendMessageA(hEdit, SCI_SETCARETLINEBACKALPHA, SC_ALPHA_NOALPHA, 0);
+
+    /* Word completion (see update_word_completions()): matching is
+       case-insensitive, the list we build is already sorted so Scintilla
+       doesn't need to re-sort it, and the popup auto-hides once nothing
+       typed so far matches any entry. */
+    SendMessageA(hEdit, SCI_AUTOCSETIGNORECASE, TRUE, 0);
+    SendMessageA(hEdit, SCI_AUTOCSETAUTOHIDE, TRUE, 0);
+    SendMessageA(hEdit, SCI_AUTOCSETORDER, SC_ORDER_PRESORTED, 0);
+    SendMessageA(hEdit, SCI_AUTOCSETMAXHEIGHT, 8, 0);
 }
 
 /* apply_editor_theme() bolds several per-construct styles (Markdown headings/
@@ -6422,6 +6448,90 @@ static void update_brace_highlight(void) {
     int match = (int)SendMessageA(g_hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
     if (match >= 0) SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)bracePos, (LPARAM)match);
     else SendMessageA(g_hEdit, SCI_BRACEBADLIGHT, (WPARAM)bracePos, 0);
+}
+
+#define WORD_COMPLETION_MIN_PREFIX 2
+#define WORD_COMPLETION_MAX_WORDS 100
+
+static int compare_words_ordinal(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Plain word completion, not lexer/keyword-driven (see the AutoC setup in
+   configure_scintilla()): as the caret's word grows to WORD_COMPLETION_MIN_PREFIX
+   characters, show every other word elsewhere in the document that starts
+   with it (case-insensitively, via SCFIND_WORDSTART - the same search
+   primitive ctrl_click_jump_to_occurrence() uses). Called on every
+   SCN_CHARADDED; does nothing once the list is already showing, since
+   Scintilla narrows the visible entries itself as more of the word is
+   typed. */
+static void update_word_completions(void) {
+    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    int wordStart = (int)SendMessageA(g_hEdit, SCI_WORDSTARTPOSITION, (WPARAM)pos, (LPARAM)1);
+    int prefixLen = pos - wordStart;
+    if (prefixLen < WORD_COMPLETION_MIN_PREFIX) return;
+    if (SendMessageA(g_hEdit, SCI_AUTOCACTIVE, 0, 0)) return;
+
+    char *prefix = (char *)malloc((size_t)prefixLen + 1);
+    if (!prefix) return;
+    struct Sci_TextRange prefixRange = { { wordStart, pos }, prefix };
+    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&prefixRange);
+    prefix[prefixLen] = 0;
+
+    int docLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, SCFIND_WORDSTART, 0);
+
+    char *words[WORD_COMPLETION_MAX_WORDS];
+    int wordCount = 0;
+    int searchFrom = 0;
+    while (wordCount < WORD_COMPLETION_MAX_WORDS) {
+        SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)searchFrom, 0);
+        SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
+        int matchStart = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)prefixLen, (LPARAM)prefix);
+        if (matchStart < 0) break;
+        int matchTargetEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        searchFrom = matchTargetEnd;
+
+        if (matchStart == wordStart) continue; /* the word being typed itself */
+        int wordEnd = (int)SendMessageA(g_hEdit, SCI_WORDENDPOSITION, (WPARAM)matchStart, (LPARAM)1);
+        int candidateLen = wordEnd - matchStart;
+        if (candidateLen <= prefixLen) continue;
+
+        char *candidate = (char *)malloc((size_t)candidateLen + 1);
+        if (!candidate) continue;
+        struct Sci_TextRange candidateRange = { { matchStart, wordEnd }, candidate };
+        SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&candidateRange);
+        candidate[candidateLen] = 0;
+
+        int duplicate = 0;
+        for (int w = 0; w < wordCount; w++) {
+            if (strcmp(words[w], candidate) == 0) { duplicate = 1; break; }
+        }
+        if (duplicate) { free(candidate); continue; }
+        words[wordCount++] = candidate;
+    }
+    free(prefix);
+
+    if (wordCount == 0) { SendMessageA(g_hEdit, SCI_AUTOCCANCEL, 0, 0); return; }
+
+    qsort(words, (size_t)wordCount, sizeof(char *), compare_words_ordinal);
+
+    size_t total = 0;
+    for (int w = 0; w < wordCount; w++) total += strlen(words[w]) + 1;
+    char *list = (char *)malloc(total);
+    if (list) {
+        size_t o = 0;
+        for (int w = 0; w < wordCount; w++) {
+            size_t wordLen = strlen(words[w]);
+            memcpy(list + o, words[w], wordLen);
+            o += wordLen;
+            if (w + 1 < wordCount) list[o++] = ' ';
+        }
+        list[o] = 0;
+        SendMessageA(g_hEdit, SCI_AUTOCSHOW, (WPARAM)prefixLen, (LPARAM)list);
+        free(list);
+    }
+    for (int w = 0; w < wordCount; w++) free(words[w]);
 }
 
 static void jump_to_matching_brace(HWND hEdit) {
@@ -11109,6 +11219,12 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
         update_brace_highlight();
         update_status_position();
         update_minimap_viewport();
+        return;
+    }
+    if (notification->code == SCN_CHARADDED) {
+        /* Word completion stays tied to the main pane, same v1 scope limit
+           noted above for SCN_UPDATEUI. */
+        if (fromMain) update_word_completions();
         return;
     }
     if (notification->code == SCN_MARGINCLICK) {
