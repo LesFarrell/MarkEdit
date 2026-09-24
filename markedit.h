@@ -175,6 +175,21 @@
 #define IDM_VIEW_USE_SPACES_INDENT 366
 #define IDM_VIEW_PREVIEW_THEME_LIGHT 367
 #define IDM_VIEW_PREVIEW_THEME_DARK  368
+#define IDM_FMT_HTML_HTML       370
+#define IDM_FMT_HTML_HEAD       371
+#define IDM_FMT_HTML_BODY       372
+#define IDM_FMT_HTML_PARAGRAPH  373
+#define IDM_FMT_HTML_BOLD       374
+#define IDM_FMT_HTML_ITALIC     375
+#define IDM_FMT_HTML_UNDERLINE  376
+#define IDM_FMT_HTML_DIV        377
+#define IDM_FMT_HTML_SPAN       378
+#define IDM_FMT_HTML_BREAK      379
+#define IDM_FMT_HTML_LINK       380
+#define IDM_FMT_HTML_TABLE      381
+#define IDM_FMT_HTML_BULLETLIST 382
+#define IDM_FMT_HTML_NUMBERLIST 383
+#define IDM_FMT_HTML_IMAGE      384
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1

@@ -297,6 +297,64 @@ static void toolbar_wrap_inline(const char *marker) {
     SetFocus(g_hEdit);
 }
 
+/* Wrap the current selection in an HTML tag pair ("<tag>" ... "</tag>"),
+   toggling it off if the selection is already wrapped in exactly that pair.
+   With no selection, insert an empty tag pair and place the caret between
+   them so typing continues inside it. Same behavior as toolbar_wrap_inline,
+   just for markers whose open and close text differ. */
+static void toolbar_wrap_tag(const char *tag) {
+    char open[24], close[24];
+    int openLen = snprintf(open, sizeof(open), "<%s>", tag);
+    int closeLen = snprintf(close, sizeof(close), "</%s>", tag);
+
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+
+    if (selEnd == selStart) {
+        char pair[48];
+        snprintf(pair, sizeof(pair), "%s%s", open, close);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)pair);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + openLen), (LPARAM)(selStart + openLen));
+        SetFocus(g_hEdit);
+        return;
+    }
+
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    int innerStart = selStart + openLen, innerEnd = selEnd - closeLen;
+    int alreadyWrapped = selEnd - selStart >= openLen + closeLen &&
+        memcmp(text + selStart, open, (size_t)openLen) == 0 &&
+        memcmp(text + innerEnd, close, (size_t)closeLen) == 0;
+
+    if (alreadyWrapped) {
+        char *inner = (char *)malloc((size_t)(innerEnd - innerStart) + 1);
+        if (inner) {
+            memcpy(inner, text + innerStart, (size_t)(innerEnd - innerStart));
+            inner[innerEnd - innerStart] = 0;
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)selEnd);
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)inner);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)(selStart + (innerEnd - innerStart)));
+            free(inner);
+        }
+    } else {
+        size_t selLen = (size_t)(selEnd - selStart);
+        char *wrapped = (char *)malloc(selLen + (size_t)openLen + (size_t)closeLen + 1);
+        if (wrapped) {
+            memcpy(wrapped, open, (size_t)openLen);
+            memcpy(wrapped + openLen, text + selStart, selLen);
+            memcpy(wrapped + openLen + selLen, close, (size_t)closeLen);
+            wrapped[(size_t)openLen + selLen + (size_t)closeLen] = 0;
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + openLen), (LPARAM)(selStart + openLen + (int)selLen));
+            free(wrapped);
+        }
+    }
+    free(text);
+    SetFocus(g_hEdit);
+}
+
 /* Returns the 0-based [firstLine, lastLine] range touched by the current
    selection (a single line if there is no selection). */
 static void toolbar_selected_line_range(HWND hEdit, int *firstLine, int *lastLine) {
@@ -484,6 +542,78 @@ static void toolbar_insert_template(const char *before, const char *placeholder,
     SetFocus(g_hEdit);
 }
 
+/* Insert an HTML link around the selection (or a placeholder), then select
+   the literal "url" inside the href attribute so it can be typed immediately
+   - same idea as toolbar_insert_template, but the placeholder sits ahead of
+   the wrapped text here since HTML puts the attribute before the content. */
+static void toolbar_insert_html_link(void) {
+    static const char before[] = "<a href=\"url\">";
+    static const char after[] = "</a>";
+    static const char placeholder[] = "link text";
+
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    int hasSelection = selEnd > selStart;
+    const char *middle = hasSelection ? text + selStart : placeholder;
+    int middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
+
+    size_t beforeLen = sizeof(before) - 1, afterLen = sizeof(after) - 1;
+    char *whole = (char *)malloc(beforeLen + (size_t)middleLen + afterLen + 1);
+    if (whole) {
+        memcpy(whole, before, beforeLen);
+        memcpy(whole + beforeLen, middle, (size_t)middleLen);
+        memcpy(whole + beforeLen + (size_t)middleLen, after, afterLen);
+        whole[beforeLen + (size_t)middleLen + afterLen] = 0;
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)whole);
+
+        int urlStart = selStart + (int)(strstr(before, "url") - before);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)urlStart, (LPARAM)(urlStart + 3));
+        free(whole);
+    }
+    free(text);
+    SetFocus(g_hEdit);
+}
+
+/* Insert an HTML image, using the selection (or a placeholder) as the alt
+   text, then select the literal "url" inside the src attribute - same
+   pattern as toolbar_insert_html_link, but <img> is a void element so the
+   selection becomes an attribute value instead of wrapped content. */
+static void toolbar_insert_html_image(void) {
+    static const char before[] = "<img src=\"url\" alt=\"";
+    static const char after[] = "\">";
+    static const char placeholder[] = "alt text";
+
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    int hasSelection = selEnd > selStart;
+    const char *middle = hasSelection ? text + selStart : placeholder;
+    int middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
+
+    size_t beforeLen = sizeof(before) - 1, afterLen = sizeof(after) - 1;
+    char *whole = (char *)malloc(beforeLen + (size_t)middleLen + afterLen + 1);
+    if (whole) {
+        memcpy(whole, before, beforeLen);
+        memcpy(whole + beforeLen, middle, (size_t)middleLen);
+        memcpy(whole + beforeLen + (size_t)middleLen, after, afterLen);
+        whole[beforeLen + (size_t)middleLen + afterLen] = 0;
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)whole);
+
+        int urlStart = selStart + (int)(strstr(before, "url") - before);
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)urlStart, (LPARAM)(urlStart + 3));
+        free(whole);
+    }
+    free(text);
+    SetFocus(g_hEdit);
+}
+
 static void toolbar_insert_table(void) {
     const char *eol = editor_eol_sequence();
     int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
@@ -495,6 +625,95 @@ static void toolbar_insert_table(void) {
         "| --- | --- | --- |%s"
         "| Cell | Cell | Cell |%s", leading, eol, eol, eol);
     SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)table);
+    SetFocus(g_hEdit);
+}
+
+/* Insert a skeleton HTML <table> (one header row, one data row), same
+   leading-newline handling as toolbar_insert_table but not selection-aware -
+   an HTML table's cells aren't a natural fit for wrapping arbitrary selected
+   text the way the list helper below wraps selected lines. */
+static void toolbar_insert_html_table(void) {
+    const char *eol = editor_eol_sequence();
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+
+    const char *leading = position_needs_leading_eol(selStart) ? eol : "";
+    char table[320];
+    snprintf(table, sizeof(table),
+        "%s<table>%s"
+        "  <tr>%s"
+        "    <th>Column 1</th>%s"
+        "    <th>Column 2</th>%s"
+        "    <th>Column 3</th>%s"
+        "  </tr>%s"
+        "  <tr>%s"
+        "    <td>Cell</td>%s"
+        "    <td>Cell</td>%s"
+        "    <td>Cell</td>%s"
+        "  </tr>%s"
+        "</table>%s",
+        leading, eol, eol, eol, eol, eol, eol, eol, eol, eol, eol, eol, eol);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)table);
+    SetFocus(g_hEdit);
+}
+
+/* Wrap each selected line in <li>...</li> and the whole block in <ul>...
+   </ul> (or <ol>...</ol> when `ordered`) - mirrors toolbar_apply_line_prefix's
+   line-range handling, but for HTML markup rather than a Markdown prefix.
+   With no selection, a skeleton with one placeholder item is inserted at the
+   caret instead - unlike the line-prefix case, there's no existing line
+   content worth preserving here, so this must insert rather than replace
+   the current line (which may hold unrelated text). */
+static void toolbar_insert_html_list(int ordered) {
+    const char *eol = editor_eol_sequence();
+    const char *tag = ordered ? "ol" : "ul";
+
+    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+
+    if (selEnd == selStart) {
+        static const char *placeholder = "List item";
+        char skeleton[96];
+        int prefixLen = snprintf(skeleton, sizeof(skeleton), "<%s>%s  <li>", tag, eol);
+        snprintf(skeleton + prefixLen, sizeof(skeleton) - (size_t)prefixLen,
+                 "%s</li>%s</%s>", placeholder, eol, tag);
+        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)skeleton);
+        int placeholderStart = selStart + prefixLen;
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)placeholderStart,
+                     (LPARAM)(placeholderStart + (int)strlen(placeholder)));
+        SetFocus(g_hEdit);
+        return;
+    }
+
+    int firstLine, lastLine;
+    toolbar_selected_line_range(g_hEdit, &firstLine, &lastLine);
+
+    int len;
+    char *text = get_edit_text(g_hEdit, &len);
+    if (!text) return;
+
+    size_t cap = (size_t)len + (size_t)(lastLine - firstLine + 1) * 32 + 64;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(text); return; }
+    size_t o = (size_t)snprintf(out, cap, "<%s>%s", tag, eol);
+
+    for (int line = firstLine; line <= lastLine; line++) {
+        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        int lineLen = lineEnd - lineStart;
+        o += (size_t)snprintf(out + o, cap - o, "  <li>");
+        memcpy(out + o, text + lineStart, (size_t)lineLen);
+        o += (size_t)lineLen;
+        o += (size_t)snprintf(out + o, cap - o, "</li>%s", eol);
+    }
+    o += (size_t)snprintf(out + o, cap - o, "</%s>", tag);
+    out[o] = 0;
+
+    int rangeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    int rangeEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)rangeStart, (LPARAM)rangeEnd);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
+    free(out);
+    free(text);
     SetFocus(g_hEdit);
 }
 
@@ -5525,9 +5744,30 @@ static HMENU build_menu(void) {
     AppendMenuA(hJson, MF_STRING, IDM_FMT_JSON_PRETTY, "&Format JSON");
     AppendMenuA(hJson, MF_STRING, IDM_FMT_JSON_MINIFY, "&Minify JSON");
 
+    HMENU hHtml = CreatePopupMenu();
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_HTML, "&HTML");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_HEAD, "H&ead");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_BODY, "&Body");
+    AppendMenuA(hHtml, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_PARAGRAPH, "&Paragraph");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_BOLD, "B&old");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_ITALIC, "&Italic");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_UNDERLINE, "&Underline");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_DIV, "&Div");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_SPAN, "&Span");
+    AppendMenuA(hHtml, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_LINK, "&Link");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_IMAGE, "I&mage");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_TABLE, "&Table");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_BULLETLIST, "B&ullet List");
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_NUMBERLIST, "&Numbered List");
+    AppendMenuA(hHtml, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_BREAK, "Line &Break");
+
     HMENU hFormat = CreatePopupMenu();
     AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hMarkdown, "&Markdown");
     AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hJson, "&JSON");
+    AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hHtml, "&HTML");
     AppendMenuA(hFormat, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hFormat, MF_STRING, IDM_FORMAT_FONT, "&Font...");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFormat, "F&ormat");
@@ -9190,7 +9430,17 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Format: Align Table Column Center", IDM_TABLE_ALIGN_CENTER},
     {L"Format: Align Table Column Right", IDM_TABLE_ALIGN_RIGHT},
     {L"Format: Format JSON", IDM_FMT_JSON_PRETTY},
-    {L"Format: Minify JSON", IDM_FMT_JSON_MINIFY}, {L"Format: Font", IDM_FORMAT_FONT},
+    {L"Format: Minify JSON", IDM_FMT_JSON_MINIFY},
+    {L"Format: HTML", IDM_FMT_HTML_HTML}, {L"Format: HTML Head", IDM_FMT_HTML_HEAD},
+    {L"Format: HTML Body", IDM_FMT_HTML_BODY}, {L"Format: HTML Paragraph", IDM_FMT_HTML_PARAGRAPH},
+    {L"Format: HTML Bold", IDM_FMT_HTML_BOLD}, {L"Format: HTML Italic", IDM_FMT_HTML_ITALIC},
+    {L"Format: HTML Underline", IDM_FMT_HTML_UNDERLINE}, {L"Format: HTML Div", IDM_FMT_HTML_DIV},
+    {L"Format: HTML Span", IDM_FMT_HTML_SPAN}, {L"Format: HTML Line Break", IDM_FMT_HTML_BREAK},
+    {L"Format: HTML Link", IDM_FMT_HTML_LINK}, {L"Format: HTML Image", IDM_FMT_HTML_IMAGE},
+    {L"Format: HTML Table", IDM_FMT_HTML_TABLE},
+    {L"Format: HTML Bullet List", IDM_FMT_HTML_BULLETLIST},
+    {L"Format: HTML Numbered List", IDM_FMT_HTML_NUMBERLIST},
+    {L"Format: Font", IDM_FORMAT_FONT},
     {L"Run: Run File", IDM_RUN_FILE}, {L"Run: Debug File", IDM_DEBUG_FILE},
     {L"Run: Continue", IDM_DEBUG_CONTINUE}, {L"Run: Step Over", IDM_DEBUG_STEP_OVER},
     {L"Run: Step Into", IDM_DEBUG_STEP_INTO},
@@ -9770,6 +10020,24 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FORMAT_FONT: do_choose_font(); break;
         case IDM_FMT_JSON_PRETTY: format_json(1); break;
         case IDM_FMT_JSON_MINIFY: format_json(0); break;
+        case IDM_FMT_HTML_HTML: toolbar_wrap_tag("html"); break;
+        case IDM_FMT_HTML_HEAD: toolbar_wrap_tag("head"); break;
+        case IDM_FMT_HTML_BODY: toolbar_wrap_tag("body"); break;
+        case IDM_FMT_HTML_PARAGRAPH: toolbar_wrap_tag("p"); break;
+        case IDM_FMT_HTML_BOLD: toolbar_wrap_tag("b"); break;
+        case IDM_FMT_HTML_ITALIC: toolbar_wrap_tag("i"); break;
+        case IDM_FMT_HTML_UNDERLINE: toolbar_wrap_tag("u"); break;
+        case IDM_FMT_HTML_DIV: toolbar_wrap_tag("div"); break;
+        case IDM_FMT_HTML_SPAN: toolbar_wrap_tag("span"); break;
+        case IDM_FMT_HTML_BREAK:
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)"<br>");
+            SetFocus(g_hEdit);
+            break;
+        case IDM_FMT_HTML_LINK: toolbar_insert_html_link(); break;
+        case IDM_FMT_HTML_IMAGE: toolbar_insert_html_image(); break;
+        case IDM_FMT_HTML_TABLE: toolbar_insert_html_table(); break;
+        case IDM_FMT_HTML_BULLETLIST: toolbar_insert_html_list(0); break;
+        case IDM_FMT_HTML_NUMBERLIST: toolbar_insert_html_list(1); break;
         case IDM_FMT_TABLE_EDITOR: show_table_editor(); break;
         case IDM_FMT_TABLE_ROW_ABOVE: insert_table_row_relative(0); break;
         case IDM_FMT_TABLE_ROW_BELOW: insert_table_row_relative(1); break;
@@ -11233,12 +11501,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     WCHAR *cliFile = (argv && argc > 1) ? wcsdup_heap(argv[1]) : NULL;
     if (argv) LocalFree(argv);
     g_commandLinePreviewMode = cliFile != NULL;
-    if (cliFile) {
-        /* command-line launch to view a file: show just the rendered preview */
+    int cliFileIsMarkdown = cliFile && language_for_path(cliFile)->id == LANG_MARKDOWN;
+    if (cliFileIsMarkdown) {
+        /* command-line launch to view a Markdown file: show just the rendered preview */
         g_previewVisible = 1;
         g_editorVisible = 0;
     } else {
-        /* plain launch with no file: show just the editor */
+        /* plain launch, or a command-line file that isn't Markdown: show just the editor */
         g_previewVisible = 0;
         g_editorVisible = 1;
     }
@@ -11257,11 +11526,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     load_layout_settings();
     load_find_settings();
     load_compiler_settings();
-    if (g_commandLinePreviewMode) {
-        /* File-association/command-line launches are preview-only for this
-           session, without overwriting the user's normal panel visibility. */
+    if (cliFileIsMarkdown) {
+        /* File-association/command-line launches of a Markdown file are
+           preview-only for this session, without overwriting the user's
+           normal panel visibility. */
         g_previewVisible = 1;
         g_editorVisible = 0;
+    } else if (g_commandLinePreviewMode) {
+        /* Command-line launch of a non-Markdown file: show it in the editor
+           for this session, same reasoning as above but the other pane. */
+        g_previewVisible = 0;
+        g_editorVisible = 1;
     }
     load_recent_files();
     prune_missing_recent_files();
