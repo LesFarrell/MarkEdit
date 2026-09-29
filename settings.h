@@ -62,6 +62,11 @@ extern WCHAR g_replaceWith[256];
 extern DWORD g_findFlags;
 extern CompilerBackendPreference g_compilerBackend;
 extern WCHAR *g_vcvarsallOverridePath;
+extern WCHAR *g_gccBinOverride;
+extern WCHAR *g_clangBinOverride;
+extern WCHAR *g_zigBinOverride;
+extern WCHAR *g_luaBinOverride;
+extern WCHAR *g_gdbBinOverride;
 extern WCHAR *g_compilerExtraFlags;
 
 WCHAR *get_settings_path(void);

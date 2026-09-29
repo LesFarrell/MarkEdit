@@ -24,6 +24,26 @@ WCHAR *get_settings_path(void) {
     return settings;
 }
 
+/* Reads a string setting that may be arbitrarily long (a filesystem path),
+   doubling the buffer until the value fits or a sane cap is hit. Returns a
+   heap copy the caller frees, or NULL (nothing allocated) when the key is
+   absent or empty. */
+static WCHAR *read_profile_string(const WCHAR *section, const WCHAR *key, const WCHAR *path) {
+    DWORD cap = 512, n = 0;
+    WCHAR *value = NULL;
+    do {
+        free(value);
+        value = (WCHAR *)calloc(cap, sizeof(WCHAR));
+        if (!value) return NULL;
+        n = GetPrivateProfileStringW(section, key, L"", value, cap, path);
+        if (n < cap - 1) break;
+        cap *= 2;
+    } while (cap <= 32768);
+    if (value && value[0]) return value;
+    free(value);
+    return NULL;
+}
+
 void load_font_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
@@ -63,18 +83,7 @@ void load_theme_settings(void) {
            the preview was already set to. */
         g_editorDarkMode = g_previewDarkMode;
     }
-    DWORD cap = 512, n = 0;
-    WCHAR *cssPath = NULL;
-    do {
-        free(cssPath);
-        cssPath = (WCHAR *)calloc(cap, sizeof(WCHAR));
-        if (!cssPath) break;
-        n = GetPrivateProfileStringW(L"Preview", L"CustomCSS", L"", cssPath, cap, path);
-        if (n < cap - 1) break;
-        cap *= 2;
-    } while (cap <= 32768);
-    if (cssPath && cssPath[0]) g_customCssPath = cssPath;
-    else free(cssPath);
+    g_customCssPath = read_profile_string(L"Preview", L"CustomCSS", path);
     free(path);
 }
 
@@ -255,15 +264,12 @@ void save_find_settings(void) {
     free(path);
 }
 
-/* Backend and VcvarsallPath are hand-edited in markedit.ini rather than
-   exposed through a menu: Backend pins Run/Debug C/C++ to one compiler
-   instead of the default Auto priority search (GCC, Clang, Zig, then MSVC as
-   a Run-only fallback), and VcvarsallPath points at a specific
-   vcvarsall.bat when MSVC isn't installed in one of the standard Program
-   Files locations find_vcvarsall() checks. ExtraFlags is the one setting in
-   this section the Settings dialog (Compiler category) does expose, and
-   save_compiler_settings() round-trips the other two unchanged whenever it
-   writes ExtraFlags back out. */
+/* Backend is hand-edited in markedit.ini rather than exposed through a menu:
+   it pins Run/Debug C/C++ to one compiler instead of the default Auto
+   priority search (GCC, Clang, Zig, then MSVC as a Run-only fallback). Every
+   other key here - the per-toolchain path overrides and ExtraFlags - is what
+   the Settings dialog's Compiler category exposes, and save_compiler_settings()
+   round-trips Backend unchanged whenever it writes any of them back out. */
 void load_compiler_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
@@ -275,31 +281,13 @@ void load_compiler_settings(void) {
     else if (_wcsicmp(value, L"MSVC") == 0) g_compilerBackend = COMPILER_BACKEND_MSVC;
     else g_compilerBackend = COMPILER_BACKEND_AUTO;
 
-    DWORD cap = 512, n = 0;
-    WCHAR *vcvarsall = NULL;
-    do {
-        free(vcvarsall);
-        vcvarsall = (WCHAR *)calloc(cap, sizeof(WCHAR));
-        if (!vcvarsall) break;
-        n = GetPrivateProfileStringW(L"Compiler", L"VcvarsallPath", L"", vcvarsall, cap, path);
-        if (n < cap - 1) break;
-        cap *= 2;
-    } while (cap <= 32768);
-    if (vcvarsall && vcvarsall[0]) g_vcvarsallOverridePath = vcvarsall;
-    else free(vcvarsall);
-
-    cap = 512; n = 0;
-    WCHAR *extraFlags = NULL;
-    do {
-        free(extraFlags);
-        extraFlags = (WCHAR *)calloc(cap, sizeof(WCHAR));
-        if (!extraFlags) break;
-        n = GetPrivateProfileStringW(L"Compiler", L"ExtraFlags", L"", extraFlags, cap, path);
-        if (n < cap - 1) break;
-        cap *= 2;
-    } while (cap <= 32768);
-    if (extraFlags && extraFlags[0]) g_compilerExtraFlags = extraFlags;
-    else free(extraFlags);
+    g_vcvarsallOverridePath = read_profile_string(L"Compiler", L"VcvarsallPath", path);
+    g_gccBinOverride = read_profile_string(L"Compiler", L"GccPath", path);
+    g_clangBinOverride = read_profile_string(L"Compiler", L"ClangPath", path);
+    g_zigBinOverride = read_profile_string(L"Compiler", L"ZigPath", path);
+    g_luaBinOverride = read_profile_string(L"Compiler", L"LuaPath", path);
+    g_gdbBinOverride = read_profile_string(L"Compiler", L"GdbPath", path);
+    g_compilerExtraFlags = read_profile_string(L"Compiler", L"ExtraFlags", path);
     free(path);
 }
 
@@ -314,6 +302,16 @@ void save_compiler_settings(void) {
     WritePrivateProfileStringW(L"Compiler", L"Backend", backend, path);
     WritePrivateProfileStringW(L"Compiler", L"VcvarsallPath",
                                g_vcvarsallOverridePath ? g_vcvarsallOverridePath : L"", path);
+    WritePrivateProfileStringW(L"Compiler", L"GccPath",
+                               g_gccBinOverride ? g_gccBinOverride : L"", path);
+    WritePrivateProfileStringW(L"Compiler", L"ClangPath",
+                               g_clangBinOverride ? g_clangBinOverride : L"", path);
+    WritePrivateProfileStringW(L"Compiler", L"ZigPath",
+                               g_zigBinOverride ? g_zigBinOverride : L"", path);
+    WritePrivateProfileStringW(L"Compiler", L"LuaPath",
+                               g_luaBinOverride ? g_luaBinOverride : L"", path);
+    WritePrivateProfileStringW(L"Compiler", L"GdbPath",
+                               g_gdbBinOverride ? g_gdbBinOverride : L"", path);
     WritePrivateProfileStringW(L"Compiler", L"ExtraFlags",
                                g_compilerExtraFlags ? g_compilerExtraFlags : L"", path);
     free(path);

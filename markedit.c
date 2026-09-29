@@ -91,6 +91,8 @@ static HBRUSH g_menuBkBrush = NULL; /* owner-drawn top-level menu bar background
 static HFONT g_menuFont = NULL;
 static int g_menuFontDpi = 0;
 static char *g_pendingHtmlBody = NULL; /* set if update requested before webview ready */
+static int g_previewShowingRawHtml = 0; /* true once show_html_file_preview() has navigated away from the shell page */
+static WCHAR *g_expectedHtmlPreviewUrl = NULL; /* one-shot allowance for show_html_file_preview()'s own navigation; see NavStarting_Invoke */
 static WCHAR *g_exportPath = NULL;
 static WCHAR *g_pendingPdfPath = NULL;
 static int g_pendingPrintAction = 0; /* 1 = print dialog, 2 = PDF export */
@@ -101,6 +103,11 @@ int g_editorDarkMode = 0; /* the Scintilla editor's colours, plus all surroundin
    Zig/MSVC priority search; the others pin Run/Debug to just one of them. */
 CompilerBackendPreference g_compilerBackend = COMPILER_BACKEND_AUTO;
 WCHAR *g_vcvarsallOverridePath = NULL; /* [Compiler] VcvarsallPath override; skips auto-detection */
+WCHAR *g_gccBinOverride = NULL;   /* [Compiler] GccPath: folder to search for gcc.exe/g++.exe instead of PATH */
+WCHAR *g_clangBinOverride = NULL; /* [Compiler] ClangPath: folder to search for clang.exe/clang++.exe instead of PATH */
+WCHAR *g_zigBinOverride = NULL;   /* [Compiler] ZigPath: folder to search for zig.exe instead of PATH */
+WCHAR *g_luaBinOverride = NULL;   /* [Compiler] LuaPath: folder to search for a Lua interpreter instead of PATH */
+WCHAR *g_gdbBinOverride = NULL;   /* [Compiler] GdbPath: folder to search for gdb.exe instead of PATH */
 WCHAR *g_compilerExtraFlags = NULL; /* [Compiler] ExtraFlags appended to Run/Debug C/C++ builds; set via Settings > Compiler */
 WCHAR *g_customCssPath = NULL;
 static WCHAR *g_debugLocationPath = NULL;
@@ -1055,7 +1062,9 @@ static void apply_editor_theme(HWND hEdit) {
            white/black) regardless of editor theme. Mirrors STYLE_DEFAULT and
            SETSEL* above. Element colours carry an alpha byte (bits 24-31,
            unlike SCI_STYLESETFORE/BACK's plain COLORREF), hence the
-           0xFF000000 for fully opaque. */
+           0xFF000000 for fully opaque. Its scrollbar is a separate, system-
+           drawn native listbox these colours don't reach - see
+           theme_autocomplete_popup(), applied each time the popup is shown. */
         SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST, (LPARAM)(RGB(0xE6, 0xED, 0xF3) | 0xFF000000));
         SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK, (LPARAM)(RGB(0x0D, 0x11, 0x17) | 0xFF000000));
         SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED, (LPARAM)(RGB(0xFF, 0xFF, 0xFF) | 0xFF000000));
@@ -1750,12 +1759,21 @@ static void paint_splitter_gap(HDC hdc, const RECT *rect) {
     DeleteObject(borderBrush);
 }
 
-/* One shared background brush for whichever of the three popup dialogs is
-   currently open. They run their own modal message loop (see
-   show_goto_line_dialog()/show_choice_dialog()/show_text_input()) and never
-   overlap, so a single brush created in WM_CREATE and freed in
-   WM_NCDESTROY is safe without per-dialog storage. */
+/* One shared background brush for whichever of these popup dialogs
+   (show_goto_line_dialog()/show_choice_dialog()/show_text_input()/the
+   Find & Replace review list/the Settings dialog) are currently open. Most
+   of them run their own modal message loop and never nest, but the Settings
+   dialog's Compiler category and its spell-check language picker (Choose...)
+   can open one of these ON TOP of another already-open one (Settings itself
+   opening the Choice dialog) - g_popupThemeDepth counts how many are
+   currently open so the brush is only actually torn down once the last one
+   closes, rather than being pulled out from under a still-open outer dialog
+   the moment a nested one exits. popup_dialog_theme_created() itself stays a
+   plain "make sure the themed brush exists right now" call with no bearing
+   on that count, since refresh_settings_dialog_theme() also calls it to
+   recolor an already-open dialog's brush without opening a new one. */
 static HBRUSH g_popupBkBrush = NULL;
+static int g_popupThemeDepth = 0;
 
 static void popup_dialog_theme_created(HWND hwnd) {
     apply_popup_titlebar_theme(hwnd, g_editorDarkMode);
@@ -1763,8 +1781,19 @@ static void popup_dialog_theme_created(HWND hwnd) {
     g_popupBkBrush = CreateSolidBrush(popup_bg_color());
 }
 
+/* Call once per popup window actually opened (WM_CREATE), paired with
+   popup_dialog_theme_destroyed() at that same window's WM_NCDESTROY. */
+static void popup_dialog_theme_opened(HWND hwnd) {
+    g_popupThemeDepth++;
+    popup_dialog_theme_created(hwnd);
+}
+
 static void popup_dialog_theme_destroyed(void) {
-    if (g_popupBkBrush) { DeleteObject(g_popupBkBrush); g_popupBkBrush = NULL; }
+    if (g_popupThemeDepth > 0) g_popupThemeDepth--;
+    if (g_popupThemeDepth == 0 && g_popupBkBrush) {
+        DeleteObject(g_popupBkBrush);
+        g_popupBkBrush = NULL;
+    }
 }
 
 /* Defined further down (with the outline panel's owner-draw, which they're
@@ -2746,7 +2775,7 @@ static HRESULT execute_webview_script(const char *script,
 }
 
 static void apply_custom_preview_css(int reportErrors) {
-    if (!g_webviewReady || !g_webview) return;
+    if (!g_webviewReady || !g_webview || g_previewShowingRawHtml) return;
     char *css = g_customCssPath ? read_utf8_text_file(g_customCssPath, 4 * 1024 * 1024) : _strdup("");
     if (!css) {
         if (reportErrors)
@@ -3152,8 +3181,13 @@ static void open_wikilink_target(const WCHAR *encoded) {
    navigating the embedded WebView away from the preview shell. Our own shell
    page load is allowed through - either the virtual-host URL
    (https://markedit.local/preview_shell.html) or, on older WebView2 Runtimes
-   lacking ICoreWebView2_3, the "about:..." page produced by NavigateToString.
-   Anything else is cancelled here and handed to ShellExecuteW instead. */
+   lacking ICoreWebView2_3, the "about:..." page produced by NavigateToString -
+   and so is show_html_file_preview()'s own navigation to the HTML file being
+   previewed (g_expectedHtmlPreviewUrl, consumed here so it only ever allows
+   that one navigation through: a click on a link inside the previewed page
+   itself, even to that exact same URL, still gets redirected out below,
+   same as every other link in the preview). Anything else is cancelled here
+   and handed to ShellExecuteW instead. */
 static HRESULT STDMETHODCALLTYPE NavStarting_Invoke(ICoreWebView2NavigationStartingEventHandler *this_, ICoreWebView2 *sender, ICoreWebView2NavigationStartingEventArgs *args) {
     (void)this_; (void)sender;
     LPWSTR uri = NULL;
@@ -3163,9 +3197,12 @@ static HRESULT STDMETHODCALLTYPE NavStarting_Invoke(ICoreWebView2NavigationStart
            page, rather than being treated as an external link. */
         static const WCHAR shellPrefix[] = L"https://markedit.local/preview_shell.html";
         size_t shellLen = wcslen(shellPrefix);
+        int isExpectedHtmlPreview = g_expectedHtmlPreviewUrl && _wcsicmp(uri, g_expectedHtmlPreviewUrl) == 0;
         int isShellPage = (_wcsnicmp(uri, shellPrefix, shellLen) == 0 &&
                            (uri[shellLen] == 0 || uri[shellLen] == L'?' || uri[shellLen] == L'#')) ||
-                           (!g_webviewReady && _wcsicmp(uri, L"about:blank") == 0);
+                           (!g_webviewReady && _wcsicmp(uri, L"about:blank") == 0) ||
+                           isExpectedHtmlPreview;
+        if (isExpectedHtmlPreview) replace_wstring(&g_expectedHtmlPreviewUrl, NULL);
         if (!isShellPage) {
             ICoreWebView2NavigationStartingEventArgs_put_Cancel(args, TRUE);
             WCHAR *localPath = decode_document_url(uri);
@@ -3245,7 +3282,7 @@ static void reveal_in_explorer(void) {
 }
 
 static void apply_preview_theme(void) {
-    if (!g_webviewReady || !g_webview) return;
+    if (!g_webviewReady || !g_webview || g_previewShowingRawHtml) return;
     char script[64];
     wsprintfA(script, "window.setTheme('%s');", g_previewDarkMode ? "dark" : "light");
     execute_webview_script(script, &g_scriptHandler);
@@ -3275,6 +3312,68 @@ void push_html_to_webview(const char *htmlFragment) {
     execute_webview_script(script, &g_scriptHandler);
     free(script);
     free(escaped);
+}
+
+/* Navigates the preview pane to the app's own shell page - the one
+   push_html_to_webview()'s setContent() call (Markdown, and the "preview
+   not available" message) needs loaded. Used both for the very first load
+   (CtrlCreated_Invoke) and to return from show_html_file_preview()'s raw
+   HTML file preview. g_webviewReady is cleared first: it means "the loaded
+   page is our scriptable shell", which stops being true the moment this
+   navigation starts, not just once NavDone_Invoke's completion notice
+   arrives - without that, a push_html_to_webview() call made right after
+   this one would see the still-stale-true flag and try to script the old
+   (about to be replaced) page immediately instead of queuing into
+   g_pendingHtmlBody for NavDone_Invoke to flush once the shell has actually
+   (re)loaded. */
+static void navigate_to_shell(void) {
+    if (!g_webview) return;
+    g_previewShowingRawHtml = 0;
+    g_webviewReady = 0;
+    if (g_webview3) {
+        /* Pass the starting theme via query string so the page can apply it
+           immediately on load, instead of defaulting to light and flipping
+           to dark only once apply_preview_theme() runs after navigation
+           completes (which caused a visible light-then-dark flash). */
+        const WCHAR *shellUrl = g_previewDarkMode
+            ? L"https://markedit.local/preview_shell.html?theme=dark"
+            : L"https://markedit.local/preview_shell.html?theme=light";
+        ICoreWebView2_Navigate(g_webview, shellUrl);
+    } else {
+        WCHAR *wHtml = to_wide(HTML_SHELL);
+        if (wHtml) ICoreWebView2_NavigateToString(g_webview, wHtml);
+        free(wHtml);
+    }
+}
+
+/* Renders an HTML document by navigating the preview pane directly to it,
+   instead of markdown_to_html()/push_html_to_webview()'s fragment-into-shell
+   injection - this runs the page's own <script> tags and resolves its own
+   relative <link>/<script>/<img> references exactly like a real browser,
+   via the same https://document.local/ virtual host mapping
+   (update_document_mapping()) the shell already uses for Markdown's own
+   relative images. Only ever reached when g_currentFile is set:
+   language_for_path() only assigns LANG_HTML to a document with a real,
+   already-saved path, so this always reflects the file's last-saved
+   content, not unsaved edits - save_to_path() calls update_preview() again
+   after every successful save to keep it current. See NavStarting_Invoke
+   for how this navigation avoids being redirected to the system browser
+   like every other link in the preview is. */
+static void show_html_file_preview(void) {
+    if (!g_webview || !g_webview3 || !g_currentFile) {
+        push_html_to_webview("<p>HTML preview needs a newer WebView2 Runtime.</p>");
+        return;
+    }
+    const WCHAR *name = PathFindFileNameW(g_currentFile);
+    size_t capacity = wcslen(name) + 32;
+    WCHAR *url = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!url) return;
+    swprintf(url, capacity, L"https://document.local/%ls", name);
+    replace_wstring(&g_expectedHtmlPreviewUrl, url);
+    g_previewShowingRawHtml = 1;
+    g_webviewReady = 0;
+    ICoreWebView2_Navigate(g_webview, url);
+    free(url);
 }
 
 static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *this_, HRESULT errorCode, ICoreWebView2Controller *ctrl) {
@@ -3335,19 +3434,8 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
         ICoreWebView2_3_SetVirtualHostNameToFolderMapping(g_webview3, L"markedit.local", exeDir, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
         free(exeDir);
         update_document_mapping();
-        /* Pass the starting theme via query string so the page can apply it
-           immediately on load, instead of defaulting to light and flipping
-           to dark only once apply_preview_theme() runs after navigation
-           completes (which caused a visible light-then-dark flash). */
-        const WCHAR *shellUrl = g_previewDarkMode
-            ? L"https://markedit.local/preview_shell.html?theme=dark"
-            : L"https://markedit.local/preview_shell.html?theme=light";
-        ICoreWebView2_Navigate(webview, shellUrl);
-    } else {
-        WCHAR *wHtml = to_wide(HTML_SHELL);
-        if (wHtml) ICoreWebView2_NavigateToString(webview, wHtml);
-        free(wHtml);
     }
+    navigate_to_shell();
 
     return S_OK;
 }
@@ -3390,12 +3478,23 @@ static void update_preview(void) {
        preview is hidden. Showing the pane calls update_preview(), and export
        sets g_exportPath first to force a current off-screen render. */
     if (!g_previewVisible && !g_exportPath) return;
+    /* HTML gets a real browser-style render (see show_html_file_preview());
+       export bypasses it since there's no Markdown render to capture for an
+       already-HTML document, same as any other non-Markdown language below. */
+    if (g_activeLanguage == LANG_HTML && !g_exportPath) {
+        show_html_file_preview();
+        return;
+    }
+    /* Returning here from a raw HTML preview: push_html_to_webview() below
+       needs the shell page loaded to run its setContent(), not whatever
+       HTML file was last navigated to. */
+    if (g_previewShowingRawHtml) navigate_to_shell();
     /* The preview renders Markdown; running markdown_to_html() over a JSON/
        C/Python/etc. document would misinterpret ordinary source lines (a
        leading '#' comment, for instance) as Markdown syntax. Show a plain
        explanation instead of a nonsensical render. */
     if (g_activeLanguage != LANG_MARKDOWN) {
-        push_html_to_webview("<p>Preview is only available for Markdown documents.</p>");
+        push_html_to_webview("<p>Preview is only available for Markdown and HTML documents.</p>");
         return;
     }
     int len;
@@ -4204,6 +4303,10 @@ static int save_to_path(const WCHAR *path) {
     free(ioPath);
     record_document_file_time(g_activeDocument);
     update_document_mapping();
+    /* HTML's preview (see show_html_file_preview()) is a real navigation to
+       the saved file, not a re-render of the live buffer like Markdown's -
+       it only reflects this save's content once it's refreshed here. */
+    if (g_activeLanguage == LANG_HTML) update_preview();
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
     set_dirty(0);
     free(displayPath);
@@ -4638,7 +4741,7 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SetWindowTextA(g_hGotoEdit, current);
             SendMessageA(g_hGotoEdit, EM_SETSEL, 0, -1);
             SetFocus(g_hGotoEdit);
-            popup_dialog_theme_created(hwnd);
+            popup_dialog_theme_opened(hwnd);
             return 0;
         }
         case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: {
@@ -4771,7 +4874,7 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         SetWindowTheme(state->list, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
         refill_choice_list(state);
         SetFocus(state->edit);
-        popup_dialog_theme_created(hwnd);
+        popup_dialog_theme_opened(hwnd);
         return 0;
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -4901,7 +5004,7 @@ static LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             330, 76, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
         SendMessageW(state->edit, EM_SETSEL, 0, -1);
         SetFocus(state->edit);
-        popup_dialog_theme_created(hwnd);
+        popup_dialog_theme_opened(hwnd);
         return 0;
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -5071,7 +5174,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         SetWindowSubclass(state->list, ReplaceListSubclassProc, 1, (DWORD_PTR)state);
         refill_replace_list(state);
         SetFocus(state->list);
-        popup_dialog_theme_created(hwnd);
+        popup_dialog_theme_opened(hwnd);
         return 0;
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -5659,6 +5762,8 @@ static HMENU build_menu(void) {
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_REPLACE, "&Replace...\tCtrl+H");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_GOTOLINE, "&Go to Line...\tCtrl+G");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_COMMAND_PALETTE, "Command &Palette...\tCtrl+Shift+P");
+    AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hEditMenu, MF_STRING, IDM_FORMAT_FONT, "&Font...");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hEditMenu, "&Edit");
 
     HMENU hView = CreatePopupMenu();
@@ -5794,8 +5899,6 @@ static HMENU build_menu(void) {
     AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hMarkdown, "&Markdown");
     AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hJson, "&JSON");
     AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hHtml, "&HTML");
-    AppendMenuA(hFormat, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hFormat, MF_STRING, IDM_FORMAT_FONT, "&Font...");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFormat, "F&ormat");
 
     HMENU hRun = CreatePopupMenu();
@@ -6457,6 +6560,38 @@ static int compare_words_ordinal(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+static BOOL CALLBACK find_autocomplete_popup_proc(HWND hwnd, LPARAM lParam) {
+    WCHAR className[16];
+    if (GetClassNameW(hwnd, className, 16) == 0 || wcscmp(className, L"ListBoxX") != 0) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != GetCurrentProcessId()) return TRUE;
+    *(HWND *)lParam = hwnd;
+    return FALSE;
+}
+
+/* SCI_AUTOCSHOW's popup is a native listbox (Win32 class "ListBoxX", with
+   the actual WC_LISTBOX scrollbar-owning control as its one child) that
+   Scintilla itself never dark-mode themes - like hEdit's own scrollbars
+   (see apply_editor_theme()'s comment on that), it's left to the system and
+   paints a plain light scrollbar even in dark mode. Scintilla doesn't hand
+   back the popup's HWND, so it's found by class name right after showing it
+   (SCI_AUTOCSHOW creates/shows the popup synchronously), scoped to this
+   process so a second Scintilla-based app's own popup is never touched.
+   The popup frame itself (WS_POPUP | WS_THICKFRAME) also needs
+   apply_popup_titlebar_theme()'s DWM dark-mode attribute, same as this
+   app's own popups get - without it, Windows 11 paints that frame's rounded
+   top strip in the light system color regardless of the listbox's own
+   theme, showing as a solid white bar across the top of the list. */
+static void theme_autocomplete_popup(void) {
+    HWND popup = NULL;
+    EnumWindows(find_autocomplete_popup_proc, (LPARAM)&popup);
+    if (!popup) return;
+    apply_popup_titlebar_theme(popup, g_editorDarkMode);
+    HWND list = GetWindow(popup, GW_CHILD);
+    if (list) SetWindowTheme(list, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+}
+
 /* Plain word completion, not lexer/keyword-driven (see the AutoC setup in
    configure_scintilla()): as the caret's word grows to WORD_COMPLETION_MIN_PREFIX
    characters, show every other word elsewhere in the document that starts
@@ -6529,6 +6664,7 @@ static void update_word_completions(void) {
         }
         list[o] = 0;
         SendMessageA(g_hEdit, SCI_AUTOCSHOW, (WPARAM)prefixLen, (LPARAM)list);
+        theme_autocomplete_popup();
         free(list);
     }
     for (int w = 0; w < wordCount; w++) free(words[w]);
@@ -6874,6 +7010,18 @@ static WCHAR *executable_on_search_path(const WCHAR *name) {
         return NULL;
     }
     return path;
+}
+
+/* Looks for one candidate executable name inside a user-configured folder
+   override (Settings > Compiler's GCC/Clang/Zig/Lua path boxes) rather than
+   searching PATH - the counterpart to executable_on_search_path() used
+   whenever an override is set. */
+static WCHAR *executable_in_directory(const WCHAR *directory, const WCHAR *name) {
+    if (!directory || !directory[0]) return NULL;
+    WCHAR *candidate = path_join(directory, name);
+    if (candidate && is_existing_file(candidate)) return candidate;
+    free(candidate);
+    return NULL;
 }
 
 /* Prefer an activated environment, then a project-local .venv/venv found by
@@ -7441,7 +7589,8 @@ static WCHAR *find_lua_interpreter(void) {
     static const WCHAR *names[] = { L"lua.exe", L"lua5.4.exe", L"lua54.exe",
                                      L"lua5.3.exe", L"lua53.exe", L"lua5.1.exe", L"luajit.exe" };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        WCHAR *lua = executable_on_search_path(names[i]);
+        WCHAR *lua = g_luaBinOverride ? executable_in_directory(g_luaBinOverride, names[i])
+                                       : executable_on_search_path(names[i]);
         if (lua) return lua;
     }
     return NULL;
@@ -7544,7 +7693,10 @@ static WCHAR *find_vcvarsall(void) {
    one compiler or leaves it Auto, trying GCC, Clang, then Zig in that order
    and falling back to MSVC only for Run (never Debug: there's no GDB-
    readable debug info from cl.exe, so Debug requires a GCC- or Clang-style
-   compiler same as before this setting existed). */
+   compiler same as before this setting existed). Each of GCC/Clang/Zig also
+   has its own optional folder override (Settings > Compiler), searched
+   instead of PATH exactly like g_vcvarsallOverridePath already does for
+   MSVC's vcvarsall.bat. */
 static WCHAR *find_native_compiler(DebugSourceKind kind, int debug, NativeCompilerKind *compilerKind) {
     static const WCHAR *cNames[]   = { L"gcc.exe", L"clang.exe", L"zig.exe" };
     static const WCHAR *cppNames[] = { L"g++.exe", L"clang++.exe", L"zig.exe" };
@@ -7568,7 +7720,10 @@ static WCHAR *find_native_compiler(DebugSourceKind kind, int debug, NativeCompil
                 kinds[i] == NATIVE_COMPILER_CLANG ? COMPILER_BACKEND_CLANG : COMPILER_BACKEND_ZIG;
             if (g_compilerBackend != want) continue;
         }
-        WCHAR *compiler = executable_on_search_path(names[i]);
+        const WCHAR *override = kinds[i] == NATIVE_COMPILER_GCC ? g_gccBinOverride :
+            kinds[i] == NATIVE_COMPILER_CLANG ? g_clangBinOverride : g_zigBinOverride;
+        WCHAR *compiler = override ? executable_in_directory(override, names[i])
+                                    : executable_on_search_path(names[i]);
         if (compiler) {
             if (compilerKind) *compilerKind = kinds[i];
             return compiler;
@@ -7735,7 +7890,10 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
         launch_msvc_file(kind, compiler);
         return;
     }
-    WCHAR *debugger = debug ? executable_on_search_path(L"gdb.exe") : NULL;
+    WCHAR *debugger = debug
+        ? (g_gdbBinOverride ? executable_in_directory(g_gdbBinOverride, L"gdb.exe")
+                             : executable_on_search_path(L"gdb.exe"))
+        : NULL;
     if (!compiler) {
         MessageBoxW(g_hMainWnd,
                     debug
@@ -9518,6 +9676,7 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Edit: Convert Line Endings to CRLF", IDM_EDIT_EOL_CRLF},
     {L"Edit: Convert Line Endings to LF", IDM_EDIT_EOL_LF},
     {L"Edit: Convert Line Endings to CR", IDM_EDIT_EOL_CR},
+    {L"Edit: Font", IDM_FORMAT_FONT},
     {L"Format: Bold", IDM_FMT_BOLD},
     {L"Format: Italic", IDM_FMT_ITALIC}, {L"Format: Strikethrough", IDM_FMT_STRIKETHROUGH},
     {L"Format: Inline Code", IDM_FMT_CODE}, {L"Format: Code Block", IDM_FMT_CODEBLOCK},
@@ -9550,7 +9709,6 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Format: HTML Table", IDM_FMT_HTML_TABLE},
     {L"Format: HTML Bullet List", IDM_FMT_HTML_BULLETLIST},
     {L"Format: HTML Numbered List", IDM_FMT_HTML_NUMBERLIST},
-    {L"Format: Font", IDM_FORMAT_FONT},
     {L"Run: Run File", IDM_RUN_FILE}, {L"Run: Debug File", IDM_DEBUG_FILE},
     {L"Run: Continue", IDM_DEBUG_CONTINUE}, {L"Run: Step Over", IDM_DEBUG_STEP_OVER},
     {L"Run: Step Into", IDM_DEBUG_STEP_INTO},
@@ -9700,6 +9858,14 @@ typedef struct SettingsDialogState {
     HWND previewThemeCaption, previewThemeLightRadio, previewThemeDarkRadio;
     HWND spellCheckCheck, showWhitespaceCheck, indentGuidesCheck, minimapCheck;
     HWND indentUseSpacesCheck, tabWidthCaption, tabWidthEdit;
+    HWND spellLanguageCaption, spellLanguageLabel, spellLanguageChooseButton;
+    HWND compilerPathsHintCaption;
+    HWND vcvarsallCaption, vcvarsallEdit, vcvarsallBrowseButton;
+    HWND gccCaption, gccEdit, gccBrowseButton;
+    HWND clangCaption, clangEdit, clangBrowseButton;
+    HWND zigCaption, zigEdit, zigBrowseButton;
+    HWND luaCaption, luaEdit, luaBrowseButton;
+    HWND gdbCaption, gdbEdit, gdbBrowseButton;
     HWND compilerFlagsCaption, compilerFlagsEdit;
 } SettingsDialogState;
 
@@ -9714,18 +9880,29 @@ static void update_settings_css_label(SettingsDialogState *state) {
     EnableWindow(state->customCssClearButton, g_customCssPath && g_customCssPath[0]);
 }
 
+/* Mirrors choose_spell_language()'s own label building (LOCALE_SLOCALIZEDDISPLAYNAME
+   over the raw BCP-47 tag) so the Editor category shows the same name the
+   language picker itself lists it under. */
+static void update_settings_spell_label(SettingsDialogState *state) {
+    WCHAR displayName[LOCALE_NAME_MAX_LENGTH] = L"";
+    if (g_spellLanguage[0])
+        GetLocaleInfoEx(g_spellLanguage, LOCALE_SLOCALIZEDDISPLAYNAME, displayName, LOCALE_NAME_MAX_LENGTH);
+    SetWindowTextW(state->spellLanguageLabel, displayName[0] ? displayName : g_spellLanguage);
+}
+
 static int is_flag_edit_whitespace(WCHAR ch) {
     return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
 }
 
-/* Applied on EN_KILLFOCUS from the Compiler category's edit box, the same as
-   set_tab_width() is for the Editor category's - trims surrounding
-   whitespace, persists via save_compiler_settings(), and is a no-op when the
-   trimmed text hasn't actually changed so tabbing through the field without
-   editing it doesn't touch the ini file. quote_extra_compiler_flags() (see
-   launch_native_file()/launch_msvc_file()) re-splits this text into
-   individual flags at build time. */
-static void set_compiler_extra_flags(const WCHAR *text) {
+/* Applied on EN_KILLFOCUS from any of the Compiler category's edit boxes
+   (the extra-flags box and the GCC/Clang/Zig/Lua/MSVC path overrides alike),
+   the same as set_tab_width() is for the Editor category's - trims
+   surrounding whitespace, persists via save_compiler_settings(), and is a
+   no-op when the trimmed text hasn't actually changed so tabbing through a
+   field without editing it doesn't touch the ini file. For the flags box,
+   quote_extra_compiler_flags() (see launch_native_file()/launch_msvc_file())
+   re-splits the saved text into individual flags at build time. */
+static void set_compiler_string_setting(WCHAR **slot, const WCHAR *text) {
     size_t start = 0, end = text ? wcslen(text) : 0;
     while (start < end && is_flag_edit_whitespace(text[start])) start++;
     while (end > start && is_flag_edit_whitespace(text[end - 1])) end--;
@@ -9737,14 +9914,52 @@ static void set_compiler_extra_flags(const WCHAR *text) {
             value[end - start] = 0;
         }
     }
-    if (value && g_compilerExtraFlags && wcscmp(value, g_compilerExtraFlags) == 0) {
+    if (value && *slot && wcscmp(value, *slot) == 0) {
         free(value);
         return;
     }
-    if (!value && !g_compilerExtraFlags) return;
-    free(g_compilerExtraFlags);
-    g_compilerExtraFlags = value;
+    if (!value && !*slot) return;
+    free(*slot);
+    *slot = value;
     save_compiler_settings();
+}
+
+/* The MSVC path box's Browse button: unlike the GCC/Clang/Zig/Lua boxes
+   below, an override here names one specific file (vcvarsall.bat) rather
+   than a folder to search, so this picks a file the same way
+   do_choose_custom_css() does instead of reusing choose_workspace_folder(). */
+static void choose_vcvarsall_path(HWND editControl) {
+    DWORD cap = 32768;
+    WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
+    if (!path) return;
+    if (g_vcvarsallOverridePath) wcsncpy(path, g_vcvarsallOverridePath, cap - 1);
+    OPENFILENAMEW ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hMainWnd;
+    ofn.lpstrFilter = L"vcvarsall.bat\0vcvarsall.bat\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = cap;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    if (GetOpenFileNameW(&ofn)) {
+        replace_wstring(&g_vcvarsallOverridePath, path);
+        save_compiler_settings();
+        SetWindowTextW(editControl, g_vcvarsallOverridePath);
+    }
+    free(path);
+}
+
+/* Shared by the GCC/Clang/Zig/Lua Browse buttons: each of those overrides
+   names a folder to search for that toolchain's executable(s) instead of
+   PATH (see find_native_compiler()/find_lua_interpreter()), so picking one
+   is just choose_workspace_folder()'s existing folder picker reused for a
+   different setting. */
+static void choose_compiler_folder(WCHAR **slot, HWND editControl) {
+    WCHAR *folder = choose_workspace_folder();
+    if (!folder) return;
+    replace_wstring(slot, folder);
+    free(folder);
+    save_compiler_settings();
+    SetWindowTextW(editControl, *slot);
 }
 
 static void update_settings_category(SettingsDialogState *state) {
@@ -9757,6 +9972,14 @@ static void update_settings_category(SettingsDialogState *state) {
         state->previewThemeCaption, state->previewThemeLightRadio, state->previewThemeDarkRadio,
         state->spellCheckCheck, state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
         state->indentUseSpacesCheck, state->tabWidthCaption, state->tabWidthEdit,
+        state->spellLanguageCaption, state->spellLanguageLabel, state->spellLanguageChooseButton,
+        state->compilerPathsHintCaption,
+        state->vcvarsallCaption, state->vcvarsallEdit, state->vcvarsallBrowseButton,
+        state->gccCaption, state->gccEdit, state->gccBrowseButton,
+        state->clangCaption, state->clangEdit, state->clangBrowseButton,
+        state->zigCaption, state->zigEdit, state->zigBrowseButton,
+        state->luaCaption, state->luaEdit, state->luaBrowseButton,
+        state->gdbCaption, state->gdbEdit, state->gdbBrowseButton,
         state->compilerFlagsCaption, state->compilerFlagsEdit,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
@@ -9791,8 +10014,30 @@ static void update_settings_category(SettingsDialogState *state) {
             ShowWindow(state->indentUseSpacesCheck, SW_SHOW);
             ShowWindow(state->tabWidthCaption, SW_SHOW);
             ShowWindow(state->tabWidthEdit, SW_SHOW);
+            ShowWindow(state->spellLanguageCaption, SW_SHOW);
+            ShowWindow(state->spellLanguageLabel, SW_SHOW);
+            ShowWindow(state->spellLanguageChooseButton, SW_SHOW);
             break;
         case 5:
+            ShowWindow(state->compilerPathsHintCaption, SW_SHOW);
+            ShowWindow(state->vcvarsallCaption, SW_SHOW);
+            ShowWindow(state->vcvarsallEdit, SW_SHOW);
+            ShowWindow(state->vcvarsallBrowseButton, SW_SHOW);
+            ShowWindow(state->gccCaption, SW_SHOW);
+            ShowWindow(state->gccEdit, SW_SHOW);
+            ShowWindow(state->gccBrowseButton, SW_SHOW);
+            ShowWindow(state->clangCaption, SW_SHOW);
+            ShowWindow(state->clangEdit, SW_SHOW);
+            ShowWindow(state->clangBrowseButton, SW_SHOW);
+            ShowWindow(state->zigCaption, SW_SHOW);
+            ShowWindow(state->zigEdit, SW_SHOW);
+            ShowWindow(state->zigBrowseButton, SW_SHOW);
+            ShowWindow(state->luaCaption, SW_SHOW);
+            ShowWindow(state->luaEdit, SW_SHOW);
+            ShowWindow(state->luaBrowseButton, SW_SHOW);
+            ShowWindow(state->gdbCaption, SW_SHOW);
+            ShowWindow(state->gdbEdit, SW_SHOW);
+            ShowWindow(state->gdbBrowseButton, SW_SHOW);
             ShowWindow(state->compilerFlagsCaption, SW_SHOW);
             ShowWindow(state->compilerFlagsEdit, SW_SHOW);
             break;
@@ -9890,11 +10135,71 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         swprintf(tabWidthText, sizeof(tabWidthText) / sizeof(tabWidthText[0]), L"%d", g_tabWidth);
         SetWindowTextW(state->tabWidthEdit, tabWidthText);
 
+        state->spellLanguageCaption = CreateWindowExW(0, L"STATIC", L"Spell check language:", WS_CHILD,
+            px, py + 172, 200, 20, hwnd, NULL, inst, NULL);
+        state->spellLanguageLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD,
+            px, py + 194, 320, 20, hwnd, NULL, inst, NULL);
+        state->spellLanguageChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px, py + 220, 120, 26, hwnd, (HMENU)66, inst, NULL);
+        EnableWindow(state->spellLanguageChooseButton, g_spellChecker != NULL);
+        update_settings_spell_label(state);
+
+        state->compilerPathsHintCaption = CreateWindowExW(0, L"STATIC",
+            L"Optional overrides (leave blank to search PATH automatically):", WS_CHILD,
+            px, py, 380, 18, hwnd, NULL, inst, NULL);
+        state->vcvarsallCaption = CreateWindowExW(0, L"STATIC", L"MSVC vcvars:", WS_CHILD,
+            px, py + 24, 90, 20, hwnd, NULL, inst, NULL);
+        state->vcvarsallEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px + 96, py + 22, 176, 24, hwnd, (HMENU)71, inst, NULL);
+        state->vcvarsallBrowseButton = CreateWindowExW(0, L"BUTTON", L"Browse...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 280, py + 22, 90, 24, hwnd, (HMENU)72, inst, NULL);
+        SetWindowTextW(state->vcvarsallEdit, g_vcvarsallOverridePath ? g_vcvarsallOverridePath : L"");
+
+        state->gccCaption = CreateWindowExW(0, L"STATIC", L"GCC/G++:", WS_CHILD,
+            px, py + 58, 90, 20, hwnd, NULL, inst, NULL);
+        state->gccEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px + 96, py + 56, 176, 24, hwnd, (HMENU)73, inst, NULL);
+        state->gccBrowseButton = CreateWindowExW(0, L"BUTTON", L"Browse...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 280, py + 56, 90, 24, hwnd, (HMENU)74, inst, NULL);
+        SetWindowTextW(state->gccEdit, g_gccBinOverride ? g_gccBinOverride : L"");
+
+        state->clangCaption = CreateWindowExW(0, L"STATIC", L"Clang:", WS_CHILD,
+            px, py + 92, 90, 20, hwnd, NULL, inst, NULL);
+        state->clangEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px + 96, py + 90, 176, 24, hwnd, (HMENU)75, inst, NULL);
+        state->clangBrowseButton = CreateWindowExW(0, L"BUTTON", L"Browse...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 280, py + 90, 90, 24, hwnd, (HMENU)76, inst, NULL);
+        SetWindowTextW(state->clangEdit, g_clangBinOverride ? g_clangBinOverride : L"");
+
+        state->zigCaption = CreateWindowExW(0, L"STATIC", L"Zig:", WS_CHILD,
+            px, py + 126, 90, 20, hwnd, NULL, inst, NULL);
+        state->zigEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px + 96, py + 124, 176, 24, hwnd, (HMENU)77, inst, NULL);
+        state->zigBrowseButton = CreateWindowExW(0, L"BUTTON", L"Browse...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 280, py + 124, 90, 24, hwnd, (HMENU)78, inst, NULL);
+        SetWindowTextW(state->zigEdit, g_zigBinOverride ? g_zigBinOverride : L"");
+
+        state->luaCaption = CreateWindowExW(0, L"STATIC", L"Lua:", WS_CHILD,
+            px, py + 160, 90, 20, hwnd, NULL, inst, NULL);
+        state->luaEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px + 96, py + 158, 176, 24, hwnd, (HMENU)79, inst, NULL);
+        state->luaBrowseButton = CreateWindowExW(0, L"BUTTON", L"Browse...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 280, py + 158, 90, 24, hwnd, (HMENU)80, inst, NULL);
+        SetWindowTextW(state->luaEdit, g_luaBinOverride ? g_luaBinOverride : L"");
+
+        state->gdbCaption = CreateWindowExW(0, L"STATIC", L"GDB:", WS_CHILD,
+            px, py + 194, 90, 20, hwnd, NULL, inst, NULL);
+        state->gdbEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px + 96, py + 192, 176, 24, hwnd, (HMENU)81, inst, NULL);
+        state->gdbBrowseButton = CreateWindowExW(0, L"BUTTON", L"Browse...",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, px + 280, py + 192, 90, 24, hwnd, (HMENU)82, inst, NULL);
+        SetWindowTextW(state->gdbEdit, g_gdbBinOverride ? g_gdbBinOverride : L"");
+
         state->compilerFlagsCaption = CreateWindowExW(0, L"STATIC",
             L"Extra flags passed to Run/Debug C/C++ builds:", WS_CHILD,
-            px, py, 380, 20, hwnd, NULL, inst, NULL);
+            px, py + 228, 380, 20, hwnd, NULL, inst, NULL);
         state->compilerFlagsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px, py + 24, 380, 24, hwnd, (HMENU)70, inst, NULL);
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, px, py + 252, 380, 24, hwnd, (HMENU)70, inst, NULL);
         SetWindowTextW(state->compilerFlagsEdit, g_compilerExtraFlags ? g_compilerExtraFlags : L"");
 
         /* Visual-styled BS_AUTOCHECKBOX/BS_AUTORADIOBUTTON controls draw their
@@ -9921,7 +10226,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         SendMessageW(state->categoryList, LB_SETCURSEL, 0, 0);
         update_settings_category(state);
         SetFocus(state->categoryList);
-        popup_dialog_theme_created(hwnd);
+        popup_dialog_theme_opened(hwnd);
         return 0;
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -9969,12 +10274,28 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 SetWindowTextW(state->tabWidthEdit, buf);
                 return 0;
             }
-            if (LOWORD(wParam) == 70 && HIWORD(wParam) == EN_KILLFOCUS) {
-                WCHAR buf[1024];
-                GetWindowTextW(state->compilerFlagsEdit, buf, sizeof(buf) / sizeof(buf[0]));
-                set_compiler_extra_flags(buf);
-                SetWindowTextW(state->compilerFlagsEdit, g_compilerExtraFlags ? g_compilerExtraFlags : L"");
-                return 0;
+            if (HIWORD(wParam) == EN_KILLFOCUS) {
+                /* Shared by the extra-flags box and every compiler path
+                   override box: each maps its control ID to the HWND/global
+                   slot pair set_compiler_string_setting() should trim and
+                   persist into. */
+                struct { WORD id; HWND edit; WCHAR **slot; } fields[] = {
+                    { 70, state->compilerFlagsEdit, &g_compilerExtraFlags },
+                    { 71, state->vcvarsallEdit, &g_vcvarsallOverridePath },
+                    { 73, state->gccEdit, &g_gccBinOverride },
+                    { 75, state->clangEdit, &g_clangBinOverride },
+                    { 77, state->zigEdit, &g_zigBinOverride },
+                    { 79, state->luaEdit, &g_luaBinOverride },
+                    { 81, state->gdbEdit, &g_gdbBinOverride },
+                };
+                for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+                    if (LOWORD(wParam) != fields[i].id) continue;
+                    WCHAR buf[1024];
+                    GetWindowTextW(fields[i].edit, buf, sizeof(buf) / sizeof(buf[0]));
+                    set_compiler_string_setting(fields[i].slot, buf);
+                    SetWindowTextW(fields[i].edit, *fields[i].slot ? *fields[i].slot : L"");
+                    return 0;
+                }
             }
             if (HIWORD(wParam) != BN_CLICKED) break;
             switch (LOWORD(wParam)) {
@@ -9992,6 +10313,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case 62: toggle_indent_guides(g_hMainWnd); break;
                 case 63: toggle_minimap(g_hMainWnd); break;
                 case 64: toggle_indent_use_spaces(g_hMainWnd); break;
+                case 66: choose_spell_language(); update_settings_spell_label(state); break;
+                case 72: choose_vcvarsall_path(state->vcvarsallEdit); break;
+                case 74: choose_compiler_folder(&g_gccBinOverride, state->gccEdit); break;
+                case 76: choose_compiler_folder(&g_clangBinOverride, state->clangEdit); break;
+                case 78: choose_compiler_folder(&g_zigBinOverride, state->zigEdit); break;
+                case 80: choose_compiler_folder(&g_luaBinOverride, state->luaEdit); break;
+                case 82: choose_compiler_folder(&g_gdbBinOverride, state->gdbEdit); break;
                 case IDCANCEL: DestroyWindow(hwnd); break;
             }
             return 0;
