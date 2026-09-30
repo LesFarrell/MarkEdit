@@ -12,7 +12,5 @@ WCHAR *absolute_path(const WCHAR *path);
 WCHAR *extended_path(const WCHAR *path);
 int skipped_workspace_directory(const WCHAR *name);
 int path_has_skipped_component(const WCHAR *path);
-int compare_explorer_entries(int aIsDirectory, const WCHAR *aName,
-                             int bIsDirectory, const WCHAR *bName);
 
 #endif

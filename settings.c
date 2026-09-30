@@ -28,7 +28,7 @@ WCHAR *get_settings_path(void) {
    doubling the buffer until the value fits or a sane cap is hit. Returns a
    heap copy the caller frees, or NULL (nothing allocated) when the key is
    absent or empty. */
-static WCHAR *read_profile_string(const WCHAR *section, const WCHAR *key, const WCHAR *path) {
+WCHAR *read_profile_string(const WCHAR *section, const WCHAR *key, const WCHAR *path) {
     DWORD cap = 512, n = 0;
     WCHAR *value = NULL;
     do {

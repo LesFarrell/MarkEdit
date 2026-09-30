@@ -50,9 +50,6 @@ void explorer_stop_watch(void);
    data. Call once from destroy_main_window(). */
 void explorer_shutdown(void);
 
-/* Re-scans every currently-expanded directory node from disk. */
-void explorer_refresh(void);
-
 /* Routes a WM_NOTIFY from the tree control. markedit.c calls this from its
    own WM_NOTIFY handler whenever notification->hwndFrom == g_hExplorerTree. */
 void explorer_handle_notify(HWND hwnd, NMHDR *notification);

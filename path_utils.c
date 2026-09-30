@@ -118,11 +118,3 @@ int path_has_skipped_component(const WCHAR *path) {
     free(copy);
     return found;
 }
-
-/* Sort order for the file explorer's tree: directories before files, then
-   case-insensitive alphabetical within each group - matches Explorer. */
-int compare_explorer_entries(int aIsDirectory, const WCHAR *aName,
-                             int bIsDirectory, const WCHAR *bName) {
-    if (aIsDirectory != bIsDirectory) return aIsDirectory ? -1 : 1;
-    return _wcsicmp(aName, bName);
-}

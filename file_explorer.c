@@ -28,6 +28,7 @@
 
 #include "path_utils.h"
 #include "settings.h"
+#include "theme.h"
 
 HWND g_hExplorerTree = NULL;
 RECT g_explorerSplitterRect = {0};
@@ -194,11 +195,13 @@ typedef struct DirEntry {
     int isDirectory;
 } DirEntry;
 
+/* Sort order for the tree: directories before files, then case-insensitive
+   alphabetical within each group - matches Explorer. */
 static int compare_dir_entries(const void *a, const void *b) {
     const DirEntry *entryA = (const DirEntry *)a;
     const DirEntry *entryB = (const DirEntry *)b;
-    return compare_explorer_entries(entryA->isDirectory, entryA->name,
-                                    entryB->isDirectory, entryB->name);
+    if (entryA->isDirectory != entryB->isDirectory) return entryA->isDirectory ? -1 : 1;
+    return _wcsicmp(entryA->name, entryB->name);
 }
 
 static void populate_directory_children(HTREEITEM item, ExplorerItemData *data) {
@@ -257,20 +260,6 @@ static HTREEITEM find_loaded_item_for_path(HTREEITEM item, const WCHAR *path) {
         }
     }
     return NULL;
-}
-
-static void reload_expanded_subtree(HTREEITEM item) {
-    ExplorerItemData *data = tree_item_data(item);
-    if (data && data->isDirectory && data->childrenLoaded) {
-        UINT state = TreeView_GetItemState(g_hExplorerTree, item, TVIS_EXPANDED);
-        if (state & TVIS_EXPANDED) reload_directory_children(item, data);
-    }
-    HTREEITEM child = TreeView_GetChild(g_hExplorerTree, item);
-    while (child) {
-        HTREEITEM next = TreeView_GetNextSibling(g_hExplorerTree, child);
-        reload_expanded_subtree(child);
-        child = next;
-    }
 }
 
 /* ---- filesystem operations invoked from the context menu ---- */
@@ -714,11 +703,9 @@ void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptText
 
 void explorer_apply_theme(void) {
     if (!g_hExplorerTree) return;
-    SetWindowTheme(g_hExplorerTree, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
-    COLORREF bg = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-    COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
-    TreeView_SetBkColor(g_hExplorerTree, bg);
-    TreeView_SetTextColor(g_hExplorerTree, fg);
+    apply_explorer_theme(g_hExplorerTree);
+    TreeView_SetBkColor(g_hExplorerTree, theme_bg_color());
+    TreeView_SetTextColor(g_hExplorerTree, theme_fg_color());
     InvalidateRect(g_hExplorerTree, NULL, TRUE);
 }
 
@@ -726,8 +713,8 @@ void explorer_set_root(const WCHAR *rootPath) {
     if (!g_hExplorerTree || !rootPath) return;
     /* Re-opening the folder already being shown (e.g. toggling the panel off
        then back on) would otherwise discard every node's expand state and
-       redo the same disk scan + watcher restart for no reason - explorer_refresh()
-       already covers "I want a fresh scan of what's here". */
+       redo the same disk scan + watcher restart for no reason - the watcher
+       already keeps what's shown in step with the disk. */
     if (s_root && s_watcher && _wcsicmp(s_root, rootPath) == 0) return;
     explorer_stop_watch();
     TreeView_DeleteAllItems(g_hExplorerTree); /* frees every ExplorerItemData via TVN_DELETEITEMW */
@@ -739,10 +726,6 @@ void explorer_set_root(const WCHAR *rootPath) {
     s_rootItem = insert_tree_item(TVI_ROOT, TVI_LAST, s_root, *leaf ? leaf : s_root, 1);
     if (s_rootItem) TreeView_Expand(g_hExplorerTree, s_rootItem, TVE_EXPAND);
     start_watcher(s_root);
-}
-
-void explorer_refresh(void) {
-    if (s_rootItem) reload_expanded_subtree(s_rootItem);
 }
 
 int explorer_content_x(int focusModeActive) {

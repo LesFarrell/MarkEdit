@@ -70,6 +70,9 @@ extern WCHAR *g_gdbBinOverride;
 extern WCHAR *g_compilerExtraFlags;
 
 WCHAR *get_settings_path(void);
+/* Heap copy of an arbitrarily long string value (caller frees), or NULL
+   when the key is absent or empty. */
+WCHAR *read_profile_string(const WCHAR *section, const WCHAR *key, const WCHAR *path);
 
 void load_font_settings(void);
 void save_font_settings(void);

@@ -153,10 +153,10 @@ path_utils.c / .h       Windows path and heap-string utilities
 text_codec.c / .h       UTF conversion and JSON string encoding
 json_formatter.c / .h   standalone JSON pretty-printer/minifier
 markdown.c / .h         cmark-gfm rendering adapter
+theme.h                 shared native light/dark palette and paint helpers
 cmark-gfm-sources.rsp   vendored renderer source list and compile flags
 markedit-sources.rsp    application source list used by build.bat
 lexilla-sources.rsp     supported lexer source list used by build.bat
-lexilla-objects.rsp     compiled Lexilla object list build.bat links into markedit.exe
 markedit.rc / .ico       Win32 resources (icon, version info)
 markedit.manifest        DPI-awareness and long-path declarations
 preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid

@@ -43,6 +43,7 @@
 #include "path_utils.h"
 #include "settings.h"
 #include "text_codec.h"
+#include "theme.h"
 #include "toolbar_icons.h"
 
 #include <WebView2.h>
@@ -250,72 +251,14 @@ static int position_needs_leading_eol(int position) {
 
 /* ================= formatting toolbar actions (operate on g_hEdit) ================= */
 
-/* Wrap the current selection in a symmetric Markdown marker (e.g. "**" for
-   bold), toggling it off if the selection is already wrapped in exactly that
-   marker. With no selection, insert an empty marker pair and place the caret
-   between them so typing continues inside it. */
-static void toolbar_wrap_inline(const char *marker) {
+/* Wrap the current selection in `open` ... `close`, toggling it off if the
+   selection is already wrapped in exactly that pair. With no selection,
+   insert an empty pair and place the caret between them so typing continues
+   inside it. Only the selection itself is read (not the whole document). */
+static void toolbar_wrap_pair(const char *open, const char *close) {
     int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
     int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-    int markerLen = (int)strlen(marker);
-
-    if (selEnd == selStart) {
-        char pair[16];
-        snprintf(pair, sizeof(pair), "%s%s", marker, marker);
-        SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)pair);
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + markerLen), (LPARAM)(selStart + markerLen));
-        SetFocus(g_hEdit);
-        return;
-    }
-
-    int len;
-    char *text = get_edit_text(g_hEdit, &len);
-    if (!text) return;
-
-    int innerStart = selStart + markerLen, innerEnd = selEnd - markerLen;
-    int alreadyWrapped = selEnd - selStart >= markerLen * 2 &&
-        memcmp(text + selStart, marker, (size_t)markerLen) == 0 &&
-        memcmp(text + innerEnd, marker, (size_t)markerLen) == 0;
-
-    if (alreadyWrapped) {
-        char *inner = (char *)malloc((size_t)(innerEnd - innerStart) + 1);
-        if (inner) {
-            memcpy(inner, text + innerStart, (size_t)(innerEnd - innerStart));
-            inner[innerEnd - innerStart] = 0;
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)selEnd);
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)inner);
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)(selStart + (innerEnd - innerStart)));
-            free(inner);
-        }
-    } else {
-        size_t selLen = (size_t)(selEnd - selStart);
-        char *wrapped = (char *)malloc(selLen + (size_t)markerLen * 2 + 1);
-        if (wrapped) {
-            memcpy(wrapped, marker, (size_t)markerLen);
-            memcpy(wrapped + markerLen, text + selStart, selLen);
-            memcpy(wrapped + markerLen + selLen, marker, (size_t)markerLen);
-            wrapped[markerLen * 2 + selLen] = 0;
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + markerLen), (LPARAM)(selStart + markerLen + (int)selLen));
-            free(wrapped);
-        }
-    }
-    free(text);
-    SetFocus(g_hEdit);
-}
-
-/* Wrap the current selection in an HTML tag pair ("<tag>" ... "</tag>"),
-   toggling it off if the selection is already wrapped in exactly that pair.
-   With no selection, insert an empty tag pair and place the caret between
-   them so typing continues inside it. Same behavior as toolbar_wrap_inline,
-   just for markers whose open and close text differ. */
-static void toolbar_wrap_tag(const char *tag) {
-    char open[24], close[24];
-    int openLen = snprintf(open, sizeof(open), "<%s>", tag);
-    int closeLen = snprintf(close, sizeof(close), "</%s>", tag);
-
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    int openLen = (int)strlen(open), closeLen = (int)strlen(close);
 
     if (selEnd == selStart) {
         char pair[48];
@@ -326,40 +269,53 @@ static void toolbar_wrap_tag(const char *tag) {
         return;
     }
 
-    int len;
-    char *text = get_edit_text(g_hEdit, &len);
-    if (!text) return;
+    int selLen = selEnd - selStart;
+    /* Points into Scintilla's own buffer; only valid until the next edit,
+       so everything needed from it is copied out before SCI_REPLACESEL. */
+    const char *selected = (const char *)SendMessageA(g_hEdit, SCI_GETRANGEPOINTER,
+                                                      (WPARAM)selStart, (LPARAM)selLen);
+    if (!selected) return;
+    int alreadyWrapped = selLen >= openLen + closeLen &&
+        memcmp(selected, open, (size_t)openLen) == 0 &&
+        memcmp(selected + selLen - closeLen, close, (size_t)closeLen) == 0;
 
-    int innerStart = selStart + openLen, innerEnd = selEnd - closeLen;
-    int alreadyWrapped = selEnd - selStart >= openLen + closeLen &&
-        memcmp(text + selStart, open, (size_t)openLen) == 0 &&
-        memcmp(text + innerEnd, close, (size_t)closeLen) == 0;
-
+    char *replacement;
+    int newSelStart, newSelLen;
     if (alreadyWrapped) {
-        char *inner = (char *)malloc((size_t)(innerEnd - innerStart) + 1);
-        if (inner) {
-            memcpy(inner, text + innerStart, (size_t)(innerEnd - innerStart));
-            inner[innerEnd - innerStart] = 0;
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)selEnd);
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)inner);
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)(selStart + (innerEnd - innerStart)));
-            free(inner);
-        }
+        newSelStart = selStart;
+        newSelLen = selLen - openLen - closeLen;
+        replacement = (char *)malloc((size_t)newSelLen + 1);
+        if (!replacement) return;
+        memcpy(replacement, selected + openLen, (size_t)newSelLen);
+        replacement[newSelLen] = 0;
     } else {
-        size_t selLen = (size_t)(selEnd - selStart);
-        char *wrapped = (char *)malloc(selLen + (size_t)openLen + (size_t)closeLen + 1);
-        if (wrapped) {
-            memcpy(wrapped, open, (size_t)openLen);
-            memcpy(wrapped + openLen, text + selStart, selLen);
-            memcpy(wrapped + openLen + selLen, close, (size_t)closeLen);
-            wrapped[(size_t)openLen + selLen + (size_t)closeLen] = 0;
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
-            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + openLen), (LPARAM)(selStart + openLen + (int)selLen));
-            free(wrapped);
-        }
+        newSelStart = selStart + openLen;
+        newSelLen = selLen;
+        replacement = (char *)malloc((size_t)selLen + (size_t)openLen + (size_t)closeLen + 1);
+        if (!replacement) return;
+        memcpy(replacement, open, (size_t)openLen);
+        memcpy(replacement + openLen, selected, (size_t)selLen);
+        memcpy(replacement + openLen + selLen, close, (size_t)closeLen);
+        replacement[openLen + selLen + closeLen] = 0;
     }
-    free(text);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)selStart, (LPARAM)selEnd);
+    SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)newSelStart, (LPARAM)(newSelStart + newSelLen));
+    free(replacement);
     SetFocus(g_hEdit);
+}
+
+/* Symmetric Markdown marker, e.g. "**" for bold. */
+static void toolbar_wrap_inline(const char *marker) {
+    toolbar_wrap_pair(marker, marker);
+}
+
+/* HTML tag pair: "<tag>" ... "</tag>". */
+static void toolbar_wrap_tag(const char *tag) {
+    char open[24], close[24];
+    snprintf(open, sizeof(open), "<%s>", tag);
+    snprintf(close, sizeof(close), "</%s>", tag);
+    toolbar_wrap_pair(open, close);
 }
 
 /* Returns the 0-based [firstLine, lastLine] range touched by the current
@@ -1041,18 +997,18 @@ static void apply_editor_theme(HWND hEdit) {
     /* Scintilla draws its own client area but leaves the scrollbars to the
        system, which paints them light unless the window opts into the dark
        explorer theme. */
-    SetWindowTheme(hEdit, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    apply_explorer_theme(hEdit);
 
     if (g_editorDarkMode) {
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0xE6, 0xED, 0xF3));
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0x0D, 0x11, 0x17));
+        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, THEME_DARK_FG);
+        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, THEME_DARK_BG);
         SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0);
 
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x7D, 0x85, 0x90));
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0x16, 0x1B, 0x22));
+        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, THEME_DARK_BG);
 
         SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0x21, 0x26, 0x2D), 0);
-        SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0xE6, 0xED, 0xF3), 0);
+        SendMessageA(hEdit, SCI_SETCARETFORE, THEME_DARK_FG, 0);
         SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0x26, 0x4F, 0x78));
         SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0xFF, 0xFF, 0xFF));
 
@@ -1065,13 +1021,13 @@ static void apply_editor_theme(HWND hEdit) {
            0xFF000000 for fully opaque. Its scrollbar is a separate, system-
            drawn native listbox these colours don't reach - see
            theme_autocomplete_popup(), applied each time the popup is shown. */
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST, (LPARAM)(RGB(0xE6, 0xED, 0xF3) | 0xFF000000));
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK, (LPARAM)(RGB(0x0D, 0x11, 0x17) | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST, (LPARAM)(THEME_DARK_FG | 0xFF000000));
+        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK, (LPARAM)(THEME_DARK_BG | 0xFF000000));
         SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED, (LPARAM)(RGB(0xFF, 0xFF, 0xFF) | 0xFF000000));
         SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED_BACK, (LPARAM)(RGB(0x26, 0x4F, 0x78) | 0xFF000000));
     } else {
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0x1F, 0x23, 0x28));
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0xFF, 0xFF, 0xFF));
+        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, THEME_LIGHT_FG);
+        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, THEME_LIGHT_BG);
         SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0);
 
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x65, 0x6D, 0x76));
@@ -1091,8 +1047,8 @@ static void apply_editor_theme(HWND hEdit) {
     /* These follow SCI_STYLECLEARALL above, which resets every style. The
        gutter colours match STYLE_LINENUMBER so the margins read as one strip. */
     COLORREF faint = g_editorDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0xAF, 0xB8, 0xC1);
-    COLORREF gutter = g_editorDarkMode ? RGB(0x16, 0x1B, 0x22) : RGB(0xF6, 0xF8, 0xFA);
-    COLORREF text = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF gutter = g_editorDarkMode ? THEME_DARK_BG : RGB(0xF6, 0xF8, 0xFA);
+    COLORREF text = theme_fg_color();
 
     SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_INDENTGUIDE, (LPARAM)faint);
     SendMessageA(hEdit, SCI_SETWHITESPACEFORE, TRUE, (LPARAM)faint);
@@ -1135,7 +1091,7 @@ static void apply_editor_theme(HWND hEdit) {
    everywhere else in the app. Called from apply_editor_theme() after every
    SCI_STYLECLEARALL, since that resets every style back to STYLE_DEFAULT. */
 static void apply_markdown_lexer_styles(HWND hEdit) {
-    COLORREF text = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
+    COLORREF text = theme_fg_color();
     COLORREF heading = g_editorDarkMode ? RGB(0x79, 0xC0, 0xFF) : RGB(0x09, 0x69, 0xDA);
     COLORREF link = g_editorDarkMode ? RGB(0x58, 0xA6, 0xFF) : RGB(0x09, 0x69, 0xDA);
     COLORREF code = g_editorDarkMode ? RGB(0xFF, 0xA6, 0x57) : RGB(0xB3, 0x53, 0x00);
@@ -1586,9 +1542,8 @@ static void apply_webview_background_colour(void) {
     ICoreWebView2Controller_QueryInterface(g_webviewController, &IID_ICoreWebView2Controller2,
                                            (void **)&ctrl2);
     if (!ctrl2) return;
-    COREWEBVIEW2_COLOR bg = g_previewDarkMode
-        ? (COREWEBVIEW2_COLOR){255, 0x0D, 0x11, 0x17}
-        : (COREWEBVIEW2_COLOR){255, 0xFF, 0xFF, 0xFF};
+    COLORREF colour = preview_bg_color();
+    COREWEBVIEW2_COLOR bg = {255, GetRValue(colour), GetGValue(colour), GetBValue(colour)};
     ICoreWebView2Controller2_put_DefaultBackgroundColor(ctrl2, bg);
     ICoreWebView2Controller2_Release(ctrl2);
 }
@@ -1599,7 +1554,7 @@ static void apply_webview_background_colour(void) {
    has painted anything. */
 static void apply_preview_host_theme(void) {
     if (g_previewBkBrush) DeleteObject(g_previewBkBrush);
-    g_previewBkBrush = CreateSolidBrush(g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+    g_previewBkBrush = CreateSolidBrush(preview_bg_color());
     if (g_hPreview) InvalidateRect(g_hPreview, NULL, TRUE);
 }
 
@@ -1608,14 +1563,14 @@ static void apply_preview_host_theme(void) {
    strip and the splitter gap - everywhere else is covered by child windows). */
 static void apply_main_theme(HWND hwnd) {
     if (g_mainBkBrush) DeleteObject(g_mainBkBrush);
-    g_mainBkBrush = CreateSolidBrush(g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+    g_mainBkBrush = CreateSolidBrush(theme_bg_color());
     if (hwnd) InvalidateRect(hwnd, NULL, TRUE);
 
     /* The outline's own content is owner-drawn (see draw_themed_listbox_item()),
        but its scrollbar is still system-drawn and needs the same explorer
        dark-mode opt-in the editor gets in apply_editor_theme(). */
     if (g_hOutline) {
-        SetWindowTheme(g_hOutline, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        apply_explorer_theme(g_hOutline);
         InvalidateRect(g_hOutline, NULL, TRUE);
     }
     explorer_apply_theme();
@@ -1667,12 +1622,27 @@ static void erase_menu_bottom_seam(HWND hwnd) {
     HDC hdc = GetWindowDC(hwnd);
     if (!hdc) return;
     RECT lineRect = {lineX, lineY, lineX + lineWidth, lineY + 1};
-    HBRUSH brush = CreateSolidBrush(RGB(0x0D, 0x11, 0x17));
-    if (brush) {
-        FillRect(hdc, &lineRect, brush);
-        DeleteObject(brush);
-    }
+    fill_rect_color(hdc, &lineRect, THEME_DARK_BG);
     ReleaseDC(hwnd, hdc);
+}
+
+/* Dark/light title bar and border for any top-level window: the per-window
+   uxtheme opt-in, the DWM caption attribute (which DWM ignores until the
+   frame is told to repaint, hence the SWP_FRAMECHANGED nudge), and the
+   scrollbar/explorer theme. Used for the main window by apply_menu_theme()
+   below and on its own for the popup windows (Go to Line, the searchable
+   picker, the plain text prompt), which have no menu bar. */
+static void apply_popup_titlebar_theme(HWND hwnd, int dark) {
+    if (!hwnd) return;
+    if (g_allowDarkModeForWindow) g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
+    BOOL useDark = dark ? TRUE : FALSE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                      &useDark, sizeof(useDark))))
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                               &useDark, sizeof(useDark));
+    SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 /* Switches the menu bar, its dropdowns, and the window's title bar/border
@@ -1691,20 +1661,10 @@ static void apply_menu_theme(HWND hwnd, int dark) {
     if (g_flushMenuThemes)
         g_flushMenuThemes();
     if (hwnd) {
-        /* Non-client caption/border: DWM ignores this until the window is
-           told to repaint its frame, hence the SetWindowPos nudge below. */
-        BOOL useDark = dark ? TRUE : FALSE;
-        if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                          &useDark, sizeof(useDark))))
-            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
-                                   &useDark, sizeof(useDark));
-        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        apply_popup_titlebar_theme(hwnd, dark);
 
         if (g_menuBkBrush) DeleteObject(g_menuBkBrush);
-        g_menuBkBrush = CreateSolidBrush(dark
-            ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
-        SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        g_menuBkBrush = CreateSolidBrush(dark ? THEME_DARK_BG : THEME_LIGHT_BG);
         HMENU menu = GetMenu(hwnd);
         if (menu && g_menuBkBrush) {
             MENUINFO info = {0};
@@ -1719,34 +1679,6 @@ static void apply_menu_theme(HWND hwnd, int dark) {
     }
 }
 
-/* The DWM dark-caption/AllowDarkModeForWindow/SetWindowTheme portion of
-   apply_menu_theme() above, generic enough to reuse on the app's other
-   top-level popup windows (Go to Line, the searchable picker, the plain
-   text prompt) - those aren't the main window, so the menu-bar-specific
-   parts of apply_menu_theme() (DrawMenuBar, SetMenuInfo, the seam erase)
-   don't apply to them. */
-static void apply_popup_titlebar_theme(HWND hwnd, int dark) {
-    if (!hwnd) return;
-    if (g_allowDarkModeForWindow) g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
-    BOOL useDark = dark ? TRUE : FALSE;
-    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                      &useDark, sizeof(useDark))))
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
-                               &useDark, sizeof(useDark));
-    SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
-    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-}
-
-/* Shared background/text colors for the app's plain popup dialogs (Go to
-   Line, the searchable picker, the text-input prompt) - same GitHub
-   light/dark palette used everywhere else, so a themed popup doesn't read
-   as a different app from the window that opened it. */
-static COLORREF popup_bg_color(void) { return g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF); }
-static COLORREF popup_fg_color(void) { return g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28); }
-static COLORREF popup_border_color(void) { return g_editorDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE); }
-static COLORREF popup_accent_color(void) { return g_editorDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x09, 0x69, 0xDA); }
-
 /* Fills one splitter gap's rect with the border colour so it reads as a
    draggable divider instead of just more of the pane background on either
    side of it - shared by every splitter's WM_ERASEBKGND painting (main,
@@ -1754,9 +1686,7 @@ static COLORREF popup_accent_color(void) { return g_editorDarkMode ? RGB(0x38, 0
    currently shown" state) is a no-op. */
 static void paint_splitter_gap(HDC hdc, const RECT *rect) {
     if (rect->right <= rect->left || rect->bottom <= rect->top) return;
-    HBRUSH borderBrush = CreateSolidBrush(popup_border_color());
-    FillRect(hdc, rect, borderBrush);
-    DeleteObject(borderBrush);
+    fill_rect_color(hdc, rect, theme_border_color());
 }
 
 /* One shared background brush for whichever of these popup dialogs
@@ -1778,7 +1708,7 @@ static int g_popupThemeDepth = 0;
 static void popup_dialog_theme_created(HWND hwnd) {
     apply_popup_titlebar_theme(hwnd, g_editorDarkMode);
     if (g_popupBkBrush) DeleteObject(g_popupBkBrush);
-    g_popupBkBrush = CreateSolidBrush(popup_bg_color());
+    g_popupBkBrush = CreateSolidBrush(theme_bg_color());
 }
 
 /* Call once per popup window actually opened (WM_CREATE), paired with
@@ -1802,8 +1732,8 @@ static void popup_dialog_theme_destroyed(void) {
 static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis);
 static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis);
 
-/* Shared WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLORBTN/WM_CTLCOLOREDIT
-   handling for the popup dialogs below - factored out since they all need
+/* Shared WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLORBTN/WM_CTLCOLOREDIT/
+   WM_CTLCOLORLISTBOX handling for the popup dialogs below - factored out since they all need
    identical theming for their STATIC labels, EDIT fields, and checkbox/radio
    buttons. Returns the brush/TRUE the caller should return from its WndProc,
    or 0 if msg wasn't handled. */
@@ -1820,14 +1750,18 @@ static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LR
        radio labels stay stuck at the system default (near-black) in dark mode. */
     if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
         HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, popup_fg_color());
+        SetTextColor(hdc, theme_fg_color());
         SetBkMode(hdc, TRANSPARENT);
         return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
     }
-    if (msg == WM_CTLCOLOREDIT) {
+    /* Owner-drawn listboxes still ask for WM_CTLCOLORLISTBOX to paint
+       whatever their items don't cover - the blank area below the last row,
+       or the whole box when there are only a few rows - so without it that
+       space stays the default white regardless of theme. */
+    if (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX) {
         HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, popup_fg_color());
-        SetBkColor(hdc, popup_bg_color());
+        SetTextColor(hdc, theme_fg_color());
+        SetBkColor(hdc, theme_bg_color());
         return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
     }
     *handled = 0;
@@ -1841,13 +1775,11 @@ static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
     int pressed = (dis->itemState & ODS_SELECTED) != 0;
     int isDefault = (GetWindowLongW(dis->hwndItem, GWL_STYLE) & BS_DEFPUSHBUTTON) != 0;
     COLORREF fill = g_editorDarkMode
-        ? (pressed ? RGB(0x30, 0x36, 0x3D) : RGB(0x21, 0x26, 0x2D))
+        ? (pressed ? THEME_DARK_BORDER : THEME_DARK_BG)
         : (pressed ? RGB(0xE1, 0xE7, 0xEC) : RGB(0xF6, 0xF8, 0xFA));
-    HBRUSH fillBrush = CreateSolidBrush(fill);
-    FillRect(dis->hDC, &dis->rcItem, fillBrush);
-    DeleteObject(fillBrush);
+    fill_rect_color(dis->hDC, &dis->rcItem, fill);
 
-    HPEN pen = CreatePen(PS_SOLID, isDefault ? 2 : 1, isDefault ? popup_accent_color() : popup_border_color());
+    HPEN pen = CreatePen(PS_SOLID, isDefault ? 2 : 1, isDefault ? theme_accent_color() : theme_border_color());
     HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
     Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
@@ -1857,7 +1789,7 @@ static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
 
     WCHAR text[128];
     GetWindowTextW(dis->hwndItem, text, 128);
-    SetTextColor(dis->hDC, popup_fg_color());
+    SetTextColor(dis->hDC, theme_fg_color());
     SetBkMode(dis->hDC, TRANSPARENT);
     RECT textRect = dis->rcItem;
     DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2302,12 +2234,8 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         HDC dc = BeginPaint(hwnd, &ps);
         RECT client;
         GetClientRect(hwnd, &client);
-        COLORREF background = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-        COLORREF foreground = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
-        HBRUSH brush = CreateSolidBrush(background);
-        FillRect(dc, &client, brush);
-        DeleteObject(brush);
-        SetTextColor(dc, foreground);
+        fill_rect_color(dc, &client, theme_bg_color());
+        SetTextColor(dc, theme_fg_color());
         SetBkMode(dc, TRANSPARENT);
         for (int i = 0; i < 4; i++) {
             RECT partRect;
@@ -2325,28 +2253,33 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
-/* ---- recently opened files, most-recent-first, stored in the same INI ---- */
-static void load_recent_files(void) {
+/* ---- recently opened files and workspace folders, most-recent-first,
+   stored in the same INI. Both lists share one implementation; only the
+   backing array, its cap, and the INI section/key names differ. ---- */
+typedef struct {
+    WCHAR **items;
+    int *count;
+    int max;
+    const WCHAR *section;   /* e.g. L"RecentFiles" */
+    const WCHAR *keyPrefix; /* e.g. L"File" -> File0, File1, ... */
+} RecentList;
+
+static const RecentList g_recentFileList = {g_recentFiles, &g_recentFileCount, MAX_RECENT_FILES,
+                                            L"RecentFiles", L"File"};
+static const RecentList g_recentFolderList = {g_recentFolders, &g_recentFolderCount, MAX_RECENT_FOLDERS,
+                                              L"RecentFolders", L"Folder"};
+
+static void recent_list_load(const RecentList *list) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
-    g_recentFileCount = 0;
-    for (int i = 0; i < MAX_RECENT_FILES; i++) {
-        WCHAR key[16];
-        swprintf(key, 16, L"File%d", i);
-        DWORD cap = 512, n = 0;
-        WCHAR *value = NULL;
-        do {
-            free(value);
-            value = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
-            if (!value) break;
-            n = GetPrivateProfileStringW(L"RecentFiles", key, L"", value, cap, path);
-            if (n < cap - 1) break;
-            cap *= 2;
-        } while (cap <= 32768);
-        if (n == 0) { free(value); break; }
-        g_recentFiles[g_recentFileCount++] = value;
-        value = NULL;
+    for (int i = 0; i < *list->count; i++) free(list->items[i]);
+    *list->count = 0;
+    for (int i = 0; i < list->max; i++) {
+        WCHAR key[32];
+        swprintf(key, 32, L"%ls%d", list->keyPrefix, i);
+        WCHAR *value = read_profile_string(list->section, key, path);
+        if (!value) break;
+        list->items[(*list->count)++] = value;
     }
     free(path);
 }
@@ -2355,67 +2288,69 @@ static void load_recent_files(void) {
    read-modify-write pass, rather than the N+1 passes that clearing the
    section and then calling WritePrivateProfileStringW once per entry would
    cost - this runs on every single file open, so it isn't a one-off. */
-static void save_recent_files(void) {
+static void recent_list_save(const RecentList *list) {
     WCHAR *path = get_settings_path();
     if (!path) return;
+    size_t prefixLen = wcslen(list->keyPrefix);
     size_t cap = 1;
-    for (int i = 0; i < g_recentFileCount; i++) cap += 16 + wcslen(g_recentFiles[i]);
+    for (int i = 0; i < *list->count; i++) cap += prefixLen + 16 + wcslen(list->items[i]);
     WCHAR *section = (WCHAR *)malloc(cap * sizeof(WCHAR));
     if (section) {
         size_t pos = 0;
-        for (int i = 0; i < g_recentFileCount; i++) {
-            int written = swprintf(section + pos, cap - pos, L"File%d=%ls", i, g_recentFiles[i]);
+        for (int i = 0; i < *list->count; i++) {
+            int written = swprintf(section + pos, cap - pos, L"%ls%d=%ls", list->keyPrefix, i, list->items[i]);
             pos += (size_t)written + 1; /* step past the entry's own NUL */
         }
         section[pos] = 0; /* second, block-terminating NUL */
-        WritePrivateProfileSectionW(L"RecentFiles", g_recentFileCount ? section : NULL, path);
+        WritePrivateProfileSectionW(list->section, *list->count ? section : NULL, path);
         free(section);
     }
     free(path);
 }
 
-/* Move (or insert) path to the front of the recent-files list, deduping
-   case-insensitively (Windows paths), capping at MAX_RECENT_FILES. */
-static void add_recent_file(const WCHAR *path) {
+/* Move (or insert) path to the front of the list, deduping
+   case-insensitively (Windows paths), capping at list->max. */
+static void recent_list_add(const RecentList *list, const WCHAR *path) {
     WCHAR *copy = wcsdup_heap(path);
     if (!copy) return;
+    int count = *list->count;
     int existing = -1;
-    for (int i = 0; i < g_recentFileCount; i++) {
-        if (_wcsicmp(g_recentFiles[i], path) == 0) { existing = i; break; }
+    for (int i = 0; i < count; i++) {
+        if (_wcsicmp(list->items[i], path) == 0) { existing = i; break; }
     }
-    int start = (existing >= 0) ? existing : (g_recentFileCount < MAX_RECENT_FILES ? g_recentFileCount : MAX_RECENT_FILES - 1);
-    if (existing >= 0) free(g_recentFiles[existing]);
-    else if (g_recentFileCount == MAX_RECENT_FILES) free(g_recentFiles[MAX_RECENT_FILES - 1]);
+    int start = (existing >= 0) ? existing : (count < list->max ? count : list->max - 1);
+    if (existing >= 0) free(list->items[existing]);
+    else if (count == list->max) free(list->items[list->max - 1]);
     for (int i = start; i > 0; i--) {
-        g_recentFiles[i] = g_recentFiles[i - 1];
+        list->items[i] = list->items[i - 1];
     }
-    g_recentFiles[0] = copy;
-    if (existing < 0 && g_recentFileCount < MAX_RECENT_FILES) g_recentFileCount++;
-    save_recent_files();
+    list->items[0] = copy;
+    if (existing < 0 && count < list->max) (*list->count)++;
+    recent_list_save(list);
 }
 
-static void clear_recent_files(void) {
-    for (int i = 0; i < g_recentFileCount; i++) {
-        free(g_recentFiles[i]);
-        g_recentFiles[i] = NULL;
+static void recent_list_clear(const RecentList *list) {
+    for (int i = 0; i < *list->count; i++) {
+        free(list->items[i]);
+        list->items[i] = NULL;
     }
-    g_recentFileCount = 0;
-    save_recent_files();
+    *list->count = 0;
+    recent_list_save(list);
 }
 
-/* Remove path from the recent-files list (e.g. because it no longer exists
-   on disk) and persist the change. */
-static void remove_recent_file(const WCHAR *path) {
+/* Remove path from the list (e.g. because it no longer exists on disk) and
+   persist the change. */
+static void recent_list_remove(const RecentList *list, const WCHAR *path) {
     int idx = -1;
-    for (int i = 0; i < g_recentFileCount; i++) {
-        if (_wcsicmp(g_recentFiles[i], path) == 0) { idx = i; break; }
+    for (int i = 0; i < *list->count; i++) {
+        if (_wcsicmp(list->items[i], path) == 0) { idx = i; break; }
     }
     if (idx < 0) return;
-    free(g_recentFiles[idx]);
-    for (int i = idx; i < g_recentFileCount - 1; i++) g_recentFiles[i] = g_recentFiles[i + 1];
-    g_recentFileCount--;
-    g_recentFiles[g_recentFileCount] = NULL;
-    save_recent_files();
+    free(list->items[idx]);
+    for (int i = idx; i < *list->count - 1; i++) list->items[i] = list->items[i + 1];
+    (*list->count)--;
+    list->items[*list->count] = NULL;
+    recent_list_save(list);
 }
 
 /* Drop any recent-file entries whose file no longer exists on disk. Called
@@ -2428,117 +2363,18 @@ static void prune_missing_recent_files(void) {
         DWORD attrs = ioPath ? GetFileAttributesW(ioPath) : INVALID_FILE_ATTRIBUTES;
         free(ioPath);
         if (attrs == INVALID_FILE_ATTRIBUTES) {
-            remove_recent_file(g_recentFiles[i]);
+            recent_list_remove(&g_recentFileList, g_recentFiles[i]);
         } else {
             i++;
         }
     }
 }
 
-/* ---- recently opened workspace folders, same shape as recent files ---- */
-static void load_recent_folders(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    for (int i = 0; i < g_recentFolderCount; i++) free(g_recentFolders[i]);
-    g_recentFolderCount = 0;
-    for (int i = 0; i < MAX_RECENT_FOLDERS; i++) {
-        WCHAR key[16];
-        swprintf(key, 16, L"Folder%d", i);
-        DWORD cap = 512, n = 0;
-        WCHAR *value = NULL;
-        do {
-            free(value);
-            value = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
-            if (!value) break;
-            n = GetPrivateProfileStringW(L"RecentFolders", key, L"", value, cap, path);
-            if (n < cap - 1) break;
-            cap *= 2;
-        } while (cap <= 32768);
-        if (n == 0) { free(value); break; }
-        g_recentFolders[g_recentFolderCount++] = value;
-        value = NULL;
-    }
-    free(path);
-}
-
-/* See save_recent_files() - same one-pass-instead-of-N+1 rationale. */
-static void save_recent_folders(void) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    size_t cap = 1;
-    for (int i = 0; i < g_recentFolderCount; i++) cap += 16 + wcslen(g_recentFolders[i]);
-    WCHAR *section = (WCHAR *)malloc(cap * sizeof(WCHAR));
-    if (section) {
-        size_t pos = 0;
-        for (int i = 0; i < g_recentFolderCount; i++) {
-            int written = swprintf(section + pos, cap - pos, L"Folder%d=%ls", i, g_recentFolders[i]);
-            pos += (size_t)written + 1;
-        }
-        section[pos] = 0;
-        WritePrivateProfileSectionW(L"RecentFolders", g_recentFolderCount ? section : NULL, path);
-        free(section);
-    }
-    free(path);
-}
-
-/* Move (or insert) path to the front of the recent-folders list, deduping
-   case-insensitively, capping at MAX_RECENT_FOLDERS - mirrors add_recent_file(). */
-static void add_recent_folder(const WCHAR *path) {
-    WCHAR *copy = wcsdup_heap(path);
-    if (!copy) return;
-    int existing = -1;
-    for (int i = 0; i < g_recentFolderCount; i++) {
-        if (_wcsicmp(g_recentFolders[i], path) == 0) { existing = i; break; }
-    }
-    int start = (existing >= 0) ? existing : (g_recentFolderCount < MAX_RECENT_FOLDERS ? g_recentFolderCount : MAX_RECENT_FOLDERS - 1);
-    if (existing >= 0) free(g_recentFolders[existing]);
-    else if (g_recentFolderCount == MAX_RECENT_FOLDERS) free(g_recentFolders[MAX_RECENT_FOLDERS - 1]);
-    for (int i = start; i > 0; i--) {
-        g_recentFolders[i] = g_recentFolders[i - 1];
-    }
-    g_recentFolders[0] = copy;
-    if (existing < 0 && g_recentFolderCount < MAX_RECENT_FOLDERS) g_recentFolderCount++;
-    save_recent_folders();
-}
-
-static void clear_recent_folders(void) {
-    for (int i = 0; i < g_recentFolderCount; i++) {
-        free(g_recentFolders[i]);
-        g_recentFolders[i] = NULL;
-    }
-    g_recentFolderCount = 0;
-    save_recent_folders();
-}
-
-/* Remove path from the recent-folders list (e.g. because it no longer
-   exists on disk) and persist the change. */
-static void remove_recent_folder(const WCHAR *path) {
-    int idx = -1;
-    for (int i = 0; i < g_recentFolderCount; i++) {
-        if (_wcsicmp(g_recentFolders[i], path) == 0) { idx = i; break; }
-    }
-    if (idx < 0) return;
-    free(g_recentFolders[idx]);
-    for (int i = idx; i < g_recentFolderCount - 1; i++) g_recentFolders[i] = g_recentFolders[i + 1];
-    g_recentFolderCount--;
-    g_recentFolders[g_recentFolderCount] = NULL;
-    save_recent_folders();
-}
-
 static void load_workspace_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    DWORD cap = 512, n = 0;
-    WCHAR *value = NULL;
-    do {
-        free(value);
-        value = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
-        if (!value) break;
-        n = GetPrivateProfileStringW(L"Workspace", L"CurrentFolder", L"", value, cap, path);
-        if (n < cap - 1) break;
-        cap *= 2;
-    } while (cap <= 32768);
-    if (value && value[0]) replace_wstring(&g_currentWorkspaceFolder, value);
+    WCHAR *value = read_profile_string(L"Workspace", L"CurrentFolder", path);
+    if (value) replace_wstring(&g_currentWorkspaceFolder, value);
     free(value);
     free(path);
 }
@@ -2617,20 +2453,20 @@ static const char *HTML_SHELL =
 ".document-outline a:hover{text-decoration:underline;}"
 ".math-display{margin:1em 0;overflow-x:auto;overflow-y:hidden;text-align:center;}"
 ".math-display>.katex-display{margin:0;padding:.2em 0;}"
-".theme-dark,.theme-dark body{background:#0d1117;color:#e6edf3;color-scheme:dark;}"
-".theme-dark code{background:#161b22;color:#e6edf3;}"
-".theme-dark pre.codeblock{background:#161b22;}"
-".theme-dark .code-copy-button{border-color:#30363d;background:#21262d;color:#e6edf3;}"
+".theme-dark,.theme-dark body{background:#161b22;color:#e6edf3;color-scheme:dark;}"
+".theme-dark code{background:#21262d;color:#e6edf3;}"
+".theme-dark pre.codeblock{background:#21262d;}"
+".theme-dark .code-copy-button{border-color:#3d444d;background:#30363d;color:#e6edf3;}"
 ".theme-dark blockquote{border-left-color:#30363d;color:#8b949e;}"
 ".theme-dark hr{border-top-color:#30363d;}"
 ".theme-dark th,.theme-dark td{border-color:#30363d;}"
-".theme-dark th{background:#161b22;}"
+".theme-dark th{background:#21262d;}"
 ".theme-dark a{color:#58a6ff;}"
-".theme-dark .mermaid-wrap{border-color:#30363d;background:#0d1117;}"
-".theme-dark .mermaid-toolbar{background:rgba(13,17,23,0.9);border-color:#30363d;}"
-".theme-dark .mermaid-toolbar button{background:#161b22;color:#e6edf3;border-color:#30363d;}"
-".theme-dark .mermaid-toolbar button:hover{background:#21262d;}"
-".theme-dark .document-outline{border-color:#30363d;background:rgba(13,17,23,.96);box-shadow:0 3px 12px rgba(0,0,0,.45);}"
+".theme-dark .mermaid-wrap{border-color:#30363d;background:#161b22;}"
+".theme-dark .mermaid-toolbar{background:rgba(22,27,34,0.9);border-color:#30363d;}"
+".theme-dark .mermaid-toolbar button{background:#21262d;color:#e6edf3;border-color:#30363d;}"
+".theme-dark .mermaid-toolbar button:hover{background:#30363d;}"
+".theme-dark .document-outline{border-color:#30363d;background:rgba(22,27,34,.96);box-shadow:0 3px 12px rgba(0,0,0,.45);}"
 ".theme-dark .document-outline nav{border-color:#30363d;}"
 ".theme-dark .document-outline a{color:#58a6ff;}"
 ".theme-dark .markdown-body blockquote.markdown-alert{border-left-color:var(--alert-color);color:inherit;}"
@@ -3692,7 +3528,7 @@ static int load_file(const WCHAR *path) {
     free(ioPath);
     if (hFile == INVALID_HANDLE_VALUE) {
         MessageBoxW(g_hMainWnd, L"Could not open file.", L"MarkEdit", MB_OK | MB_ICONERROR);
-        remove_recent_file(path);
+        recent_list_remove(&g_recentFileList, path);
         refresh_menu(g_hMainWnd);
         free(displayPath);
         return 0;
@@ -3742,7 +3578,7 @@ static int load_file(const WCHAR *path) {
         update_document_mapping();
         update_preview();
         set_dirty(0);
-        add_recent_file(displayPath ? displayPath : path);
+        recent_list_add(&g_recentFileList, displayPath ? displayPath : path);
         refresh_menu(g_hMainWnd);
         ok = 1;
     } else {
@@ -3933,10 +3769,7 @@ static void do_insert_file(void) {
 
 static int is_image_file(const WCHAR *path) {
     const WCHAR *extension = PathFindExtensionW(path);
-    return extension && (_wcsicmp(extension, L".png") == 0 ||
-        _wcsicmp(extension, L".jpg") == 0 || _wcsicmp(extension, L".jpeg") == 0 ||
-        _wcsicmp(extension, L".gif") == 0 || _wcsicmp(extension, L".bmp") == 0 ||
-        _wcsicmp(extension, L".webp") == 0 || _wcsicmp(extension, L".svg") == 0);
+    return extension && extension_in_list(extension, L".png;.jpg;.jpeg;.gif;.bmp;.webp;.svg");
 }
 
 /* Create a collision-safe destination in an "images" folder next to the
@@ -4296,7 +4129,7 @@ static int save_to_path(const WCHAR *path) {
     }
     /* Record the path before replace_wstring(): when saving the current file,
        `path` may alias g_currentFile, which replace_wstring() can free. */
-    add_recent_file(displayPath ? displayPath : path);
+    recent_list_add(&g_recentFileList, displayPath ? displayPath : path);
     replace_wstring(&g_currentFile, displayPath ? displayPath : path);
     apply_document_language(g_hEdit, g_currentFile);
     if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
@@ -4871,7 +4704,7 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         /* Item content is owner-drawn (draw_themed_listbox_item), but the
            scrollbar itself is still system-drawn and needs the same
            explorer dark-mode opt-in the editor/outline scrollbars get. */
-        SetWindowTheme(state->list, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        apply_explorer_theme(state->list);
         refill_choice_list(state);
         SetFocus(state->edit);
         popup_dialog_theme_opened(hwnd);
@@ -4879,22 +4712,11 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
     switch (msg) {
-        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: {
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: {
             LRESULT handled = 0;
             LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
             if (handled) return result;
             break;
-        }
-        /* The results listbox owner-draws its items (WM_DRAWITEM below), but
-           Windows still asks for this to paint whatever the items don't
-           cover - the blank area below the last row, or the whole box when
-           there are only a few results - so without it that space stays the
-           default white regardless of theme. */
-        case WM_CTLCOLORLISTBOX: {
-            HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, popup_fg_color());
-            SetBkColor(hdc, popup_bg_color());
-            return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
         }
         case WM_MEASUREITEM: {
             MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
@@ -5170,7 +4992,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             412, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             496, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
-        SetWindowTheme(state->list, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        apply_explorer_theme(state->list);
         SetWindowSubclass(state->list, ReplaceListSubclassProc, 1, (DWORD_PTR)state);
         refill_replace_list(state);
         SetFocus(state->list);
@@ -5179,17 +5001,11 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
     switch (msg) {
-        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: {
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: {
             LRESULT handled = 0;
             LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
             if (handled) return result;
             break;
-        }
-        case WM_CTLCOLORLISTBOX: {
-            HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, popup_fg_color());
-            SetBkColor(hdc, popup_bg_color());
-            return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
         }
         case WM_MEASUREITEM: {
             MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
@@ -5609,15 +5425,13 @@ static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
 
     int active = (dis->itemState & (ODS_SELECTED | ODS_HOTLIGHT)) != 0;
     COLORREF background = g_editorDarkMode
-        ? (active ? RGB(0x21, 0x26, 0x2D) : RGB(0x0D, 0x11, 0x17))
-        : (active ? RGB(0xE8, 0xEC, 0xF1) : RGB(0xFF, 0xFF, 0xFF));
+        ? (active ? RGB(0x21, 0x26, 0x2D) : THEME_DARK_BG)
+        : (active ? RGB(0xE8, 0xEC, 0xF1) : THEME_LIGHT_BG);
     COLORREF foreground = (dis->itemState & (ODS_DISABLED | ODS_GRAYED))
         ? (g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x65, 0x6D, 0x76))
-        : (g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28));
+        : theme_fg_color();
 
-    HBRUSH brush = CreateSolidBrush(background);
-    FillRect(dis->hDC, &dis->rcItem, brush);
-    DeleteObject(brush);
+    fill_rect_color(dis->hDC, &dis->rcItem, background);
 
     int oldBkMode = SetBkMode(dis->hDC, TRANSPARENT);
     COLORREF oldText = SetTextColor(dis->hDC, foreground);
@@ -5997,14 +5811,14 @@ static HWND g_hToolbarButtons[TOOLBAR_BUTTON_COUNT];
 static HWND g_hToolbarTooltip;
 
 /* Recolors the toolbar buttons' shared tooltip to match the current app
-   theme (same GitHub light/dark palette as popup_bg_color()/popup_fg_color()).
+   theme (same GitHub light/dark palette as theme_bg_color()/theme_fg_color()).
    Visual styles are switched off for this control in create_toolbar() below,
    since themed tooltips ignore TTM_SETTIPBKCOLOR/TTM_SETTIPTEXTCOLOR and
    would otherwise stay the OS's light tooltip colors even in dark mode. */
 static void apply_toolbar_tooltip_theme(void) {
     if (!g_hToolbarTooltip) return;
-    SendMessageW(g_hToolbarTooltip, TTM_SETTIPBKCOLOR, (WPARAM)popup_bg_color(), 0);
-    SendMessageW(g_hToolbarTooltip, TTM_SETTIPTEXTCOLOR, (WPARAM)popup_fg_color(), 0);
+    SendMessageW(g_hToolbarTooltip, TTM_SETTIPBKCOLOR, (WPARAM)theme_bg_color(), 0);
+    SendMessageW(g_hToolbarTooltip, TTM_SETTIPTEXTCOLOR, (WPARAM)theme_fg_color(), 0);
 }
 
 static void create_toolbar(HWND hwnd) {
@@ -6057,16 +5871,11 @@ static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
     }
     if (index < 0 || !TOOLBAR_BUTTONS[index].paint) return;
 
-    COLORREF bg = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-    COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
-    COLORREF pressedBg = g_editorDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xE1, 0xE7, 0xEC);
+    COLORREF fg = theme_fg_color();
+    COLORREF pressedBg = g_editorDarkMode ? THEME_DARK_BORDER : RGB(0xE1, 0xE7, 0xEC);
 
     int pressed = (dis->itemState & ODS_SELECTED) != 0;
-    COLORREF fillColor = pressed ? pressedBg : bg;
-
-    HBRUSH fillBrush = CreateSolidBrush(fillColor);
-    FillRect(dis->hDC, &dis->rcItem, fillBrush);
-    DeleteObject(fillBrush);
+    fill_rect_color(dis->hDC, &dis->rcItem, pressed ? pressedBg : theme_bg_color());
 
     if (dis->itemState & ODS_FOCUS) {
         HPEN focusPen = CreatePen(PS_SOLID, 1, fg);
@@ -6194,9 +6003,12 @@ static void layout(HWND hwnd) {
                          MulDiv(510, w > 0 ? GetDpiForWindow(hwnd) : 96, 96), -1 };
         SendMessageW(g_hStatus, SB_SETPARTS, 4, (LPARAM)parts);
         /* StatusSubclassProc paints from these part rectangles via
-           SB_GETRECT, so a resize needs a repaint to match the new sizes -
-           including once at startup, right after the parts are first set. */
-        update_status_bar();
+           SB_GETRECT, so a resize needs a repaint to match the new sizes.
+           Resizing can't change the text, so the full-document word count
+           only runs the first time (before any part text exists), not on
+           every WM_SIZE or splitter-drag mouse move. */
+        if (g_statusPartText[1][0]) InvalidateRect(g_hStatus, NULL, FALSE);
+        else update_status_bar();
         h -= statusHeight;
     }
 
@@ -6589,7 +6401,7 @@ static void theme_autocomplete_popup(void) {
     if (!popup) return;
     apply_popup_titlebar_theme(popup, g_editorDarkMode);
     HWND list = GetWindow(popup, GW_CHILD);
-    if (list) SetWindowTheme(list, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    if (list) apply_explorer_theme(list);
 }
 
 /* Plain word completion, not lexer/keyword-driven (see the AutoC setup in
@@ -6896,13 +6708,10 @@ typedef enum DebugSourceKind {
 static DebugSourceKind debug_source_kind(const WCHAR *path) {
     const WCHAR *extension = path ? PathFindExtensionW(path) : NULL;
     if (!extension) return DEBUG_SOURCE_NONE;
-    if (_wcsicmp(extension, L".py") == 0 || _wcsicmp(extension, L".pyw") == 0)
-        return DEBUG_SOURCE_PYTHON;
-    if (_wcsicmp(extension, L".c") == 0) return DEBUG_SOURCE_C;
-    if (_wcsicmp(extension, L".cc") == 0 || _wcsicmp(extension, L".cpp") == 0 ||
-        _wcsicmp(extension, L".cxx") == 0)
-        return DEBUG_SOURCE_CPP;
-    if (_wcsicmp(extension, L".lua") == 0) return DEBUG_SOURCE_LUA;
+    if (extension_in_list(extension, L".py;.pyw")) return DEBUG_SOURCE_PYTHON;
+    if (extension_in_list(extension, L".c")) return DEBUG_SOURCE_C;
+    if (extension_in_list(extension, L".cc;.cpp;.cxx")) return DEBUG_SOURCE_CPP;
+    if (extension_in_list(extension, L".lua")) return DEBUG_SOURCE_LUA;
     return DEBUG_SOURCE_NONE;
 }
 
@@ -8290,7 +8099,11 @@ static void update_outline(void) {
     if (!g_hOutline) return;
     SendMessageW(g_hOutline, LB_RESETCONTENT, 0, 0);
     g_outlineCount = 0;
-    if (g_activeLanguage != LANG_MARKDOWN) return;
+    /* The list is only read back by clicks on it, and toggle_outline()
+       rebuilds it when the pane is shown, so a hidden pane skips the scan. */
+    if (!g_outlineVisible || g_activeLanguage != LANG_MARKDOWN) return;
+    /* Suspend repainting so re-adding every heading doesn't flicker. */
+    SendMessageW(g_hOutline, WM_SETREDRAW, FALSE, 0);
     int lines = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     for (int lineNumber = 0; lineNumber < lines && g_outlineCount < 1024; lineNumber++) {
         int linePosition = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
@@ -8328,6 +8141,8 @@ static void update_outline(void) {
         }
         free(line);
     }
+    SendMessageW(g_hOutline, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_hOutline, NULL, TRUE);
 }
 
 static void toggle_outline(HWND hwnd) {
@@ -9248,7 +9063,7 @@ static void do_quick_open(void) {
    deliberately not part of this, since only that one caller needs it). */
 static void adopt_workspace_folder(HWND hwnd, const WCHAR *root) {
     replace_wstring(&g_currentWorkspaceFolder, root);
-    add_recent_folder(root);
+    recent_list_add(&g_recentFolderList, root);
     save_workspace_settings();
     refresh_menu(hwnd);
     if (g_explorerVisible) explorer_set_root(g_currentWorkspaceFolder);
@@ -9273,7 +9088,7 @@ static void do_open_recent_workspace(int index) {
     if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
         MessageBoxW(g_hMainWnd, L"That folder could not be found.", L"MarkEdit",
                     MB_OK | MB_ICONINFORMATION);
-        remove_recent_folder(root);
+        recent_list_remove(&g_recentFolderList, root);
         refresh_menu(g_hMainWnd);
         free(root);
         return;
@@ -10053,7 +9868,7 @@ static void update_settings_category(SettingsDialogState *state) {
    repaint with the new colors instead of leaving stale ones on screen. */
 static void refresh_settings_dialog_theme(HWND hwnd, SettingsDialogState *state) {
     popup_dialog_theme_created(hwnd);
-    SetWindowTheme(state->categoryList, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    apply_explorer_theme(state->categoryList);
     /* Checkboxes/radios stay unthemed (see the WM_CREATE block below for why);
        nothing to redo here since that opt-out doesn't depend on light/dark. */
     RedrawWindow(hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
@@ -10071,7 +9886,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
             12, 12, 140, 300, hwnd, (HMENU)10, inst, NULL);
         for (int i = 0; i < 6; i++) SendMessageW(state->categoryList, LB_ADDSTRING, 0, (LPARAM)categories[i]);
-        SetWindowTheme(state->categoryList, g_editorDarkMode ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        apply_explorer_theme(state->categoryList);
 
         int px = 168, py = 16;
         state->themeLightRadio = CreateWindowExW(0, L"BUTTON", L"Light",
@@ -10231,17 +10046,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
     switch (msg) {
-        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORBTN: {
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORBTN:
+        case WM_CTLCOLORLISTBOX: {
             LRESULT handled = 0;
             LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
             if (handled) return result;
             break;
-        }
-        case WM_CTLCOLORLISTBOX: {
-            HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, popup_fg_color());
-            SetBkColor(hdc, popup_bg_color());
-            return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
         }
         case WM_MEASUREITEM: {
             MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
@@ -10387,7 +10197,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_REPLACE_WORKSPACE: do_replace_in_workspace(); break;
         case IDM_OPEN_WORKSPACE: do_open_workspace(); break;
         case IDM_RECENT_WORKSPACE_CLEAR:
-            clear_recent_folders();
+            recent_list_clear(&g_recentFolderList);
             refresh_menu(hwnd);
             break;
         case IDM_FILE_SAVE: do_save(); break;
@@ -10402,7 +10212,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_FILE_REOPEN_CLOSED: do_reopen_closed_tab(); break;
         case IDM_FILE_GO_BACK: go_wiki_back(); break;
         case IDM_FILE_RECENT_CLEAR:
-            clear_recent_files();
+            recent_list_clear(&g_recentFileList);
             refresh_menu(hwnd);
             break;
         case IDM_SETTINGS: show_settings_dialog(); break;
@@ -10551,17 +10361,13 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
     int index = (int)dis->itemID;
     if (index < 0 || index >= g_documentCount) return;
     int selected = TabCtrl_GetCurSel(g_hTabs) == index;
-    COLORREF bg = g_editorDarkMode
-        ? (selected ? RGB(0x0D, 0x11, 0x17) : RGB(0x16, 0x1B, 0x22))
-        : (selected ? RGB(0xFF, 0xFF, 0xFF) : RGB(0xF0, 0xF3, 0xF6));
+    COLORREF bg = g_editorDarkMode ? THEME_DARK_BG
+        : (selected ? THEME_LIGHT_BG : RGB(0xF0, 0xF3, 0xF6));
     COLORREF fg = g_editorDarkMode
         ? (selected ? RGB(0xF0, 0xF6, 0xFC) : RGB(0xB1, 0xBA, 0xC4))
-        : RGB(0x1F, 0x23, 0x28);
-    COLORREF border = g_editorDarkMode ? RGB(0x30, 0x36, 0x3D) : RGB(0xD0, 0xD7, 0xDE);
-    HBRUSH brush = CreateSolidBrush(bg);
-    FillRect(dis->hDC, &dis->rcItem, brush);
-    DeleteObject(brush);
-    HPEN borderPen = CreatePen(PS_SOLID, 1, border);
+        : THEME_LIGHT_FG;
+    fill_rect_color(dis->hDC, &dis->rcItem, bg);
+    HPEN borderPen = CreatePen(PS_SOLID, 1, theme_border_color());
     HPEN oldPen = (HPEN)SelectObject(dis->hDC, borderPen);
     MoveToEx(dis->hDC, dis->rcItem.right - 1, dis->rcItem.top + 2, NULL);
     LineTo(dis->hDC, dis->rcItem.right - 1, dis->rcItem.bottom - 2);
@@ -10639,12 +10445,10 @@ static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis) {
     if ((int)dis->itemID < 0) return;
     int selected = (dis->itemState & ODS_SELECTED) != 0;
     COLORREF bg = g_editorDarkMode
-        ? (selected ? RGB(0x26, 0x4F, 0x78) : RGB(0x0D, 0x11, 0x17))
-        : (selected ? RGB(0xB6, 0xD7, 0xFF) : RGB(0xFF, 0xFF, 0xFF));
-    COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
-    HBRUSH brush = CreateSolidBrush(bg);
-    FillRect(dis->hDC, &dis->rcItem, brush);
-    DeleteObject(brush);
+        ? (selected ? RGB(0x26, 0x4F, 0x78) : THEME_DARK_BG)
+        : (selected ? RGB(0xB6, 0xD7, 0xFF) : THEME_LIGHT_BG);
+    COLORREF fg = theme_fg_color();
+    fill_rect_color(dis->hDC, &dis->rcItem, bg);
 
     /* LB_GETTEXT overflows whatever buffer it's given rather than truncating
        to it, so the buffer has to be sized from LB_GETTEXTLEN first - a
@@ -11326,10 +11130,7 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
         /* The recessed strip behind the tabs, matching the editor's
            line-number gutter immediately below it. */
-        HBRUSH brush = CreateSolidBrush(g_editorDarkMode
-            ? RGB(0x16, 0x1B, 0x22) : RGB(0xF6, 0xF8, 0xFA));
-        FillRect(buffer, &client, brush);
-        DeleteObject(brush);
+        fill_rect_color(buffer, &client, g_editorDarkMode ? THEME_DARK_BG : RGB(0xF6, 0xF8, 0xFA));
 
         int selected = TabCtrl_GetCurSel(hwnd);
         for (int i = 0; i < g_documentCount; i++) {
@@ -11581,7 +11382,12 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
        snapshot, silently losing track of real unsaved edits). */
     if (!g_switchingDocument && !g_dirty) set_dirty(1);
     if (!g_switchingDocument) g_recoverySnapshotStale = 1;
-    if (g_previewVisible) SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
+    /* Only a Markdown render depends on the unsaved text: an HTML preview
+       shows the saved file (refreshed from save_to_path()), and every other
+       language shows a fixed message, so re-rendering those after each pause
+       in typing would just reload the same thing. */
+    if (g_previewVisible && g_activeLanguage == LANG_MARKDOWN)
+        SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
     schedule_spell_check();
     /* update_status_bar() does a full-document SCI_GETTEXT copy plus an O(n)
        word-count scan - too costly to run on every single keystroke.
@@ -11663,10 +11469,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CTLCOLORSTATIC: {
             if ((HWND)lParam == g_hPreview && g_previewBkBrush) {
                 HDC hdcStatic = (HDC)wParam;
-                COLORREF bk = g_previewDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-                COLORREF fg = g_previewDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x00, 0x00, 0x00);
-                SetBkColor(hdcStatic, bk);
-                SetTextColor(hdcStatic, fg);
+                SetBkColor(hdcStatic, preview_bg_color());
+                SetTextColor(hdcStatic, g_previewDarkMode ? THEME_DARK_FG : RGB(0x00, 0x00, 0x00));
                 return (LRESULT)g_previewBkBrush;
             }
             break;
@@ -11679,10 +11483,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CTLCOLORLISTBOX: {
             if ((HWND)lParam == g_hOutline && g_mainBkBrush) {
                 HDC hdcList = (HDC)wParam;
-                COLORREF bk = g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF);
-                COLORREF fg = g_editorDarkMode ? RGB(0xE6, 0xED, 0xF3) : RGB(0x1F, 0x23, 0x28);
-                SetBkColor(hdcList, bk);
-                SetTextColor(hdcList, fg);
+                SetBkColor(hdcList, theme_bg_color());
+                SetTextColor(hdcList, theme_fg_color());
                 return (LRESULT)g_mainBkBrush;
             }
             break;
@@ -11724,9 +11526,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
            strip's margins and the splitter gap. */
         case WM_ERASEBKGND: {
             /* The class has no background brush, so this must always paint. */
-            if (!g_mainBkBrush)
-                g_mainBkBrush = CreateSolidBrush(
-                    g_editorDarkMode ? RGB(0x0D, 0x11, 0x17) : RGB(0xFF, 0xFF, 0xFF));
+            if (!g_mainBkBrush) g_mainBkBrush = CreateSolidBrush(theme_bg_color());
             RECT rc;
             GetClientRect(hwnd, &rc);
             FillRect((HDC)wParam, &rc, g_mainBkBrush);
@@ -11982,9 +11782,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_previewVisible = 0;
         g_editorVisible = 1;
     }
-    load_recent_files();
+    recent_list_load(&g_recentFileList);
     prune_missing_recent_files();
-    load_recent_folders();
+    recent_list_load(&g_recentFolderList);
     load_workspace_settings();
 
     HRESULT comResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
