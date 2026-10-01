@@ -6,4 +6,7 @@
    documents. Kept read-only-ish by being untitled - saving prompts for a path. */
 const char *help_reference_markdown(void);
 
+/* Help > Keyboard Shortcuts, shown the same way as the reference above. */
+const char *help_shortcuts_markdown(void);
+
 #endif

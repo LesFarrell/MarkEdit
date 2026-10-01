@@ -6,3 +6,4 @@ markdown.c
 settings.c
 help_reference.c
 file_explorer.c
+toolbar_icons.c

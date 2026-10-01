@@ -13,9 +13,14 @@ extern "C" {
   typedef char bool;
 #endif
 
+/* MarkEdit: upstream generates this file per compiler with CMake; the
+   vendored copy is shared by the GCC/Clang/Zig and MSVC builds, so the two
+   GNU-only features are detected here instead of hard-coded on. */
+#if defined(__GNUC__) || defined(__clang__)
 #define HAVE___BUILTIN_EXPECT
 
 #define HAVE___ATTRIBUTE__
+#endif
 
 #ifdef HAVE___ATTRIBUTE__
   #define CMARK_ATTRIBUTE(list) __attribute__ (list)

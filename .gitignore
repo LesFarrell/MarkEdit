@@ -5,13 +5,12 @@ markedit.res
 tests/test_parser.exe
 tests/test_parser.pdb
 /dist/
+/dist.previous/
 /dest/
 /Scintilla.dll
 /WebView2Loader.dll
-/Lexilla.dll
 /Lexilla.lib
 /Lexilla.pdb
-/libLexilla.dll.a
 
 # Lexilla is linked straight into markedit.exe (see build.bat); its sources
 # are compiled to same-named .o files in the project root before linking.
@@ -19,6 +18,7 @@ tests/test_parser.pdb
 # because Lexilla.cxx unconditionally __declspec(dllexport)s its API even
 # when compiled into an exe rather than a DLL.
 /*.o
+/lexilla-objects.rsp
 /markedit.lib
 
 # premake5-generated Makefiles (premake5.lua is the checked-in source)
@@ -27,7 +27,8 @@ tests/test_parser.pdb
 # Inno Setup's default output directory (markedit.iss is the checked-in source)
 /Output/
 
-# Runtime-generated WebView2 browser profile/cache
+# WebView2 browser profile/cache that builds before it moved to
+# %LOCALAPPDATA%\MarkEdit\WebView2 created beside markedit.exe
 webview2_data/
 
 # User settings persisted at runtime
@@ -48,4 +49,3 @@ third_party/scintilla/bin/*
 third_party/webview2/x64/WebView2LoaderStatic.lib
 .claude/settings.json
 .claude/
-third_party/

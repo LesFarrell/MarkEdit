@@ -1,13 +1,22 @@
 -- Premake5 script for MarkEdit.
--- Alternative to the Zig-based build.bat / test.bat scripts, using a native
--- MinGW-w64 GCC toolchain.
--- Generate Makefiles with:  premake5 gmake
--- Then build with:          make config=release_x64
--- (builds markedit.exe, statically linking Lexilla, and test_parser).
+-- Alternative to the Zig-based build.bat / test.bat scripts, for three
+-- toolchains (builds markedit.exe, statically linking Lexilla, and
+-- test_parser, then stages dist/ the same way build.bat does):
 --
--- premake5 --help for other actions (e.g. `premake5 vs2022`), but this
--- project's headers/libs are laid out for MinGW-w64-compatible toolchains, so
--- gmake is the supported Premake action.
+--   MinGW-w64 GCC:  premake5 gmake          then  make -C build config=release_x64
+--   Zig:            premake5 --zig gmake    then  make -C build config=release_x64
+--   MSVC:           premake5 vs2022         then  build build/MarkEdit.sln
+--                   (or any later vs20xx action Premake supports)
+--
+-- The gmake builds need GNU make running its recipes under a POSIX sh (as
+-- w64devkit or MSYS2 provide): the post-build staging uses cp/mkdir. --zig
+-- needs only zig on PATH besides make - zig cc / zig c++ / zig ar / zig rc
+-- stand in for the whole GCC toolchain, including windres.
+
+newoption {
+    trigger = "zig",
+    description = "With gmake: compile and link with zig cc / zig c++ instead of GCC",
+}
 
 workspace "MarkEdit"
     configurations { "Release" }
@@ -17,7 +26,19 @@ workspace "MarkEdit"
     filter "platforms:x64"
         architecture "x86_64"
 
-    filter "toolset:gcc"
+    -- Premake has no Zig toolset; its Clang one generates the right flags
+    -- (zig cc is Clang), and these override the compiler commands it names.
+    -- `override` beats both the makefile's own defaults and the make command
+    -- line, so the build can't silently fall back to a system clang/gcc.
+    filter "options:zig"
+        toolset "clang"
+        makesettings {
+            "override CC = zig cc",
+            "override CXX = zig c++",
+            "override AR = zig ar",
+        }
+
+    filter "toolset:gcc or clang"
         buildoptions {
             "-ffunction-sections",
             "-fdata-sections",
@@ -27,6 +48,16 @@ workspace "MarkEdit"
             "-fmerge-all-constants",
         }
         linkoptions { "-Wl,--gc-sections", "-Wl,--strip-all", "-Wl,--build-id=none" }
+
+    filter "toolset:msc"
+        -- The sources are UTF-8 (wide literals such as L"—"); without
+        -- /utf-8, MSVC reads them in the system code page and miscompiles
+        -- every non-ASCII literal.
+        buildoptions { "/utf-8" }
+        defines { "_CRT_SECURE_NO_WARNINGS" }
+        -- The GCC/Zig builds don't define UNICODE either; WinMain and the
+        -- ...A/...W API calls are written for that.
+        characterset "ASCII"
     filter {}
 
 CMARK_GFM_DIR = "third_party/cmark-gfm"
@@ -75,9 +106,80 @@ function cmark_gfm_settings()
     files(CMARK_GFM_SOURCES)
     includedirs { CMARK_GFM_DIR.."/src", CMARK_GFM_DIR.."/extensions" }
     defines { "CMARK_GFM_STATIC_DEFINE", "CMARK_GFM_EXTENSIONS_STATIC_DEFINE" }
-    filter "toolset:gcc"
+    filter "toolset:gcc or clang"
         buildoptions { "-Wno-unused-parameter" }
+    filter "toolset:msc"
+        disablewarnings { "4100" } -- unreferenced parameter, as -Wno-unused-parameter
     filter {}
+end
+
+-- ---- dist/ staging, mirroring build.bat (same file list, same
+-- third_party/<component> licence/version layout), so every build path
+-- produces a complete, ready-to-run folder. Unlike build.bat this doesn't
+-- wipe dist/ first - it only adds or overwrites, so a stale file from a
+-- since-removed dependency could linger; that tradeoff matches this
+-- script's role as the lighter-weight alternative to build.bat.
+-- All paths are relative to the repo root.
+DIST_FILES = {
+    "markedit.exe", "Scintilla.dll", "WebView2Loader.dll",
+    "preview_shell.html", "github-markdown.css", "mermaid.min.js", "highlight.min.js",
+    "highlight-powershell.min.js", "highlight-github.min.css", "highlight-github-dark.min.css",
+    "LICENSE", "THIRD_PARTY_NOTICES.md",
+}
+DIST_LICENCES = {
+    ["cmark-gfm"]   = { CMARK_GFM_DIR.."/COPYING" },
+    ["highlightjs"] = { "third_party/highlightjs/LICENSE", "third_party/highlightjs/VERSION.txt" },
+    ["katex"]       = { "third_party/katex/LICENSE", "third_party/katex/VERSION.txt" },
+    ["lexilla"]     = { LEXILLA_DIR.."/License.txt", LEXILLA_DIR.."/version.txt" },
+    ["scintilla"]   = { SCINTILLA_DIR.."/License.txt", SCINTILLA_DIR.."/version.txt" },
+    ["webview2"]    = { WEBVIEW2_DIR.."/LICENSE.txt" },
+}
+-- The two runtime DLLs are copied next to markedit.exe first, so the build
+-- runs in place as well as from dist/.
+RUNTIME_DLLS = { WEBVIEW2_DIR.."/x64/WebView2Loader.dll", SCINTILLA_DIR.."/bin/Scintilla.dll" }
+
+-- Post-build commands run with cwd = the build/ directory (where both the
+-- makefiles and the Visual Studio projects live), so every repo path is
+-- prefixed with "../". {COPYFILE} and friends aren't used: their expansion
+-- follows the host shell, which for gmake on Windows is cmd syntax even when
+-- make runs its recipes under sh. Each generator is spelled out instead.
+local function staging_commands(posix)
+    local commands = {}
+    local function at(path)
+        path = "../"..path
+        return posix and path or path:gsub("/", "\\")
+    end
+    local function copy(source, destination)
+        if posix then
+            table.insert(commands, "cp -f "..at(source).." "..at(destination))
+        else
+            table.insert(commands, 'copy /Y "'..at(source)..'" "'..at(destination)..'" >nul')
+        end
+    end
+    local function mkdir(path)
+        if posix then
+            table.insert(commands, "mkdir -p "..at(path))
+        else
+            table.insert(commands, 'if not exist "'..at(path)..'" mkdir "'..at(path)..'"')
+        end
+    end
+
+    for _, dll in ipairs(RUNTIME_DLLS) do copy(dll, "") end
+    mkdir("dist/katex")
+    for _, file in ipairs(DIST_FILES) do copy(file, "dist/") end
+    if posix then
+        table.insert(commands, "cp -rf "..at("katex").."/. "..at("dist/katex").."/")
+    else
+        table.insert(commands, 'xcopy /E /I /Y /Q "'..at("katex")..'" "'..at("dist/katex")..'" >nul')
+    end
+    local components = {}
+    for component in pairs(DIST_LICENCES) do table.insert(components, component) end
+    table.sort(components) -- a stable command order from run to run
+    for _, component in ipairs(components) do
+        mkdir("dist/third_party/"..component)
+        for _, licence in ipairs(DIST_LICENCES[component]) do copy(licence, "dist/third_party/"..component.."/") end
+    end
+    return commands
 end
 
 -- Trimmed down from Lexilla's full catalogue to the languages supported by
@@ -119,7 +221,7 @@ project "lexilla"
     defines { "NDEBUG" }
     optimize "Size"
 
-    filter "toolset:gcc"
+    filter "toolset:gcc or clang"
         buildoptions { "-fno-exceptions", "-fno-rtti" }
     filter {}
 
@@ -141,6 +243,7 @@ project "markedit"
         "help_reference.c", "help_reference.h",
         "file_explorer.c", "file_explorer.h",
         "toolbar_icons.c", "toolbar_icons.h",
+        "theme.h",
         "markedit.rc",
     }
     cmark_gfm_settings()
@@ -152,14 +255,16 @@ project "markedit"
     filter "files:not **.rc"
         externalincludedirs { WEBVIEW2_DIR.."/include", SCINTILLA_DIR.."/include", LEXILLA_DIR.."/include" }
     filter {}
-    libdirs { WEBVIEW2_DIR.."/x64", "." }
-        links { "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "windowscodecs", "uxtheme", "dwmapi", "Lexilla" }
-    dependson { "lexilla" }
+    libdirs { WEBVIEW2_DIR.."/x64" }
+    -- The project name, not its "Lexilla" target name, so Premake treats it as
+    -- the sibling project above: it links that project's output wherever it
+    -- was built and orders the build after it, for both make and Visual Studio.
+    links { "lexilla", "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "windowscodecs", "uxtheme", "dwmapi" }
 
     warnings "Extra"
     optimize "Size"
 
-    filter "toolset:gcc"
+    filter "toolset:gcc or clang"
         buildoptions { "-Wno-unknown-pragmas" }
         -- WebView2Loader.dll.lib rather than WebView2LoaderStatic.lib: the
         -- static loader is MSVC-ABI-only (MSVC name mangling, /GS stack-
@@ -167,43 +272,33 @@ project "markedit"
         -- into this GNU/MinGW toolchain's output - the dynamic loader's DLL
         -- boundary is plain C, so it's the only ABI-compatible option here.
         -- This vendor import library is named WebView2Loader.dll.lib rather
-        -- than libWebView2Loader.a, so pass its path directly to GNU ld.
+        -- than libWebView2Loader.a, so pass its path directly to the linker.
         linkoptions { "../"..WEBVIEW2_DIR.."/x64/WebView2Loader.dll.lib" }
-    filter {}
+        postbuildcommands(staging_commands(true))
+    -- Lexilla is C++, but this project links with the C driver; name each
+    -- toolchain's C++ runtime explicitly.
+    filter "toolset:gcc"
+        links { "stdc++" }
+    filter "options:zig"
+        links { "c++" }
+        -- Zig has no windres for the gmake resource rule; zig rc compiles
+        -- the script to a .res that lld links directly (as build.bat does).
+        removefiles { "markedit.rc" }
+        prebuildcommands { "zig rc ../markedit.rc markedit.res" }
+        linkoptions { "markedit.res" }
 
-    -- {COPY}'s generated `IF EXIST (...) ELSE (...)` batch syntax only runs
-    -- under cmd.exe; this project's gmake2 build runs under the MinGW/
-    -- w64devkit sh, so copy with a plain POSIX cp instead. Postbuild commands
-    -- run with cwd = the gmake2 build/ directory (not targetdir), so both the
-    -- source (vendor dir) and destination (repo root, alongside markedit.exe)
-    -- are given relative to build/.
-    --
-    -- The remaining commands mirror build.bat's dist/ staging (same file
-    -- list, same third_party/<component> licence/version layout) so this
-    -- build path also produces a complete, ready-to-run folder instead of
-    -- leaving binaries and sources mixed together in the repo root. Unlike
-    -- build.bat, this doesn't wipe dist/ first - mkdir -p/cp -f only add or
-    -- overwrite, so a stale file from a since-removed dependency could
-    -- linger; that tradeoff matches this script's role as the lighter-weight
-    -- alternative to the primary Zig/build.bat release path.
-    postbuildcommands {
-        "cp -f ../"..WEBVIEW2_DIR.."/x64/WebView2Loader.dll ..",
-        "cp -f ../"..SCINTILLA_DIR.."/bin/Scintilla.dll ..",
-        "mkdir -p ../dist/katex ../dist/third_party/cmark-gfm ../dist/third_party/highlightjs "..
-            "../dist/third_party/katex ../dist/third_party/lexilla ../dist/third_party/scintilla "..
-            "../dist/third_party/webview2",
-        "cp -f ../markedit.exe ../Scintilla.dll ../WebView2Loader.dll "..
-            "../preview_shell.html ../github-markdown.css ../mermaid.min.js ../highlight.min.js "..
-            "../highlight-powershell.min.js ../highlight-github.min.css ../highlight-github-dark.min.css "..
-            "../LICENSE ../THIRD_PARTY_NOTICES.md ../dist/",
-        "cp -rf ../katex/. ../dist/katex/",
-        "cp -f ../"..CMARK_GFM_DIR.."/COPYING ../dist/third_party/cmark-gfm/",
-        "cp -f ../third_party/highlightjs/LICENSE ../third_party/highlightjs/VERSION.txt ../dist/third_party/highlightjs/",
-        "cp -f ../third_party/katex/LICENSE ../third_party/katex/VERSION.txt ../dist/third_party/katex/",
-        "cp -f ../"..LEXILLA_DIR.."/License.txt ../"..LEXILLA_DIR.."/version.txt ../dist/third_party/lexilla/",
-        "cp -f ../"..SCINTILLA_DIR.."/License.txt ../"..SCINTILLA_DIR.."/version.txt ../dist/third_party/scintilla/",
-        "cp -f ../"..WEBVIEW2_DIR.."/LICENSE.txt ../dist/third_party/webview2/",
-    }
+    filter "toolset:msc"
+        -- The same DLL-backed loader as the GCC/Zig builds, so every
+        -- toolchain ships the same WebView2Loader.dll in dist/.
+        links { "WebView2Loader.dll.lib" }
+        -- markedit.rc already embeds markedit.manifest; a linker-generated
+        -- manifest as well is a duplicate-resource link error.
+        flags { "NoManifest" }
+        -- Function/data pointer casts are how the WebView2 COM handler
+        -- vtables are filled in from C.
+        disablewarnings { "4152" }
+        postbuildcommands(staging_commands(false))
+    filter {}
 
 project "test_parser"
     kind "ConsoleApp"
@@ -220,6 +315,8 @@ project "test_parser"
     warnings "Extra"
     optimize "Size"
 
-    filter "toolset:gcc"
+    filter "toolset:gcc or clang"
         buildoptions { "-Werror" }
+    filter "toolset:msc"
+        buildoptions { "/WX" }
     filter {}

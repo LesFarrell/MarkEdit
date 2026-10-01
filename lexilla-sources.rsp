@@ -20,6 +20,3 @@ third_party/lexilla/lexlib/LexerSimple.cxx
 third_party/lexilla/lexlib/PropSetSimple.cxx
 third_party/lexilla/lexlib/StyleContext.cxx
 third_party/lexilla/lexlib/WordList.cxx
--Ithird_party/lexilla/include
--Ithird_party/lexilla/lexlib
--Ithird_party/scintilla/include

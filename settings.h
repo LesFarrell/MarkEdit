@@ -48,6 +48,7 @@ extern int g_tabWidth;
 extern int g_outlineVisible;
 extern int g_minimapVisible;
 extern int g_editorZoom;
+extern int g_largeFileThresholdMB;
 extern WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH];
 extern int g_splitterRatio;
 extern int g_splitterPos;

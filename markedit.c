@@ -123,18 +123,28 @@ typedef struct Document {
     sptr_t sciDocument;
     WCHAR *path;
     int dirty;
-    int hasBom;
+    int hasBom; /* the file has a byte-order mark for its encoding (UTF-8 or UTF-16) */
+    int encoding; /* the TextEncoding the file is stored in; the editor holds UTF-8 */
+    int encodingForced; /* chosen with Reopen with Encoding, so reloads keep it */
     FILETIME fileTime;
     int hasFileTime;
     int externalChanged;
-    int caret;
-    int anchor;
-    int firstVisibleLine;
+    Sci_Position caret;
+    Sci_Position anchor;
+    Sci_Position firstVisibleLine;
     int xOffset;
     unsigned untitledNumber;
     int closedIndex;
-    int isReference; /* the Markdown reference, so Help reuses its tab */
+    int isReference; /* a ReferenceKind: a Help page, so Help reuses its tab */
+    int largeFile; /* opened in large-file mode, see LARGE_FILE_FEATURES */
 } Document;
+
+/* The Help pages opened as unsaved Markdown tabs (see show_help_page()). */
+typedef enum { REFERENCE_NONE = 0, REFERENCE_MARKDOWN, REFERENCE_SHORTCUTS } ReferenceKind;
+
+static const WCHAR *reference_title(int kind) {
+    return kind == REFERENCE_SHORTCUTS ? L"Keyboard Shortcuts" : L"Markdown Reference";
+}
 
 static Document g_documents[MAX_DOCUMENTS];
 static int g_documentCount = 0;
@@ -166,6 +176,16 @@ static int g_wikiBackCount = 0;
 #define g_currentFile (g_documents[g_activeDocument].path)
 #define g_dirty       (g_documents[g_activeDocument].dirty)
 #define g_hasBom      (g_documents[g_activeDocument].hasBom)
+#define g_encoding    (g_documents[g_activeDocument].encoding)
+#define g_largeFile   (g_documents[g_activeDocument].largeFile)
+/* LARGE_FILE_FEATURES: a file of at least this many MiB opens in large-file
+   mode - streamed straight into a style-less, 64-bit-position Scintilla
+   document (see read_large_file_document()) with every full-document feature that
+   would otherwise rescan it on each pause in typing switched off: lexing
+   and folding, word wrap, preview, outline, word count, word completion,
+   brace matching, smart Enter/Tab, and recovery snapshots. Plain editing, find/replace, and
+   save still work. Persisted as [View] LargeFileThresholdMB. */
+int g_largeFileThresholdMB = 64;
 int g_previewVisible = 0;
 int g_editorVisible = 1;
 int g_previewOnLeft = 0;
@@ -202,7 +222,7 @@ static int g_minimapViewTop = 0; /* client-relative y (minimap coords) of the vi
 static int g_minimapViewHeight = 0;
 int g_editorZoom = 0; /* Scintilla SCI_SETZOOM units: +1/-1 per level, 0 is 100%. */
 WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH] = L"";
-static int g_outlineLines[1024];
+static Sci_Position g_outlineLines[1024];
 static int g_outlineCount = 0;
 static int g_tabDragIndex = -1;
 static int g_tabDragged = 0;
@@ -226,8 +246,8 @@ DWORD g_findFlags = FR_DOWN;
 static UINT g_msgFindReplace;
 
 /* ---- simple growable text buffer, used to pull text out of the Scintilla control ---- */
-static char *get_edit_text(HWND hEdit, int *outLen) {
-    int len = (int)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
+static char *get_edit_text(HWND hEdit, Sci_Position *outLen) {
+    Sci_Position len = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
     char *buf = (char *)malloc((size_t)len + 1);
     if (!buf) { if (outLen) *outLen = 0; return NULL; }
     SendMessageA(hEdit, SCI_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf);
@@ -243,7 +263,7 @@ static const char *editor_eol_sequence(void) {
     }
 }
 
-static int position_needs_leading_eol(int position) {
+static int position_needs_leading_eol(Sci_Position position) {
     if (position <= 0) return 0;
     int previous = (int)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)(position - 1), 0);
     return previous != '\r' && previous != '\n';
@@ -256,8 +276,8 @@ static int position_needs_leading_eol(int position) {
    insert an empty pair and place the caret between them so typing continues
    inside it. Only the selection itself is read (not the whole document). */
 static void toolbar_wrap_pair(const char *open, const char *close) {
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     int openLen = (int)strlen(open), closeLen = (int)strlen(close);
 
     if (selEnd == selStart) {
@@ -269,7 +289,7 @@ static void toolbar_wrap_pair(const char *open, const char *close) {
         return;
     }
 
-    int selLen = selEnd - selStart;
+    Sci_Position selLen = selEnd - selStart;
     /* Points into Scintilla's own buffer; only valid until the next edit,
        so everything needed from it is copied out before SCI_REPLACESEL. */
     const char *selected = (const char *)SendMessageA(g_hEdit, SCI_GETRANGEPOINTER,
@@ -280,7 +300,7 @@ static void toolbar_wrap_pair(const char *open, const char *close) {
         memcmp(selected + selLen - closeLen, close, (size_t)closeLen) == 0;
 
     char *replacement;
-    int newSelStart, newSelLen;
+    Sci_Position newSelStart, newSelLen;
     if (alreadyWrapped) {
         newSelStart = selStart;
         newSelLen = selLen - openLen - closeLen;
@@ -320,14 +340,14 @@ static void toolbar_wrap_tag(const char *tag) {
 
 /* Returns the 0-based [firstLine, lastLine] range touched by the current
    selection (a single line if there is no selection). */
-static void toolbar_selected_line_range(HWND hEdit, int *firstLine, int *lastLine) {
-    int selStart = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
-    *firstLine = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selStart, 0);
-    *lastLine = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selEnd, 0);
+static void toolbar_selected_line_range(HWND hEdit, Sci_Position *firstLine, Sci_Position *lastLine) {
+    Sci_Position selStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    *firstLine = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selStart, 0);
+    *lastLine = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selEnd, 0);
     /* A selection ending exactly at the start of a line (e.g. after pressing
        Home then Shift+Down once) shouldn't pull that line into the range. */
-    if (*lastLine > *firstLine && selEnd == (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)*lastLine, 0))
+    if (*lastLine > *firstLine && selEnd == (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)*lastLine, 0))
         (*lastLine)--;
 }
 
@@ -335,7 +355,7 @@ static void toolbar_selected_line_range(HWND hEdit, int *firstLine, int *lastLin
    line-prefix markers this toolbar manages (heading, quote, bullet, numbered,
    task). Returns 0 if none match. Used so re-clicking a different button on
    an already-prefixed line replaces the old prefix instead of stacking. */
-static int toolbar_prefix_length(const char *line, int lineLen) {
+static int toolbar_prefix_length(const char *line, Sci_Position lineLen) {
     int i = 0;
     while (i < lineLen && (line[i] == ' ') && i < 3) i++; /* tolerate up to 3 leading spaces, like CommonMark */
     if (i < lineLen && line[i] == '>' ) {
@@ -383,10 +403,10 @@ static int toolbar_prefix_length(const char *line, int lineLen) {
    `numbered` renumbers sequential lines 1., 2., 3., etc.; when true, `prefix`
    is ignored and "N. " is generated per line instead. */
 static void toolbar_apply_line_prefix(const char *prefix, int numbered) {
-    int firstLine, lastLine;
+    Sci_Position firstLine, lastLine;
     toolbar_selected_line_range(g_hEdit, &firstLine, &lastLine);
 
-    int len;
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
 
@@ -398,18 +418,18 @@ static void toolbar_apply_line_prefix(const char *prefix, int numbered) {
     size_t o = 0;
     int number = 1;
 
-    int rangeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-    int rangeEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    Sci_Position rangeStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    Sci_Position rangeEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
 
     /* For the numbered-list case, toggle the whole range off only if every
        line in it is already numbered (so clicking again removes numbering). */
     int allNumbered = 1;
     if (numbered) {
-        for (int line = firstLine; line <= lastLine && allNumbered; line++) {
-            int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-            int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        for (Sci_Position line = firstLine; line <= lastLine && allNumbered; line++) {
+            Sci_Position lineStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+            Sci_Position lineEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
             const char *lineText = text + lineStart;
-            int lineLen = lineEnd - lineStart;
+            Sci_Position lineLen = lineEnd - lineStart;
             int indentLen = 0;
             while (indentLen < lineLen && lineText[indentLen] == ' ' && indentLen < 3) indentLen++;
             int prefixLen = toolbar_prefix_length(lineText, lineLen);
@@ -421,10 +441,10 @@ static void toolbar_apply_line_prefix(const char *prefix, int numbered) {
 
     const char *eol = editor_eol_sequence();
     size_t eolLen = strlen(eol);
-    for (int line = firstLine; line <= lastLine; line++) {
-        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-        int lineLen = lineEnd - lineStart;
+    for (Sci_Position line = firstLine; line <= lastLine; line++) {
+        Sci_Position lineStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        Sci_Position lineEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        Sci_Position lineLen = lineEnd - lineStart;
         const char *lineText = text + lineStart;
 
         int indentLen = 0;
@@ -472,15 +492,15 @@ static void toolbar_apply_line_prefix(const char *prefix, int numbered) {
    `after` is "](url)") so the user can immediately type the destination.
    Used for link/image inserts. */
 static void toolbar_insert_template(const char *before, const char *placeholder, const char *after) {
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-    int len;
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
 
     int hasSelection = selEnd > selStart;
     const char *middle = hasSelection ? text + selStart : placeholder;
-    int middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
+    Sci_Position middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
 
     size_t beforeLen = strlen(before), afterLen = strlen(after);
     char *whole = (char *)malloc(beforeLen + (size_t)middleLen + afterLen + 1);
@@ -493,10 +513,10 @@ static void toolbar_insert_template(const char *before, const char *placeholder,
 
         const char *urlPlaceholder = strstr(after, "url");
         if (urlPlaceholder) {
-            int urlStart = selStart + (int)beforeLen + middleLen + (int)(urlPlaceholder - after);
+            Sci_Position urlStart = selStart + (int)beforeLen + middleLen + (int)(urlPlaceholder - after);
             SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)urlStart, (LPARAM)(urlStart + 3));
         } else if (!hasSelection) {
-            int caret = selStart + (int)beforeLen + middleLen + (int)afterLen;
+            Sci_Position caret = selStart + (int)beforeLen + middleLen + (int)afterLen;
             SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
         }
         free(whole);
@@ -514,15 +534,15 @@ static void toolbar_insert_html_link(void) {
     static const char after[] = "</a>";
     static const char placeholder[] = "link text";
 
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-    int len;
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
 
     int hasSelection = selEnd > selStart;
     const char *middle = hasSelection ? text + selStart : placeholder;
-    int middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
+    Sci_Position middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
 
     size_t beforeLen = sizeof(before) - 1, afterLen = sizeof(after) - 1;
     char *whole = (char *)malloc(beforeLen + (size_t)middleLen + afterLen + 1);
@@ -533,7 +553,7 @@ static void toolbar_insert_html_link(void) {
         whole[beforeLen + (size_t)middleLen + afterLen] = 0;
         SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)whole);
 
-        int urlStart = selStart + (int)(strstr(before, "url") - before);
+        Sci_Position urlStart = selStart + (int)(strstr(before, "url") - before);
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)urlStart, (LPARAM)(urlStart + 3));
         free(whole);
     }
@@ -550,15 +570,15 @@ static void toolbar_insert_html_image(void) {
     static const char after[] = "\">";
     static const char placeholder[] = "alt text";
 
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
-    int len;
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
 
     int hasSelection = selEnd > selStart;
     const char *middle = hasSelection ? text + selStart : placeholder;
-    int middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
+    Sci_Position middleLen = hasSelection ? (selEnd - selStart) : (int)strlen(placeholder);
 
     size_t beforeLen = sizeof(before) - 1, afterLen = sizeof(after) - 1;
     char *whole = (char *)malloc(beforeLen + (size_t)middleLen + afterLen + 1);
@@ -569,7 +589,7 @@ static void toolbar_insert_html_image(void) {
         whole[beforeLen + (size_t)middleLen + afterLen] = 0;
         SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)whole);
 
-        int urlStart = selStart + (int)(strstr(before, "url") - before);
+        Sci_Position urlStart = selStart + (int)(strstr(before, "url") - before);
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)urlStart, (LPARAM)(urlStart + 3));
         free(whole);
     }
@@ -579,7 +599,7 @@ static void toolbar_insert_html_image(void) {
 
 static void toolbar_insert_table(void) {
     const char *eol = editor_eol_sequence();
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
 
     const char *leading = position_needs_leading_eol(selStart) ? eol : "";
     char table[168];
@@ -597,7 +617,7 @@ static void toolbar_insert_table(void) {
    text the way the list helper below wraps selected lines. */
 static void toolbar_insert_html_table(void) {
     const char *eol = editor_eol_sequence();
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
 
     const char *leading = position_needs_leading_eol(selStart) ? eol : "";
     char table[320];
@@ -630,8 +650,8 @@ static void toolbar_insert_html_list(int ordered) {
     const char *eol = editor_eol_sequence();
     const char *tag = ordered ? "ol" : "ul";
 
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
 
     if (selEnd == selStart) {
         static const char *placeholder = "List item";
@@ -640,17 +660,17 @@ static void toolbar_insert_html_list(int ordered) {
         snprintf(skeleton + prefixLen, sizeof(skeleton) - (size_t)prefixLen,
                  "%s</li>%s</%s>", placeholder, eol, tag);
         SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)skeleton);
-        int placeholderStart = selStart + prefixLen;
+        Sci_Position placeholderStart = selStart + prefixLen;
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)placeholderStart,
                      (LPARAM)(placeholderStart + (int)strlen(placeholder)));
         SetFocus(g_hEdit);
         return;
     }
 
-    int firstLine, lastLine;
+    Sci_Position firstLine, lastLine;
     toolbar_selected_line_range(g_hEdit, &firstLine, &lastLine);
 
-    int len;
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
 
@@ -659,10 +679,10 @@ static void toolbar_insert_html_list(int ordered) {
     if (!out) { free(text); return; }
     size_t o = (size_t)snprintf(out, cap, "<%s>%s", tag, eol);
 
-    for (int line = firstLine; line <= lastLine; line++) {
-        int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-        int lineLen = lineEnd - lineStart;
+    for (Sci_Position line = firstLine; line <= lastLine; line++) {
+        Sci_Position lineStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        Sci_Position lineEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        Sci_Position lineLen = lineEnd - lineStart;
         o += (size_t)snprintf(out + o, cap - o, "  <li>");
         memcpy(out + o, text + lineStart, (size_t)lineLen);
         o += (size_t)lineLen;
@@ -671,8 +691,8 @@ static void toolbar_insert_html_list(int ordered) {
     o += (size_t)snprintf(out + o, cap - o, "</%s>", tag);
     out[o] = 0;
 
-    int rangeStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-    int rangeEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    Sci_Position rangeStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    Sci_Position rangeEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)rangeStart, (LPARAM)rangeEnd);
     SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
     free(out);
@@ -685,8 +705,8 @@ static void toolbar_insert_html_list(int ordered) {
    place the caret right after the opening "```" so a language hint (e.g.
    "c") can be typed immediately. */
 static void toolbar_insert_codeblock(void) {
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     const char *eol = editor_eol_sequence();
     size_t eolLen = strlen(eol);
     const char *leading = position_needs_leading_eol(selStart) ? eol : "";
@@ -696,13 +716,13 @@ static void toolbar_insert_codeblock(void) {
         char empty[36];
         snprintf(empty, sizeof(empty), "%s```%s%s```%s", leading, eol, eol, eol);
         SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)empty);
-        int caret = selStart + (int)leadingLen + 3;
+        Sci_Position caret = selStart + (int)leadingLen + 3;
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
         SetFocus(g_hEdit);
         return;
     }
 
-    int len;
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
     size_t selLen = (size_t)(selEnd - selStart);
@@ -718,7 +738,7 @@ static void toolbar_insert_codeblock(void) {
         memcpy(wrapped + openLen + selLen + eolLen + 3, eol, eolLen);
         wrapped[openLen + selLen + closeLen] = 0;
         SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)wrapped);
-        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + (int)openLen), (LPARAM)(selStart + (int)openLen + (int)selLen));
+        SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)(selStart + (int)openLen), (LPARAM)(selStart + (Sci_Position)openLen + (Sci_Position)selLen));
         free(wrapped);
     }
     free(text);
@@ -726,7 +746,7 @@ static void toolbar_insert_codeblock(void) {
 }
 
 static void toolbar_insert_horizontal_rule(void) {
-    int position = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position position = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
     const char *eol = editor_eol_sequence();
     const char *leading = position_needs_leading_eol(position) ? eol : "";
     char block[24];
@@ -736,15 +756,15 @@ static void toolbar_insert_horizontal_rule(void) {
 }
 
 static void toolbar_insert_alert(void) {
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     const char *eol = editor_eol_sequence();
-    int len;
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
 
     const char *body = selEnd > selStart ? text + selStart : "Alert text";
-    int bodyLen = selEnd > selStart ? selEnd - selStart : 10;
+    Sci_Position bodyLen = selEnd > selStart ? selEnd - selStart : 10;
     size_t cap = (size_t)bodyLen * 3 + strlen(eol) * 3 + 32;
     char *out = (char *)malloc(cap);
     if (!out) { free(text); return; }
@@ -756,7 +776,7 @@ static void toolbar_insert_alert(void) {
     memcpy(out + o, "> [!NOTE]", 9); o += 9;
     size_t eolLen = strlen(eol); memcpy(out + o, eol, eolLen); o += eolLen;
     int lineStart = 1;
-    for (int i = 0; i < bodyLen; i++) {
+    for (Sci_Position i = 0; i < bodyLen; i++) {
         if (lineStart) { memcpy(out + o, "> ", 2); o += 2; lineStart = 0; }
         char c = body[i];
         out[o++] = c;
@@ -773,22 +793,23 @@ static void toolbar_insert_alert(void) {
 }
 
 static void toolbar_insert_footnote(void) {
-    int len;
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
     int next = 1;
-    for (int i = 0; i + 3 < len; i++) {
+    for (Sci_Position i = 0; i + 3 < len; i++) {
         if (text[i] == '[' && text[i + 1] == '^' && text[i + 2] >= '0' && text[i + 2] <= '9') {
-            int value = 0, j = i + 2;
+            int value = 0;
+            Sci_Position j = i + 2;
             while (j < len && text[j] >= '0' && text[j] <= '9') value = value * 10 + (text[j++] - '0');
             if (j < len && text[j] == ']' && value >= next) next = value + 1;
         }
     }
 
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     const char *note = selEnd > selStart ? text + selStart : "Footnote text";
-    int noteLen = selEnd > selStart ? selEnd - selStart : 13;
+    Sci_Position noteLen = selEnd > selStart ? selEnd - selStart : 13;
     const char *eol = editor_eol_sequence();
     char reference[32], prefix[48];
     snprintf(reference, sizeof(reference), "[^%d]", next);
@@ -796,10 +817,10 @@ static void toolbar_insert_footnote(void) {
 
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)reference);
-    int newLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position newLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)newLength, (LPARAM)newLength);
     SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)prefix);
-    int noteStart = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position noteStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
     char *noteCopy = (char *)malloc((size_t)noteLen + 1);
     if (noteCopy) {
         memcpy(noteCopy, note, (size_t)noteLen); noteCopy[noteLen] = 0;
@@ -836,21 +857,36 @@ static void toolbar_command(WORD cmd) {
     }
 }
 
-/* Replace the Scintilla control's entire contents. Note SCI_SETTEXT is itself
-   undoable (a delete-all + insert wrapped in one undo group); callers loading
-   a fresh document (New/Open) should follow up with SCI_EMPTYUNDOBUFFER so the
-   previous document's content isn't reachable via Undo. */
-static void set_edit_text(HWND hEdit, const char *text) {
+/* Sets the EOL mode new lines are typed with to whichever line ending the
+   freshly loaded document uses first (CRLF when it has none). Read back from
+   Scintilla rather than the loaded bytes, so read_large_file_document()'s
+   streamed load - which never holds the whole text in one buffer - gets the
+   same answer as set_edit_text(). */
+static void apply_detected_eol_mode(HWND hEdit) {
+    Sci_Position length = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, 0, 0);
     int eolMode = SC_EOL_CRLF;
-    const char *firstCr = strchr(text, '\r');
-    const char *firstLf = strchr(text, '\n');
-    if (firstLf && (!firstCr || firstLf < firstCr)) {
-        eolMode = SC_EOL_LF;
-    } else if (firstCr) {
-        eolMode = firstCr[1] == '\n' ? SC_EOL_CRLF : SC_EOL_CR;
+    if (lineEnd < length) {
+        char first = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)lineEnd, 0);
+        char next = lineEnd + 1 < length
+            ? (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(lineEnd + 1), 0) : 0;
+        if (first == '\n') eolMode = SC_EOL_LF;
+        else eolMode = next == '\n' ? SC_EOL_CRLF : SC_EOL_CR;
     }
     SendMessageA(hEdit, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
-    SendMessageA(hEdit, SCI_SETTEXT, 0, (LPARAM)text);
+}
+
+/* Replace the Scintilla control's entire contents with `length` bytes of
+   `text`. A whole-document target replace rather than SCI_SETTEXT, which
+   stops at the first NUL - a UTF-16 file can legitimately contain U+0000.
+   It's still a single undoable change; callers loading a fresh document
+   (New/Open) should follow up with SCI_EMPTYUNDOBUFFER so the previous
+   document's content isn't reachable via Undo. */
+static void set_edit_text(HWND hEdit, const char *text, Sci_Position length) {
+    SendMessageA(hEdit, SCI_TARGETWHOLEDOCUMENT, 0, 0);
+    SendMessageA(hEdit, SCI_REPLACETARGET, (WPARAM)length, (LPARAM)text);
+    SendMessageA(hEdit, SCI_SETEMPTYSELECTION, 0, 0);
+    apply_detected_eol_mode(hEdit);
 }
 
 /* Configure the Scintilla control as a source editor: a Lexilla lexer for
@@ -895,13 +931,13 @@ static int g_splitLineNumberDigits = 0; /* separate cache for g_hSplitEdit - see
    other view's still-needed SCI_SETMARGINWIDTHN call. */
 static void update_linenumber_margin_width(HWND hEdit) {
     int *cache = (hEdit == g_hSplitEdit) ? &g_splitLineNumberDigits : &g_lineNumberDigits;
-    int lineCount = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
     int digitCount = 1;
-    for (int n = lineCount; n >= 10; n /= 10) digitCount++;
+    for (Sci_Position n = lineCount; n >= 10; n /= 10) digitCount++;
     if (digitCount == *cache) return;
     *cache = digitCount;
-    char digits[16];
-    wsprintfA(digits, "_%d", lineCount); /* leading '_' gives a little breathing room */
+    char digits[32];
+    snprintf(digits, sizeof(digits), "_%lld", (long long)lineCount); /* leading '_' gives a little breathing room */
     int width = (int)SendMessageA(hEdit, SCI_TEXTWIDTH, STYLE_LINENUMBER, (LPARAM)digits);
     SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_LINENUMBERS, width);
 }
@@ -977,8 +1013,9 @@ static int extension_in_list(const WCHAR *extension, const WCHAR *list) {
 }
 
 /* Picks the language for a document path. A document with no path yet (a
-   new, untitled tab) defaults to plain text rather than assuming Markdown -
-   see show_help_reference() for the one deliberate exception, which forces
+   new, untitled tab) defaults to plain text rather than assuming Markdown
+   (its preview still renders as Markdown - see update_preview()) -
+   see show_help_page() for the one deliberate exception, which forces
    Markdown for its own untitled tab since its content always is Markdown.
    An unrecognized extension on an actual saved path still falls back to
    Markdown, unchanged: that's a real file whose language merely isn't in
@@ -1297,9 +1334,11 @@ static void apply_language_styles(HWND hEdit) {
 }
 
 /* Switches the editor to the lexer for `path`, reapplying the theme so the
-   new styles get colours. Safe to call when the language is unchanged. */
+   new styles get colours. Safe to call when the language is unchanged. A
+   large-file document is always plain text: its document has no style
+   storage to lex into (see read_large_file_document()). */
 static void apply_document_language(HWND hEdit, const WCHAR *path) {
-    const LanguageInfo *language = language_for_path(path);
+    const LanguageInfo *language = g_largeFile ? &LANGUAGES[LANG_TEXT] : language_for_path(path);
     g_activeLanguage = language->id;
 
     void *lexer = CreateLexer(language->lexer);
@@ -1317,7 +1356,8 @@ static void apply_document_language(HWND hEdit, const WCHAR *path) {
                  language->folds ? FOLD_MARGIN_WIDTH : 0);
 
     apply_editor_theme(hEdit);
-    SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
+    apply_word_wrap(hEdit);
+    if (!g_largeFile) SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
     schedule_spell_check();
 }
 
@@ -1471,7 +1511,7 @@ static void perform_spell_check(void) {
     if (!g_hEdit) return;
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
 
-    int textLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position textLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
     SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
     if (!g_spellCheckEnabled || !g_spellChecker ||
@@ -1480,12 +1520,12 @@ static void perform_spell_check(void) {
 
     /* Ensure the Markdown styles used to exclude code and links are current. */
     SendMessageA(g_hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
-    int ignoredLength = 0;
+    Sci_Position ignoredLength = 0;
     char *utf8 = get_edit_text(g_hEdit, &ignoredLength);
     if (!utf8) return;
 
     int wideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        utf8, textLength, NULL, 0);
+        utf8, (int)textLength, NULL, 0);
     if (wideLength <= 0) {
         free(utf8);
         return;
@@ -1495,7 +1535,7 @@ static void perform_spell_check(void) {
         free(utf8);
         return;
     }
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, textLength, wide, wideLength);
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, (int)textLength, wide, wideLength);
 
     IEnumSpellingError *errors = NULL;
     if (SUCCEEDED(ISpellChecker_Check(g_spellChecker, wide, &errors)) && errors) {
@@ -1796,10 +1836,14 @@ static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
 }
 
 /* Wrapped lines continue with a hanging indent so a wrapped list item or
-   blockquote stays visually attached to its marker. */
+   blockquote stays visually attached to its marker. Wrap mode belongs to
+   the view, not the document, so this is reapplied from
+   apply_document_language() whenever the active document changes:
+   wrapping a large-file document would lay out every line of it up front. */
 static void apply_word_wrap(HWND hEdit) {
-    SendMessageA(hEdit, SCI_SETWRAPMODE, g_wordWrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
-    if (!g_wordWrap) return;
+    int wrap = g_wordWrap && !g_largeFile;
+    SendMessageA(hEdit, SCI_SETWRAPMODE, wrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
+    if (!wrap) return;
     SendMessageA(hEdit, SCI_SETWRAPINDENTMODE, SC_WRAPINDENT_SAME, 0);
     SendMessageA(hEdit, SCI_SETWRAPVISUALFLAGS, SC_WRAPVISUALFLAG_END, 0);
 }
@@ -1972,7 +2016,10 @@ static void apply_editor_font(const WCHAR *faceName, int pointSize) {
    so running the portable distribution never dirties its own folder. Only
    modified documents are written; normal saves and a clean exit remove them. */
 
-static WCHAR *get_recovery_directory(void) {
+/* %LOCALAPPDATA%\MarkEdit\<name>, created if needed: per-user, machine-local
+   state that has to be writable wherever markedit.exe itself lives -
+   including a Program Files install a standard user can't write to. */
+static WCHAR *get_local_app_directory(const WCHAR *name) {
     DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", NULL, 0);
     if (!needed) return NULL;
     WCHAR *local = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));
@@ -1984,13 +2031,17 @@ static WCHAR *get_recovery_directory(void) {
     free(local);
     if (!app) return NULL;
     CreateDirectoryW(app, NULL);
-    WCHAR *recovery = path_join(app, L"Recovery");
+    WCHAR *directory = path_join(app, name);
     free(app);
-    if (recovery) CreateDirectoryW(recovery, NULL);
-    return recovery;
+    if (directory) CreateDirectoryW(directory, NULL);
+    return directory;
 }
 
-static char *get_document_text(int index, int *outLength) {
+static WCHAR *get_recovery_directory(void) {
+    return get_local_app_directory(L"Recovery");
+}
+
+static char *get_document_text(int index, Sci_Position *outLength) {
     if (!g_hEdit || index < 0 || index >= g_documentCount) return NULL;
     sptr_t current = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
     int oldSwitching = g_switchingDocument;
@@ -2043,6 +2094,25 @@ static char *read_bytes_file(const WCHAR *path, int *outLength) {
     return text;
 }
 
+/* Reads a text file the way load_file() interprets one - detecting its
+   encoding (see detect_text_encoding()) - as NUL-terminated UTF-8, for
+   features that read files without opening them in a tab. */
+static char *read_text_file(const WCHAR *path, int *outLength, int *outEncoding, int *outHasBom) {
+    int length = 0;
+    char *bytes = read_bytes_file(path, &length);
+    if (!bytes) return NULL;
+    size_t bom = 0;
+    TextEncoding encoding = detect_text_encoding(bytes, (size_t)length, 1, &bom);
+    size_t decodedLength = 0;
+    char *text = text_decode_all(encoding, bytes + bom, (size_t)length - bom, &decodedLength);
+    free(bytes);
+    if (!text || decodedLength > INT_MAX) { free(text); return NULL; }
+    if (outLength) *outLength = (int)decodedLength;
+    if (outEncoding) *outEncoding = encoding;
+    if (outHasBom) *outHasBom = bom > 0;
+    return text;
+}
+
 static void clear_recovery_snapshot(void) {
     WCHAR *directory = get_recovery_directory();
     if (!directory) return;
@@ -2062,7 +2132,8 @@ static void write_recovery_snapshot(void) {
     if (!g_recoverySnapshotStale) return;
     g_recoverySnapshotStale = 0;
     int dirtyCount = 0;
-    for (int i = 0; i < g_documentCount; i++) if (g_documents[i].dirty) dirtyCount++;
+    for (int i = 0; i < g_documentCount; i++)
+        if (g_documents[i].dirty && !g_documents[i].largeFile) dirtyCount++;
     if (!dirtyCount) {
         clear_recovery_snapshot();
         update_status_position();
@@ -2076,8 +2147,10 @@ static void write_recovery_snapshot(void) {
     int writtenCount = 0;
     for (int i = 0; i < g_documentCount; i++) {
         Document *doc = &g_documents[i];
-        if (!doc->dirty) continue;
-        int length = 0;
+        /* Rewriting a large-file document on every autosave tick would
+           stall the UI thread for as long as the write takes. */
+        if (!doc->dirty || doc->largeFile) continue;
+        Sci_Position length = 0;
         char *text = get_document_text(i, &length);
         WCHAR fileName[32], key[32], value[32];
         swprintf(fileName, sizeof(fileName) / sizeof(fileName[0]), L"document-%d.txt", writtenCount);
@@ -2094,6 +2167,9 @@ static void write_recovery_snapshot(void) {
         WritePrivateProfileStringW(L"Recovery", key, value, manifest);
         swprintf(key, sizeof(key) / sizeof(key[0]), L"Bom%d", writtenCount);
         WritePrivateProfileStringW(L"Recovery", key, doc->hasBom ? L"1" : L"0", manifest);
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Encoding%d", writtenCount);
+        swprintf(value, sizeof(value) / sizeof(value[0]), L"%d", doc->encoding);
+        WritePrivateProfileStringW(L"Recovery", key, value, manifest);
         writtenCount++;
         free(text);
         free(contentPath);
@@ -2140,7 +2216,7 @@ static int restore_recovery_snapshot(void) {
             free(text); break;
         }
         g_switchingDocument = 1;
-        set_edit_text(g_hEdit, text);
+        set_edit_text(g_hEdit, text, length);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         g_switchingDocument = 0;
         free(text);
@@ -2153,6 +2229,11 @@ static int restore_recovery_snapshot(void) {
             (unsigned)GetPrivateProfileIntW(L"Recovery", key, 0, manifest);
         swprintf(key, sizeof(key) / sizeof(key[0]), L"Bom%d", i);
         g_hasBom = GetPrivateProfileIntW(L"Recovery", key, 0, manifest) != 0;
+        /* Absent from snapshots written before encodings were tracked: those
+           were all UTF-8. The snapshot text itself is always UTF-8. */
+        swprintf(key, sizeof(key) / sizeof(key[0]), L"Encoding%d", i);
+        int encoding = (int)GetPrivateProfileIntW(L"Recovery", key, TEXT_ENCODING_UTF8, manifest);
+        g_encoding = encoding >= TEXT_ENCODING_UTF8 && encoding <= TEXT_ENCODING_ANSI ? encoding : TEXT_ENCODING_UTF8;
         apply_document_language(g_hEdit, g_currentFile);
         if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
         set_dirty(1);
@@ -2186,26 +2267,43 @@ static WCHAR g_statusPartText[4][128];
 
 static void update_status_position(void) {
     if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
-    int position = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
-    int column = (int)SendMessageA(g_hEdit, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
-    swprintf(g_statusPartText[0], 128, L"Ln %d, Col %d", line, column);
+    Sci_Position position = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
+    Sci_Position column = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
+    swprintf(g_statusPartText[0], 128, L"Ln %lld, Col %lld", (long long)line, (long long)column);
     int eol = (int)SendMessageA(g_hEdit, SCI_GETEOLMODE, 0, 0);
     const WCHAR *eolName = eol == SC_EOL_LF ? L"LF" : eol == SC_EOL_CR ? L"CR" : L"CRLF";
-    swprintf(g_statusPartText[2], 128, L"UTF-8%ls   %ls", g_hasBom ? L" BOM" : L"", eolName);
-    swprintf(g_statusPartText[3], 128, L"%ls", g_dirty ? L"Modified · recovery enabled" : L"Saved");
+    WCHAR encodingName[40];
+    switch (g_encoding) {
+        case TEXT_ENCODING_UTF16LE: wcscpy(encodingName, L"UTF-16 LE"); break;
+        case TEXT_ENCODING_UTF16BE: wcscpy(encodingName, L"UTF-16 BE"); break;
+        case TEXT_ENCODING_ANSI:
+            swprintf(encodingName, 40, L"ANSI (CP %u)", text_ansi_code_page());
+            break;
+        default: wcscpy(encodingName, L"UTF-8"); break;
+    }
+    swprintf(g_statusPartText[2], 128, L"%ls%ls   %ls", encodingName, g_hasBom ? L" BOM" : L"", eolName);
+    swprintf(g_statusPartText[3], 128, L"%ls", !g_dirty ? L"Saved"
+             : g_largeFile ? L"Modified" : L"Modified · recovery enabled");
     InvalidateRect(g_hStatus, NULL, FALSE);
 }
 
 static void update_status_bar(void) {
     update_status_position();
     if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
-    int length = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    int characters = (int)SendMessageA(g_hEdit, SCI_COUNTCHARACTERS, 0, (LPARAM)length);
-    int ignored = 0, words = 0, inWord = 0;
+    if (g_largeFile) {
+        double mib = (double)(Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) / (1024.0 * 1024.0);
+        swprintf(g_statusPartText[1], 128, L"Large file mode   %.1f MB", mib);
+        InvalidateRect(g_hStatus, NULL, FALSE);
+        return;
+    }
+    Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position characters = (Sci_Position)SendMessageA(g_hEdit, SCI_COUNTCHARACTERS, 0, (LPARAM)length);
+    Sci_Position ignored = 0;
+    int words = 0, inWord = 0;
     char *text = get_edit_text(g_hEdit, &ignored);
     if (text) {
-        for (int i = 0; i < length; i++) {
+        for (Sci_Position i = 0; i < length; i++) {
             unsigned char ch = (unsigned char)text[i];
             int wordChar = ch >= 0x80 || isalnum(ch) || ch == '_' || ch == '\'';
             if (wordChar && !inWord) words++;
@@ -2213,7 +2311,7 @@ static void update_status_bar(void) {
         }
         free(text);
     }
-    swprintf(g_statusPartText[1], 128, L"Words %d   Characters %d", words, characters);
+    swprintf(g_statusPartText[1], 128, L"Words %d   Characters %lld", words, (long long)characters);
     InvalidateRect(g_hStatus, NULL, FALSE);
 }
 
@@ -2776,7 +2874,7 @@ static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceiv
     if (g_editorVisible && g_previewVisible && wcsncmp(message, L"scroll:", 7) == 0) {
         WCHAR *end = NULL;
         long line = wcstol(message + 7, &end, 10);
-        int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+        Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
         if (end && *end == 0 && line >= 1 && line <= lineCount) {
             g_ignoreNextEditorScroll = 1;
             KillTimer(g_hMainWnd, IDT_SCROLL_SYNC);
@@ -3289,11 +3387,10 @@ static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebVie
 }
 
 static void init_webview(void) {
-    WCHAR *module = get_module_path();
-    WCHAR *exeDir = module ? path_directory(module) : NULL;
-    WCHAR *userDataDir = exeDir ? path_join(exeDir, L"webview2_data") : NULL;
-    free(module);
-    free(exeDir);
+    /* The browser profile lives with the other per-user state rather than
+       beside markedit.exe: an installed copy in Program Files can't write
+       there, which made creating the WebView2 environment fail outright. */
+    WCHAR *userDataDir = get_local_app_directory(L"WebView2");
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(NULL, userDataDir, NULL, &g_envHandler);
     free(userDataDir);
     if (FAILED(hr)) {
@@ -3308,6 +3405,39 @@ static void init_webview(void) {
    pause; above it, rendering can take long enough to be worth signaling. */
 #define PREVIEW_SLOW_RENDER_THRESHOLD (256 * 1024)
 
+/* Above this size a source-code preview skips syntax highlighting:
+   highlight.js reruns over the whole block on every refresh, so a big file
+   would stall the preview after each pause in typing. */
+#define PREVIEW_HIGHLIGHT_MAX_LENGTH (512 * 1024)
+
+/* Wraps a non-Markdown document as a single fenced code block tagged with
+   `tag`, so it previews as highlighted source through the same Markdown
+   pipeline (highlight.js picks the block up by its language class). The
+   fence is one backtick longer than the longest run of backticks in the
+   text - CommonMark fences can be any length from three - so nothing in
+   the source can close it early. */
+static char *source_as_markdown(const char *text, size_t length, const char *tag) {
+    size_t longest = 0, run = 0;
+    for (size_t i = 0; i < length; i++) {
+        run = text[i] == '`' ? run + 1 : 0;
+        if (run > longest) longest = run;
+    }
+    size_t fence = longest >= 3 ? longest + 1 : 3;
+    size_t tagLength = strlen(tag);
+    char *markdown = (char *)malloc(fence * 2 + tagLength + length + 4);
+    if (!markdown) return NULL;
+    size_t o = 0;
+    memset(markdown + o, '`', fence); o += fence;
+    memcpy(markdown + o, tag, tagLength); o += tagLength;
+    markdown[o++] = '\n';
+    memcpy(markdown + o, text, length); o += length;
+    if (length && text[length - 1] != '\n') markdown[o++] = '\n';
+    memset(markdown + o, '`', fence); o += fence;
+    markdown[o++] = '\n';
+    markdown[o] = 0;
+    return markdown;
+}
+
 static void update_preview(void) {
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_PREVIEW_UPDATE);
     /* Loading/restoring/switching tabs should not parse Markdown while the
@@ -3315,8 +3445,8 @@ static void update_preview(void) {
        sets g_exportPath first to force a current off-screen render. */
     if (!g_previewVisible && !g_exportPath) return;
     /* HTML gets a real browser-style render (see show_html_file_preview());
-       export bypasses it since there's no Markdown render to capture for an
-       already-HTML document, same as any other non-Markdown language below. */
+       export bypasses it, since that navigation isn't a render the export can
+       capture, and gets the highlighted-source render other languages use. */
     if (g_activeLanguage == LANG_HTML && !g_exportPath) {
         show_html_file_preview();
         return;
@@ -3325,17 +3455,30 @@ static void update_preview(void) {
        needs the shell page loaded to run its setContent(), not whatever
        HTML file was last navigated to. */
     if (g_previewShowingRawHtml) navigate_to_shell();
-    /* The preview renders Markdown; running markdown_to_html() over a JSON/
-       C/Python/etc. document would misinterpret ordinary source lines (a
-       leading '#' comment, for instance) as Markdown syntax. Show a plain
-       explanation instead of a nonsensical render. */
-    if (g_activeLanguage != LANG_MARKDOWN) {
-        push_html_to_webview("<p>Preview is only available for Markdown and HTML documents.</p>");
+    /* Checked before the language: a large-file document is always plain
+       text (see apply_document_language()), which would otherwise get the
+       message below as though it were simply the wrong kind of file. */
+    if (g_largeFile) {
+        push_html_to_webview("<p>Preview is turned off for large files.</p>");
         return;
     }
-    int len;
+    Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
     if (!text) return;
+    /* Running markdown_to_html() straight over a JSON/C/Python/etc. document
+       would misread ordinary source lines (a leading '#' comment, say) as
+       Markdown syntax, so every other language previews as its own source,
+       syntax-highlighted. An untitled tab has no type yet - its editor
+       stays plain text (see language_for_path()) - and previews as
+       Markdown, as a saved file of an unknown type does. */
+    if (g_activeLanguage != LANG_MARKDOWN && !(g_activeLanguage == LANG_TEXT && !g_currentFile)) {
+        const char *tag = len > PREVIEW_HIGHLIGHT_MAX_LENGTH ? "" : LANGUAGES[g_activeLanguage].fenceTag;
+        char *source = source_as_markdown(text, (size_t)len, tag);
+        free(text);
+        if (!source) return;
+        text = source;
+        len = (Sci_Position)strlen(source);
+    }
 
     int showWaitCursor = len >= PREVIEW_SLOW_RENDER_THRESHOLD;
     HCURSOR oldCursor = showWaitCursor ? SetCursor(LoadCursorA(NULL, IDC_WAIT)) : NULL;
@@ -3355,10 +3498,10 @@ static void update_preview(void) {
 static void sync_preview_to_editor_scroll(void) {
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SCROLL_SYNC);
     if (!g_webviewReady || !g_webview || !g_editorVisible || !g_previewVisible) return;
-    int line = (int)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0) + 1;
+    Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0) + 1;
     char script[96];
     snprintf(script, sizeof(script),
-             "if(window.scrollToSourceLine)window.scrollToSourceLine(%d);", line);
+             "if(window.scrollToSourceLine)window.scrollToSourceLine(%lld);", (long long)line);
     execute_webview_script(script, &g_scriptHandler);
 }
 
@@ -3371,7 +3514,7 @@ static const WCHAR *document_short_name(const Document *doc) {
 static void format_document_label(const Document *doc, WCHAR *label, size_t capacity) {
     const WCHAR *shortName = document_short_name(doc);
     if (doc->isReference && !shortName) {
-        swprintf(label, capacity, L"Markdown Reference%ls", doc->dirty ? L" *" : L"");
+        swprintf(label, capacity, L"%ls%ls", reference_title(doc->isReference), doc->dirty ? L" *" : L"");
     } else if (shortName && shortName[0]) {
         swprintf(label, capacity, L"%ls%ls", shortName, doc->dirty ? L" *" : L"");
     } else if (doc->untitledNumber == 0) {
@@ -3397,9 +3540,9 @@ static void update_tab_label(int index) {
 static void save_active_document_view(void) {
     if (!g_hEdit || g_documentCount <= 0) return;
     Document *doc = &g_documents[g_activeDocument];
-    doc->caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    doc->anchor = (int)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
-    doc->firstVisibleLine = (int)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    doc->caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    doc->anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
+    doc->firstVisibleLine = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
     doc->xOffset = (int)SendMessageA(g_hEdit, SCI_GETXOFFSET, 0, 0);
 }
 
@@ -3501,7 +3644,7 @@ static int create_document_tab(void) {
 static void update_title(void) {
     const Document *active = &g_documents[g_activeDocument];
     const WCHAR *name = g_currentFile ? g_currentFile
-        : active->isReference ? L"Markdown Reference"
+        : active->isReference ? reference_title(active->isReference)
         : (active->untitledNumber == 0 ? L"Untitled.txt" : L"Untitled");
     size_t cap = wcslen(name) + 32;
     WCHAR *title = (WCHAR *)malloc(cap * sizeof(WCHAR));
@@ -3519,7 +3662,126 @@ static void set_dirty(int dirty) {
     update_status_position();
 }
 
-static int load_file(const WCHAR *path) {
+/* Swaps the active tab onto a different Scintilla document and releases the
+   one it had. A document's storage options are fixed when it's created, so
+   load_file() needs this whenever a file's large-file mode differs from the
+   one the tab's current document was made for - and on every large-file
+   load, since the loader always builds a new document. Configured the same
+   way create_document_tab() sets up a new tab's document. */
+static void replace_active_scintilla_document(sptr_t sciDoc, int largeFile) {
+    sptr_t old = g_documents[g_activeDocument].sciDocument;
+    int oldSwitching = g_switchingDocument;
+    g_switchingDocument = 1;
+    g_documents[g_activeDocument].sciDocument = sciDoc;
+    g_largeFile = largeFile;
+    set_active_editor_document(sciDoc);
+    configure_scintilla(g_hEdit);
+    apply_editor_font(g_fontFaceName, g_fontPointSize);
+    SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)old);
+    g_switchingDocument = oldSwitching;
+}
+
+/* Scintilla's ILoader (ILoader.h) is a C++ interface. It has no virtual
+   destructor, so its vtable is exactly these three slots in declaration
+   order and can be called from C the same way the COM interfaces are. */
+typedef struct SciLoader SciLoader;
+typedef struct SciLoaderVtbl {
+    int (SCI_METHOD *Release)(SciLoader *self);
+    int (SCI_METHOD *AddData)(SciLoader *self, const char *data, Sci_Position length);
+    void *(SCI_METHOD *ConvertToDocument)(SciLoader *self);
+} SciLoaderVtbl;
+struct SciLoader { const SciLoaderVtbl *lpVtbl; };
+
+#define LARGE_FILE_READ_CHUNK (4 * 1024 * 1024)
+
+/* Streams `file` into a new large-file document (see LARGE_FILE_FEATURES)
+   through SCI_CREATELOADER, so the text is only ever held once - by
+   Scintilla - rather than in a read buffer and then copied into the
+   document by SCI_SETTEXT. The document stores no styles (halving its
+   memory; it's never lexed) and uses 64-bit positions, which is what lets
+   files past 2 GB open at all. Any encoding other than UTF-8 is converted
+   a chunk at a time on the way in. `forcedEncoding` is a TextEncoding, or
+   -1 to detect it: from the first chunk, then - for a file that looks like
+   UTF-8 - by validating the rest as it streams, starting over as ANSI if a
+   later chunk turns out not to be. Returns 0 on failure, with *outOfMemory
+   set when Scintilla couldn't allocate the text. */
+static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEncoding,
+                                       int *outEncoding, int *outHasBom, int *outOfMemory) {
+    *outOfMemory = 0;
+    char *chunk = (char *)malloc(LARGE_FILE_READ_CHUNK);
+    char *decoded = (char *)malloc(text_decode_capacity(LARGE_FILE_READ_CHUNK));
+    if (!chunk || !decoded) {
+        free(chunk); free(decoded);
+        *outOfMemory = 1;
+        return 0;
+    }
+    sptr_t result = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        LARGE_INTEGER start = {0};
+        if (attempt && !SetFilePointerEx(file, start, NULL, FILE_BEGIN)) break;
+        SciLoader *loader = (SciLoader *)SendMessageA(g_hEdit, SCI_CREATELOADER, (WPARAM)length,
+            (LPARAM)(SC_DOCUMENTOPTION_STYLES_NONE | SC_DOCUMENTOPTION_TEXT_LARGE));
+        if (!loader) { *outOfMemory = 1; break; }
+        TextCodecState codec = { TEXT_ENCODING_UTF8, {0}, 0 };
+        Utf8Validator validator;
+        utf8_validator_init(&validator);
+        int validating = 0, ok = 1, restart = 0;
+        *outHasBom = 0;
+        size_t total = 0;
+        while (ok && total < length) {
+            DWORD want = (DWORD)((length - total) > LARGE_FILE_READ_CHUNK ? LARGE_FILE_READ_CHUNK : (length - total));
+            DWORD got = 0;
+            if (!ReadFile(file, chunk, want, &got, NULL) || got == 0) { ok = 0; break; }
+            const char *data = chunk;
+            size_t dataLength = got;
+            if (total == 0) {
+                size_t bom = 0;
+                if (forcedEncoding >= 0) {
+                    codec.encoding = (TextEncoding)forcedEncoding;
+                    bom = text_bom_length(chunk, got, codec.encoding);
+                } else {
+                    codec.encoding = detect_text_encoding(chunk, got, got == length, &bom);
+                    /* A first chunk that looks like UTF-8 only says so much. */
+                    validating = codec.encoding == TEXT_ENCODING_UTF8 && !bom;
+                }
+                *outHasBom = bom > 0;
+                data += bom;
+                dataLength -= bom;
+            }
+            total += got;
+            if (validating && !utf8_validator_feed(&validator, data, dataLength)) { restart = 1; break; }
+            if (codec.encoding != TEXT_ENCODING_UTF8) {
+                size_t produced = 0;
+                if (!text_decode(&codec, data, dataLength, total == length, decoded,
+                                 text_decode_capacity(LARGE_FILE_READ_CHUNK), &produced)) { ok = 0; break; }
+                data = decoded;
+                dataLength = produced;
+            }
+            int status = dataLength ? loader->lpVtbl->AddData(loader, data, (Sci_Position)dataLength) : SC_STATUS_OK;
+            if (status != SC_STATUS_OK) {
+                *outOfMemory = status == SC_STATUS_BADALLOC;
+                ok = 0;
+            }
+        }
+        if (ok && !restart && validating && !utf8_validator_finish(&validator)) restart = 1;
+        if (!ok || restart) {
+            loader->lpVtbl->Release(loader);
+            if (!ok) break;
+            forcedEncoding = TEXT_ENCODING_ANSI;
+            continue;
+        }
+        *outEncoding = codec.encoding;
+        result = (sptr_t)loader->lpVtbl->ConvertToDocument(loader);
+        break;
+    }
+    free(chunk);
+    free(decoded);
+    return result;
+}
+
+/* `forcedEncoding` is a TextEncoding to read the file as (File > Reopen
+   with Encoding), or -1 to detect it. */
+static int load_file_as(const WCHAR *path, int forcedEncoding) {
     WCHAR *displayPath = absolute_path(path);
     WCHAR *ioPath = extended_path(path);
     HANDLE hFile = ioPath ? CreateFileW(ioPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -3534,16 +3796,67 @@ static int load_file(const WCHAR *path) {
         return 0;
     }
     LARGE_INTEGER size;
-    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 || size.QuadPart > INT_MAX) {
+    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0) {
         CloseHandle(hFile);
-        MessageBoxW(g_hMainWnd, L"The file is too large to edit safely.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        MessageBoxW(g_hMainWnd, L"Could not read file.", L"MarkEdit", MB_OK | MB_ICONERROR);
         free(displayPath);
         return 0;
     }
     size_t length = (size_t)size.QuadPart;
-    char *buf = (char *)malloc(length + 1);
+    /* Past INT_MAX a file has to open in large-file mode whatever the
+       threshold is set to: only a large-file document has 64-bit positions. */
+    int largeFile = size.QuadPart >= (LONGLONG)g_largeFileThresholdMB * 1024 * 1024 ||
+                    size.QuadPart > INT_MAX;
+    char *buf = NULL;
     size_t total = 0;
-    int ok = 0;
+    int ok = 0, loaded = 0, outOfMemory = 0, tooLarge = 0;
+    char *decoded = NULL;
+    if (largeFile) {
+        /* SCI_CREATELOADER resets g_hEdit's per-view line state as a side
+           effect (Editor.cxx's CreateLoader). A successful load swaps in the
+           new document, which rebuilds it; a failed one re-attaches the
+           tab's own document below to do the same, so the view is saved
+           first to put the caret and scroll position back. */
+        save_active_document_view();
+        HCURSOR oldCursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
+        int hasBom = 0, encoding = TEXT_ENCODING_UTF8;
+        sptr_t sciDoc = read_large_file_document(hFile, length, forcedEncoding, &encoding,
+                                                 &hasBom, &outOfMemory);
+        SetCursor(oldCursor);
+        if (!sciDoc) {
+            const Document *doc = &g_documents[g_activeDocument];
+            g_switchingDocument = 1;
+            set_active_editor_document(doc->sciDocument);
+            SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)doc->anchor, (LPARAM)doc->caret);
+            SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)doc->firstVisibleLine, 0);
+            SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)doc->xOffset, 0);
+            g_switchingDocument = 0;
+        } else {
+            g_switchingDocument = 1;
+            replace_active_scintilla_document(sciDoc, 1);
+            apply_detected_eol_mode(g_hEdit);
+            /* A loader-built document starts with undo collection off. */
+            SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, TRUE, 0);
+            SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+            SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+            g_switchingDocument = 0;
+            g_hasBom = hasBom;
+            g_encoding = encoding;
+            g_documents[g_activeDocument].encodingForced = forcedEncoding >= 0;
+            /* Swapping in a loader-built document raises no SCN_MODIFIED,
+               which is what refreshes these after an ordinary load. */
+            update_linenumber_margin_width(g_hEdit);
+            if (g_hSplitEdit) update_linenumber_margin_width(g_hSplitEdit);
+            update_status_bar();
+            loaded = 1;
+            /* No convert_indentation() here, unlike the ordinary path
+               below: rewriting every line of a large file on load is the
+               kind of whole-document pass this mode exists to avoid. */
+        }
+    } else {
+        buf = (char *)malloc(length + 1);
+        if (!buf) outOfMemory = 1;
+    }
     while (buf && total < length) {
         DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : (length - total));
         DWORD got = 0;
@@ -3552,28 +3865,54 @@ static int load_file(const WCHAR *path) {
     }
     if (buf && total == length) {
         buf[length] = 0;
-        const char *content = buf;
-        if (has_utf8_bom(buf, (int)length)) {
-            content += 3;
-            g_hasBom = 1;
-        } else {
-            g_hasBom = 0;
+        size_t bom = 0;
+        TextEncoding encoding = forcedEncoding >= 0 ? (TextEncoding)forcedEncoding
+                                                    : detect_text_encoding(buf, length, 1, &bom);
+        if (forcedEncoding >= 0) bom = text_bom_length(buf, length, encoding);
+        const char *content = buf + bom;
+        size_t contentLength = length - bom;
+        if (encoding != TEXT_ENCODING_UTF8) {
+            size_t decodedLength = 0;
+            decoded = text_decode_all(encoding, content, length - bom, &decodedLength);
+            contentLength = decodedLength;
+            if (!decoded) outOfMemory = 1;
+            /* ANSI text can triple in size as UTF-8, past what an ordinary
+               (32-bit) document holds; only large-file mode can take that. */
+            else if (decodedLength > INT_MAX) tooLarge = 1;
+            content = outOfMemory || tooLarge ? NULL : decoded;
         }
-        g_switchingDocument = 1;
-        set_edit_text(g_hEdit, content);
-        /* Matches toggle_indent_use_spaces(): when the setting is on, a
-           file opened (or dropped) with tab-indentation should come in
-           already converted rather than leaving a mix of tabs and spaces.
-           Done inside the g_switchingDocument window and before
-           SCI_EMPTYUNDOBUFFER so it's folded into the loaded state - no
-           spurious dirty flag and nothing to undo back into tabs. */
-        if (g_indentUseSpaces) convert_indentation(g_hEdit, 1);
-        SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-        SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-        g_switchingDocument = 0;
+        if (content) {
+            /* Reloading a tab that was in large-file mode with a file that's
+               since shrunk needs an ordinary, lexable document again. */
+            if (g_largeFile) {
+                sptr_t sciDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
+                if (sciDoc) replace_active_scintilla_document(sciDoc, 0);
+            }
+            g_hasBom = bom > 0;
+            g_encoding = encoding;
+            g_documents[g_activeDocument].encodingForced = forcedEncoding >= 0;
+            g_switchingDocument = 1;
+            set_edit_text(g_hEdit, content, (Sci_Position)contentLength);
+            /* Matches toggle_indent_use_spaces(): when the setting is on, a
+               file opened (or dropped) with tab-indentation should come in
+               already converted rather than leaving a mix of tabs and spaces.
+               Done inside the g_switchingDocument window and before
+               SCI_EMPTYUNDOBUFFER so it's folded into the loaded state - no
+               spurious dirty flag and nothing to undo back into tabs. */
+            if (g_indentUseSpaces) convert_indentation(g_hEdit, 1);
+            SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+            SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+            g_switchingDocument = 0;
+            loaded = 1;
+        }
+    }
+    if (loaded) {
         replace_wstring(&g_currentFile, displayPath ? displayPath : path);
         apply_document_language(g_hEdit, g_currentFile);
         if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
+        /* An ordinary load's SCN_MODIFIED schedules this; a large-file
+           load raises none, so clear the outline the old text built. */
+        if (g_largeFile) update_outline();
         record_document_file_time(g_activeDocument);
         update_document_mapping();
         update_preview();
@@ -3582,17 +3921,51 @@ static int load_file(const WCHAR *path) {
         refresh_menu(g_hMainWnd);
         ok = 1;
     } else {
-        MessageBoxW(g_hMainWnd, L"Could not read file.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        MessageBoxW(g_hMainWnd, outOfMemory ? L"Not enough memory to open this file."
+                    : tooLarge ? L"This file is too large to open as text below the large-file "
+                                 L"threshold. Lower [View] LargeFileThresholdMB in markedit.ini "
+                                 L"to open it in large-file mode."
+                    : L"Could not read file.",
+                    L"MarkEdit", MB_OK | MB_ICONERROR);
     }
+    free(decoded);
     if (buf) free(buf);
     CloseHandle(hFile);
     free(displayPath);
     return ok;
 }
 
+static int load_file(const WCHAR *path) {
+    return load_file_as(path, -1);
+}
+
+/* File > Reopen with Encoding: rereads the file from disk as `encoding`,
+   for when detection guessed wrong. */
+static void reopen_with_encoding(TextEncoding encoding) {
+    if (!g_currentFile) {
+        MessageBoxW(g_hMainWnd, L"Save the document first - there's no file to reopen yet.",
+                    L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g_dirty && MessageBoxW(g_hMainWnd, L"Reopening discards your unsaved changes. Continue?",
+                               L"MarkEdit", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    WCHAR *path = wcsdup_heap(g_currentFile);
+    if (path) load_file_as(path, encoding);
+    free(path);
+}
+
+/* Edit > Convert > Encoding: the text stays as it is; this only changes how
+   the next save stores it, so it marks the document modified. */
+static void set_document_encoding(TextEncoding encoding, int hasBom) {
+    if (g_encoding == (int)encoding && g_hasBom == hasBom) return;
+    g_encoding = encoding;
+    g_hasBom = hasBom;
+    set_dirty(1);
+}
+
 static int active_document_is_reusable(void) {
     return !g_currentFile && !g_dirty &&
-           (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) == 0;
+           (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) == 0;
 }
 
 static int open_file_in_tab(const WCHAR *path) {
@@ -3622,6 +3995,8 @@ static int open_file_in_tab(const WCHAR *path) {
         g_activeDocument = target;
         set_active_editor_document(g_documents[target].sciDocument);
         apply_editor_font(g_fontFaceName, g_fontPointSize);
+        apply_document_language(g_hEdit, g_currentFile);
+        if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[target].anchor, (LPARAM)g_documents[target].caret);
         SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)failedDoc);
         TabCtrl_SetCurSel(g_hTabs, target);
@@ -3750,12 +4125,10 @@ static void do_insert_file(void) {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     ofn.lpstrDefExt = L"md";
     if (GetOpenFileNameW(&ofn)) {
-        int length = 0;
-        char *text = read_bytes_file(path, &length);
+        char *text = read_text_file(path, NULL, NULL, NULL);
         if (text) {
-            char *content = has_utf8_bom(text, length) ? text + 3 : text;
             SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)content);
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)text);
             SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
             SetFocus(g_hEdit);
         } else {
@@ -4063,10 +4436,12 @@ static void handle_dropfiles(HDROP hDrop) {
 /* Crash-safe write: content goes to a sibling temp file first, which then
    replaces `target` in one filesystem operation (ReplaceFileW, or a plain
    move for a file that doesn't exist yet), so a failure partway through
-   never leaves a half-written document on disk. `target` must already be
-   an I/O-ready (extended-length) path. Shared by save_to_path() and
+   never leaves a half-written document on disk. `text` is UTF-8 and is
+   converted to `encoding` on the way out. `target` must already be an
+   I/O-ready (extended-length) path. Shared by save_to_path() and
    workspace-wide replace. */
-static int write_file_atomic(const WCHAR *target, const char *text, size_t len, int hasBom) {
+static int write_file_atomic(const WCHAR *target, const char *text, size_t len,
+                             TextEncoding encoding, int hasBom) {
     size_t pathLen = wcslen(target);
     WCHAR *temporary = (WCHAR *)malloc((pathLen + 64) * sizeof(WCHAR));
     HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -4082,19 +4457,36 @@ static int write_file_atomic(const WCHAR *target, const char *text, size_t len, 
         free(temporary);
         return 0;
     }
-    static const char bom[3] = { (char)0xEF, (char)0xBB, (char)0xBF };
+    size_t bomLength = 0;
+    const char *bom = text_encoding_bom(encoding, &bomLength);
     size_t total = 0;
     BOOL ok = TRUE;
-    if (hasBom) {
+    if (hasBom && bomLength) {
         DWORD written = 0;
-        if (!WriteFile(hFile, bom, 3, &written, NULL) || written != 3) ok = FALSE;
+        if (!WriteFile(hFile, bom, (DWORD)bomLength, &written, NULL) || written != bomLength) ok = FALSE;
     }
+    /* `text` is UTF-8; anything else is converted a chunk at a time. */
+    TextCodecState codec = { encoding, {0}, 0 };
+    size_t encodedCapacity = text_encode_capacity(1024 * 1024);
+    char *encoded = encoding == TEXT_ENCODING_UTF8 ? NULL : (char *)malloc(encodedCapacity);
+    if (encoding != TEXT_ENCODING_UTF8 && !encoded) ok = FALSE;
     while (ok && total < len) {
-        DWORD chunk = (DWORD)((len - total) > 1024 * 1024 ? 1024 * 1024 : (len - total));
+        size_t piece = (len - total) > 1024 * 1024 ? 1024 * 1024 : (len - total);
+        const char *bytes = text + total;
+        size_t byteCount = piece;
+        if (encoded) {
+            if (!text_encode(&codec, text + total, piece, total + piece == len, encoded,
+                             encodedCapacity, &byteCount, NULL)) { ok = FALSE; break; }
+            bytes = encoded;
+        }
         DWORD written = 0;
-        if (!WriteFile(hFile, text + total, chunk, &written, NULL) || written != chunk) { ok = FALSE; break; }
-        total += written;
+        if (byteCount && (!WriteFile(hFile, bytes, (DWORD)byteCount, &written, NULL) || written != byteCount)) {
+            ok = FALSE;
+            break;
+        }
+        total += piece;
     }
+    free(encoded);
     if (ok) ok = FlushFileBuffers(hFile);
     if (!CloseHandle(hFile)) ok = FALSE;
     if (ok) {
@@ -4110,23 +4502,67 @@ static int write_file_atomic(const WCHAR *target, const char *text, size_t len, 
 }
 
 static int save_to_path(const WCHAR *path) {
-    int len;
-    char *text = get_edit_text(g_hEdit, &len);
+    /* Written straight from Scintilla's own buffer: SCI_GETCHARACTERPOINTER
+       closes the gap so the text is contiguous, and the pointer stays valid
+       until the document is next modified. Only the encoding prompt below
+       can let that happen (its message loop runs the file-watch timer), so
+       the pointer is fetched again after it. A copy via get_edit_text()
+       would need a second document-sized allocation, which a large-file
+       document may not have room for. */
+    Sci_Position len = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    const char *text = (const char *)SendMessageA(g_hEdit, SCI_GETCHARACTERPOINTER, 0, 0);
     if (!text) {
         MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
+    TextEncoding encoding = (TextEncoding)g_encoding;
+    int hasBom = g_hasBom;
+    int lossless = text_encoding_is_lossless(text, (size_t)len, encoding);
+    if (lossless < 0) {
+        MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        return 0;
+    }
+    if (!lossless) {
+        WCHAR message[400];
+        if (encoding == TEXT_ENCODING_ANSI)
+            swprintf(message, sizeof(message) / sizeof(message[0]),
+                     L"Some characters in this document can't be stored in ANSI (code page %u).\n\n"
+                     L"Yes: save it as UTF-8 instead.\n"
+                     L"No: save as ANSI anyway, replacing those characters with '?'.",
+                     text_ansi_code_page());
+        else
+            swprintf(message, sizeof(message) / sizeof(message[0]),
+                     L"This document contains bytes that aren't valid text - it was probably "
+                     L"reopened with the wrong encoding - and they can't be stored in UTF-16.\n\n"
+                     L"Yes: save it as UTF-8 instead, keeping those bytes as they are.\n"
+                     L"No: save as UTF-16 anyway, replacing them with \x201C\xFFFD\x201D.");
+        int answer = MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
+        if (answer == IDCANCEL) return 0;
+        if (answer == IDYES) {
+            encoding = TEXT_ENCODING_UTF8;
+            hasBom = 0;
+        }
+        /* The prompt's message loop runs timers - an external-change reload
+           can replace the text under it - so the buffer is fetched again. */
+        len = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+        text = (const char *)SendMessageA(g_hEdit, SCI_GETCHARACTERPOINTER, 0, 0);
+        if (!text) {
+            MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
+            return 0;
+        }
+    }
     WCHAR *displayPath = absolute_path(path);
     WCHAR *ioPath = extended_path(path);
     const WCHAR *target = ioPath ? ioPath : path;
-    int ok = write_file_atomic(target, text, (size_t)len, g_hasBom);
-    free(text);
+    int ok = write_file_atomic(target, text, (size_t)len, encoding, hasBom);
     if (!ok) {
         free(displayPath);
         free(ioPath);
         MessageBoxW(g_hMainWnd, L"Could not write the complete file; the original was left unchanged.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
+    g_encoding = encoding;
+    g_hasBom = hasBom;
     /* Record the path before replace_wstring(): when saving the current file,
        `path` may alias g_currentFile, which replace_wstring() can free. */
     recent_list_add(&g_recentFileList, displayPath ? displayPath : path);
@@ -4363,6 +4799,13 @@ static void release_document_reference(Document *doc) {
 
 static void push_closed_document(Document removed, int index) {
     removed.closedIndex = index;
+    /* Holding a large-file tab's document for Reopen Closed Tab would keep
+       the whole file in memory; it keeps only its path and is read from
+       disk again on reopen (see do_reopen_closed_tab()). */
+    if (removed.largeFile && removed.sciDocument) {
+        SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)removed.sciDocument);
+        removed.sciDocument = 0;
+    }
     if (g_closedDocumentCount == MAX_CLOSED_DOCUMENTS) {
         release_document_reference(&g_closedDocuments[0]);
         for (int i = 0; i + 1 < g_closedDocumentCount; i++)
@@ -4392,6 +4835,7 @@ static void do_close_document_at(int index) {
         set_active_editor_document(newDoc);
         configure_scintilla(g_hEdit);
         apply_editor_font(g_fontFaceName, g_fontPointSize);
+        if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
         SendMessageA(g_hEdit, SCI_CLEARALL, 0, 0);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
@@ -4414,6 +4858,8 @@ static void do_close_document_at(int index) {
     g_switchingDocument = 1;
     set_active_editor_document(g_documents[g_activeDocument].sciDocument);
     apply_editor_font(g_fontFaceName, g_fontPointSize);
+    apply_document_language(g_hEdit, g_currentFile);
+    if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)g_documents[g_activeDocument].anchor,
                  (LPARAM)g_documents[g_activeDocument].caret);
     g_switchingDocument = 0;
@@ -4435,6 +4881,11 @@ static void do_reopen_closed_tab(void) {
     }
     Document restored = g_closedDocuments[--g_closedDocumentCount];
     memset(&g_closedDocuments[g_closedDocumentCount], 0, sizeof(g_closedDocuments[0]));
+    if (!restored.sciDocument) { /* a large-file tab, see push_closed_document() */
+        if (restored.path) open_file_in_tab(restored.path);
+        free(restored.path);
+        return;
+    }
     save_active_document_view();
 
     int replaceBlank = g_documentCount == 1 && active_document_is_reusable();
@@ -4469,6 +4920,8 @@ static void do_reopen_closed_tab(void) {
         SendMessageW(g_hTabs, TCM_INSERTITEMW, (WPARAM)index, (LPARAM)&item);
     }
     apply_editor_font(g_fontFaceName, g_fontPointSize);
+    apply_document_language(g_hEdit, g_currentFile);
+    if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)restored.anchor, (LPARAM)restored.caret);
     SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)restored.firstVisibleLine, 0);
     SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)restored.xOffset, 0);
@@ -4493,7 +4946,7 @@ static void prompt_reload_active_external_change(void) {
         : L"This file changed on disk. Reload the updated version?";
     if (MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES) {
         WCHAR *path = wcsdup_heap(g_currentFile);
-        if (path) load_file(path);
+        if (path) load_file_as(path, doc->encodingForced ? doc->encoding : -1);
         free(path);
     }
 }
@@ -4568,9 +5021,9 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             CreateWindowExA(0, "BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 132, 50, 76, 25, hwnd, (HMENU)IDCANCEL, GetModuleHandleA(NULL), NULL);
             char current[32];
-            int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION,
+            Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION,
                 SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0), 0) + 1;
-            snprintf(current, sizeof(current), "%d", line);
+            snprintf(current, sizeof(current), "%lld", (long long)line);
             SetWindowTextA(g_hGotoEdit, current);
             SendMessageA(g_hGotoEdit, EM_SETSEL, 0, -1);
             SetFocus(g_hGotoEdit);
@@ -4593,7 +5046,7 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 char value[32];
                 GetWindowTextA(g_hGotoEdit, value, sizeof(value));
                 long line = strtol(value, NULL, 10);
-                int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+                Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
                 if (line < 1 || line > lineCount) {
                     MessageBeep(MB_ICONWARNING);
                     SendMessageA(g_hGotoEdit, EM_SETSEL, 0, -1);
@@ -5099,36 +5552,36 @@ static int show_replace_review_dialog(ReplaceMatch *matches, int count) {
 
 static void find_in_edit(const char *needle, int matchCase, int down) {
     if (!needle || !needle[0]) return;
-    int len = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position len = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     int needleLen = (int)strlen(needle);
-    int foundAt = -1;
-    int foundEnd = -1;
+    Sci_Position foundAt = -1;
+    Sci_Position foundEnd = -1;
     SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
 
     if (down) {
         SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)selEnd, 0);
         SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)len, 0);
-        foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
+        foundAt = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         if (foundAt < 0) {
             SendMessageA(g_hEdit, SCI_SETTARGETSTART, 0, 0);
             SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)selStart, 0);
-            foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
+            foundAt = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         }
     } else {
         SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)selStart, 0);
         SendMessageA(g_hEdit, SCI_SETTARGETEND, 0, 0);
-        foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
+        foundAt = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         if (foundAt < 0) {
             SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)len, 0);
             SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)selEnd, 0);
-            foundAt = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
+            foundAt = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)needleLen, (LPARAM)needle);
         }
     }
 
     if (foundAt >= 0) {
-        foundEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        foundEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)foundAt, (LPARAM)foundEnd);
         SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
         SetFocus(g_hEdit);
@@ -5138,15 +5591,15 @@ static void find_in_edit(const char *needle, int matchCase, int down) {
 }
 
 static void replace_selection_and_find(const char *findWhat, const char *replaceWith, int matchCase) {
-    int selStart = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selEnd = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (selEnd > selStart) {
         int findLen = (int)strlen(findWhat);
         SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
         SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)selStart, 0);
         SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)selEnd, 0);
-        int found = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)findLen, (LPARAM)findWhat);
-        int foundEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        Sci_Position found = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)findLen, (LPARAM)findWhat);
+        Sci_Position foundEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
         if (found == selStart && foundEnd == selEnd) {
             SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)replaceWith);
         }
@@ -5202,17 +5655,17 @@ static void handle_findmsg(FINDREPLACEW *fr) {
         int count = 0;
         int findLen = (int)strlen(findUtf8);
         int replaceLen = (int)strlen(replaceUtf8);
-        int position = 0;
-        int documentLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+        Sci_Position position = 0;
+        Sci_Position documentLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
         SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
         while (findLen > 0 && position <= documentLength && count <= 100000) {
             SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)position, 0);
             SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)documentLength, 0);
-            int found = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET,
+            Sci_Position found = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET,
                                            (WPARAM)findLen, (LPARAM)findUtf8);
             if (found < 0) break;
-            int oldEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+            Sci_Position oldEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
             SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)replaceLen, (LPARAM)replaceUtf8);
             documentLength += replaceLen - (oldEnd - found);
             position = found + replaceLen;
@@ -5336,20 +5789,21 @@ static void clear_custom_css(void) {
     refresh_menu(g_hMainWnd);
 }
 
-/* ---- Help > Markdown Reference: a plain-text syntax cheat sheet. ----
-   The reference text itself lives in help_reference.c/.h. */
+/* ---- Help > Markdown Reference and Keyboard Shortcuts. ----
+   The page text itself lives in help_reference.c/.h. */
 
-/* Opens the reference as an ordinary unsaved document, so the live preview
-   renders it and every construct in it can be edited and experimented with. */
-static void show_help_reference(void) {
+/* Opens a Help page as an ordinary unsaved document, so the live preview
+   renders it and every construct in it can be edited and experimented with.
+   Each page reuses its own tab if it's already open. */
+static void show_help_page(ReferenceKind kind) {
     for (int i = 0; i < g_documentCount; i++) {
-        if (g_documents[i].isReference) {
+        if (g_documents[i].isReference == (int)kind) {
             switch_document(i);
             return;
         }
     }
     if (!create_document_tab()) return;
-    g_documents[g_activeDocument].isReference = 1;
+    g_documents[g_activeDocument].isReference = kind;
     /* create_document_tab() just defaulted this untitled tab's language to
        plain text (language_for_path(NULL)). This tab's content is always
        Markdown regardless, so force it back - passing any name that merely
@@ -5358,7 +5812,9 @@ static void show_help_reference(void) {
     apply_document_language(g_hEdit, L"markdown-reference.md");
     if (g_hSplitEdit) apply_document_language(g_hSplitEdit, L"markdown-reference.md");
     g_switchingDocument = 1;
-    set_edit_text(g_hEdit, help_reference_markdown());
+    const char *page = kind == REFERENCE_SHORTCUTS ? help_shortcuts_markdown()
+                                                   : help_reference_markdown();
+    set_edit_text(g_hEdit, page, (Sci_Position)strlen(page));
     SendMessageA(g_hEdit, SCI_SETSEL, 0, 0);
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
@@ -5367,6 +5823,44 @@ static void show_help_reference(void) {
     update_tab_label(g_activeDocument);
     update_title();
     update_preview();
+}
+
+/* Help > About. The version is read from the exe's own VERSIONINFO
+   resource (markedit.rc) rather than repeated here, so the two can't drift;
+   VS_FIXEDFILEINFO is located by its signature, which avoids linking
+   version.lib just for VerQueryValue(). */
+static void show_about_box(void) {
+    WCHAR version[32] = L"";
+    HRSRC resource = FindResourceW(NULL, MAKEINTRESOURCEW(VS_VERSION_INFO), MAKEINTRESOURCEW(16) /* RT_VERSION */);
+    HGLOBAL loaded = resource ? LoadResource(NULL, resource) : NULL;
+    const BYTE *bytes = loaded ? (const BYTE *)LockResource(loaded) : NULL;
+    DWORD size = resource ? SizeofResource(NULL, resource) : 0;
+    for (DWORD offset = 0; bytes && offset + sizeof(VS_FIXEDFILEINFO) <= size; offset += 4) {
+        const VS_FIXEDFILEINFO *info = (const VS_FIXEDFILEINFO *)(bytes + offset);
+        if (info->dwSignature != 0xFEEF04BD) continue;
+        swprintf(version, sizeof(version) / sizeof(version[0]), L"%u.%u.%u",
+                 (unsigned)HIWORD(info->dwFileVersionMS), (unsigned)LOWORD(info->dwFileVersionMS),
+                 (unsigned)HIWORD(info->dwFileVersionLS));
+        break;
+    }
+    WCHAR text[512];
+    swprintf(text, sizeof(text) / sizeof(text[0]),
+             L"MarkEdit%ls%ls\n"
+             L"A Markdown and source code editor for Windows.\n\n"
+             L"Copyright (c) 2026 Les Farrell\n\n"
+             L"Built with Scintilla, Lexilla, cmark-gfm, Microsoft Edge WebView2, "
+             L"highlight.js, KaTeX, and Mermaid. See THIRD_PARTY_NOTICES.md for "
+             L"their licences.",
+             version[0] ? L" " : L"", version);
+    MSGBOXPARAMSW box = {0};
+    box.cbSize = sizeof(box);
+    box.hwndOwner = g_hMainWnd;
+    box.hInstance = GetModuleHandleW(NULL);
+    box.lpszText = text;
+    box.lpszCaption = L"About MarkEdit";
+    box.dwStyle = MB_OK | MB_USERICON;
+    box.lpszIcon = MAKEINTRESOURCEW(IDI_APPICON);
+    MessageBoxIndirectW(&box);
 }
 
 /* Menu text treats '&' as an accelerator marker; escape it as '&&' so a path
@@ -5381,7 +5875,7 @@ static void escape_ampersands(const WCHAR *in, WCHAR *out, size_t outSize) {
 }
 
 /* Windows does not recolour the visible, non-client menu bar when an app
-   switches its private dark-mode preference at runtime. Draw just those five
+   switches its private dark-mode preference at runtime. Draw just those
    top-level items ourselves; the dropdown contents remain native menus and
    are themed by apply_menu_theme(). */
 static HFONT main_menu_font(void) {
@@ -5453,6 +5947,15 @@ static HMENU build_menu(void) {
     HMENU hFile = CreatePopupMenu();
     AppendMenuA(hFile, MF_STRING, IDM_FILE_NEW, "&New\tCtrl+N");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_OPEN, "&Open...\tCtrl+O");
+    char ansiLabel[48];
+    snprintf(ansiLabel, sizeof(ansiLabel), "&ANSI (code page %u)", text_ansi_code_page());
+    HMENU hReopenEncoding = CreatePopupMenu();
+    AppendMenuA(hReopenEncoding, MF_STRING, IDM_FILE_REOPEN_UTF8, "UTF-&8");
+    AppendMenuA(hReopenEncoding, MF_STRING, IDM_FILE_REOPEN_UTF16LE, "UTF-16 &LE");
+    AppendMenuA(hReopenEncoding, MF_STRING, IDM_FILE_REOPEN_UTF16BE, "UTF-16 &BE");
+    AppendMenuA(hReopenEncoding, MF_STRING, IDM_FILE_REOPEN_ANSI, ansiLabel);
+    AppendMenuA(hFile, MF_POPUP | (g_currentFile ? 0 : MF_GRAYED), (UINT_PTR)hReopenEncoding,
+                "Reopen with &Encoding");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_QUICK_OPEN, "&Quick Open in Folder...\tCtrl+K");
     AppendMenuA(hFile, MF_STRING, IDM_FILE_FIND_FOLDER, "Find in F&older...");
     AppendMenuA(hFile, MF_STRING, IDM_REPLACE_WORKSPACE, "Replace in Fol&der...");
@@ -5516,8 +6019,6 @@ static HMENU build_menu(void) {
     AppendMenuA(hFile, MF_POPUP, (UINT_PTR)hRecentWorkspaces, "Recent Wor&kspaces");
     AppendMenuA(hFile, MF_SEPARATOR, 0, NULL);
 
-    AppendMenuA(hFile, MF_STRING, IDM_SETTINGS, "Settin&gs...");
-    AppendMenuA(hFile, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXIT, "E&xit");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFile, "&File");
 
@@ -5569,15 +6070,19 @@ static HMENU build_menu(void) {
     AppendMenuA(hLineEndings, MF_STRING, IDM_EDIT_EOL_LF, "&LF (Unix/macOS)");
     AppendMenuA(hLineEndings, MF_STRING, IDM_EDIT_EOL_CR, "C&R (Classic Mac)");
     AppendMenuA(hConvert, MF_POPUP, (UINT_PTR)hLineEndings, "Line &Endings");
+    HMENU hEncoding = CreatePopupMenu();
+    AppendMenuA(hEncoding, MF_STRING, IDM_EDIT_ENCODING_UTF8, "UTF-&8");
+    AppendMenuA(hEncoding, MF_STRING, IDM_EDIT_ENCODING_UTF8_BOM, "UTF-8 with &BOM");
+    AppendMenuA(hEncoding, MF_STRING, IDM_EDIT_ENCODING_UTF16LE, "UTF-16 &LE");
+    AppendMenuA(hEncoding, MF_STRING, IDM_EDIT_ENCODING_UTF16BE, "UTF-16 B&E");
+    AppendMenuA(hEncoding, MF_STRING, IDM_EDIT_ENCODING_ANSI, ansiLabel);
+    AppendMenuA(hConvert, MF_POPUP, (UINT_PTR)hEncoding, "En&coding");
     AppendMenuA(hEditMenu, MF_POPUP, (UINT_PTR)hConvert, "Con&vert");
     AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_FIND, "&Find...\tCtrl+F");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_FINDNEXT, "Find &Next\tF3");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_REPLACE, "&Replace...\tCtrl+H");
     AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_GOTOLINE, "&Go to Line...\tCtrl+G");
-    AppendMenuA(hEditMenu, MF_STRING, IDM_EDIT_COMMAND_PALETTE, "Command &Palette...\tCtrl+Shift+P");
-    AppendMenuA(hEditMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(hEditMenu, MF_STRING, IDM_FORMAT_FONT, "&Font...");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hEditMenu, "&Edit");
 
     HMENU hView = CreatePopupMenu();
@@ -5606,6 +6111,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hPreviewTheme, MF_STRING | (g_customCssPath ? 0 : MF_GRAYED),
                 IDM_VIEW_CLEAR_CUSTOM_CSS, "C&lear Custom Preview CSS");
     AppendMenuA(hView, MF_POPUP, (UINT_PTR)hPreviewTheme, "&Markdown Theme");
+    AppendMenuA(hView, MF_STRING, IDM_FORMAT_FONT, "Fon&t...");
     AppendMenuA(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hView, MF_STRING | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_PREVIEW_ON_LEFT, "Preview on &Left");
@@ -5709,11 +6215,15 @@ static HMENU build_menu(void) {
     AppendMenuA(hHtml, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hHtml, MF_STRING, IDM_FMT_HTML_BREAK, "Line &Break");
 
-    HMENU hFormat = CreatePopupMenu();
-    AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hMarkdown, "&Markdown");
-    AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hJson, "&JSON");
-    AppendMenuA(hFormat, MF_POPUP, (UINT_PTR)hHtml, "&HTML");
-    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hFormat, "F&ormat");
+    HMENU hTools = CreatePopupMenu();
+    AppendMenuA(hTools, MF_STRING, IDM_EDIT_COMMAND_PALETTE, "Command &Palette...\tCtrl+Shift+P");
+    AppendMenuA(hTools, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hTools, MF_POPUP, (UINT_PTR)hMarkdown, "&Markdown");
+    AppendMenuA(hTools, MF_POPUP, (UINT_PTR)hJson, "&JSON");
+    AppendMenuA(hTools, MF_POPUP, (UINT_PTR)hHtml, "&HTML");
+    AppendMenuA(hTools, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hTools, MF_STRING, IDM_SETTINGS, "Settin&gs...");
+    AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hTools, "&Tools");
 
     HMENU hRun = CreatePopupMenu();
     AppendMenuA(hRun, MF_STRING, IDM_RUN_FILE, "&Run File\tCtrl+F5");
@@ -5728,6 +6238,9 @@ static HMENU build_menu(void) {
 
     HMENU hHelp = CreatePopupMenu();
     AppendMenuA(hHelp, MF_STRING, IDM_HELP_REFERENCE, "&Markdown Reference");
+    AppendMenuA(hHelp, MF_STRING, IDM_HELP_SHORTCUTS, "&Keyboard Shortcuts");
+    AppendMenuA(hHelp, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hHelp, MF_STRING, IDM_HELP_ABOUT, "&About MarkEdit");
     AppendMenuA(hMenuBar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)hHelp, "&Help");
 
     if (g_menuBkBrush) {
@@ -6116,7 +6629,7 @@ static void layout(HWND hwnd) {
 static void update_view_menu(HWND hwnd) {
     HMENU hMenuBar = GetMenu(hwnd);
     if (!hMenuBar) return;
-    HMENU hView = GetSubMenu(hMenuBar, 2); /* File, Edit, View, Format, Run, Help */
+    HMENU hView = GetSubMenu(hMenuBar, 2); /* File, Edit, View, Tools, Run, Help */
     CheckMenuItem(hView, IDM_VIEW_TOGGLEPREVIEW, MF_BYCOMMAND | (g_previewVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLEEDITOR, MF_BYCOMMAND | (g_editorVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_PREVIEW_ON_LEFT, MF_BYCOMMAND | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED));
@@ -6131,7 +6644,13 @@ static void update_view_menu(HWND hwnd) {
     CheckMenuItem(hView, IDM_VIEW_EXPLORER, MF_BYCOMMAND | (g_explorerVisible ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hView, IDM_VIEW_TOGGLESPLIT, MF_BYCOMMAND | (g_splitEditorVisible ? MF_CHECKED : MF_UNCHECKED));
     EnableMenuItem(hView, IDM_VIEW_RESET_SPLIT_EDITOR, MF_BYCOMMAND | (g_splitEditorVisible ? MF_ENABLED : MF_GRAYED));
-    HMENU hTheme = GetSubMenu(hView, 6);
+    /* Found by the command it holds rather than by position, which drifts
+       whenever an item is added above it. */
+    HMENU hTheme = NULL;
+    for (int i = GetMenuItemCount(hView) - 1; i >= 0 && !hTheme; i--) {
+        HMENU sub = GetSubMenu(hView, i);
+        if (sub && GetMenuState(sub, IDM_VIEW_THEME_GITHUB_LIGHT, MF_BYCOMMAND) != (UINT)-1) hTheme = sub;
+    }
     if (hTheme) {
         CheckMenuRadioItem(hTheme, IDM_VIEW_THEME_GITHUB_LIGHT, IDM_VIEW_THEME_GITHUB_DARK,
                            g_editorDarkMode ? IDM_VIEW_THEME_GITHUB_DARK : IDM_VIEW_THEME_GITHUB_LIGHT,
@@ -6320,8 +6839,8 @@ static void reset_editor_zoom(void) {
 }
 
 static void fold_toggle_at_cursor(void) {
-    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    Sci_Position pos = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
     SendMessageA(g_hEdit, SCI_TOGGLEFOLD, (WPARAM)line, 0);
 }
 
@@ -6343,8 +6862,8 @@ static int is_brace_char(char c) {
 /* The position of the brace adjacent to the caret - preferring the character
    just before it, so the match follows the caret the way editors expect -
    or -1 if the caret isn't next to one. */
-static int brace_position_near_caret(HWND hEdit) {
-    int pos = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+static Sci_Position brace_position_near_caret(HWND hEdit) {
+    Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
     if (pos > 0 && is_brace_char((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(pos - 1), 0)))
         return pos - 1;
     if (is_brace_char((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)pos, 0)))
@@ -6355,12 +6874,14 @@ static int brace_position_near_caret(HWND hEdit) {
 /* Keeps the matching-brace highlight (STYLE_BRACELIGHT/STYLE_BRACEBAD, set up
    in apply_editor_theme) in sync with the caret. Called on every SCN_UPDATEUI. */
 static void update_brace_highlight(void) {
-    int bracePos = brace_position_near_caret(g_hEdit);
+    /* An unmatched brace makes SCI_BRACEMATCH scan to the document's end,
+       on every caret move. */
+    Sci_Position bracePos = g_largeFile ? -1 : brace_position_near_caret(g_hEdit);
     if (bracePos < 0) {
         SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
         return;
     }
-    int match = (int)SendMessageA(g_hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
+    Sci_Position match = (Sci_Position)SendMessageA(g_hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
     if (match >= 0) SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)bracePos, (LPARAM)match);
     else SendMessageA(g_hEdit, SCI_BRACEBADLIGHT, (WPARAM)bracePos, 0);
 }
@@ -6413,41 +6934,42 @@ static void theme_autocomplete_popup(void) {
    Scintilla narrows the visible entries itself as more of the word is
    typed. */
 static void update_word_completions(void) {
-    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int wordStart = (int)SendMessageA(g_hEdit, SCI_WORDSTARTPOSITION, (WPARAM)pos, (LPARAM)1);
-    int prefixLen = pos - wordStart;
+    if (g_largeFile) return;
+    Sci_Position pos = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position wordStart = (Sci_Position)SendMessageA(g_hEdit, SCI_WORDSTARTPOSITION, (WPARAM)pos, (LPARAM)1);
+    Sci_Position prefixLen = pos - wordStart;
     if (prefixLen < WORD_COMPLETION_MIN_PREFIX) return;
     if (SendMessageA(g_hEdit, SCI_AUTOCACTIVE, 0, 0)) return;
 
     char *prefix = (char *)malloc((size_t)prefixLen + 1);
     if (!prefix) return;
-    struct Sci_TextRange prefixRange = { { wordStart, pos }, prefix };
-    SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&prefixRange);
+    struct Sci_TextRangeFull prefixRange = { { wordStart, pos }, prefix };
+    SendMessageA(g_hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&prefixRange);
     prefix[prefixLen] = 0;
 
-    int docLength = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position docLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, SCFIND_WORDSTART, 0);
 
     char *words[WORD_COMPLETION_MAX_WORDS];
     int wordCount = 0;
-    int searchFrom = 0;
+    Sci_Position searchFrom = 0;
     while (wordCount < WORD_COMPLETION_MAX_WORDS) {
         SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)searchFrom, 0);
         SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
-        int matchStart = (int)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)prefixLen, (LPARAM)prefix);
+        Sci_Position matchStart = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)prefixLen, (LPARAM)prefix);
         if (matchStart < 0) break;
-        int matchTargetEnd = (int)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        Sci_Position matchTargetEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
         searchFrom = matchTargetEnd;
 
         if (matchStart == wordStart) continue; /* the word being typed itself */
-        int wordEnd = (int)SendMessageA(g_hEdit, SCI_WORDENDPOSITION, (WPARAM)matchStart, (LPARAM)1);
-        int candidateLen = wordEnd - matchStart;
+        Sci_Position wordEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_WORDENDPOSITION, (WPARAM)matchStart, (LPARAM)1);
+        Sci_Position candidateLen = wordEnd - matchStart;
         if (candidateLen <= prefixLen) continue;
 
         char *candidate = (char *)malloc((size_t)candidateLen + 1);
         if (!candidate) continue;
-        struct Sci_TextRange candidateRange = { { matchStart, wordEnd }, candidate };
-        SendMessageA(g_hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&candidateRange);
+        struct Sci_TextRangeFull candidateRange = { { matchStart, wordEnd }, candidate };
+        SendMessageA(g_hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&candidateRange);
         candidate[candidateLen] = 0;
 
         int duplicate = 0;
@@ -6483,9 +7005,9 @@ static void update_word_completions(void) {
 }
 
 static void jump_to_matching_brace(HWND hEdit) {
-    int bracePos = brace_position_near_caret(hEdit);
+    Sci_Position bracePos = brace_position_near_caret(hEdit);
     if (bracePos < 0) return;
-    int match = (int)SendMessageA(hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
+    Sci_Position match = (Sci_Position)SendMessageA(hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
     if (match < 0) return;
     SendMessageA(hEdit, SCI_SETSEL, (WPARAM)match, (LPARAM)match);
     SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
@@ -6495,15 +7017,15 @@ static void jump_to_matching_brace(HWND hEdit) {
    the rest. Non-ASCII bytes (including UTF-8 continuation bytes) are left
    untouched rather than mangled. */
 static void apply_title_case(HWND hEdit) {
-    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
-    int length = end - start;
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position length = end - start;
     if (length <= 0) return;
     char *text = (char *)malloc((size_t)length + 1);
     if (!text) return;
     SendMessageA(hEdit, SCI_GETSELTEXT, 0, (LPARAM)text);
     int atWordStart = 1;
-    for (int i = 0; i < length; i++) {
+    for (Sci_Position i = 0; i < length; i++) {
         unsigned char c = (unsigned char)text[i];
         if (isalpha(c)) {
             text[i] = (char)(atWordStart ? toupper(c) : tolower(c));
@@ -6532,33 +7054,33 @@ static int compare_lines_desc(const void *a, const void *b) {
    (first occurrence kept, order otherwise preserved). Operates on the lines
    touched by the current selection, as one undo step. */
 static void transform_selected_lines(HWND hEdit, int mode) {
-    int firstLine, lastLine;
+    Sci_Position firstLine, lastLine;
     toolbar_selected_line_range(hEdit, &firstLine, &lastLine);
     if (lastLine <= firstLine) return;
 
-    int rangeStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-    int rangeEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
-    int totalLength = rangeEnd - rangeStart;
+    Sci_Position rangeStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    Sci_Position rangeEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    Sci_Position totalLength = rangeEnd - rangeStart;
     char *buffer = (char *)malloc((size_t)totalLength + 1);
     if (!buffer) return;
-    struct Sci_TextRange tr;
+    struct Sci_TextRangeFull tr;
     tr.chrg.cpMin = rangeStart;
     tr.chrg.cpMax = rangeEnd;
     tr.lpstrText = buffer;
-    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&tr);
+    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&tr);
 
-    int lineCount = lastLine - firstLine + 1;
+    Sci_Position lineCount = lastLine - firstLine + 1;
     char **lines = (char **)malloc((size_t)lineCount * sizeof(char *));
     if (!lines) { free(buffer); return; }
-    int n = 0;
+    Sci_Position n = 0;
     char *cursor = buffer;
-    for (int i = 0; i < lineCount; i++) {
+    for (Sci_Position i = 0; i < lineCount; i++) {
         char *eol = strchr(cursor, '\n');
         size_t len = eol ? (size_t)(eol - cursor) : strlen(cursor);
         if (len > 0 && cursor[len - 1] == '\r') len--;
         char *copy = (char *)malloc(len + 1);
         if (!copy) {
-            for (int j = 0; j < n; j++) free(lines[j]);
+            for (Sci_Position j = 0; j < n; j++) free(lines[j]);
             free(lines);
             free(buffer);
             return;
@@ -6571,7 +7093,7 @@ static void transform_selected_lines(HWND hEdit, int mode) {
 
     if (mode == 2) {
         int kept = 0;
-        for (int i = 0; i < n; i++) {
+        for (Sci_Position i = 0; i < n; i++) {
             int dup = 0;
             for (int j = 0; j < kept; j++) {
                 if (strcmp(lines[j], lines[i]) == 0) { dup = 1; break; }
@@ -6586,11 +7108,11 @@ static void transform_selected_lines(HWND hEdit, int mode) {
 
     const char *eol = editor_eol_sequence();
     size_t outCap = 1;
-    for (int i = 0; i < n; i++) outCap += strlen(lines[i]) + strlen(eol);
+    for (Sci_Position i = 0; i < n; i++) outCap += strlen(lines[i]) + strlen(eol);
     char *out = (char *)malloc(outCap);
     if (out) {
         out[0] = 0;
-        for (int i = 0; i < n; i++) {
+        for (Sci_Position i = 0; i < n; i++) {
             strcat(out, lines[i]);
             if (i < n - 1) strcat(out, eol);
         }
@@ -6598,7 +7120,7 @@ static void transform_selected_lines(HWND hEdit, int mode) {
         SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
         free(out);
     }
-    for (int i = 0; i < n; i++) free(lines[i]);
+    for (Sci_Position i = 0; i < n; i++) free(lines[i]);
     free(lines);
     free(buffer);
 }
@@ -6609,12 +7131,12 @@ static void transform_selected_lines(HWND hEdit, int mode) {
 static void convert_indentation(HWND hEdit, int toSpaces) {
     int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
     if (tabWidth <= 0) tabWidth = 4;
-    int lineCount = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
     SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    for (int line = lineCount - 1; line >= 0; line--) {
-        int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-        int indentEnd = lineStart;
+    for (Sci_Position line = lineCount - 1; line >= 0; line--) {
+        Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        Sci_Position indentEnd = lineStart;
         int column = 0;
         while (indentEnd < lineEnd) {
             char ch = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)indentEnd, 0);
@@ -6664,7 +7186,7 @@ static void select_all_occurrences(HWND hEdit) {
 /* Bookmarks are Scintilla markers on MARKER_BOOKMARK, which live on the
    document buffer itself - each tab keeps its own set automatically as
    SCI_SETDOCPOINTER swaps between them. */
-static void toggle_bookmark_at_line(int line) {
+static void toggle_bookmark_at_line(Sci_Position line) {
     int mask = (int)SendMessageA(g_hEdit, SCI_MARKERGET, (WPARAM)line, 0);
     if (mask & (1 << MARKER_BOOKMARK))
         SendMessageA(g_hEdit, SCI_MARKERDELETE, (WPARAM)line, (LPARAM)MARKER_BOOKMARK);
@@ -6673,26 +7195,26 @@ static void toggle_bookmark_at_line(int line) {
 }
 
 static void toggle_bookmark_at_cursor(HWND hEdit) {
-    int pos = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
-    toggle_bookmark_at_line((int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0));
+    Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    toggle_bookmark_at_line((Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0));
 }
 
 static void goto_bookmark(HWND hEdit, int forward) {
-    int pos = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int line = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
-    int found;
+    Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position line = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    Sci_Position found;
     if (forward) {
-        found = (int)SendMessageA(hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1), (LPARAM)(1 << MARKER_BOOKMARK));
-        if (found < 0) found = (int)SendMessageA(hEdit, SCI_MARKERNEXT, 0, (LPARAM)(1 << MARKER_BOOKMARK));
+        found = (Sci_Position)SendMessageA(hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1), (LPARAM)(1 << MARKER_BOOKMARK));
+        if (found < 0) found = (Sci_Position)SendMessageA(hEdit, SCI_MARKERNEXT, 0, (LPARAM)(1 << MARKER_BOOKMARK));
     } else {
-        found = (int)SendMessageA(hEdit, SCI_MARKERPREVIOUS, (WPARAM)(line - 1), (LPARAM)(1 << MARKER_BOOKMARK));
+        found = (Sci_Position)SendMessageA(hEdit, SCI_MARKERPREVIOUS, (WPARAM)(line - 1), (LPARAM)(1 << MARKER_BOOKMARK));
         if (found < 0) {
-            int lastLine = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0) - 1;
-            found = (int)SendMessageA(hEdit, SCI_MARKERPREVIOUS, (WPARAM)lastLine, (LPARAM)(1 << MARKER_BOOKMARK));
+            Sci_Position lastLine = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0) - 1;
+            found = (Sci_Position)SendMessageA(hEdit, SCI_MARKERPREVIOUS, (WPARAM)lastLine, (LPARAM)(1 << MARKER_BOOKMARK));
         }
     }
     if (found < 0) return;
-    int gotoPos = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)found, 0);
+    Sci_Position gotoPos = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)found, 0);
     SendMessageA(hEdit, SCI_SETSEL, (WPARAM)gotoPos, (LPARAM)gotoPos);
     SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
 }
@@ -6726,7 +7248,7 @@ static int is_debuggable_source(DebugSourceKind kind) {
 /* Debugger breakpoints are separate from general-purpose bookmarks, but share
    the same narrow marker margin. Scintilla keeps them attached to their lines
    as text is inserted or removed. */
-static void toggle_breakpoint_at_line(int line) {
+static void toggle_breakpoint_at_line(Sci_Position line) {
     if (!is_debuggable_source(debug_source_kind(g_currentFile))) {
         MessageBoxW(g_hMainWnd, L"Breakpoints are available for Python, C, and C++ files.",
                     L"Debugging", MB_OK | MB_ICONINFORMATION);
@@ -6740,8 +7262,8 @@ static void toggle_breakpoint_at_line(int line) {
 }
 
 static void toggle_breakpoint_at_cursor(void) {
-    int pos = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    Sci_Position pos = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
     toggle_breakpoint_at_line(line);
 }
 
@@ -6777,8 +7299,8 @@ static WCHAR *locate_powershell(void) {
 static int collect_breakpoint_lines(int **outLines) {
     int capacity = 0, count = 0;
     int *lines = NULL;
-    int line = -1;
-    while ((line = (int)SendMessageA(g_hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1),
+    Sci_Position line = -1;
+    while ((line = (Sci_Position)SendMessageA(g_hEdit, SCI_MARKERNEXT, (WPARAM)(line + 1),
                                       (LPARAM)(1 << MARKER_BREAKPOINT))) >= 0) {
         if (count >= capacity) {
             int next = capacity ? capacity * 2 : 8;
@@ -6787,7 +7309,9 @@ static int collect_breakpoint_lines(int **outLines) {
             lines = grown;
             capacity = next;
         }
-        lines[count++] = line;
+        /* Debugger "file:line" commands take an int; breakpoints are only
+           offered on Python/C/C++ sources, nowhere near 2^31 lines. */
+        lines[count++] = (int)line;
     }
     *outLines = lines;
     return count;
@@ -7094,7 +7618,7 @@ static void poll_debug_location(void) {
     clear_debug_execution_markers();
     SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)(line - 1), MARKER_DEBUG_LINE);
     SendMessageA(g_hEdit, SCI_ENSUREVISIBLE, (WPARAM)(line - 1), 0);
-    int visibleLines = (int)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position visibleLines = (Sci_Position)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
     SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE,
                  (WPARAM)(line > visibleLines / 2 ? line - visibleLines / 2 - 1 : 0), 0);
     replace_wstring(&g_lastDebugSource, source);
@@ -7885,15 +8409,15 @@ static void launch_active_source_file(int debug) {
 /* Strip trailing spaces and tabs from every line, as one undo action. Lines
    are rewritten back to front so earlier line positions stay valid. */
 static void trim_trailing_whitespace(HWND hEdit) {
-    int lineCount = (int)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
-    int caret = (int)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position caret = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
     int trimmed = 0;
 
     SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    for (int line = lineCount - 1; line >= 0; line--) {
-        int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-        int cut = lineEnd;
+    for (Sci_Position line = lineCount - 1; line >= 0; line--) {
+        Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+        Sci_Position cut = lineEnd;
         while (cut > lineStart) {
             char ch = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(cut - 1), 0);
             if (ch != ' ' && ch != '\t') break;
@@ -7915,8 +8439,8 @@ static void trim_trailing_whitespace(HWND hEdit) {
 
 /* True when `line` (length lineLen) is exactly an HTML comment delimiter,
    ignoring surrounding whitespace. */
-static int line_is_comment_delimiter(const char *line, int lineLen, const char *delimiter) {
-    int i = 0, end = lineLen;
+static int line_is_comment_delimiter(const char *line, Sci_Position lineLen, const char *delimiter) {
+    Sci_Position i = 0, end = lineLen;
     while (i < end && (line[i] == ' ' || line[i] == '\t')) i++;
     while (end > i && (line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
     int delimiterLen = (int)strlen(delimiter);
@@ -7927,26 +8451,26 @@ static int line_is_comment_delimiter(const char *line, int lineLen, const char *
    in an HTML comment on its own lines - and unwrapped when already exactly
    that. */
 static void toggle_comment(HWND hEdit) {
-    int firstLine, lastLine;
+    Sci_Position firstLine, lastLine;
     toolbar_selected_line_range(hEdit, &firstLine, &lastLine);
 
-    int length;
+    Sci_Position length;
     char *text = get_edit_text(hEdit, &length);
     if (!text) return;
-    int blockStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-    int blockEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
+    Sci_Position blockStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    Sci_Position blockEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
 
-    int openEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)firstLine, 0);
-    int closeStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lastLine, 0);
+    Sci_Position openEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)firstLine, 0);
+    Sci_Position closeStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lastLine, 0);
     if (lastLine - firstLine >= 1 &&
         line_is_comment_delimiter(text + blockStart, openEnd - blockStart, "<!--") &&
         line_is_comment_delimiter(text + closeStart, blockEnd - closeStart, "-->")) {
-        int innerStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)(firstLine + 1), 0);
+        Sci_Position innerStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)(firstLine + 1), 0);
         /* lastLine == firstLine + 1 means the delimiters are on adjacent
            lines with nothing between them - the inner content is empty
            rather than computed from a line range (which would go negative). */
-        int innerLength = lastLine - firstLine >= 2
-            ? (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(lastLine - 1), 0) - innerStart
+        Sci_Position innerLength = lastLine - firstLine >= 2
+            ? (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(lastLine - 1), 0) - innerStart
             : 0;
         char *inner = (char *)malloc((size_t)innerLength + 1);
         if (inner) {
@@ -7990,10 +8514,10 @@ static void toggle_comment(HWND hEdit) {
 
 /* True when the line begins a fenced code block delimiter (``` or ~~~,
    after up to three leading spaces as CommonMark allows). */
-static int line_starts_fence(int line) {
-    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-    int lineEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-    int i = lineStart;
+static int line_starts_fence(Sci_Position line) {
+    Sci_Position lineStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    Sci_Position lineEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
+    Sci_Position i = lineStart;
     while (i < lineEnd && i - lineStart < 3 &&
            (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)i, 0) == ' ') i++;
     char first = (char)SendMessageA(g_hEdit, SCI_GETCHARAT, (WPARAM)i, 0);
@@ -8009,11 +8533,11 @@ static int line_starts_fence(int line) {
 
 /* Finds the fenced block containing `line`, returning the source range between
    its delimiters. Returns 0 when the caret is not inside a fence. */
-static int fence_body_range(int line, int *bodyStart, int *bodyEnd) {
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    int openLine = -1, closeLine = -1;
+static int fence_body_range(Sci_Position line, Sci_Position *bodyStart, Sci_Position *bodyEnd) {
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position openLine = -1, closeLine = -1;
 
-    for (int scan = line; scan >= 0; scan--) {
+    for (Sci_Position scan = line; scan >= 0; scan--) {
         if (!line_starts_fence(scan)) continue;
         /* A fence delimiter on the caret's own line is the opener only if the
            caret sits on the opening one; scanning up finds that either way. */
@@ -8022,24 +8546,24 @@ static int fence_body_range(int line, int *bodyStart, int *bodyEnd) {
     }
     if (openLine < 0) return 0;
 
-    for (int scan = openLine + 1; scan < lineCount; scan++) {
+    for (Sci_Position scan = openLine + 1; scan < lineCount; scan++) {
         if (line_starts_fence(scan)) { closeLine = scan; break; }
     }
     if (closeLine < 0 || line > closeLine) return 0;
 
-    *bodyStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(openLine + 1), 0);
-    *bodyEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(closeLine - 1), 0);
+    *bodyStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(openLine + 1), 0);
+    *bodyEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(closeLine - 1), 0);
     return closeLine > openLine + 1;
 }
 
 /* Reformats the selection, or the fenced block at the caret when there is no
    selection. Leaves the document untouched if the text isn't valid JSON. */
 static void format_json(int indent) {
-    int start = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position start = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
 
     if (start == end) {
-        int caretLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+        Sci_Position caretLine = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
         if (!fence_body_range(caretLine, &start, &end)) {
             MessageBoxW(g_hMainWnd,
                         L"Place the caret inside a fenced code block, or select the JSON to format.",
@@ -8048,11 +8572,17 @@ static void format_json(int indent) {
         }
     }
 
-    int length;
+    /* json_reformat() takes an int length. */
+    if (end - start > INT_MAX) {
+        MessageBoxW(g_hMainWnd, L"That JSON is too large to format.",
+                    L"MarkEdit", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    Sci_Position length;
     char *text = get_edit_text(g_hEdit, &length);
     if (!text) return;
 
-    char *formatted = json_reformat(text + start, end - start, editor_eol_sequence(), indent);
+    char *formatted = json_reformat(text + start, (int)(end - start), editor_eol_sequence(), indent);
     free(text);
     if (!formatted) {
         MessageBoxW(g_hMainWnd, L"That text could not be read as JSON.",
@@ -8104,19 +8634,19 @@ static void update_outline(void) {
     if (!g_outlineVisible || g_activeLanguage != LANG_MARKDOWN) return;
     /* Suspend repainting so re-adding every heading doesn't flicker. */
     SendMessageW(g_hOutline, WM_SETREDRAW, FALSE, 0);
-    int lines = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    for (int lineNumber = 0; lineNumber < lines && g_outlineCount < 1024; lineNumber++) {
-        int linePosition = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    Sci_Position lines = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    for (Sci_Position lineNumber = 0; lineNumber < lines && g_outlineCount < 1024; lineNumber++) {
+        Sci_Position linePosition = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
         int style = (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)linePosition, 0);
         if (style < SCE_MARKDOWN_HEADER1 || style > SCE_MARKDOWN_HEADER6) continue;
-        int length = (int)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
+        Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
         if (length <= 0 || length > 65535) continue;
         char *line = (char *)malloc((size_t)length + 1);
         if (!line) break;
-        int got = (int)SendMessageA(g_hEdit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
+        Sci_Position got = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
         line[got >= 0 && got <= length ? got : length] = 0;
         int start = 0, textLength = 0;
-        int level = parse_atx_heading(line, got, &start, &textLength);
+        int level = parse_atx_heading(line, (int)got, &start, &textLength);
         if (level && textLength > 0) {
             char *heading = (char *)malloc((size_t)textLength + 1);
             if (heading) {
@@ -8185,10 +8715,10 @@ static void configure_minimap(HWND hMinimap) {
 static void update_minimap_viewport(void) {
     if (!g_hMinimap || !g_hEdit || !g_minimapVisible || !IsWindowVisible(g_hMinimap)) return;
 
-    int totalLines = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    int mainFirstVisible = (int)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
-    int mainFirstDocLine = (int)SendMessageA(g_hEdit, SCI_DOCLINEFROMVISIBLE, (WPARAM)mainFirstVisible, 0);
-    int mainLinesOnScreen = (int)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position totalLines = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position mainFirstVisible = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    Sci_Position mainFirstDocLine = (Sci_Position)SendMessageA(g_hEdit, SCI_DOCLINEFROMVISIBLE, (WPARAM)mainFirstVisible, 0);
+    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
 
     int minimapLineHeight = (int)SendMessageA(g_hMinimap, SCI_TEXTHEIGHT, 0, 0);
     if (minimapLineHeight < 1) minimapLineHeight = 1;
@@ -8200,18 +8730,20 @@ static void update_minimap_viewport(void) {
     /* Documents that fit entirely within the minimap's height stay pinned at
        the top; longer ones scroll to keep the main editor's viewport roughly
        centered within the minimap. */
-    int minimapFirstDocLine = 0;
+    Sci_Position minimapFirstDocLine = 0;
     if (totalLines > minimapLinesOnScreen) {
         minimapFirstDocLine = mainFirstDocLine - (minimapLinesOnScreen - mainLinesOnScreen) / 2;
-        int maxFirst = totalLines - minimapLinesOnScreen;
+        Sci_Position maxFirst = totalLines - minimapLinesOnScreen;
         if (minimapFirstDocLine > maxFirst) minimapFirstDocLine = maxFirst;
         if (minimapFirstDocLine < 0) minimapFirstDocLine = 0;
     }
-    int minimapFirstVisible = (int)SendMessageA(g_hMinimap, SCI_VISIBLEFROMDOCLINE, (WPARAM)minimapFirstDocLine, 0);
+    Sci_Position minimapFirstVisible = (Sci_Position)SendMessageA(g_hMinimap, SCI_VISIBLEFROMDOCLINE, (WPARAM)minimapFirstDocLine, 0);
     SendMessageA(g_hMinimap, SCI_SETFIRSTVISIBLELINE, (WPARAM)minimapFirstVisible, 0);
 
-    int newViewTop = (mainFirstDocLine - minimapFirstDocLine) * minimapLineHeight;
-    int newViewHeight = mainLinesOnScreen * minimapLineHeight;
+    /* Pixels within the minimap: the clamping above keeps the main view's
+       first line within one minimap height of the minimap's own. */
+    int newViewTop = (int)(mainFirstDocLine - minimapFirstDocLine) * minimapLineHeight;
+    int newViewHeight = (int)mainLinesOnScreen * minimapLineHeight;
     if (newViewHeight < 4) newViewHeight = 4;
 
     /* This runs on every caret move/scroll tick (see SCN_UPDATEUI), so only
@@ -8226,13 +8758,13 @@ static void update_minimap_viewport(void) {
    centered in its viewport - used for both a single click and drag-to-scroll. */
 static void minimap_scroll_main_to_y(int y) {
     if (!g_hEdit || !g_hMinimap) return;
-    int pos = (int)SendMessageA(g_hMinimap, SCI_POSITIONFROMPOINT, (WPARAM)0, (LPARAM)y);
+    Sci_Position pos = (Sci_Position)SendMessageA(g_hMinimap, SCI_POSITIONFROMPOINT, (WPARAM)0, (LPARAM)y);
     if (pos < 0) return;
-    int docLine = (int)SendMessageA(g_hMinimap, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
-    int mainLinesOnScreen = (int)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
-    int target = docLine - mainLinesOnScreen / 2;
+    Sci_Position docLine = (Sci_Position)SendMessageA(g_hMinimap, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position target = docLine - mainLinesOnScreen / 2;
     if (target < 0) target = 0;
-    int targetVisible = (int)SendMessageA(g_hEdit, SCI_VISIBLEFROMDOCLINE, (WPARAM)target, 0);
+    Sci_Position targetVisible = (Sci_Position)SendMessageA(g_hEdit, SCI_VISIBLEFROMDOCLINE, (WPARAM)target, 0);
     SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)targetVisible, 0);
 }
 
@@ -8317,17 +8849,17 @@ static void reset_split_editor(HWND hwnd) {
     save_layout_settings();
 }
 
-static char *editor_line_text(int lineNumber, int *outLength) {
-    int length = (int)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
+static char *editor_line_text(Sci_Position lineNumber, int *outLength) {
+    Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
     if (length < 0 || length > 1024 * 1024) return NULL;
     char *line = (char *)malloc((size_t)length + 1);
     if (!line) return NULL;
-    int got = (int)SendMessageA(g_hEdit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
+    Sci_Position got = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
     if (got < 0) got = 0;
     if (got > length) got = length;
     line[got] = 0;
     while (got > 0 && (line[got - 1] == '\r' || line[got - 1] == '\n')) line[--got] = 0;
-    if (outLength) *outLength = got;
+    if (outLength) *outLength = (int)got; /* at most 1 MiB, checked above */
     return line;
 }
 
@@ -8390,10 +8922,11 @@ static int append_dynamic(char **buffer, size_t *length, size_t *capacity, const
 }
 
 static void show_table_editor(void) {
-    int caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int caretLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    int first = caretLine, last = caretLine, existing = 0;
+    Sci_Position caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position caretLine = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position first = caretLine, last = caretLine;
+    int existing = 0;
     int lineLength = 0;
     char *line = editor_line_text(caretLine, &lineLength);
     if (line && strchr(line, '|')) {
@@ -8422,7 +8955,7 @@ static void show_table_editor(void) {
         if (header) { columns = table_row_cells(header, cells[0], 20); free(header); }
         if (columns < 1) columns = 1;
         existingRows = 1;
-        for (int sourceLine = first + 2; sourceLine <= last && existingRows < 51; sourceLine++) {
+        for (Sci_Position sourceLine = first + 2; sourceLine <= last && existingRows < 51; sourceLine++) {
             char *row = editor_line_text(sourceLine, NULL);
             if (row) { table_row_cells(row, cells[existingRows], columns); free(row); }
             existingRows++;
@@ -8472,12 +9005,12 @@ static void show_table_editor(void) {
     }
     free_table_cells(cells);
     if (!table) return;
-    int replaceStart, replaceEnd;
+    Sci_Position replaceStart, replaceEnd;
     if (existing) {
-        replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)first, 0);
+        replaceStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)first, 0);
         replaceEnd = last + 1 < lineCount
-            ? (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(last + 1), 0)
-            : (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+            ? (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(last + 1), 0)
+            : (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     } else {
         replaceStart = replaceEnd = caret;
         if (position_needs_leading_eol(caret)) {
@@ -8506,15 +9039,15 @@ static void show_table_editor(void) {
    scratch. */
 
 typedef struct TableCaretInfo {
-    int firstLine, lastLine; /* inclusive line range of the whole table */
-    int row;                 /* 0 = header, 1 = separator, 2+ = data row */
+    Sci_Position firstLine, lastLine; /* inclusive line range of the whole table */
+    Sci_Position row;                 /* 0 = header, 1 = separator, 2+ = data row */
     int column;               /* 0-based column the caret is in */
 } TableCaretInfo;
 
 /* How many pipe-delimited cells of `line` end strictly before byte `offset`,
    using the same leading-whitespace/leading-pipe skipping table_row_cells()
    uses, so the result lines up with that function's own cell indexing. */
-static int table_column_at_offset(const char *line, int offset) {
+static int table_column_at_offset(const char *line, Sci_Position offset) {
     const char *cursor = line;
     while (*cursor == ' ' || *cursor == '\t') cursor++;
     if (*cursor == '|') cursor++;
@@ -8534,13 +9067,13 @@ static void free_row_cells(char *cells[], int count) {
    Returns 0 (leaving *info untouched) if the caret isn't in a table with at
    least a header and a separator row. */
 static int find_table_caret_info(TableCaretInfo *info) {
-    int caret = (int)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int caretLine = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position caretLine = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     char *line = editor_line_text(caretLine, NULL);
     if (!line || !strchr(line, '|')) { free(line); return 0; }
 
-    int first = caretLine, last = caretLine;
+    Sci_Position first = caretLine, last = caretLine;
     while (first > 0) {
         char *previous = editor_line_text(first - 1, NULL);
         int belongs = previous && strchr(previous, '|');
@@ -8557,7 +9090,7 @@ static int find_table_caret_info(TableCaretInfo *info) {
     }
     if (last - first < 1) { free(line); return 0; } /* need a header and a separator row */
 
-    int lineStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)caretLine, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)caretLine, 0);
     info->firstLine = first;
     info->lastLine = last;
     info->row = caretLine - first;
@@ -8587,15 +9120,15 @@ static void insert_table_row_relative(int below) {
     free(header);
     if (columns < 1) columns = 1;
 
-    int targetLine = info.row <= 1
+    Sci_Position targetLine = info.row <= 1
         ? info.firstLine + 2 /* first data row, right after the separator */
         : info.firstLine + info.row + (below ? 1 : 0);
 
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     int appendAtEnd = targetLine >= lineCount;
-    int insertPos = appendAtEnd
-        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
-        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)targetLine, 0);
+    Sci_Position insertPos = appendAtEnd
+        ? (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)targetLine, 0);
 
     const char *eol = editor_eol_sequence();
     char *rowText = NULL; size_t rowLength = 0, rowCapacity = 0;
@@ -8624,20 +9157,20 @@ static void delete_table_row_at_cursor(void) {
         return;
     }
 
-    int line = info.firstLine + info.row;
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    int start, end;
+    Sci_Position line = info.firstLine + info.row;
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position start, end;
     if (line + 1 < lineCount) {
-        start = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        end = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(line + 1), 0);
+        start = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+        end = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(line + 1), 0);
     } else {
         /* Deleting the document's very last line: remove the EOL before it
            instead of one that doesn't exist after it, so no blank line is
            left behind at the end of the table. */
-        end = (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+        end = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
         start = line > 0
-            ? (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(line - 1), 0)
-            : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+            ? (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)(line - 1), 0)
+            : (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
     }
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)start, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)end, 0);
@@ -8650,7 +9183,7 @@ static void delete_table_row_at_cursor(void) {
    one undo step, inserting a new cell at `at` in each - shared by insert-
    column-left/right below. */
 static void insert_table_column_at(const TableCaretInfo *info, int at) {
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     /* When the table is the last thing in the document, its last line may
        have no trailing EOL of its own - so the rebuilt text mustn't add one
        either, or every insert would tack on a newline the file never had. */
@@ -8658,12 +9191,12 @@ static void insert_table_column_at(const TableCaretInfo *info, int at) {
     const char *eol = editor_eol_sequence();
     char *out = NULL; size_t outLength = 0, outCapacity = 0;
     int ok = 1;
-    for (int lineNumber = info->firstLine; ok && lineNumber <= info->lastLine; lineNumber++) {
+    for (Sci_Position lineNumber = info->firstLine; ok && lineNumber <= info->lastLine; lineNumber++) {
         char *lineText = editor_line_text(lineNumber, NULL);
         char *cells[128];
         int count = table_row_cells(lineText ? lineText : "", cells, 128);
         free(lineText);
-        int rowKind = lineNumber - info->firstLine; /* 0 header, 1 separator, 2+ data */
+        Sci_Position rowKind = lineNumber - info->firstLine; /* 0 header, 1 separator, 2+ data */
         int insertAt = at > count ? count : at;
         const char *newCell = rowKind == 1 ? "---" : rowKind == 0 ? "New" : "";
 
@@ -8687,10 +9220,10 @@ static void insert_table_column_at(const TableCaretInfo *info, int at) {
     }
     if (!ok || !out) { free(out); return; }
 
-    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info->firstLine, 0);
-    int replaceEnd = atDocumentEnd
-        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
-        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info->lastLine + 1), 0);
+    Sci_Position replaceStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info->firstLine, 0);
+    Sci_Position replaceEnd = atDocumentEnd
+        ? (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info->lastLine + 1), 0);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
@@ -8724,7 +9257,7 @@ static void delete_table_column_at_cursor(void) {
     }
     int removeAt = info.column >= headerCount ? headerCount - 1 : info.column;
 
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     /* When the table is the last thing in the document, its last line may
        have no trailing EOL of its own - so the rebuilt text mustn't add one
        either, or every delete would tack on a newline the file never had. */
@@ -8732,7 +9265,7 @@ static void delete_table_column_at_cursor(void) {
     const char *eol = editor_eol_sequence();
     char *out = NULL; size_t outLength = 0, outCapacity = 0;
     int ok = 1;
-    for (int lineNumber = info.firstLine; ok && lineNumber <= info.lastLine; lineNumber++) {
+    for (Sci_Position lineNumber = info.firstLine; ok && lineNumber <= info.lastLine; lineNumber++) {
         char *lineText = editor_line_text(lineNumber, NULL);
         char *cells[128];
         int count = table_row_cells(lineText ? lineText : "", cells, 128);
@@ -8752,10 +9285,10 @@ static void delete_table_column_at_cursor(void) {
     }
     if (!ok || !out) { free(out); return; }
 
-    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
-    int replaceEnd = atDocumentEnd
-        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
-        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0);
+    Sci_Position replaceStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
+    Sci_Position replaceEnd = atDocumentEnd
+        ? (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
@@ -8801,13 +9334,13 @@ static int compare_table_sort_rows(const void *a, const void *b) {
 static void sort_table_rows(int descending) {
     TableCaretInfo info;
     if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
-    int dataRowCount = info.lastLine - info.firstLine - 1;
+    Sci_Position dataRowCount = info.lastLine - info.firstLine - 1;
     if (dataRowCount < 2) return; /* nothing to reorder */
 
     TableSortRow *rows = (TableSortRow *)calloc((size_t)dataRowCount, sizeof(TableSortRow));
     if (!rows) return;
     int numeric = 1;
-    for (int i = 0; i < dataRowCount; i++) {
+    for (Sci_Position i = 0; i < dataRowCount; i++) {
         rows[i].lineText = editor_line_text(info.firstLine + 2 + i, NULL);
         char *cells[128];
         int count = table_row_cells(rows[i].lineText ? rows[i].lineText : "", cells, 128);
@@ -8821,7 +9354,7 @@ static void sort_table_rows(int descending) {
     g_tableSortDescending = descending;
     qsort(rows, (size_t)dataRowCount, sizeof(TableSortRow), compare_table_sort_rows);
 
-    int lineCount = (int)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
     /* When the table is the last thing in the document, its last line may
        have no trailing EOL of its own - so the rebuilt text mustn't add one
        either, or every sort would tack on a newline the file never had. */
@@ -8835,21 +9368,21 @@ static void sort_table_rows(int descending) {
              append_dynamic(&out, &outLength, &outCapacity, eol) &&
              append_dynamic(&out, &outLength, &outCapacity, separator ? separator : "") &&
              append_dynamic(&out, &outLength, &outCapacity, eol);
-    for (int i = 0; ok && i < dataRowCount; i++) {
+    for (Sci_Position i = 0; ok && i < dataRowCount; i++) {
         ok = append_dynamic(&out, &outLength, &outCapacity, rows[i].lineText ? rows[i].lineText : "");
         if (ok && !(atDocumentEnd && i == dataRowCount - 1))
             ok = append_dynamic(&out, &outLength, &outCapacity, eol);
     }
     free(header);
     free(separator);
-    for (int i = 0; i < dataRowCount; i++) { free(rows[i].lineText); free(rows[i].key); }
+    for (Sci_Position i = 0; i < dataRowCount; i++) { free(rows[i].lineText); free(rows[i].key); }
     free(rows);
     if (!ok || !out) { free(out); return; }
 
-    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
-    int replaceEnd = atDocumentEnd
-        ? (int)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
-        : (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0);
+    Sci_Position replaceStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)info.firstLine, 0);
+    Sci_Position replaceEnd = atDocumentEnd
+        ? (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0)
+        : (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(info.lastLine + 1), 0);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
@@ -8867,7 +9400,7 @@ static void set_table_column_alignment(const char *marker) {
     TableCaretInfo info;
     if (!find_table_caret_info(&info)) { report_not_in_table(); return; }
 
-    int separatorLine = info.firstLine + 1;
+    Sci_Position separatorLine = info.firstLine + 1;
     char *separator = editor_line_text(separatorLine, NULL);
     char *cells[128];
     int count = table_row_cells(separator ? separator : "", cells, 128);
@@ -8892,8 +9425,8 @@ static void set_table_column_alignment(const char *marker) {
     free(separator);
     if (!ok || !out) { free(out); return; }
 
-    int replaceStart = (int)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)separatorLine, 0);
-    int replaceEnd = (int)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)separatorLine, 0);
+    Sci_Position replaceStart = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)separatorLine, 0);
+    Sci_Position replaceEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINEENDPOSITION, (WPARAM)separatorLine, 0);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)replaceStart, 0);
     SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)replaceEnd, 0);
@@ -9139,11 +9672,9 @@ static void do_find_in_folder(void) {
         WIN32_FILE_ATTRIBUTE_DATA attributes;
         if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes) ||
             attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) continue;
-        int length = 0;
-        char *content = read_bytes_file(files.paths[i], &length);
+        char *content = read_text_file(files.paths[i], NULL, NULL, NULL);
         if (!content) continue;
         char *cursor = content;
-        if (has_utf8_bom(cursor, length)) cursor += 3;
         int lineNumber = 1;
         while (*cursor && results.count < 2000) {
             char *end = strchr(cursor, '\n');
@@ -9209,7 +9740,7 @@ static void reload_document_buffer(int index, const char *content) {
     g_switchingDocument = 1;
     if (current != g_documents[index].sciDocument)
         SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
-    set_edit_text(g_hEdit, content);
+    set_edit_text(g_hEdit, content, (Sci_Position)strlen(content));
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
     if (current != g_documents[index].sciDocument)
@@ -9272,6 +9803,7 @@ static char *replace_all_in_line(const char *line, const char *find, const char 
 static void apply_workspace_replace(ReplaceMatch *matches, int count, const char *find, const char *replace) {
     int filesChanged = 0;
     int filesFailed = 0;
+    int filesSkipped = 0;
     int i = 0;
     while (i < count) {
         const WCHAR *path = matches[i].path;
@@ -9283,11 +9815,29 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
         if (!anyAccepted) { i = fileEnd; continue; }
 
         int openIndex = find_open_document_for_path(path);
-        int length = 0;
-        char *content = (openIndex >= 0) ? get_document_text(openIndex, &length) : read_bytes_file(path, &length);
+        Sci_Position length = 0;
+        char *content = NULL;
+        int hasBom = 0, encoding = TEXT_ENCODING_UTF8;
+        if (openIndex >= 0) {
+            content = get_document_text(openIndex, &length);
+            hasBom = g_documents[openIndex].hasBom;
+            encoding = g_documents[openIndex].encoding;
+        } else {
+            int fileLength = 0;
+            content = read_text_file(path, &fileLength, &encoding, &hasBom);
+            length = fileLength;
+        }
         if (!content) { i = fileEnd; continue; }
-        int hasBom = openIndex >= 0 ? g_documents[openIndex].hasBom : has_utf8_bom(content, length);
-        char *body = content + (openIndex < 0 && hasBom ? 3 : 0);
+        /* The line rebuild below walks NUL-terminated lines, so text with a
+           NUL in it (possible in a UTF-16 file) would be written back cut
+           short - leave such a file alone. */
+        if (strlen(content) != (size_t)length) {
+            filesSkipped++;
+            free(content);
+            i = fileEnd;
+            continue;
+        }
+        char *body = content;
 
         size_t outCapacity = (size_t)length + 256;
         char *out = (char *)malloc(outCapacity);
@@ -9327,7 +9877,11 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
         if (out && changed) {
             WCHAR *ioPath = extended_path(path);
             const WCHAR *target = ioPath ? ioPath : path;
-            if (write_file_atomic(target, out, outLength, hasBom)) {
+            /* A replacement the file's encoding can't hold skips the file
+               rather than silently becoming '?' or U+FFFD. */
+            if (text_encoding_is_lossless(out, outLength, (TextEncoding)encoding) != 1) {
+                filesSkipped++;
+            } else if (write_file_atomic(target, out, outLength, (TextEncoding)encoding, hasBom)) {
                 filesChanged++;
                 /* `out` was built from the live editor buffer (including any
                    other unsaved edits), so it's exactly what was just written
@@ -9347,22 +9901,26 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
         free(content);
         i = fileEnd;
     }
-    WCHAR message[256];
-    if (filesChanged == 0 && filesFailed == 0) {
-        swprintf(message, 256, L"No files were changed.");
-    } else if (filesFailed == 0) {
-        swprintf(message, 256, L"Updated %d file%ls.", filesChanged, filesChanged == 1 ? L"" : L"s");
+    WCHAR message[512];
+    if (filesChanged == 0 && filesFailed == 0 && filesSkipped == 0) {
+        swprintf(message, 512, L"No files were changed.");
     } else {
         /* Aggregated into one dialog rather than one per failed file, which
            otherwise forced dismissing a modal for every read-only/locked file
            in a row before a large batch replace could finish. */
-        swprintf(message, 256, L"Updated %d file%ls. %d file%ls could not be written and %ls skipped.",
-                 filesChanged, filesChanged == 1 ? L"" : L"s",
-                 filesFailed, filesFailed == 1 ? L"" : L"s",
-                 filesFailed == 1 ? L"was" : L"were");
+        int used = swprintf(message, 512, L"Updated %d file%ls.", filesChanged, filesChanged == 1 ? L"" : L"s");
+        if (filesFailed && used > 0)
+            used += swprintf(message + used, 512 - (size_t)used,
+                             L" %d file%ls could not be written and %ls skipped.",
+                             filesFailed, filesFailed == 1 ? L"" : L"s", filesFailed == 1 ? L"was" : L"were");
+        if (filesSkipped && used > 0)
+            swprintf(message + used, 512 - (size_t)used,
+                     L" %d file%ls left unchanged (a NUL character in the file, or a "
+                     L"replacement its encoding can't store).",
+                     filesSkipped, filesSkipped == 1 ? L" was" : L"s were");
     }
     MessageBoxW(g_hMainWnd, message, L"Replace in Folder",
-               MB_OK | (filesFailed ? MB_ICONWARNING : MB_ICONINFORMATION));
+               MB_OK | (filesFailed || filesSkipped ? MB_ICONWARNING : MB_ICONINFORMATION));
 }
 
 /* Same folder enumeration and line scan as do_find_in_folder(), but every
@@ -9393,11 +9951,9 @@ static void do_replace_in_workspace(void) {
         WIN32_FILE_ATTRIBUTE_DATA attributes;
         if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes) ||
             attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) continue;
-        int length = 0;
-        char *content = read_bytes_file(files.paths[i], &length);
+        char *content = read_text_file(files.paths[i], NULL, NULL, NULL);
         if (!content) continue;
         char *cursor = content;
-        if (has_utf8_bom(cursor, length)) cursor += 3;
         int lineNumber = 1;
         while (*cursor && matchCount < 2000) {
             char *end = strchr(cursor, '\n');
@@ -9462,7 +10018,7 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"File: Quick Open in Folder", IDM_FILE_QUICK_OPEN},
     {L"File: Find in Folder", IDM_FILE_FIND_FOLDER}, {L"File: Replace in Folder", IDM_REPLACE_WORKSPACE},
     {L"File: Open Workspace Folder", IDM_OPEN_WORKSPACE},
-    {L"File: Settings", IDM_SETTINGS},
+    {L"Tools: Settings", IDM_SETTINGS},
     {L"File: Save", IDM_FILE_SAVE},
     {L"File: Save As", IDM_FILE_SAVEAS}, {L"File: Save All", IDM_FILE_SAVE_ALL},
     {L"File: Export Rendered HTML", IDM_FILE_EXPORT_HTML},
@@ -9488,10 +10044,19 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Edit: Convert to Title Case", IDM_EDIT_TITLECASE}, {L"Edit: Sort Lines Ascending", IDM_EDIT_SORT_ASC},
     {L"Edit: Sort Lines Descending", IDM_EDIT_SORT_DESC}, {L"Edit: Remove Duplicate Lines", IDM_EDIT_SORT_DEDUPE},
     {L"Edit: Tabs to Spaces", IDM_EDIT_TABS_TO_SPACES}, {L"Edit: Spaces to Tabs", IDM_EDIT_SPACES_TO_TABS},
+    {L"Edit: Convert Encoding to UTF-8", IDM_EDIT_ENCODING_UTF8},
+    {L"Edit: Convert Encoding to UTF-8 with BOM", IDM_EDIT_ENCODING_UTF8_BOM},
+    {L"Edit: Convert Encoding to UTF-16 LE", IDM_EDIT_ENCODING_UTF16LE},
+    {L"Edit: Convert Encoding to UTF-16 BE", IDM_EDIT_ENCODING_UTF16BE},
+    {L"Edit: Convert Encoding to ANSI", IDM_EDIT_ENCODING_ANSI},
+    {L"File: Reopen with Encoding UTF-8", IDM_FILE_REOPEN_UTF8},
+    {L"File: Reopen with Encoding UTF-16 LE", IDM_FILE_REOPEN_UTF16LE},
+    {L"File: Reopen with Encoding UTF-16 BE", IDM_FILE_REOPEN_UTF16BE},
+    {L"File: Reopen with Encoding ANSI", IDM_FILE_REOPEN_ANSI},
     {L"Edit: Convert Line Endings to CRLF", IDM_EDIT_EOL_CRLF},
     {L"Edit: Convert Line Endings to LF", IDM_EDIT_EOL_LF},
     {L"Edit: Convert Line Endings to CR", IDM_EDIT_EOL_CR},
-    {L"Edit: Font", IDM_FORMAT_FONT},
+    {L"View: Font", IDM_FORMAT_FONT},
     {L"Format: Bold", IDM_FMT_BOLD},
     {L"Format: Italic", IDM_FMT_ITALIC}, {L"Format: Strikethrough", IDM_FMT_STRIKETHROUGH},
     {L"Format: Inline Code", IDM_FMT_CODE}, {L"Format: Code Block", IDM_FMT_CODEBLOCK},
@@ -9550,7 +10115,9 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"View: Custom Preview CSS", IDM_VIEW_CUSTOM_CSS},
     {L"View: Clear Custom Preview CSS", IDM_VIEW_CLEAR_CUSTOM_CSS}, {L"View: Toggle Fold", IDM_VIEW_FOLD_TOGGLE},
     {L"View: Fold All", IDM_VIEW_FOLD_ALL}, {L"View: Unfold All", IDM_VIEW_UNFOLD_ALL},
-    {L"Help: Markdown Reference", IDM_HELP_REFERENCE}
+    {L"Help: Markdown Reference", IDM_HELP_REFERENCE},
+    {L"Help: Keyboard Shortcuts", IDM_HELP_SHORTCUTS},
+    {L"Help: About MarkEdit", IDM_HELP_ABOUT}
 };
 
 static void show_command_palette(void) {
@@ -10252,6 +10819,15 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_EDIT_TABS_TO_SPACES: convert_indentation(active_edit_view(), 1); break;
         case IDM_EDIT_SPACES_TO_TABS: convert_indentation(active_edit_view(), 0); break;
         case IDM_EDIT_EOL_CRLF: convert_line_endings(active_edit_view(), SC_EOL_CRLF); break;
+        case IDM_EDIT_ENCODING_UTF8: set_document_encoding(TEXT_ENCODING_UTF8, 0); break;
+        case IDM_EDIT_ENCODING_UTF8_BOM: set_document_encoding(TEXT_ENCODING_UTF8, 1); break;
+        case IDM_EDIT_ENCODING_UTF16LE: set_document_encoding(TEXT_ENCODING_UTF16LE, 1); break;
+        case IDM_EDIT_ENCODING_UTF16BE: set_document_encoding(TEXT_ENCODING_UTF16BE, 1); break;
+        case IDM_EDIT_ENCODING_ANSI: set_document_encoding(TEXT_ENCODING_ANSI, 0); break;
+        case IDM_FILE_REOPEN_UTF8: reopen_with_encoding(TEXT_ENCODING_UTF8); break;
+        case IDM_FILE_REOPEN_UTF16LE: reopen_with_encoding(TEXT_ENCODING_UTF16LE); break;
+        case IDM_FILE_REOPEN_UTF16BE: reopen_with_encoding(TEXT_ENCODING_UTF16BE); break;
+        case IDM_FILE_REOPEN_ANSI: reopen_with_encoding(TEXT_ENCODING_ANSI); break;
         case IDM_EDIT_EOL_LF: convert_line_endings(active_edit_view(), SC_EOL_LF); break;
         case IDM_EDIT_EOL_CR: convert_line_endings(active_edit_view(), SC_EOL_CR); break;
         case IDM_EDIT_FIND: show_find_dialog(0); break;
@@ -10344,7 +10920,9 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_PREVIEW_THEME_DARK:
             select_preview_theme(hwnd, cmd == IDM_VIEW_PREVIEW_THEME_DARK);
             break;
-        case IDM_HELP_REFERENCE: show_help_reference(); break;
+        case IDM_HELP_REFERENCE: show_help_page(REFERENCE_MARKDOWN); break;
+        case IDM_HELP_SHORTCUTS: show_help_page(REFERENCE_SHORTCUTS); break;
+        case IDM_HELP_ABOUT: show_about_box(); break;
     }
 }
 
@@ -10476,12 +11054,12 @@ static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis) {
     free(heapLabel);
 }
 
-static int line_has_list_marker(const char *line, int length) {
-    int i = 0;
+static int line_has_list_marker(const char *line, Sci_Position length) {
+    Sci_Position i = 0;
     while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
     if (i + 1 < length && (line[i] == '-' || line[i] == '*' || line[i] == '+') &&
         (line[i + 1] == ' ' || line[i + 1] == '\t')) return 1;
-    int digits = i;
+    Sci_Position digits = i;
     while (i < length && line[i] >= '0' && line[i] <= '9') i++;
     return i > digits && i + 1 < length && (line[i] == '.' || line[i] == ')') &&
         (line[i + 1] == ' ' || line[i + 1] == '\t');
@@ -10491,18 +11069,19 @@ static int line_has_list_marker(const char *line, int length) {
    ordinary text. A collapsed caret anywhere in a Markdown list item indents
    the entire item, which makes nesting work without first moving the caret. */
 static int smart_tab(HWND hEdit, int reverse) {
-    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (g_largeFile) return 0; /* copies the whole line, see smart_newline() */
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (start != end) return 0; /* retain Scintilla's block-selection behavior */
 
-    int lineNumber = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
-    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
-    int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
-    int lineLength = lineEnd - lineStart;
+    Sci_Position lineNumber = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    Sci_Position lineLength = lineEnd - lineStart;
     char *line = (char *)malloc((size_t)lineLength + 1);
     if (!line) return 0;
-    struct Sci_TextRange range = { { lineStart, lineEnd }, line };
-    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    struct Sci_TextRangeFull range = { { lineStart, lineEnd }, line };
+    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&range);
     line[lineLength] = 0;
 
     int leadingLength = 0;
@@ -10535,7 +11114,7 @@ static int smart_tab(HWND hEdit, int reverse) {
 
     int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
     if (tabWidth < 1) tabWidth = 4;
-    int column = (int)SendMessageA(hEdit, SCI_GETCOLUMN, (WPARAM)start, 0);
+    Sci_Position column = (Sci_Position)SendMessageA(hEdit, SCI_GETCOLUMN, (WPARAM)start, 0);
     int spaces = tabWidth - column % tabWidth;
     char padding[32];
     if (spaces >= (int)sizeof(padding)) spaces = (int)sizeof(padding) - 1;
@@ -10546,23 +11125,23 @@ static int smart_tab(HWND hEdit, int reverse) {
 }
 
 static int smart_markdown_newline(HWND hEdit) {
-    int selectionStart = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selectionEnd = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selectionStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selectionEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (selectionStart != selectionEnd) return 0;
-    int caret = selectionEnd;
+    Sci_Position caret = selectionEnd;
     if (caret > 0 && (int)SendMessageA(hEdit, SCI_GETSTYLEAT, (WPARAM)(caret - 1), 0) == SCE_MARKDOWN_CODEBK)
         return 0;
-    int line = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-    int beforeLength = caret - lineStart;
+    Sci_Position line = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    Sci_Position beforeLength = caret - lineStart;
     if (beforeLength <= 0) return 0;
     char *before = (char *)malloc((size_t)beforeLength + 1);
     if (!before) return 0;
-    struct Sci_TextRange range;
+    struct Sci_TextRangeFull range;
     range.chrg.cpMin = lineStart;
     range.chrg.cpMax = caret;
     range.lpstrText = before;
-    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&range);
     before[beforeLength] = 0;
 
     int i = 0;
@@ -10608,7 +11187,7 @@ static int smart_markdown_newline(HWND hEdit) {
     if (!hasMarker && !hasQuote) { free(before); return 0; }
     int contentStart = hasMarker ? markerEnd : quoteEnd;
     int contentEmpty = 1;
-    for (int p = contentStart; p < beforeLength; p++) {
+    for (Sci_Position p = contentStart; p < beforeLength; p++) {
         if (before[p] != ' ' && before[p] != '\t') { contentEmpty = 0; break; }
     }
 
@@ -10657,7 +11236,7 @@ static int smart_markdown_newline(HWND hEdit) {
     return 1;
 }
 
-static int ends_with_word(const char *text, int length, const char *word) {
+static int ends_with_word(const char *text, Sci_Position length, const char *word) {
     int wordLength = (int)strlen(word);
     if (length < wordLength || memcmp(text + length - wordLength, word,
                                       (size_t)wordLength) != 0) return 0;
@@ -10665,7 +11244,7 @@ static int ends_with_word(const char *text, int length, const char *word) {
                                       text[length - wordLength - 1] == '_');
 }
 
-static int style_allows_indent(HWND hEdit, int position) {
+static int style_allows_indent(HWND hEdit, Sci_Position position) {
     int style = (int)SendMessageA(hEdit, SCI_GETSTYLEAT, (WPARAM)position, 0);
     switch (g_activeLanguage) {
         case LANG_CPP:
@@ -10704,8 +11283,8 @@ static int style_allows_indent(HWND hEdit, int position) {
     }
 }
 
-static int line_opens_indent(HWND hEdit, const char *before, int contentStart, int trimmedEnd,
-                             int lineStart, char *closingOut) {
+static int line_opens_indent(HWND hEdit, const char *before, Sci_Position contentStart,
+                             Sci_Position trimmedEnd, Sci_Position lineStart, char *closingOut) {
     if (closingOut) *closingOut = 0;
     if (trimmedEnd <= contentStart || before[contentStart] == '#') return 0;
     if (!style_allows_indent(hEdit, lineStart + trimmedEnd - 1)) return 0;
@@ -10737,31 +11316,31 @@ static int line_opens_indent(HWND hEdit, const char *before, int contentStart, i
    real tab after language-specific block openers. When the caret is between a
    paired opener and closer, expand both onto properly aligned lines at once. */
 static int smart_indented_newline(HWND hEdit) {
-    int selectionStart = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int selectionEnd = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position selectionStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selectionEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (selectionStart != selectionEnd) return 0;
-    int caret = selectionEnd;
-    int lineNumber = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
-    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
-    int lineEnd = (int)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
-    int beforeLength = caret - lineStart;
+    Sci_Position caret = selectionEnd;
+    Sci_Position lineNumber = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    Sci_Position beforeLength = caret - lineStart;
     if (beforeLength < 0) return 0;
     char *before = (char *)malloc((size_t)beforeLength + 1);
     if (!before) return 0;
-    struct Sci_TextRange range = { { lineStart, caret }, before };
-    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    struct Sci_TextRangeFull range = { { lineStart, caret }, before };
+    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&range);
     before[beforeLength] = 0;
 
     int indentLength = 0;
     while (indentLength < beforeLength &&
            (before[indentLength] == ' ' || before[indentLength] == '\t')) indentLength++;
-    int trimmedEnd = beforeLength;
+    Sci_Position trimmedEnd = beforeLength;
     while (trimmedEnd > indentLength &&
            (before[trimmedEnd - 1] == ' ' || before[trimmedEnd - 1] == '\t')) trimmedEnd--;
     char closing = 0;
     int addIndent = line_opens_indent(hEdit, before, indentLength, trimmedEnd, lineStart, &closing);
 
-    int after = caret;
+    Sci_Position after = caret;
     while (after < lineEnd) {
         char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)after, 0);
         if (character != ' ' && character != '\t') break;
@@ -10770,7 +11349,7 @@ static int smart_indented_newline(HWND hEdit) {
     int pairedClose = addIndent && closing && after < lineEnd &&
         (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)after, 0) == closing;
     if (pairedClose) {
-        int rest = after + 1;
+        Sci_Position rest = after + 1;
         while (rest < lineEnd) {
             char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)rest, 0);
             if (character != ' ' && character != '\t') { pairedClose = 0; break; }
@@ -10808,6 +11387,9 @@ static int smart_indented_newline(HWND hEdit) {
 }
 
 static int smart_newline(HWND hEdit) {
+    /* Both copy the line up to the caret - in a large file with few line
+       breaks, that can be most of the document on every Enter. */
+    if (g_largeFile) return 0;
     if (g_activeLanguage == LANG_MARKDOWN && smart_markdown_newline(hEdit)) return 1;
     return smart_indented_newline(hEdit);
 }
@@ -10821,18 +11403,18 @@ static int smart_closing_indent(HWND hEdit, char typed) {
         g_activeLanguage == LANG_JSON);
     if (typed == ']' && g_activeLanguage == LANG_JSON) valid = 1;
     if (!valid) return 0;
-    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (start != end || (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed)
         return 0;
-    int line = (int)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
-    int lineStart = (int)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-    for (int position = lineStart; position < start; position++) {
+    Sci_Position line = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    for (Sci_Position position = lineStart; position < start; position++) {
         char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)position, 0);
         if (character != ' ' && character != '\t') return 0;
     }
     if (start == lineStart) return 0;
-    int removeStart = start;
+    Sci_Position removeStart = start;
     if ((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '\t') {
         removeStart--;
     } else {
@@ -10852,8 +11434,8 @@ static int smart_closing_indent(HWND hEdit, char typed) {
 
 static int smart_pair_character(HWND hEdit, char typed) {
     char closing = typed == '(' ? ')' : typed == '[' ? ']' : typed == '{' ? '}' : typed == '`' ? '`' : 0;
-    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (typed == '`' && start == end) {
         if ((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == '`') {
             SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
@@ -10870,7 +11452,7 @@ static int smart_pair_character(HWND hEdit, char typed) {
         }
         return 0;
     }
-    int length = end - start;
+    Sci_Position length = end - start;
     char *selected = (char *)malloc((size_t)length + 1);
     if (!selected) return 0;
     if (length > 0) SendMessageA(hEdit, SCI_GETSELTEXT, 0, (LPARAM)selected);
@@ -10893,8 +11475,8 @@ static int smart_pair_character(HWND hEdit, char typed) {
 }
 
 static int smart_pair_backspace(HWND hEdit) {
-    int start = (int)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    int end = (int)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     if (start != end || start <= 0) return 0;
     char before = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0);
     char after = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)start, 0);
@@ -10911,9 +11493,9 @@ static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
         return 0;
 
     POINT screenPoint;
-    int position;
+    Sci_Position position;
     if ((int)GET_X_LPARAM(lParam) == -1 && (int)GET_Y_LPARAM(lParam) == -1) {
-        position = (int)SendMessageA(hwnd, SCI_GETCURRENTPOS, 0, 0);
+        position = (Sci_Position)SendMessageA(hwnd, SCI_GETCURRENTPOS, 0, 0);
         if (!GetCaretPos(&screenPoint)) screenPoint = (POINT){0, 0};
         ClientToScreen(hwnd, &screenPoint);
     } else {
@@ -10921,7 +11503,7 @@ static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
         screenPoint.y = GET_Y_LPARAM(lParam);
         POINT clientPoint = screenPoint;
         ScreenToClient(hwnd, &clientPoint);
-        position = (int)SendMessageA(hwnd, SCI_POSITIONFROMPOINTCLOSE,
+        position = (Sci_Position)SendMessageA(hwnd, SCI_POSITIONFROMPOINTCLOSE,
                                      (WPARAM)clientPoint.x, (LPARAM)clientPoint.y);
     }
     if (position < 0) return 0;
@@ -10931,14 +11513,14 @@ static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
         position--;
     if (!SendMessageA(hwnd, SCI_INDICATORVALUEAT, INDICATOR_SPELLING, position)) return 0;
 
-    int start = (int)SendMessageA(hwnd, SCI_INDICATORSTART, INDICATOR_SPELLING, position);
-    int end = (int)SendMessageA(hwnd, SCI_INDICATOREND, INDICATOR_SPELLING, position);
+    Sci_Position start = (Sci_Position)SendMessageA(hwnd, SCI_INDICATORSTART, INDICATOR_SPELLING, position);
+    Sci_Position end = (Sci_Position)SendMessageA(hwnd, SCI_INDICATOREND, INDICATOR_SPELLING, position);
     if (start < 0 || end <= start) return 0;
-    int byteLength = end - start;
+    Sci_Position byteLength = end - start;
     char *utf8Word = (char *)malloc((size_t)byteLength + 1);
     if (!utf8Word) return 1;
-    struct Sci_TextRange range = { { start, end }, utf8Word };
-    SendMessageA(hwnd, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    struct Sci_TextRangeFull range = { { start, end }, utf8Word };
+    SendMessageA(hwnd, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&range);
     utf8Word[byteLength] = 0;
     WCHAR *word = to_wide(utf8Word);
     free(utf8Word);
@@ -10989,7 +11571,7 @@ static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
             SendMessageA(hwnd, SCI_BEGINUNDOACTION, 0, 0);
             SendMessageA(hwnd, SCI_SETTARGETSTART, (WPARAM)start, 0);
             SendMessageA(hwnd, SCI_SETTARGETEND, (WPARAM)end, 0);
-            int inserted = (int)SendMessageA(hwnd, SCI_REPLACETARGET,
+            Sci_Position inserted = (Sci_Position)SendMessageA(hwnd, SCI_REPLACETARGET,
                                               (WPARAM)-1, (LPARAM)replacement);
             SendMessageA(hwnd, SCI_SETSEL, (WPARAM)(start + inserted),
                          (LPARAM)(start + inserted));
@@ -11024,21 +11606,21 @@ static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
    Returns 0 (unhandled, so the caller falls back to a normal click) when
    there's no word under the pointer to jump from. */
 static int ctrl_click_jump_to_occurrence(HWND hEdit, int x, int y) {
-    int position = (int)SendMessageA(hEdit, SCI_POSITIONFROMPOINTCLOSE, (WPARAM)x, (LPARAM)y);
+    Sci_Position position = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMPOINTCLOSE, (WPARAM)x, (LPARAM)y);
     if (position < 0) return 0;
 
-    int wordStart = (int)SendMessageA(hEdit, SCI_WORDSTARTPOSITION, (WPARAM)position, (LPARAM)1);
-    int wordEnd = (int)SendMessageA(hEdit, SCI_WORDENDPOSITION, (WPARAM)position, (LPARAM)1);
+    Sci_Position wordStart = (Sci_Position)SendMessageA(hEdit, SCI_WORDSTARTPOSITION, (WPARAM)position, (LPARAM)1);
+    Sci_Position wordEnd = (Sci_Position)SendMessageA(hEdit, SCI_WORDENDPOSITION, (WPARAM)position, (LPARAM)1);
     if (wordEnd <= wordStart) return 0;
 
-    int wordLength = wordEnd - wordStart;
+    Sci_Position wordLength = wordEnd - wordStart;
     char *word = (char *)malloc((size_t)wordLength + 1);
     if (!word) return 1;
-    struct Sci_TextRange range = { { wordStart, wordEnd }, word };
-    SendMessageA(hEdit, SCI_GETTEXTRANGE, 0, (LPARAM)&range);
+    struct Sci_TextRangeFull range = { { wordStart, wordEnd }, word };
+    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&range);
     word[wordLength] = 0;
 
-    int docLength = (int)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position docLength = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
     SendMessageA(hEdit, SCI_SETSEARCHFLAGS, SCFIND_WHOLEWORD | SCFIND_MATCHCASE, 0);
 
     /* Search past the clicked word first, wrapping back to the start of the
@@ -11046,16 +11628,16 @@ static int ctrl_click_jump_to_occurrence(HWND hEdit, int x, int y) {
        find_in_edit() uses for its "down" search. */
     SendMessageA(hEdit, SCI_SETTARGETSTART, (WPARAM)wordEnd, 0);
     SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
-    int foundAt = (int)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
+    Sci_Position foundAt = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
     if (foundAt < 0) {
         SendMessageA(hEdit, SCI_SETTARGETSTART, 0, 0);
         SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)wordStart, 0);
-        foundAt = (int)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
+        foundAt = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
     }
     free(word);
 
     if (foundAt >= 0) {
-        int foundEnd = (int)SendMessageA(hEdit, SCI_GETTARGETEND, 0, 0);
+        Sci_Position foundEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETTARGETEND, 0, 0);
         SendMessageA(hEdit, SCI_SETSEL, (WPARAM)foundAt, (LPARAM)foundEnd);
         SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
     } else {
@@ -11361,7 +11943,7 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
            markers on the shared document - shared by both panes - so this
            works the same regardless of which pane the click came from. */
         if (scn->margin == MARGIN_BOOKMARKS) {
-            int line = (int)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)scn->position, 0);
+            Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)scn->position, 0);
             /* Debuggable files default the margin to breakpoints, but Shift+Click
                always reaches a bookmark - otherwise mouse-driven bookmarking would
                be silently unavailable for any Python/C/C++ file. */
@@ -11382,11 +11964,10 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
        snapshot, silently losing track of real unsaved edits). */
     if (!g_switchingDocument && !g_dirty) set_dirty(1);
     if (!g_switchingDocument) g_recoverySnapshotStale = 1;
-    /* Only a Markdown render depends on the unsaved text: an HTML preview
-       shows the saved file (refreshed from save_to_path()), and every other
-       language shows a fixed message, so re-rendering those after each pause
-       in typing would just reload the same thing. */
-    if (g_previewVisible && g_activeLanguage == LANG_MARKDOWN)
+    /* An HTML preview shows the saved file (refreshed from save_to_path()),
+       so re-rendering it after each pause in typing would just reload the
+       same page; every other language previews the unsaved text. */
+    if (g_previewVisible && g_activeLanguage != LANG_HTML)
         SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
     schedule_spell_check();
     /* update_status_bar() does a full-document SCI_GETTEXT copy plus an O(n)

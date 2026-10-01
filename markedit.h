@@ -78,6 +78,17 @@
 #define IDM_VIEW_FOCUS_MODE      239
 #define IDM_VIEW_WORD_WRAP       242
 #define IDM_HELP_REFERENCE 240
+#define IDM_HELP_SHORTCUTS 385
+#define IDM_HELP_ABOUT     386
+#define IDM_FILE_REOPEN_UTF8    387
+#define IDM_FILE_REOPEN_UTF16LE 388
+#define IDM_FILE_REOPEN_UTF16BE 389
+#define IDM_FILE_REOPEN_ANSI    390
+#define IDM_EDIT_ENCODING_UTF8     391
+#define IDM_EDIT_ENCODING_UTF8_BOM 392
+#define IDM_EDIT_ENCODING_UTF16LE  393
+#define IDM_EDIT_ENCODING_UTF16BE  394
+#define IDM_EDIT_ENCODING_ANSI     395
 
 /* ---- menu command IDs: Markdown formatting toolbar/menu ---- */
 #define IDM_FMT_BOLD          260
@@ -204,6 +215,7 @@ static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
 static void apply_markdown_lexer_styles(HWND hEdit);
 static void apply_language_styles(HWND hEdit);
+static void apply_word_wrap(HWND hEdit);
 static void apply_preview_host_theme(void);
 static void refresh_menu(HWND hwnd);
 static void layout(HWND hwnd);

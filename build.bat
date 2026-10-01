@@ -29,14 +29,16 @@ rem
 rem Each Lexilla source is compiled individually into a same-named .o in the
 rem project root (zig's cc/c++ driver, unlike plain clang, can't emit
 rem multiple named object files from one -c invocation targeting
-rem COFF/Windows) - the resulting .o list is kept in lexilla-objects.rsp for
-rem the final link below.
+rem COFF/Windows) - the resulting .o list is written to lexilla-objects.rsp
+rem (a generated file, not checked in) for the final link below.
+type nul > lexilla-objects.rsp
 for /f "usebackq delims=" %%S in (`findstr /i ".cxx" lexilla-sources.rsp`) do (
     zig c++ -std=c++17 %COMMON_FLAGS% -DNDEBUG -Ithird_party\lexilla\include -Ithird_party\lexilla\lexlib -Ithird_party\scintilla\include -c "%%S" -o "%%~nS.o"
     if !errorlevel! neq 0 (
         echo Lexilla build failed compiling %%S.
         exit /b 1
     )
+    echo %%~nS.o>>lexilla-objects.rsp
 )
 
 rem zig c++ (not zig cc) so the C++ object code compiled above still gets its

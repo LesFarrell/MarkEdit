@@ -6,8 +6,35 @@
 
 static int failures = 0;
 
+/* markdown_to_html() tags every block with data-sourcepos="..." for the
+   editor/preview scroll sync. Most expectations are about structure and
+   content, not positions, so they match against the HTML with those
+   attributes removed; expect_contains_raw() checks the positions themselves. */
+static void strip_sourcepos(char *html) {
+    static const char attribute[] = " data-sourcepos=\"";
+    char *out = html;
+    for (char *in = html; *in;) {
+        if (strncmp(in, attribute, sizeof(attribute) - 1) == 0) {
+            char *close = strchr(in + sizeof(attribute) - 1, '"');
+            if (close) { in = close + 1; continue; }
+        }
+        *out++ = *in++;
+    }
+    *out = 0;
+}
+
+static void expect_contains_raw(const char *name, const char *markdown, const char *expected) {
+    char *html = markdown_to_html(markdown);
+    if (!html || !strstr(html, expected)) {
+        fprintf(stderr, "FAIL %s\nexpected substring: %s\nactual: %s\n", name, expected, html ? html : "(null)");
+        failures++;
+    }
+    free(html);
+}
+
 static void expect_contains(const char *name, const char *markdown, const char *expected) {
     char *html = markdown_to_html(markdown);
+    if (html) strip_sourcepos(html);
     if (!html || !strstr(html, expected)) {
         fprintf(stderr, "FAIL %s\nexpected substring: %s\nactual: %s\n", name, expected, html ? html : "(null)");
         failures++;
@@ -17,6 +44,7 @@ static void expect_contains(const char *name, const char *markdown, const char *
 
 static void expect_not_contains(const char *name, const char *markdown, const char *unexpected) {
     char *html = markdown_to_html(markdown);
+    if (html) strip_sourcepos(html);
     if (!html || strstr(html, unexpected)) {
         fprintf(stderr, "FAIL %s\nunexpected substring: %s\nactual: %s\n", name, unexpected, html ? html : "(null)");
         failures++;
@@ -26,6 +54,7 @@ static void expect_not_contains(const char *name, const char *markdown, const ch
 
 int main(void) {
     expect_contains("heading", "# Hello *world*\n", "<h1>Hello <em>world</em></h1>");
+    expect_contains_raw("heading sourcepos", "# Hello *world*\n", "<h1 data-sourcepos=\"1:1-1:15\">");
     expect_contains("hard break spaces", "first  \nsecond\n", "first<br />\nsecond");
     expect_contains("hard break slash", "first\\\nsecond\n", "first<br />\nsecond");
     expect_contains("loose list", "- one\n\n- two\n", "<li>\n<p>one</p>");

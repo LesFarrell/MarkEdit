@@ -147,6 +147,10 @@ void load_layout_settings(void) {
     g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     if (g_editorZoom < -10) g_editorZoom = -10;
     if (g_editorZoom > 20) g_editorZoom = 20;
+    g_largeFileThresholdMB = read_profile_int(L"View", L"LargeFileThresholdMB", g_largeFileThresholdMB, path);
+    if (g_largeFileThresholdMB < 1) g_largeFileThresholdMB = 1;
+    /* Above 2 GB a file opens in large-file mode regardless (see load_file()). */
+    if (g_largeFileThresholdMB > 2047) g_largeFileThresholdMB = 2047;
     GetPrivateProfileStringW(L"SpellCheck", L"Language", L"en-GB", g_spellLanguage,
                              LOCALE_NAME_MAX_LENGTH, path);
     if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
@@ -185,6 +189,7 @@ void save_layout_settings(void) {
     write_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path);
     write_profile_int(L"View", L"ExplorerVisible", g_explorerVisible, path);
     write_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
+    write_profile_int(L"View", L"LargeFileThresholdMB", g_largeFileThresholdMB, path);
     WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
     if (!g_commandLinePreviewMode) {
         write_profile_int(L"View", L"PreviewVisible", g_previewVisible, path);

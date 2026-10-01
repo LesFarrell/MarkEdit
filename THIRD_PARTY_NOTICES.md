@@ -8,7 +8,9 @@ their respective copyright holders.
 Markdown parsing and HTML rendering use
 [cmark-gfm](https://github.com/github/cmark-gfm), copyright (c) 2014 John
 MacFarlane and contributors. Its BSD 2-Clause terms and the notices for derived
-components are reproduced at `third_party/cmark-gfm/COPYING`.
+components are reproduced at `third_party/cmark-gfm/COPYING`. The vendored
+`src/config.h` (generated per compiler upstream) is modified to enable its
+GCC-only features only under GCC/Clang, so the same copy also builds with MSVC.
 
 ## Mermaid 11.16.0
 

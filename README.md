@@ -3,13 +3,13 @@
 A tiny, native Win32 Markdown editor with live HTML preview.
 
 - **Left pane** — a [Scintilla](https://www.scintilla.org/) source editor for your Markdown, with line numbers, current-line highlighting, smart four-column Tab/Shift+Tab indentation, and syntax highlighting via vendored [Lexilla](https://github.com/ScintillaOrg/lexilla) lexers, chosen from the file extension.
-- **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library.
+- **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library. Every file type previews: Markdown renders as a document, HTML files render as the saved web page, and any other recognised type (source code, JSON, YAML, `.txt`) shows as its own syntax-highlighted source, with highlighting skipped above 512 KB. Files of an unrecognised type, and new untitled tabs, preview as Markdown.
 - A formatting toolbar above the editor for bold, italic, strikethrough, inline code, fenced code blocks, headings, blockquotes, bullet/numbered/task lists, links, images, tables, footnotes, horizontal rules, alerts, toggling the preview pane, and swapping the panel sides.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
-- GitHub Light and GitHub Dark themes (View → Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
+- GitHub Light and GitHub Dark themes (View → Editor Theme and View → Markdown Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
 - The window appears immediately on launch; spell-check activation, the WebView2 preview engine, and reopening the previous session's files happen in the background right after, instead of delaying the window's appearance.
 
-Launching with no arguments opens the editor with the saved workspace layout; launching with a file path shows just the rendered preview (`markedit.exe notes.md`).
+Launching with no arguments opens the editor with the saved workspace layout; launching with a Markdown file path shows just the rendered preview (`markedit.exe notes.md`), and any other file opens in the editor.
 
 ## Features
 
@@ -32,7 +32,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Toggle Comment wraps the selected lines in an HTML comment (Markdown has no line-comment syntax) and unwraps them again.
 - Select All Occurrences (Ctrl+Shift+L) turns every match of the word under the caret, or of the current selection, into its own selection for multi-caret editing.
 - Convert Line Endings (Edit → Convert → Line Endings) rewrites the document to CRLF, LF, or CR and switches the editor's save format to match.
-- Format JSON and Minify JSON (Format menu) reindent the fenced code block at the caret, or the current selection. Text that cannot be read as JSON is left untouched. These re-indent rather than validate: bracket balance and string termination are checked, but grammar errors between tokens (a trailing comma, a missing colon) pass through unchanged.
+- Format JSON and Minify JSON (Tools menu) reindent the fenced code block at the caret, or the current selection. Text that cannot be read as JSON is left untouched. These re-indent rather than validate: bracket balance and string termination are checked, but grammar errors between tokens (a trailing comma, a missing colon) pass through unchanged.
 - Word wrap (View → Word Wrap or Alt+Z), remembered between sessions.
 - A live status bar reports the caret line/column, word and Unicode character counts, UTF-8/BOM state, line endings, and save/recovery state.
 - Native Windows spell checking (View → Spell Check), remembered between sessions. Misspelled Markdown prose gets a themed squiggle; links, inline code, and fenced code are excluded. Right-click a marked word for corrections, Ignore Word, or Add to Dictionary. View → Spell Check Language selects any installed Windows dictionary.
@@ -47,22 +47,24 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - The table editor resizes an existing GFM table while preserving its cells, or creates a new table with a chosen number of rows and columns.
 - A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, and Refresh actions. Renaming a file updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
 - Quick Open searches file names in the active workspace, while Find in Folder searches supported text files and opens results at the matching line. If no workspace is open, either command first asks for a folder. Generated/dependency folders are skipped.
-- A searchable command palette (Ctrl+Shift+P) exposes the editor's commands without navigating menus.
+- A searchable command palette (Tools → Command Palette or Ctrl+Shift+P) exposes the editor's commands without navigating menus.
 - Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.
 - Synchronized scrolling between the Markdown editor and rendered preview.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
 - Insert File at Cursor (File menu) reads a chosen file's contents and inserts them at the caret, replacing any selection.
-- Editor font is configurable (Format → Font) and remembered between sessions.
+- Editor font is configurable (View → Font) and remembered between sessions.
 - Editor zoom (View → Zoom In/Out/Reset or Ctrl+=/Ctrl+-/Ctrl+0) scales the editor text independently of the configured font size and is remembered between sessions.
 - Open Terminal Here (File menu or toolbar) opens Windows Terminal, falling back to Command Prompt, in the current file's folder. Show in Explorer (File menu) opens Explorer with the current file pre-selected.
-- GitHub Light and GitHub Dark themes (View → Theme), remembered between sessions.
-- An optional UTF-8 custom preview stylesheet (View → Custom Preview CSS), embedded into rendered HTML exports and remembered between sessions.
+- An optional UTF-8 custom preview stylesheet (View → Markdown Theme → Custom Preview CSS), embedded into rendered HTML exports and remembered between sessions.
 - Focus mode (View → Focus Mode or F11) hides the menu, tabs, and formatting toolbar and is remembered between sessions.
 - Window position/size/maximized state, editor/preview order, workspace visibility, active workspace folder, and splitter position are remembered between sessions; View → Preview on Left controls the editor/preview order.
 - Find/Replace, Go to Line, Undo/Redo, standard clipboard shortcuts. The search and replacement text, match-case setting, and search direction are remembered between sessions.
-- A Markdown syntax reference (Help → Markdown Reference), opened as a live Markdown document so the preview renders every construct it documents.
+- A Markdown syntax reference (Help → Markdown Reference), opened as a live Markdown document so the preview renders every construct it documents. Help → Keyboard Shortcuts opens the shortcut list the same way, and Help → About MarkEdit shows the version.
+- Tools → Settings gathers appearance, font, word wrap, preview, editor, and compiler options in one dialog.
 - Unicode filenames, long Windows paths, drag-and-drop, and document-relative links/images.
+- Text encodings: UTF-8 (with or without a BOM), UTF-16 LE/BE (with or without a BOM), and the system ANSI code page are detected on open and kept on save; the status bar shows which one a document uses. File → Reopen with Encoding rereads a file whose encoding was guessed wrong, and Edit → Convert → Encoding changes the one it's saved in. Saving warns first if the document has characters the chosen encoding can't store (anything outside the ANSI code page, or bytes that aren't valid text when saving UTF-16). Insert File, Find in Folder, and Replace in Folder decode files the same way; Replace in Folder writes each file back in its own encoding and leaves alone any file it can't store the replacement in.
 - Failure-safe saves: content is flushed to a temporary file before atomically replacing the destination.
+- Large files, including ones past 2 GB, open in large-file mode once they reach `[View] LargeFileThresholdMB` in `markedit.ini` (64 MB by default). The file is streamed straight into the editor and shown as plain text with word wrap off; the preview, outline, word count, word completion, brace matching, smart Enter/Tab, and autosave recovery are switched off for that document so editing stays responsive. Find/Replace, Go to Line, bookmarks, and saving work as normal.
 - Preview hardening for untrusted documents: raw HTML and dangerous URLs are disabled, Mermaid runs in strict mode, and the shell uses a restrictive content-security policy.
 
 ### Keyboard shortcuts
@@ -74,38 +76,46 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | Ctrl+K | Quick Open in Folder |
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Save As |
+| Ctrl+Alt+S | Save All |
 | Ctrl+P | Print rendered preview |
-| Ctrl+Shift+P | Command palette |
 | Ctrl+W | Close current tab |
 | Ctrl+Shift+T | Reopen last closed tab |
-| Alt+Left | Go back to where the last wiki-link jump was made from |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Alt+Left | Go back to where the last wiki-link jump was made from |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
 | Ctrl+X / Ctrl+C / Ctrl+V | Cut / Copy / Paste |
 | Ctrl+A | Select All |
-| Ctrl+F | Find |
-| Ctrl+H | Replace |
-| Ctrl+G | Go to Line |
-| F3 | Find Next |
-| F5 | Debug active Python, C, or C++ file |
-| F6 | Continue the active debug session |
-| F10 | Step over the current line |
-| Shift+F11 | Step into the current call |
-| Ctrl+F5 | Run active Python, C, C++, or Lua file |
-| F9 | Toggle debugger breakpoint |
-| Tab / Shift+Tab | Smart indent / outdent (four-column tab stops) |
+| Tab / Shift+Tab | Smart indent / outdent |
 | Ctrl+D | Duplicate line |
 | Ctrl+Shift+K | Delete line |
 | Ctrl+J | Join lines |
 | Alt+Up / Alt+Down | Move line or selection up / down |
 | Ctrl+/ | Toggle comment |
+| Ctrl+Shift+D | Select next occurrence |
 | Ctrl+Shift+L | Select all occurrences |
-| Ctrl+=/Ctrl+- | Zoom in / out |
-| Ctrl+0 | Reset zoom |
+| Ctrl+] | Jump to matching brace |
+| Ctrl+F | Find |
+| F3 | Find Next |
+| Ctrl+H | Replace |
+| Ctrl+G | Go to Line |
+| Ctrl+F2 | Toggle bookmark |
+| F2 / Shift+F2 | Next / previous bookmark |
+| Ctrl+Shift+P | Command palette |
 | Ctrl+Shift+V | Toggle preview pane |
 | Ctrl+Shift+E | Toggle editor pane |
+| Ctrl+Shift+X | Toggle file explorer |
+| Ctrl+\\ | Toggle split editor |
+| Ctrl+F6 / Ctrl+Shift+F6 | Cycle panes forward / back |
 | F11 | Toggle focus mode |
 | Alt+Z | Toggle word wrap |
+| Ctrl+= / Ctrl+- | Zoom in / out |
+| Ctrl+0 | Reset zoom |
+| Ctrl+F5 | Run active Python, C, C++, or Lua file |
+| F5 | Debug active Python, C, or C++ file |
+| F6 | Continue the active debug session |
+| F10 | Step over the current line |
+| Shift+F11 | Step into the current call |
+| F9 | Toggle debugger breakpoint |
 
 ## Building
 
@@ -117,12 +127,23 @@ build.bat
 
 This uses Zig's C/C++ toolchain with size optimization, dead-section elimination, and symbol stripping. After compiling, it safely clears and recreates `dist/`, then stages `markedit.exe`, the required runtime DLLs, offline preview assets, and licence files there.
 
-A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC builds. From Command Prompt, generate Makefiles and build the same targets with:
+A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC, Zig, and MSVC builds. Each builds the same targets (`markedit.exe`, statically linking Lexilla, and `tests\test_parser.exe`) and stages `dist/` the way `build.bat` does:
 
 ```bat
+rem MinGW-w64 GCC
 premake5 gmake
 make -C build config=release_x64
+
+rem Zig (zig cc / zig c++ / zig rc stand in for the GCC toolchain)
+premake5 --zig gmake
+make -C build config=release_x64
+
+rem MSVC (Visual Studio 2022 or later; open build\MarkEdit.sln, or:)
+premake5 vs2022
+msbuild build\MarkEdit.sln /p:Configuration=Release /p:Platform=x64
 ```
+
+The two `gmake` builds need GNU make running its recipes under a POSIX shell, as [w64devkit](https://github.com/skeeto/w64devkit) or MSYS2 provide.
 
 Run the parser regression tests with:
 
@@ -130,8 +151,8 @@ Run the parser regression tests with:
 test.bat
 ```
 
-The same test and build commands run in GitHub Actions. Successful workflow
-runs produce a self-contained Windows artifact.
+GitHub Actions runs `test.bat` and `build.bat`. Successful workflow runs
+produce a self-contained Windows artifact.
 
 Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) to be installed (present by default on current Windows 10/11).
 
@@ -143,14 +164,18 @@ Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https
 - the preview shell, Mermaid, Highlight.js, GitHub Markdown CSS, and the complete `katex/` asset tree needed for offline rendering; and
 - `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`.
 
-Do not package `markedit.ini`, `webview2_data/`, debug symbols, import libraries, compiler objects, or temporary archives. The settings file and WebView2 browser profile are user-specific and are created on first run. The Inno Setup and GitHub Actions manifests mirror this runtime-and-licences layout.
+Do not package `markedit.ini`, debug symbols, import libraries, compiler objects, or temporary archives. Per-user state is created on first run outside the install folder: settings in `%APPDATA%\markedit\markedit.ini`, and the WebView2 browser profile and recovery snapshots under `%LOCALAPPDATA%\MarkEdit`. The Inno Setup and GitHub Actions manifests mirror this runtime-and-licences layout.
 
 ## Project layout
 
 ```
-markedit.c              Win32 application and UI orchestration
+markedit.c / .h         Win32 application and UI orchestration; command IDs
+settings.c / .h         markedit.ini persistence
+help_reference.c / .h   Help > Markdown Reference and Keyboard Shortcuts pages
+file_explorer.c / .h    workspace file explorer panel
+toolbar_icons.c / .h    formatting-toolbar icon painters
 path_utils.c / .h       Windows path and heap-string utilities
-text_codec.c / .h       UTF conversion and JSON string encoding
+text_codec.c / .h       UTF conversion, text-file encoding detection and conversion, JSON string encoding
 json_formatter.c / .h   standalone JSON pretty-printer/minifier
 markdown.c / .h         cmark-gfm rendering adapter
 theme.h                 shared native light/dark palette and paint helpers
@@ -166,14 +191,14 @@ highlight*.js / .css     bundled Highlight.js renderer and light/dark themes
 katex/                    bundled KaTeX renderer, stylesheet, and fonts
 make_icon.ps1            regenerates markedit.ico
 build.bat                size-optimized Zig build script
-premake5.lua             alternative Makefile generator for the same build
+premake5.lua             alternative build for MinGW GCC, Zig (make) or MSVC (Visual Studio)
 markedit.iss             Inno Setup installer script
 dist/                    clean unpacked release staging folder (generated, not tracked)
 test.bat / tests/        parser regression tests
 third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
 third_party/lexilla/     Lexilla 5.5.1 lexer sources and licence, trimmed to the supported languages
-third_party/cmark-gfm/   cmark-gfm 0.29.0.gfm.13 source and BSD-2-Clause licence
+third_party/cmark-gfm/   cmark-gfm 0.29.0.gfm.13 source (config.h adjusted for MSVC) and BSD-2-Clause licence
 third_party/highlightjs/ Highlight.js 11.11.1 licence and provenance
 third_party/katex/       KaTeX 0.17.0 licence and provenance
 ```
@@ -182,7 +207,7 @@ third_party/katex/       KaTeX 0.17.0 licence and provenance
 
 The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look. Its light and dark variants are synchronized with the matching GitHub editor palette. Mermaid, Highlight.js, and KaTeX assets are also local, so rendering works offline and does not silently fetch executable content, styles, or fonts from a CDN.
 
-Build outputs such as `markedit.exe`, the assembled `dist/` folder, `markedit.ini` (saved settings), and `webview2_data/` (WebView2's browser profile/cache) are generated locally and are not tracked in git.
+Build outputs such as `markedit.exe` and the assembled `dist/` folder are generated locally and are not tracked in git; neither is a `webview2_data/` folder left beside the exe by builds from before the WebView2 profile moved to `%LOCALAPPDATA%\MarkEdit\WebView2`.
 
 ## Security and Markdown scope
 

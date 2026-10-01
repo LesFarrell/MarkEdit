@@ -1,20 +1,32 @@
 ; Inno Setup script for MarkEdit.
-; Build markedit.exe first (build.bat), then compile this with Inno Setup
-; (ISCC.exe markedit.iss) from the repo root.
-; build.bat stages the complete release tree in dist/. User settings, the
-; WebView2 browser profile, debug symbols, import libraries, and compiler
-; objects stay out.
+; Build first (build.bat, or any premake5.lua toolchain), then compile this
+; with Inno Setup 6 (ISCC.exe markedit.iss) from the repo root.
+; build.bat stages the complete release tree in dist/; everything installed
+; comes from there. User settings, the WebView2 browser profile, debug
+; symbols, import libraries, and compiler objects stay out.
 
 #define MyAppName "MarkEdit"
-#define MyAppVersion "1.0.0"
-#define MyAppPublisher "MarkEdit contributors"
 #define MyAppExeName "markedit.exe"
+#define MyAppExePath AddBackslash(SourcePath) + "dist\" + MyAppExeName
+
+#if !FileExists(MyAppExePath)
+  #error dist\markedit.exe is missing - run build.bat before compiling the installer.
+#endif
+
+; Version, publisher, and copyright are read from markedit.exe's own
+; VERSIONINFO (markedit.rc) - the same source Help > About shows - so the
+; installer can never disagree with the program it installs.
+#define MyAppVersion GetStringFileInfo(MyAppExePath, "ProductVersion")
+#define MyAppPublisher GetStringFileInfo(MyAppExePath, "CompanyName")
+#define MyAppCopyright GetStringFileInfo(MyAppExePath, "LegalCopyright")
 
 [Setup]
 AppId={{B2B0C9C0-5B0E-4C8B-9C7C-2C6C6E2C9A10}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppCopyright={#MyAppCopyright}
+VersionInfoVersion={#GetVersionNumbersString(MyAppExePath)}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -25,19 +37,22 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 WizardStyle=modern
+; The association tasks write under Software\Classes; tell Explorer so new
+; "Open with" entries show up without signing out.
+ChangesAssociations=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
-Name: "assocmd"; Description: "Associate .md files with {#MyAppName}"; GroupDescription: "File associations:"
+Name: "assocmd"; Description: "Associate Markdown files (.md, .markdown, ...) with {#MyAppName}"; GroupDescription: "File associations:"
+Name: "openwith"; Description: "Add {#MyAppName} to ""Open with"" for text, HTML, and source code files"; GroupDescription: "File associations:"; Flags: unchecked
 
 [Files]
 ; Application runtime.
 Source: "dist\markedit.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\Scintilla.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\Lexilla.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\WebView2Loader.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; Offline preview assets.
 Source: "dist\preview_shell.html"; DestDir: "{app}"; Flags: ignoreversion
@@ -68,17 +83,88 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
-Root: HKA; Subkey: "Software\Classes\.md\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.md"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assocmd
+; Markdown: the extensions markedit.c's LANGUAGES table treats as Markdown.
+; Registered through OpenWithProgids, so MarkEdit is offered for them
+; without overriding a default the user already chose.
 Root: HKA; Subkey: "Software\Classes\MarkEdit.md"; ValueType: string; ValueName: ""; ValueData: "Markdown Document"; Flags: uninsdeletekey; Tasks: assocmd
 Root: HKA; Subkey: "Software\Classes\MarkEdit.md\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Tasks: assocmd
 Root: HKA; Subkey: "Software\Classes\MarkEdit.md\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: assocmd
+Root: HKA; Subkey: "Software\Classes\.md\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.md"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assocmd
+Root: HKA; Subkey: "Software\Classes\.markdown\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.md"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assocmd
+Root: HKA; Subkey: "Software\Classes\.mdown\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.md"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assocmd
+Root: HKA; Subkey: "Software\Classes\.mkd\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.md"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assocmd
+Root: HKA; Subkey: "Software\Classes\.mdwn\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.md"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assocmd
+Root: HKA; Subkey: "Software\Classes\.text\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.md"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assocmd
+; Every other language in the LANGUAGES table, plus HTML. These only add
+; MarkEdit to each type's "Open with" list. A non-Markdown file named on the
+; command line opens in the editor rather than preview-only.
+Root: HKA; Subkey: "Software\Classes\MarkEdit.source"; ValueType: string; ValueName: ""; ValueData: "Text Document"; Flags: uninsdeletekey; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\MarkEdit.source\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\MarkEdit.source\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.txt\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.json\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.jsonc\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.jsonl\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.geojson\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.webmanifest\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.xml\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.xsd\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.xsl\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.xslt\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.svg\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.rss\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.atom\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.plist\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.csproj\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.props\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.targets\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.html\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.htm\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.xhtml\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.yml\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.yaml\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.c\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.h\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.cc\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.cpp\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.cxx\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.hpp\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.hxx\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.js\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.mjs\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.cjs\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.ts\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.tsx\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.jsx\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.cs\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.java\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.go\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.rs\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.php\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.py\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.pyw\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.pyi\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.sh\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.bash\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.zsh\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.ksh\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.bashrc\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.profile\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.ps1\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.psm1\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.psd1\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.lua\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}\webview2_data"
+; The preview's WebView2 browser profile - a cache, safe to remove (see
+; init_webview() in markedit.c).
+Type: filesandordirs; Name: "{localappdata}\MarkEdit\WebView2"
 ; get_settings_path() (settings.c) writes here, under %APPDATA%, not {app} -
 ; the app is never installed with write access to Program Files, so settings
 ; were never going to end up next to the exe.
 Type: files; Name: "{userappdata}\markedit\markedit.ini"
+; %LOCALAPPDATA%\MarkEdit\Recovery (unsaved-document snapshots) is left in
+; place deliberately: it can hold work that was never saved anywhere else.
