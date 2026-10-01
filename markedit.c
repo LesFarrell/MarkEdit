@@ -96,7 +96,13 @@ static int g_previewShowingRawHtml = 0; /* true once show_html_file_preview() ha
 static WCHAR *g_expectedHtmlPreviewUrl = NULL; /* one-shot allowance for show_html_file_preview()'s own navigation; see NavStarting_Invoke */
 static WCHAR *g_exportPath = NULL;
 static WCHAR *g_pendingPdfPath = NULL;
-static int g_pendingPrintAction = 0; /* 1 = print dialog, 2 = PDF export */
+typedef enum PrintAction {
+    PRINT_ACTION_NONE = 0,
+    PRINT_ACTION_DIALOG,
+    PRINT_ACTION_EXPORT_PDF
+} PrintAction;
+
+static PrintAction g_pendingPrintAction = PRINT_ACTION_NONE;
 int g_previewDarkMode = 0; /* the rendered Markdown preview's own theme, independent of the editor/app chrome below */
 int g_editorDarkMode = 0; /* the Scintilla editor's colours, plus all surrounding app chrome (menus, dialogs, tabs, toolbar, title bar) */
 /* CompilerBackendPreference is declared in settings.h; see load_compiler_settings()
@@ -2851,7 +2857,7 @@ static HRESULT STDMETHODCALLTYPE PdfDone_Invoke(ICoreWebView2PrintToPdfCompleted
                     MB_OK | MB_ICONINFORMATION);
     free(g_pendingPdfPath);
     g_pendingPdfPath = NULL;
-    g_pendingPrintAction = 0;
+    g_pendingPrintAction = PRINT_ACTION_NONE;
     return S_OK;
 }
 
@@ -4719,7 +4725,7 @@ static void prepare_rendered_print(int exportPdf) {
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g_pendingPrintAction) {
+    if (g_pendingPrintAction != PRINT_ACTION_NONE) {
         MessageBoxW(g_hMainWnd, L"A print or PDF operation is already in progress.", L"MarkEdit",
                     MB_OK | MB_ICONINFORMATION);
         return;
@@ -4742,9 +4748,9 @@ static void prepare_rendered_print(int exportPdf) {
         dialog.lpstrDefExt = L"pdf";
         if (!GetSaveFileNameW(&dialog)) { free(path); return; }
         g_pendingPdfPath = path;
-        g_pendingPrintAction = 2;
+        g_pendingPrintAction = PRINT_ACTION_EXPORT_PDF;
     } else {
-        g_pendingPrintAction = 1;
+        g_pendingPrintAction = PRINT_ACTION_DIALOG;
     }
     if (!g_previewVisible) {
         g_previewVisible = 1;
@@ -4757,8 +4763,8 @@ static void prepare_rendered_print(int exportPdf) {
 
 static void run_pending_print(void) {
     KillTimer(g_hMainWnd, IDT_PRINT_PREVIEW);
-    if (!g_webview || !g_pendingPrintAction) return;
-    if (g_pendingPrintAction == 1) {
+    if (!g_webview || g_pendingPrintAction == PRINT_ACTION_NONE) return;
+    if (g_pendingPrintAction == PRINT_ACTION_DIALOG) {
         ICoreWebView2_16 *printWebView = NULL;
         if (SUCCEEDED(ICoreWebView2_QueryInterface(g_webview, &IID_ICoreWebView2_16,
                                                     (void **)&printWebView)) && printWebView) {
@@ -4772,8 +4778,8 @@ static void run_pending_print(void) {
             MessageBoxW(g_hMainWnd, L"This WebView2 Runtime does not support printing.",
                         L"MarkEdit", MB_OK | MB_ICONERROR);
         }
-        g_pendingPrintAction = 0;
-    } else if (g_pendingPrintAction == 2 && g_pendingPdfPath) {
+        g_pendingPrintAction = PRINT_ACTION_NONE;
+    } else if (g_pendingPrintAction == PRINT_ACTION_EXPORT_PDF && g_pendingPdfPath) {
         ICoreWebView2_7 *pdfWebView = NULL;
         if (SUCCEEDED(ICoreWebView2_QueryInterface(g_webview, &IID_ICoreWebView2_7,
                                                    (void **)&pdfWebView)) && pdfWebView) {
@@ -4786,7 +4792,7 @@ static void run_pending_print(void) {
                     L"MarkEdit", MB_OK | MB_ICONERROR);
         free(g_pendingPdfPath);
         g_pendingPdfPath = NULL;
-        g_pendingPrintAction = 0;
+        g_pendingPrintAction = PRINT_ACTION_NONE;
     }
 }
 
@@ -10741,6 +10747,478 @@ static void show_settings_dialog(void) {
     if (loopResult == 0) PostQuitMessage((int)message.wParam);
 }
 
+/* Menu commands, grouped by the feature they operate on. */
+static int handle_file_command(HWND hwnd, WORD cmd) {
+    switch (cmd) {
+        case IDM_FILE_NEW:
+            create_document_tab();
+            break;
+        case IDM_FILE_OPEN:
+            do_open();
+            break;
+        case IDM_FILE_INSERT:
+            do_insert_file();
+            break;
+        case IDM_FILE_QUICK_OPEN:
+            do_quick_open();
+            break;
+        case IDM_FILE_FIND_FOLDER:
+            do_find_in_folder();
+            break;
+        case IDM_REPLACE_WORKSPACE:
+            do_replace_in_workspace();
+            break;
+        case IDM_OPEN_WORKSPACE:
+            do_open_workspace();
+            break;
+        case IDM_RECENT_WORKSPACE_CLEAR:
+            recent_list_clear(&g_recentFolderList);
+            refresh_menu(hwnd);
+            break;
+        case IDM_FILE_SAVE:
+            do_save();
+            break;
+        case IDM_FILE_SAVEAS:
+            do_saveas();
+            break;
+        case IDM_FILE_SAVE_ALL:
+            do_save_all();
+            break;
+        case IDM_FILE_EXPORT_HTML:
+            do_export_html();
+            break;
+        case IDM_FILE_EXPORT_PDF:
+            prepare_rendered_print(1);
+            break;
+        case IDM_FILE_PRINT:
+            prepare_rendered_print(0);
+            break;
+        case IDM_FILE_OPEN_TERMINAL:
+            open_terminal_here();
+            break;
+        case IDM_FILE_SHOW_EXPLORER:
+            reveal_in_explorer();
+            break;
+        case IDM_FILE_CLOSE:
+            do_close_document_at(g_activeDocument);
+            break;
+        case IDM_FILE_REOPEN_CLOSED:
+            do_reopen_closed_tab();
+            break;
+        case IDM_FILE_GO_BACK:
+            go_wiki_back();
+            break;
+        case IDM_FILE_RECENT_CLEAR:
+            recent_list_clear(&g_recentFileList);
+            refresh_menu(hwnd);
+            break;
+        case IDM_SETTINGS:
+            show_settings_dialog();
+            break;
+        case IDM_FILE_EXIT:
+            do_exit();
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+static int handle_edit_command(WORD cmd) {
+    switch (cmd) {
+        case IDM_EDIT_UNDO:
+            SendMessageA(active_edit_view(), SCI_UNDO, 0, 0);
+            break;
+        case IDM_EDIT_REDO:
+            SendMessageA(active_edit_view(), SCI_REDO, 0, 0);
+            break;
+        case IDM_EDIT_CUT:
+            SendMessageA(active_edit_view(), SCI_CUT, 0, 0);
+            break;
+        case IDM_EDIT_COPY:
+            SendMessageA(active_edit_view(), SCI_COPY, 0, 0);
+            break;
+        case IDM_EDIT_PASTE:
+            /* Image paste always lands in the main pane - it can prompt to
+               save the document first, which isn't worth threading through
+               to the split pane for what's a rare combination. */
+            if (!paste_image_from_clipboard()) SendMessageA(active_edit_view(), SCI_PASTE, 0, 0);
+            break;
+        case IDM_EDIT_DELETE:
+            SendMessageA(active_edit_view(), SCI_CLEAR, 0, 0);
+            break;
+        case IDM_EDIT_SELECTALL:
+            SendMessageA(active_edit_view(), SCI_SELECTALL, 0, 0);
+            break;
+        case IDM_EDIT_DUPLICATE_LINE:
+            SendMessageA(active_edit_view(), SCI_LINEDUPLICATE, 0, 0);
+            break;
+        case IDM_EDIT_MOVE_LINE_UP:
+            SendMessageA(active_edit_view(), SCI_MOVESELECTEDLINESUP, 0, 0);
+            break;
+        case IDM_EDIT_MOVE_LINE_DOWN:
+            SendMessageA(active_edit_view(), SCI_MOVESELECTEDLINESDOWN, 0, 0);
+            break;
+        case IDM_EDIT_DELETE_LINE:
+            SendMessageA(active_edit_view(), SCI_LINEDELETE, 0, 0);
+            break;
+        case IDM_EDIT_JOIN_LINES:
+            SendMessageA(active_edit_view(), SCI_LINESJOIN, 0, 0);
+            break;
+        case IDM_EDIT_TOGGLE_COMMENT:
+            toggle_comment(active_edit_view());
+            break;
+        case IDM_EDIT_TRIM_WHITESPACE:
+            trim_trailing_whitespace(active_edit_view());
+            break;
+        case IDM_EDIT_SELECT_NEXT:
+            select_next_occurrence(active_edit_view());
+            break;
+        case IDM_EDIT_SELECT_ALL_OCCURRENCES:
+            select_all_occurrences(active_edit_view());
+            break;
+        case IDM_EDIT_MATCH_BRACE:
+            jump_to_matching_brace(active_edit_view());
+            break;
+        case IDM_EDIT_BOOKMARK_TOGGLE:
+            toggle_bookmark_at_cursor(active_edit_view());
+            break;
+        case IDM_EDIT_BOOKMARK_NEXT:
+            goto_bookmark(active_edit_view(), 1);
+            break;
+        case IDM_EDIT_BOOKMARK_PREV:
+            goto_bookmark(active_edit_view(), 0);
+            break;
+        case IDM_EDIT_BOOKMARK_CLEAR:
+            clear_all_bookmarks();
+            break;
+        case IDM_EDIT_UPPERCASE:
+            SendMessageA(active_edit_view(), SCI_UPPERCASE, 0, 0);
+            break;
+        case IDM_EDIT_LOWERCASE:
+            SendMessageA(active_edit_view(), SCI_LOWERCASE, 0, 0);
+            break;
+        case IDM_EDIT_TITLECASE:
+            apply_title_case(active_edit_view());
+            break;
+        case IDM_EDIT_SORT_ASC:
+            transform_selected_lines(active_edit_view(), 0);
+            break;
+        case IDM_EDIT_SORT_DESC:
+            transform_selected_lines(active_edit_view(), 1);
+            break;
+        case IDM_EDIT_SORT_DEDUPE:
+            transform_selected_lines(active_edit_view(), 2);
+            break;
+        case IDM_EDIT_TABS_TO_SPACES:
+            convert_indentation(active_edit_view(), 1);
+            break;
+        case IDM_EDIT_SPACES_TO_TABS:
+            convert_indentation(active_edit_view(), 0);
+            break;
+        case IDM_EDIT_EOL_CRLF:
+            convert_line_endings(active_edit_view(), SC_EOL_CRLF);
+            break;
+        case IDM_EDIT_ENCODING_UTF8:
+            set_document_encoding(TEXT_ENCODING_UTF8, 0);
+            break;
+        case IDM_EDIT_ENCODING_UTF8_BOM:
+            set_document_encoding(TEXT_ENCODING_UTF8, 1);
+            break;
+        case IDM_EDIT_ENCODING_UTF16LE:
+            set_document_encoding(TEXT_ENCODING_UTF16LE, 1);
+            break;
+        case IDM_EDIT_ENCODING_UTF16BE:
+            set_document_encoding(TEXT_ENCODING_UTF16BE, 1);
+            break;
+        case IDM_EDIT_ENCODING_ANSI:
+            set_document_encoding(TEXT_ENCODING_ANSI, 0);
+            break;
+        case IDM_FILE_REOPEN_UTF8:
+            reopen_with_encoding(TEXT_ENCODING_UTF8);
+            break;
+        case IDM_FILE_REOPEN_UTF16LE:
+            reopen_with_encoding(TEXT_ENCODING_UTF16LE);
+            break;
+        case IDM_FILE_REOPEN_UTF16BE:
+            reopen_with_encoding(TEXT_ENCODING_UTF16BE);
+            break;
+        case IDM_FILE_REOPEN_ANSI:
+            reopen_with_encoding(TEXT_ENCODING_ANSI);
+            break;
+        case IDM_EDIT_EOL_LF:
+            convert_line_endings(active_edit_view(), SC_EOL_LF);
+            break;
+        case IDM_EDIT_EOL_CR:
+            convert_line_endings(active_edit_view(), SC_EOL_CR);
+            break;
+        case IDM_EDIT_FIND:
+            show_find_dialog(0);
+            break;
+        case IDM_EDIT_REPLACE:
+            show_find_dialog(1);
+            break;
+        case IDM_EDIT_GOTOLINE:
+            show_goto_line_dialog();
+            break;
+        case IDM_EDIT_COMMAND_PALETTE:
+            show_command_palette();
+            break;
+        case IDM_EDIT_FINDNEXT:
+            if (g_findWhat[0]) {
+                char *findUtf8 = to_utf8(g_findWhat);
+                if (findUtf8) find_in_edit(findUtf8, (g_fr.Flags & FR_MATCHCASE) ? 1 : 0, 1);
+                free(findUtf8);
+            } else show_find_dialog(0);
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+static int handle_format_command(WORD cmd) {
+    switch (cmd) {
+        case IDM_FORMAT_FONT:
+            do_choose_font();
+            break;
+        case IDM_FMT_JSON_PRETTY:
+            format_json(1);
+            break;
+        case IDM_FMT_JSON_MINIFY:
+            format_json(0);
+            break;
+        case IDM_FMT_HTML_HTML:
+            toolbar_wrap_tag("html");
+            break;
+        case IDM_FMT_HTML_HEAD:
+            toolbar_wrap_tag("head");
+            break;
+        case IDM_FMT_HTML_BODY:
+            toolbar_wrap_tag("body");
+            break;
+        case IDM_FMT_HTML_PARAGRAPH:
+            toolbar_wrap_tag("p");
+            break;
+        case IDM_FMT_HTML_BOLD:
+            toolbar_wrap_tag("b");
+            break;
+        case IDM_FMT_HTML_ITALIC:
+            toolbar_wrap_tag("i");
+            break;
+        case IDM_FMT_HTML_UNDERLINE:
+            toolbar_wrap_tag("u");
+            break;
+        case IDM_FMT_HTML_DIV:
+            toolbar_wrap_tag("div");
+            break;
+        case IDM_FMT_HTML_SPAN:
+            toolbar_wrap_tag("span");
+            break;
+        case IDM_FMT_HTML_BREAK:
+            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)"<br>");
+            SetFocus(g_hEdit);
+            break;
+        case IDM_FMT_HTML_LINK:
+            toolbar_insert_html_link();
+            break;
+        case IDM_FMT_HTML_IMAGE:
+            toolbar_insert_html_image();
+            break;
+        case IDM_FMT_HTML_TABLE:
+            toolbar_insert_html_table();
+            break;
+        case IDM_FMT_HTML_BULLETLIST:
+            toolbar_insert_html_list(0);
+            break;
+        case IDM_FMT_HTML_NUMBERLIST:
+            toolbar_insert_html_list(1);
+            break;
+        case IDM_FMT_TABLE_EDITOR:
+            show_table_editor();
+            break;
+        case IDM_FMT_TABLE_ROW_ABOVE:
+            insert_table_row_relative(0);
+            break;
+        case IDM_FMT_TABLE_ROW_BELOW:
+            insert_table_row_relative(1);
+            break;
+        case IDM_FMT_TABLE_ROW_DELETE:
+            delete_table_row_at_cursor();
+            break;
+        case IDM_FMT_TABLE_COL_LEFT:
+            insert_table_column_relative(0);
+            break;
+        case IDM_FMT_TABLE_COL_RIGHT:
+            insert_table_column_relative(1);
+            break;
+        case IDM_FMT_TABLE_COL_DELETE:
+            delete_table_column_at_cursor();
+            break;
+        case IDM_TABLE_SORT_ASC:
+            sort_table_rows(0);
+            break;
+        case IDM_TABLE_SORT_DESC:
+            sort_table_rows(1);
+            break;
+        case IDM_TABLE_ALIGN_LEFT:
+            set_table_column_alignment(":---");
+            break;
+        case IDM_TABLE_ALIGN_CENTER:
+            set_table_column_alignment(":---:");
+            break;
+        case IDM_TABLE_ALIGN_RIGHT:
+            set_table_column_alignment("---:");
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+static int handle_debug_command(WORD cmd) {
+    switch (cmd) {
+        case IDM_RUN_FILE:
+            launch_active_source_file(0);
+            break;
+        case IDM_DEBUG_FILE:
+            launch_active_source_file(1);
+            break;
+        case IDM_DEBUG_CONTINUE:
+            run_debugger_command(IDM_DEBUG_CONTINUE);
+            break;
+        case IDM_DEBUG_STEP_OVER:
+            run_debugger_command(IDM_DEBUG_STEP_OVER);
+            break;
+        case IDM_DEBUG_STEP_INTO:
+            run_debugger_command(IDM_DEBUG_STEP_INTO);
+            break;
+        case IDM_DEBUG_BREAKPOINT:
+            toggle_breakpoint_at_cursor();
+            break;
+        case IDM_DEBUG_CLEAR_BREAKPOINTS:
+            clear_debug_breakpoints();
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+static int handle_view_command(HWND hwnd, WORD cmd) {
+    switch (cmd) {
+        case IDM_VIEW_TOGGLEPREVIEW:
+            toggle_preview(hwnd);
+            break;
+        case IDM_VIEW_TOGGLEEDITOR:
+            toggle_editor(hwnd);
+            break;
+        case IDM_VIEW_PREVIEW_ON_LEFT:
+            toggle_panel_sides(hwnd);
+            break;
+        case IDM_VIEW_CUSTOM_CSS:
+            do_choose_custom_css();
+            break;
+        case IDM_VIEW_CLEAR_CUSTOM_CSS:
+            clear_custom_css();
+            break;
+        case IDM_VIEW_FOCUS_MODE:
+            toggle_focus_mode(hwnd);
+            break;
+        case IDM_VIEW_WORD_WRAP:
+            toggle_word_wrap(hwnd);
+            break;
+        case IDM_VIEW_SPELL_CHECK:
+            toggle_spell_check(hwnd);
+            break;
+        case IDM_VIEW_SPELL_LANGUAGE:
+            choose_spell_language();
+            break;
+        case IDM_VIEW_SHOW_WHITESPACE:
+            toggle_show_whitespace(hwnd);
+            break;
+        case IDM_VIEW_INDENT_GUIDES:
+            toggle_indent_guides(hwnd);
+            break;
+        case IDM_VIEW_USE_SPACES_INDENT:
+            toggle_indent_use_spaces(hwnd);
+            break;
+        case IDM_VIEW_FOLD_TOGGLE:
+            fold_toggle_at_cursor();
+            break;
+        case IDM_VIEW_FOLD_ALL:
+            fold_all_lines(0);
+            break;
+        case IDM_VIEW_UNFOLD_ALL:
+            fold_all_lines(1);
+            break;
+        case IDM_VIEW_OUTLINE:
+            toggle_outline(hwnd);
+            break;
+        case IDM_VIEW_MINIMAP:
+            toggle_minimap(hwnd);
+            break;
+        case IDM_VIEW_EXPLORER:
+            toggle_explorer_panel(hwnd);
+            break;
+        case IDM_VIEW_TOGGLESPLIT:
+            toggle_split_editor(hwnd);
+            break;
+        case IDM_VIEW_RESET_SPLIT_EDITOR:
+            reset_split_editor(hwnd);
+            break;
+        case IDM_VIEW_ZOOM_IN:
+            adjust_editor_zoom(1);
+            break;
+        case IDM_VIEW_ZOOM_OUT:
+            adjust_editor_zoom(-1);
+            break;
+        case IDM_VIEW_ZOOM_RESET:
+            reset_editor_zoom();
+            break;
+        case IDM_VIEW_NEXT_TAB:
+            if (g_documentCount > 1) switch_document((g_activeDocument + 1) % g_documentCount);
+            break;
+        case IDM_VIEW_PREVIOUS_TAB:
+            if (g_documentCount > 1) switch_document((g_activeDocument + g_documentCount - 1) % g_documentCount);
+            break;
+        case IDM_VIEW_CYCLE_PANE:
+            cycle_pane_focus(0);
+            break;
+        case IDM_VIEW_CYCLE_PANE_PREV:
+            cycle_pane_focus(1);
+            break;
+        case IDM_VIEW_THEME_GITHUB_LIGHT:
+        case IDM_VIEW_THEME_GITHUB_DARK:
+            select_theme(hwnd, cmd == IDM_VIEW_THEME_GITHUB_DARK);
+            break;
+        case IDM_VIEW_PREVIEW_THEME_LIGHT:
+        case IDM_VIEW_PREVIEW_THEME_DARK:
+            select_preview_theme(hwnd, cmd == IDM_VIEW_PREVIEW_THEME_DARK);
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+static int handle_help_command(WORD cmd) {
+    switch (cmd) {
+        case IDM_HELP_REFERENCE:
+            show_help_page(REFERENCE_MARKDOWN);
+            break;
+        case IDM_HELP_SHORTCUTS:
+            show_help_page(REFERENCE_SHORTCUTS);
+            break;
+        case IDM_HELP_ABOUT:
+            show_about_box();
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
 static void handle_main_command(HWND hwnd, WORD cmd) {
     if (cmd >= IDM_FILE_RECENT_0 && cmd < IDM_FILE_RECENT_0 + MAX_RECENT_FILES) {
         do_open_recent(cmd - IDM_FILE_RECENT_0);
@@ -10755,175 +11233,13 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         return;
     }
 
-    switch (cmd) {
-        case IDM_FILE_NEW: create_document_tab(); break;
-        case IDM_FILE_OPEN: do_open(); break;
-        case IDM_FILE_INSERT: do_insert_file(); break;
-        case IDM_FILE_QUICK_OPEN: do_quick_open(); break;
-        case IDM_FILE_FIND_FOLDER: do_find_in_folder(); break;
-        case IDM_REPLACE_WORKSPACE: do_replace_in_workspace(); break;
-        case IDM_OPEN_WORKSPACE: do_open_workspace(); break;
-        case IDM_RECENT_WORKSPACE_CLEAR:
-            recent_list_clear(&g_recentFolderList);
-            refresh_menu(hwnd);
-            break;
-        case IDM_FILE_SAVE: do_save(); break;
-        case IDM_FILE_SAVEAS: do_saveas(); break;
-        case IDM_FILE_SAVE_ALL: do_save_all(); break;
-        case IDM_FILE_EXPORT_HTML: do_export_html(); break;
-        case IDM_FILE_EXPORT_PDF: prepare_rendered_print(1); break;
-        case IDM_FILE_PRINT: prepare_rendered_print(0); break;
-        case IDM_FILE_OPEN_TERMINAL: open_terminal_here(); break;
-        case IDM_FILE_SHOW_EXPLORER: reveal_in_explorer(); break;
-        case IDM_FILE_CLOSE: do_close_document_at(g_activeDocument); break;
-        case IDM_FILE_REOPEN_CLOSED: do_reopen_closed_tab(); break;
-        case IDM_FILE_GO_BACK: go_wiki_back(); break;
-        case IDM_FILE_RECENT_CLEAR:
-            recent_list_clear(&g_recentFileList);
-            refresh_menu(hwnd);
-            break;
-        case IDM_SETTINGS: show_settings_dialog(); break;
-        case IDM_FILE_EXIT: do_exit(); break;
-        case IDM_EDIT_UNDO: SendMessageA(active_edit_view(), SCI_UNDO, 0, 0); break;
-        case IDM_EDIT_REDO: SendMessageA(active_edit_view(), SCI_REDO, 0, 0); break;
-        case IDM_EDIT_CUT: SendMessageA(active_edit_view(), SCI_CUT, 0, 0); break;
-        case IDM_EDIT_COPY: SendMessageA(active_edit_view(), SCI_COPY, 0, 0); break;
-        case IDM_EDIT_PASTE:
-            /* Image paste always lands in the main pane - it can prompt to
-               save the document first, which isn't worth threading through
-               to the split pane for what's a rare combination. */
-            if (!paste_image_from_clipboard()) SendMessageA(active_edit_view(), SCI_PASTE, 0, 0);
-            break;
-        case IDM_EDIT_DELETE: SendMessageA(active_edit_view(), SCI_CLEAR, 0, 0); break;
-        case IDM_EDIT_SELECTALL: SendMessageA(active_edit_view(), SCI_SELECTALL, 0, 0); break;
-        case IDM_EDIT_DUPLICATE_LINE: SendMessageA(active_edit_view(), SCI_LINEDUPLICATE, 0, 0); break;
-        case IDM_EDIT_MOVE_LINE_UP: SendMessageA(active_edit_view(), SCI_MOVESELECTEDLINESUP, 0, 0); break;
-        case IDM_EDIT_MOVE_LINE_DOWN: SendMessageA(active_edit_view(), SCI_MOVESELECTEDLINESDOWN, 0, 0); break;
-        case IDM_EDIT_DELETE_LINE: SendMessageA(active_edit_view(), SCI_LINEDELETE, 0, 0); break;
-        case IDM_EDIT_JOIN_LINES: SendMessageA(active_edit_view(), SCI_LINESJOIN, 0, 0); break;
-        case IDM_EDIT_TOGGLE_COMMENT: toggle_comment(active_edit_view()); break;
-        case IDM_EDIT_TRIM_WHITESPACE: trim_trailing_whitespace(active_edit_view()); break;
-        case IDM_EDIT_SELECT_NEXT: select_next_occurrence(active_edit_view()); break;
-        case IDM_EDIT_SELECT_ALL_OCCURRENCES: select_all_occurrences(active_edit_view()); break;
-        case IDM_EDIT_MATCH_BRACE: jump_to_matching_brace(active_edit_view()); break;
-        case IDM_EDIT_BOOKMARK_TOGGLE: toggle_bookmark_at_cursor(active_edit_view()); break;
-        case IDM_EDIT_BOOKMARK_NEXT: goto_bookmark(active_edit_view(), 1); break;
-        case IDM_EDIT_BOOKMARK_PREV: goto_bookmark(active_edit_view(), 0); break;
-        case IDM_EDIT_BOOKMARK_CLEAR: clear_all_bookmarks(); break;
-        case IDM_EDIT_UPPERCASE: SendMessageA(active_edit_view(), SCI_UPPERCASE, 0, 0); break;
-        case IDM_EDIT_LOWERCASE: SendMessageA(active_edit_view(), SCI_LOWERCASE, 0, 0); break;
-        case IDM_EDIT_TITLECASE: apply_title_case(active_edit_view()); break;
-        case IDM_EDIT_SORT_ASC: transform_selected_lines(active_edit_view(), 0); break;
-        case IDM_EDIT_SORT_DESC: transform_selected_lines(active_edit_view(), 1); break;
-        case IDM_EDIT_SORT_DEDUPE: transform_selected_lines(active_edit_view(), 2); break;
-        case IDM_EDIT_TABS_TO_SPACES: convert_indentation(active_edit_view(), 1); break;
-        case IDM_EDIT_SPACES_TO_TABS: convert_indentation(active_edit_view(), 0); break;
-        case IDM_EDIT_EOL_CRLF: convert_line_endings(active_edit_view(), SC_EOL_CRLF); break;
-        case IDM_EDIT_ENCODING_UTF8: set_document_encoding(TEXT_ENCODING_UTF8, 0); break;
-        case IDM_EDIT_ENCODING_UTF8_BOM: set_document_encoding(TEXT_ENCODING_UTF8, 1); break;
-        case IDM_EDIT_ENCODING_UTF16LE: set_document_encoding(TEXT_ENCODING_UTF16LE, 1); break;
-        case IDM_EDIT_ENCODING_UTF16BE: set_document_encoding(TEXT_ENCODING_UTF16BE, 1); break;
-        case IDM_EDIT_ENCODING_ANSI: set_document_encoding(TEXT_ENCODING_ANSI, 0); break;
-        case IDM_FILE_REOPEN_UTF8: reopen_with_encoding(TEXT_ENCODING_UTF8); break;
-        case IDM_FILE_REOPEN_UTF16LE: reopen_with_encoding(TEXT_ENCODING_UTF16LE); break;
-        case IDM_FILE_REOPEN_UTF16BE: reopen_with_encoding(TEXT_ENCODING_UTF16BE); break;
-        case IDM_FILE_REOPEN_ANSI: reopen_with_encoding(TEXT_ENCODING_ANSI); break;
-        case IDM_EDIT_EOL_LF: convert_line_endings(active_edit_view(), SC_EOL_LF); break;
-        case IDM_EDIT_EOL_CR: convert_line_endings(active_edit_view(), SC_EOL_CR); break;
-        case IDM_EDIT_FIND: show_find_dialog(0); break;
-        case IDM_EDIT_REPLACE: show_find_dialog(1); break;
-        case IDM_EDIT_GOTOLINE: show_goto_line_dialog(); break;
-        case IDM_EDIT_COMMAND_PALETTE: show_command_palette(); break;
-        case IDM_EDIT_FINDNEXT:
-            if (g_findWhat[0]) {
-                char *findUtf8 = to_utf8(g_findWhat);
-                if (findUtf8) find_in_edit(findUtf8, (g_fr.Flags & FR_MATCHCASE) ? 1 : 0, 1);
-                free(findUtf8);
-            } else show_find_dialog(0);
-            break;
-        case IDM_FORMAT_FONT: do_choose_font(); break;
-        case IDM_FMT_JSON_PRETTY: format_json(1); break;
-        case IDM_FMT_JSON_MINIFY: format_json(0); break;
-        case IDM_FMT_HTML_HTML: toolbar_wrap_tag("html"); break;
-        case IDM_FMT_HTML_HEAD: toolbar_wrap_tag("head"); break;
-        case IDM_FMT_HTML_BODY: toolbar_wrap_tag("body"); break;
-        case IDM_FMT_HTML_PARAGRAPH: toolbar_wrap_tag("p"); break;
-        case IDM_FMT_HTML_BOLD: toolbar_wrap_tag("b"); break;
-        case IDM_FMT_HTML_ITALIC: toolbar_wrap_tag("i"); break;
-        case IDM_FMT_HTML_UNDERLINE: toolbar_wrap_tag("u"); break;
-        case IDM_FMT_HTML_DIV: toolbar_wrap_tag("div"); break;
-        case IDM_FMT_HTML_SPAN: toolbar_wrap_tag("span"); break;
-        case IDM_FMT_HTML_BREAK:
-            SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)"<br>");
-            SetFocus(g_hEdit);
-            break;
-        case IDM_FMT_HTML_LINK: toolbar_insert_html_link(); break;
-        case IDM_FMT_HTML_IMAGE: toolbar_insert_html_image(); break;
-        case IDM_FMT_HTML_TABLE: toolbar_insert_html_table(); break;
-        case IDM_FMT_HTML_BULLETLIST: toolbar_insert_html_list(0); break;
-        case IDM_FMT_HTML_NUMBERLIST: toolbar_insert_html_list(1); break;
-        case IDM_FMT_TABLE_EDITOR: show_table_editor(); break;
-        case IDM_FMT_TABLE_ROW_ABOVE: insert_table_row_relative(0); break;
-        case IDM_FMT_TABLE_ROW_BELOW: insert_table_row_relative(1); break;
-        case IDM_FMT_TABLE_ROW_DELETE: delete_table_row_at_cursor(); break;
-        case IDM_FMT_TABLE_COL_LEFT: insert_table_column_relative(0); break;
-        case IDM_FMT_TABLE_COL_RIGHT: insert_table_column_relative(1); break;
-        case IDM_FMT_TABLE_COL_DELETE: delete_table_column_at_cursor(); break;
-        case IDM_TABLE_SORT_ASC: sort_table_rows(0); break;
-        case IDM_TABLE_SORT_DESC: sort_table_rows(1); break;
-        case IDM_TABLE_ALIGN_LEFT: set_table_column_alignment(":---"); break;
-        case IDM_TABLE_ALIGN_CENTER: set_table_column_alignment(":---:"); break;
-        case IDM_TABLE_ALIGN_RIGHT: set_table_column_alignment("---:"); break;
-        case IDM_RUN_FILE: launch_active_source_file(0); break;
-        case IDM_DEBUG_FILE: launch_active_source_file(1); break;
-        case IDM_DEBUG_CONTINUE: run_debugger_command(IDM_DEBUG_CONTINUE); break;
-        case IDM_DEBUG_STEP_OVER: run_debugger_command(IDM_DEBUG_STEP_OVER); break;
-        case IDM_DEBUG_STEP_INTO: run_debugger_command(IDM_DEBUG_STEP_INTO); break;
-        case IDM_DEBUG_BREAKPOINT: toggle_breakpoint_at_cursor(); break;
-        case IDM_DEBUG_CLEAR_BREAKPOINTS: clear_debug_breakpoints(); break;
-        case IDM_VIEW_TOGGLEPREVIEW: toggle_preview(hwnd); break;
-        case IDM_VIEW_TOGGLEEDITOR: toggle_editor(hwnd); break;
-        case IDM_VIEW_PREVIEW_ON_LEFT: toggle_panel_sides(hwnd); break;
-        case IDM_VIEW_CUSTOM_CSS: do_choose_custom_css(); break;
-        case IDM_VIEW_CLEAR_CUSTOM_CSS: clear_custom_css(); break;
-        case IDM_VIEW_FOCUS_MODE: toggle_focus_mode(hwnd); break;
-        case IDM_VIEW_WORD_WRAP: toggle_word_wrap(hwnd); break;
-        case IDM_VIEW_SPELL_CHECK: toggle_spell_check(hwnd); break;
-        case IDM_VIEW_SPELL_LANGUAGE: choose_spell_language(); break;
-        case IDM_VIEW_SHOW_WHITESPACE: toggle_show_whitespace(hwnd); break;
-        case IDM_VIEW_INDENT_GUIDES: toggle_indent_guides(hwnd); break;
-        case IDM_VIEW_USE_SPACES_INDENT: toggle_indent_use_spaces(hwnd); break;
-        case IDM_VIEW_FOLD_TOGGLE: fold_toggle_at_cursor(); break;
-        case IDM_VIEW_FOLD_ALL: fold_all_lines(0); break;
-        case IDM_VIEW_UNFOLD_ALL: fold_all_lines(1); break;
-        case IDM_VIEW_OUTLINE: toggle_outline(hwnd); break;
-        case IDM_VIEW_MINIMAP: toggle_minimap(hwnd); break;
-        case IDM_VIEW_EXPLORER: toggle_explorer_panel(hwnd); break;
-        case IDM_VIEW_TOGGLESPLIT: toggle_split_editor(hwnd); break;
-        case IDM_VIEW_RESET_SPLIT_EDITOR: reset_split_editor(hwnd); break;
-        case IDM_VIEW_ZOOM_IN: adjust_editor_zoom(1); break;
-        case IDM_VIEW_ZOOM_OUT: adjust_editor_zoom(-1); break;
-        case IDM_VIEW_ZOOM_RESET: reset_editor_zoom(); break;
-        case IDM_VIEW_NEXT_TAB:
-            if (g_documentCount > 1) switch_document((g_activeDocument + 1) % g_documentCount);
-            break;
-        case IDM_VIEW_PREVIOUS_TAB:
-            if (g_documentCount > 1) switch_document((g_activeDocument + g_documentCount - 1) % g_documentCount);
-            break;
-        case IDM_VIEW_CYCLE_PANE: cycle_pane_focus(0); break;
-        case IDM_VIEW_CYCLE_PANE_PREV: cycle_pane_focus(1); break;
-        case IDM_VIEW_THEME_GITHUB_LIGHT:
-        case IDM_VIEW_THEME_GITHUB_DARK:
-            select_theme(hwnd, cmd == IDM_VIEW_THEME_GITHUB_DARK);
-            break;
-        case IDM_VIEW_PREVIEW_THEME_LIGHT:
-        case IDM_VIEW_PREVIEW_THEME_DARK:
-            select_preview_theme(hwnd, cmd == IDM_VIEW_PREVIEW_THEME_DARK);
-            break;
-        case IDM_HELP_REFERENCE: show_help_page(REFERENCE_MARKDOWN); break;
-        case IDM_HELP_SHORTCUTS: show_help_page(REFERENCE_SHORTCUTS); break;
-        case IDM_HELP_ABOUT: show_about_box(); break;
-    }
+    /* Each handler reports whether it recognized the command. */
+    if (handle_file_command(hwnd, cmd)) return;
+    if (handle_edit_command(cmd)) return;
+    if (handle_format_command(cmd)) return;
+    if (handle_debug_command(cmd)) return;
+    if (handle_view_command(hwnd, cmd)) return;
+    if (handle_help_command(cmd)) return;
 }
 
 static RECT tab_close_rectangle(const RECT *tabRect) {
