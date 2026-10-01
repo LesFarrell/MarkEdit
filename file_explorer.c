@@ -274,9 +274,9 @@ static void copy_path_to_clipboard(const WCHAR *path) {
         GlobalUnlock(global);
         if (OpenClipboard(s_hParent)) {
             EmptyClipboard();
-            SetClipboardData(CF_UNICODETEXT, global);
+            HANDLE transferred = SetClipboardData(CF_UNICODETEXT, global);
             CloseClipboard();
-            return; /* the clipboard now owns `global` */
+            if (transferred) return; /* the clipboard now owns `global` */
         }
     }
     GlobalFree(global);
@@ -297,9 +297,14 @@ static int delete_to_recycle_bin(const WCHAR *path) {
         IShellItem *item = NULL;
         hr = SHCreateItemFromParsingName(path, NULL, &IID_IShellItem, (void **)&item);
         if (SUCCEEDED(hr) && item) {
-            IFileOperation_DeleteItem(operation, item, NULL);
-            hr = IFileOperation_PerformOperations(operation);
+            hr = IFileOperation_DeleteItem(operation, item, NULL);
+            if (SUCCEEDED(hr)) hr = IFileOperation_PerformOperations(operation);
+            BOOL aborted = TRUE;
+            if (SUCCEEDED(hr)) hr = IFileOperation_GetAnyOperationsAborted(operation, &aborted);
             IShellItem_Release(item);
+            IFileOperation_Release(operation);
+            /* A cancelled operation must not be retried through the fallback. */
+            return SUCCEEDED(hr) && !aborted;
         }
         IFileOperation_Release(operation);
         if (SUCCEEDED(hr)) return 1;
@@ -310,7 +315,7 @@ static int delete_to_recycle_bin(const WCHAR *path) {
     op.wFunc = FO_DELETE;
     op.pFrom = doubleNulPath;
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
-    return SHFileOperationW(&op) == 0;
+    return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
 }
 
 /* Rejects anything that isn't a single plain path component - in particular

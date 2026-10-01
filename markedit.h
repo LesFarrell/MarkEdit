@@ -25,6 +25,7 @@
 #define IDT_DEBUG_LOCATION 8
 #define IDT_STATUS_UPDATE 9
 #define IDT_EXPLORER_REFRESH 10
+#define IDT_HTML_EXPORT 11
 
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
@@ -213,8 +214,6 @@ static void update_preview(void);
 void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
-static void apply_markdown_lexer_styles(HWND hEdit);
-static void apply_language_styles(HWND hEdit);
 static void apply_word_wrap(HWND hEdit);
 static void apply_preview_host_theme(void);
 static void refresh_menu(HWND hwnd);

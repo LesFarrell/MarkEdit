@@ -235,11 +235,16 @@ project "markedit"
 
     files {
         "markedit.c",
+        "editor_commands.c", "editor_commands.h",
+        "editor_language.c", "editor_language.h",
+        "preview_fallback.c", "preview_fallback.h",
         "path_utils.c", "path_utils.h",
+        "file_io.c", "file_io.h",
         "text_codec.c", "text_codec.h",
         "json_formatter.c", "json_formatter.h",
         "markdown.c", "markdown.h",
         "settings.c", "settings.h",
+        "recent_list.c", "recent_list.h",
         "help_reference.c", "help_reference.h",
         "file_explorer.c", "file_explorer.h",
         "toolbar_icons.c", "toolbar_icons.h",
@@ -315,6 +320,41 @@ project "test_parser"
     warnings "Extra"
     optimize "Size"
 
+    filter "toolset:gcc or clang"
+        buildoptions { "-Werror" }
+    filter "toolset:msc"
+        buildoptions { "/WX" }
+    filter {}
+
+project "test_editor_commands"
+    kind "ConsoleApp"
+    language "C"
+    cdialect "C11"
+    targetname "test_editor_commands"
+    targetdir "tests"
+    objdir "build/obj/test_editor_commands"
+    files { "tests/test_editor_commands.c", "editor_commands.c", "editor_commands.h" }
+    includedirs { "." }
+    links { "user32" }
+    warnings "Extra"
+    optimize "Size"
+    filter "toolset:gcc or clang"
+        buildoptions { "-Werror" }
+    filter "toolset:msc"
+        buildoptions { "/WX" }
+    filter {}
+
+project "test_core"
+    kind "ConsoleApp"
+    language "C"
+    cdialect "C11"
+    targetname "test_core"
+    targetdir "tests"
+    objdir "build/obj/test_core"
+    files { "tests/test_core.c", "json_formatter.c", "text_codec.c", "file_io.c", "path_utils.c" }
+    includedirs { "." }
+    warnings "Extra"
+    optimize "Size"
     filter "toolset:gcc or clang"
         buildoptions { "-Werror" }
     filter "toolset:msc"

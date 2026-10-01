@@ -3,6 +3,99 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Validate before removing whitespace: otherwise malformed input such as
+   [1 2] would silently become a different, valid value ([12]). */
+typedef struct JsonReader {
+    const char *text;
+    int length;
+    int position;
+} JsonReader;
+
+static void json_skip_space(JsonReader *reader) {
+    while (reader->position < reader->length &&
+           strchr(" \t\r\n", reader->text[reader->position]) &&
+           reader->text[reader->position] != 0) reader->position++;
+}
+
+static int json_take(JsonReader *reader, char character) {
+    if (reader->position >= reader->length ||
+        reader->text[reader->position] != character) return 0;
+    reader->position++;
+    return 1;
+}
+
+static int json_read_string(JsonReader *reader) {
+    if (!json_take(reader, '"')) return 0;
+    while (reader->position < reader->length) {
+        unsigned char c = (unsigned char)reader->text[reader->position++];
+        if (c == '"') return 1;
+        if (c < 0x20) return 0;
+        if (c != '\\') continue;
+        if (reader->position >= reader->length) return 0;
+        char escape = reader->text[reader->position++];
+        if (escape == 'u') {
+            for (int i = 0; i < 4; i++) {
+                if (reader->position >= reader->length) return 0;
+                char digit = reader->text[reader->position++];
+                if (!((digit >= '0' && digit <= '9') ||
+                      (digit >= 'a' && digit <= 'f') ||
+                      (digit >= 'A' && digit <= 'F'))) return 0;
+            }
+        } else if (!escape || !strchr("\"\\/bfnrt", escape)) return 0;
+    }
+    return 0;
+}
+
+static int json_read_digits(JsonReader *reader) {
+    int start = reader->position;
+    while (reader->position < reader->length &&
+           reader->text[reader->position] >= '0' &&
+           reader->text[reader->position] <= '9') reader->position++;
+    return reader->position > start;
+}
+
+static int json_read_value(JsonReader *reader, int depth) {
+    json_skip_space(reader);
+    if (reader->position >= reader->length) return 0;
+    char c = reader->text[reader->position];
+    if (c == '"') return json_read_string(reader);
+    if (c == '{' || c == '[') {
+        if (depth >= 256) return 0;
+        reader->position++;
+        char closer = c == '{' ? '}' : ']';
+        json_skip_space(reader);
+        if (json_take(reader, closer)) return 1;
+        for (;;) {
+            if (c == '{') {
+                json_skip_space(reader);
+                if (!json_read_string(reader)) return 0;
+                json_skip_space(reader);
+                if (!json_take(reader, ':')) return 0;
+            }
+            if (!json_read_value(reader, depth + 1)) return 0;
+            json_skip_space(reader);
+            if (json_take(reader, closer)) return 1;
+            if (!json_take(reader, ',')) return 0;
+        }
+    }
+    const char *literal = c == 't' ? "true" : c == 'f' ? "false" : c == 'n' ? "null" : NULL;
+    if (literal) {
+        int length = (int)strlen(literal);
+        if (reader->length - reader->position < length ||
+            memcmp(reader->text + reader->position, literal, (size_t)length)) return 0;
+        reader->position += length;
+        return 1;
+    }
+    json_take(reader, '-');
+    if (!json_take(reader, '0') && !json_read_digits(reader)) return 0;
+    if (json_take(reader, '.') && !json_read_digits(reader)) return 0;
+    if (json_take(reader, 'e') || json_take(reader, 'E')) {
+        if (!json_take(reader, '+')) json_take(reader, '-');
+        if (!json_read_digits(reader)) return 0;
+    }
+    return 1;
+}
+
 typedef struct JsonPrinter {
     char *output;
     size_t length;
@@ -43,9 +136,13 @@ static int json_copy_string(JsonPrinter *printer, const char *text, int index, i
 }
 
 char *json_reformat(const char *text, int length, const char *eol, int indent) {
+    if (!text || length <= 0 || !eol) return NULL;
+    JsonReader reader = {text, length, 0};
+    if (!json_read_value(&reader, 0)) return NULL;
+    json_skip_space(&reader);
+    if (reader.position != length) return NULL;
     JsonPrinter printer = {NULL, 0, 0, 0};
     int depth = 0;
-    int containers = 0;
     int sawValue = 0;
     int closed = 0; /* the outermost container has closed - anything but trailing whitespace after this is invalid */
     /* One opener per nesting level, so a closer is checked against the kind
@@ -85,7 +182,6 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
                 openers[depth] = character;
                 json_emit(&printer, &character, 1);
                 depth++;
-                containers++;
                 sawValue = 1;
                 break;
             case '}':
@@ -141,7 +237,7 @@ char *json_reformat(const char *text, int length, const char *eol, int indent) {
         }
     }
 
-    if (printer.failed || depth != 0 || !sawValue || !containers) {
+    if (printer.failed || depth != 0 || !sawValue) {
         free(printer.output);
         return NULL;
     }

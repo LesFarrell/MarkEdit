@@ -8,7 +8,7 @@
 
 /* GitHub light/dark palette shared by every natively drawn surface (editor,
    menus, tabs, status bar, popups, file explorer). The preview's CSS
-   (preview_shell.html, github-markdown.css, HTML_SHELL in markedit.c)
+   (preview_shell.html, github-markdown.css, preview_fallback.c)
    carries the same values and must be kept in step by hand. */
 #define THEME_DARK_BG      RGB(0x16, 0x1B, 0x22)
 #define THEME_DARK_FG      RGB(0xE6, 0xED, 0xF3)

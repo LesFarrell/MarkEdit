@@ -88,8 +88,17 @@ char *markdown_to_html(const char *text) {
         }
     }
 
-    text = skip_yaml_front_matter(text);
-    cmark_parser_feed(parser, text, strlen(text));
+    const char *body = skip_yaml_front_matter(text);
+    /* Keep source positions aligned with the editor after hiding metadata. */
+    for (const char *cursor = text; cursor < body; cursor++) {
+        if (*cursor == '\r') {
+            cmark_parser_feed(parser, "\n", 1);
+            if (cursor + 1 < body && cursor[1] == '\n') cursor++;
+        } else if (*cursor == '\n') {
+            cmark_parser_feed(parser, "\n", 1);
+        }
+    }
+    cmark_parser_feed(parser, body, strlen(body));
     document = cmark_parser_finish(parser);
     if (!document) {
         cmark_llist_free(mem, render_extensions);

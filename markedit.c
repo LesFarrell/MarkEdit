@@ -36,12 +36,17 @@
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
 #define DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 19
 #endif
+#include "editor_commands.h"
+#include "editor_language.h"
+#include "preview_fallback.h"
 #include "file_explorer.h"
+#include "file_io.h"
 #include "help_reference.h"
 #include "json_formatter.h"
 #include "markdown.h"
 #include "path_utils.h"
 #include "settings.h"
+#include "recent_list.h"
 #include "text_codec.h"
 #include "theme.h"
 #include "toolbar_icons.h"
@@ -95,6 +100,7 @@ static char *g_pendingHtmlBody = NULL; /* set if update requested before webview
 static int g_previewShowingRawHtml = 0; /* true once show_html_file_preview() has navigated away from the shell page */
 static WCHAR *g_expectedHtmlPreviewUrl = NULL; /* one-shot allowance for show_html_file_preview()'s own navigation; see NavStarting_Invoke */
 static WCHAR *g_exportPath = NULL;
+static unsigned long g_exportRequest = 0;
 static WCHAR *g_pendingPdfPath = NULL;
 typedef enum PrintAction {
     PRINT_ACTION_NONE = 0,
@@ -344,19 +350,6 @@ static void toolbar_wrap_tag(const char *tag) {
     toolbar_wrap_pair(open, close);
 }
 
-/* Returns the 0-based [firstLine, lastLine] range touched by the current
-   selection (a single line if there is no selection). */
-static void toolbar_selected_line_range(HWND hEdit, Sci_Position *firstLine, Sci_Position *lastLine) {
-    Sci_Position selStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    Sci_Position selEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
-    *firstLine = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selStart, 0);
-    *lastLine = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)selEnd, 0);
-    /* A selection ending exactly at the start of a line (e.g. after pressing
-       Home then Shift+Down once) shouldn't pull that line into the range. */
-    if (*lastLine > *firstLine && selEnd == (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)*lastLine, 0))
-        (*lastLine)--;
-}
-
 /* How many bytes of `line` (of length lineLen) are one of the recognized
    line-prefix markers this toolbar manages (heading, quote, bullet, numbered,
    task). Returns 0 if none match. Used so re-clicking a different button on
@@ -410,7 +403,7 @@ static int toolbar_prefix_length(const char *line, Sci_Position lineLen) {
    is ignored and "N. " is generated per line instead. */
 static void toolbar_apply_line_prefix(const char *prefix, int numbered) {
     Sci_Position firstLine, lastLine;
-    toolbar_selected_line_range(g_hEdit, &firstLine, &lastLine);
+    editor_selected_line_range(g_hEdit, &firstLine, &lastLine);
 
     Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
@@ -674,7 +667,7 @@ static void toolbar_insert_html_list(int ordered) {
     }
 
     Sci_Position firstLine, lastLine;
-    toolbar_selected_line_range(g_hEdit, &firstLine, &lastLine);
+    editor_selected_line_range(g_hEdit, &firstLine, &lastLine);
 
     Sci_Position len;
     char *text = get_edit_text(g_hEdit, &len);
@@ -950,92 +943,6 @@ static void update_linenumber_margin_width(HWND hEdit) {
 
 /* Apply GitHub's light/dark palette to the editor so it matches the preview.
    Called once at startup and whenever the selected theme changes. */
-
-/* ---- source language selection, driven by the document file extension ---- */
-
-typedef enum {
-    LANG_MARKDOWN = 0, LANG_JSON, LANG_XML, LANG_HTML, LANG_YAML,
-    LANG_CPP, LANG_PYTHON, LANG_BASH, LANG_POWERSHELL, LANG_LUA, LANG_TEXT
-} Language;
-
-typedef struct LanguageInfo {
-    Language id;
-    const char *lexer;
-    const WCHAR *extensions; /* semicolon-delimited, each dot-prefixed */
-    const char *keywords;    /* primary keyword list, NULL when the lexer needs none */
-    const char *fenceTag;    /* Markdown info-string; lexer names are not always valid ones */
-    int folds;               /* the vendored Markdown lexer emits no fold levels at all */
-} LanguageInfo;
-
-static const LanguageInfo LANGUAGES[] = {
-    { LANG_MARKDOWN, "markdown", L".md;.markdown;.mdown;.mkd;.mdwn;.text", NULL, "markdown", 0 },
-    { LANG_JSON, "json", L".json;.jsonc;.jsonl;.geojson;.webmanifest", "true false null", "json", 1 },
-    { LANG_XML, "xml", L".xml;.xsd;.xsl;.xslt;.svg;.rss;.atom;.plist;.csproj;.props;.targets", NULL, "xml", 1 },
-    { LANG_HTML, "hypertext", L".html;.htm;.xhtml", NULL, "html", 1 },
-    { LANG_YAML, "yaml", L".yml;.yaml", "true false null yes no on off", "yaml", 1 },
-    { LANG_CPP, "cpp", L".c;.h;.cc;.cpp;.cxx;.hpp;.hxx;.js;.mjs;.cjs;.ts;.tsx;.jsx;.cs;.java;.go;.rs;.php",
-      "auto break case char const continue default do double else enum extern float for goto if"
-      " inline int long register return short signed sizeof static struct switch typedef union"
-      " unsigned void volatile while bool catch class const_cast delete dynamic_cast explicit"
-      " export false friend mutable namespace new operator private protected public"
-      " reinterpret_cast static_cast template this throw true try typeid typename using virtual"
-      " nullptr constexpr decltype noexcept override final function var let await async"
-      " import from interface type extends implements", "c", 1 },
-    { LANG_PYTHON, "python", L".py;.pyw;.pyi",
-      "and as assert async await break class continue def del elif else except finally for from"
-      " global if import in is lambda nonlocal not or pass raise return try while with yield"
-      " None True False self", "python", 1 },
-    { LANG_BASH, "bash", L".sh;.bash;.zsh;.ksh;.bashrc;.profile",
-      "if then else elif fi case esac for while until do done in function select time coproc"
-      " break continue return exit export local readonly declare unset shift eval exec source",
-      "bash", 1 },
-    { LANG_POWERSHELL, "powershell", L".ps1;.psm1;.psd1",
-      "begin break catch continue data do dynamicparam else elseif end exit filter finally for"
-      " foreach from function if in local param process return switch throw trap try until"
-      " where while", "powershell", 1 },
-    { LANG_LUA, "lua", L".lua",
-      "and break do else elseif end false for function goto if in local nil not or repeat return"
-      " then true until while", "lua", 1 },
-    /* "text" deliberately names no compiled-in lexer (see lexilla-sources.rsp) -
-       CreateLexer() returns NULL for it, apply_document_language() then skips
-       SCI_SETILEXER, and the document is left with no lexer at all: genuinely
-       unstyled plain text rather than a lexer that happens to add no colour. */
-    { LANG_TEXT, "text", L".txt", NULL, "text", 0 },
-};
-
-#define LANGUAGE_COUNT ((int)(sizeof(LANGUAGES) / sizeof(LANGUAGES[0])))
-
-/* Case-insensitive match of `extension` against one semicolon-delimited list. */
-static int extension_in_list(const WCHAR *extension, const WCHAR *list) {
-    size_t length = wcslen(extension);
-    for (const WCHAR *entry = list; *entry; ) {
-        const WCHAR *end = wcschr(entry, L';');
-        size_t entryLength = end ? (size_t)(end - entry) : wcslen(entry);
-        if (entryLength == length && _wcsnicmp(entry, extension, length) == 0) return 1;
-        if (!end) break;
-        entry = end + 1;
-    }
-    return 0;
-}
-
-/* Picks the language for a document path. A document with no path yet (a
-   new, untitled tab) defaults to plain text rather than assuming Markdown
-   (its preview still renders as Markdown - see update_preview()) -
-   see show_help_page() for the one deliberate exception, which forces
-   Markdown for its own untitled tab since its content always is Markdown.
-   An unrecognized extension on an actual saved path still falls back to
-   Markdown, unchanged: that's a real file whose language merely isn't in
-   the table, not a blank document that hasn't been given one yet. */
-static const LanguageInfo *language_for_path(const WCHAR *path) {
-    if (!path) return &LANGUAGES[LANG_TEXT];
-    const WCHAR *extension = PathFindExtensionW(path);
-    if (!extension || !*extension) return &LANGUAGES[LANG_MARKDOWN];
-
-    for (int l = 0; l < LANGUAGE_COUNT; l++) {
-        if (extension_in_list(extension, LANGUAGES[l].extensions)) return &LANGUAGES[l];
-    }
-    return &LANGUAGES[LANG_MARKDOWN];
-}
 static void apply_editor_theme(HWND hEdit) {
     /* Scintilla draws its own client area but leaves the scrollbars to the
        system, which paints them light unless the window opts into the dark
@@ -1125,218 +1032,8 @@ static void apply_editor_theme(HWND hEdit) {
                  (LPARAM)(g_editorDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E)));
     SendMessageA(hEdit, SCI_INDICSETUNDER, INDICATOR_SPELLING, TRUE);
 
-    apply_language_styles(hEdit);
+    apply_language_styles(hEdit, (Language)g_activeLanguage, g_editorDarkMode);
     InvalidateRect(hEdit, NULL, TRUE);
-}
-
-/* Color the Markdown lexer's styles (see third_party/lexilla/include/
-   SciLexer.h, SCE_MARKDOWN_*) to match the GitHub light/dark palette used
-   everywhere else in the app. Called from apply_editor_theme() after every
-   SCI_STYLECLEARALL, since that resets every style back to STYLE_DEFAULT. */
-static void apply_markdown_lexer_styles(HWND hEdit) {
-    COLORREF text = theme_fg_color();
-    COLORREF heading = g_editorDarkMode ? RGB(0x79, 0xC0, 0xFF) : RGB(0x09, 0x69, 0xDA);
-    COLORREF link = g_editorDarkMode ? RGB(0x58, 0xA6, 0xFF) : RGB(0x09, 0x69, 0xDA);
-    COLORREF code = g_editorDarkMode ? RGB(0xFF, 0xA6, 0x57) : RGB(0xB3, 0x53, 0x00);
-    COLORREF quote = g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
-    COLORREF list = g_editorDarkMode ? RGB(0xD2, 0xA8, 0xFF) : RGB(0x82, 0x50, 0xDF);
-    COLORREF strike = g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
-    COLORREF rule = g_editorDarkMode ? RGB(0x7D, 0x85, 0x90) : RGB(0x65, 0x6D, 0x76);
-
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRONG1, text);
-    SendMessageA(hEdit, SCI_STYLESETBOLD, SCE_MARKDOWN_STRONG1, TRUE);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRONG2, text);
-    SendMessageA(hEdit, SCI_STYLESETBOLD, SCE_MARKDOWN_STRONG2, TRUE);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_EM1, text);
-    SendMessageA(hEdit, SCI_STYLESETITALIC, SCE_MARKDOWN_EM1, TRUE);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_EM2, text);
-    SendMessageA(hEdit, SCI_STYLESETITALIC, SCE_MARKDOWN_EM2, TRUE);
-
-    int headerStyles[6] = { SCE_MARKDOWN_HEADER1, SCE_MARKDOWN_HEADER2, SCE_MARKDOWN_HEADER3,
-                             SCE_MARKDOWN_HEADER4, SCE_MARKDOWN_HEADER5, SCE_MARKDOWN_HEADER6 };
-    for (int i = 0; i < 6; i++) {
-        SendMessageA(hEdit, SCI_STYLESETFORE, headerStyles[i], heading);
-        SendMessageA(hEdit, SCI_STYLESETBOLD, headerStyles[i], TRUE);
-    }
-
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_ULIST_ITEM, list);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_OLIST_ITEM, list);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_BLOCKQUOTE, quote);
-    SendMessageA(hEdit, SCI_STYLESETITALIC, SCE_MARKDOWN_BLOCKQUOTE, TRUE);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRIKEOUT, strike);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_HRULE, rule);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_LINK, link);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_CODE, code);
-    SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODE, (LPARAM)"Consolas");
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_CODE2, code);
-    SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODE2, (LPARAM)"Consolas");
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_CODEBK, code);
-    SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODEBK, (LPARAM)"Consolas");
-}
-
-/* The GitHub syntax palette, shared by every non-Markdown lexer so the editor
-   keeps one look across languages. */
-typedef struct SyntaxPalette {
-    COLORREF comment, keyword, string, number, function, variable, tag, attribute, operatorColour;
-} SyntaxPalette;
-
-static SyntaxPalette syntax_palette(void) {
-    SyntaxPalette p;
-    if (g_editorDarkMode) {        
-        p.comment = RGB(0x1f,0x88,0x3d);
-        p.keyword = RGB(0xFF, 0x7B, 0x72);
-        p.string = RGB(0xA5, 0xD6, 0xFF);
-        p.number = RGB(0x79, 0xC0, 0xFF);
-        p.function = RGB(0xD2, 0xA8, 0xFF);
-        p.variable = RGB(0xFF, 0xA6, 0x57);
-        p.tag = RGB(0x7E, 0xE7, 0x87);
-        p.attribute = RGB(0x79, 0xC0, 0xFF);
-        p.operatorColour = RGB(0xE6, 0xED, 0xF3);
-    } else {
-        p.comment = RGB(0x1f,0x88,0x3d);
-        p.keyword = RGB(0xCF, 0x22, 0x2E);
-        p.string = RGB(0x0A, 0x30, 0x69);
-        p.number = RGB(0x09, 0x69, 0xDA);
-        p.function = RGB(0x82, 0x50, 0xDF);
-        p.variable = RGB(0x95, 0x38, 0x00);
-        p.tag = RGB(0x11, 0x63, 0x29);
-        p.attribute = RGB(0x09, 0x69, 0xDA);
-        p.operatorColour = RGB(0x1F, 0x23, 0x28);
-    }
-    return p;
-}
-
-static void style_range(HWND hEdit, const int *styles, int count, COLORREF colour) {
-    for (int i = 0; i < count; i++)
-        SendMessageA(hEdit, SCI_STYLESETFORE, (WPARAM)styles[i], (LPARAM)colour);
-}
-
-static void apply_json_styles(HWND hEdit, const SyntaxPalette *p) {
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_PROPERTYNAME, (LPARAM)p->attribute);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_STRING, (LPARAM)p->string);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_NUMBER, (LPARAM)p->number);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_KEYWORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_LDKEYWORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_OPERATOR, (LPARAM)p->operatorColour);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_ESCAPESEQUENCE, (LPARAM)p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_URI, (LPARAM)p->string);
-    const int comments[] = { SCE_JSON_LINECOMMENT, SCE_JSON_BLOCKCOMMENT };
-    style_range(hEdit, comments, 2, p->comment);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_ERROR, (LPARAM)p->keyword);
-}
-
-static void apply_markup_styles(HWND hEdit, const SyntaxPalette *p) {
-    const int tags[] = { SCE_H_TAG, SCE_H_TAGEND, SCE_H_TAGUNKNOWN, SCE_H_XMLSTART, SCE_H_XMLEND };
-    style_range(hEdit, tags, 5, p->tag);
-    const int attributes[] = { SCE_H_ATTRIBUTE, SCE_H_ATTRIBUTEUNKNOWN };
-    style_range(hEdit, attributes, 2, p->attribute);
-    const int strings[] = { SCE_H_DOUBLESTRING, SCE_H_SINGLESTRING, SCE_H_VALUE };
-    style_range(hEdit, strings, 3, p->string);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_NUMBER, (LPARAM)p->number);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_COMMENT, (LPARAM)p->comment);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_ENTITY, (LPARAM)p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_CDATA, (LPARAM)p->comment);
-}
-
-static void apply_yaml_styles(HWND hEdit, const SyntaxPalette *p) {
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_IDENTIFIER, (LPARAM)p->attribute);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_KEYWORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_NUMBER, (LPARAM)p->number);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_COMMENT, (LPARAM)p->comment);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_REFERENCE, (LPARAM)p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_DOCUMENT, (LPARAM)p->comment);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_OPERATOR, (LPARAM)p->operatorColour);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_ERROR, (LPARAM)p->keyword);
-}
-
-static void apply_cpp_styles(HWND hEdit, const SyntaxPalette *p) {
-    const int comments[] = { SCE_C_COMMENT, SCE_C_COMMENTLINE, SCE_C_COMMENTDOC, SCE_C_COMMENTLINEDOC };
-    style_range(hEdit, comments, 4, p->comment);
-    const int strings[] = { SCE_C_STRING, SCE_C_CHARACTER, SCE_C_VERBATIM, SCE_C_STRINGEOL };
-    style_range(hEdit, strings, 4, p->string);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_WORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_WORD2, (LPARAM)p->function);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_NUMBER, (LPARAM)p->number);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_PREPROCESSOR, (LPARAM)p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_OPERATOR, (LPARAM)p->operatorColour);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_REGEX, (LPARAM)p->string);
-}
-
-static void apply_python_styles(HWND hEdit, const SyntaxPalette *p) {
-    const int comments[] = { SCE_P_COMMENTLINE, SCE_P_COMMENTBLOCK };
-    style_range(hEdit, comments, 2, p->comment);
-    const int strings[] = { SCE_P_STRING, SCE_P_CHARACTER, SCE_P_TRIPLE, SCE_P_TRIPLEDOUBLE, SCE_P_FSTRING };
-    style_range(hEdit, strings, 5, p->string);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_WORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_NUMBER, (LPARAM)p->number);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_DEFNAME, (LPARAM)p->function);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_CLASSNAME, (LPARAM)p->function);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_DECORATOR, (LPARAM)p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_OPERATOR, (LPARAM)p->operatorColour);
-}
-
-static void apply_bash_styles(HWND hEdit, const SyntaxPalette *p) {
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_COMMENTLINE, (LPARAM)p->comment);
-    const int strings[] = { SCE_SH_STRING, SCE_SH_CHARACTER, SCE_SH_HERE_Q, SCE_SH_BACKTICKS };
-    style_range(hEdit, strings, 4, p->string);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_WORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_NUMBER, (LPARAM)p->number);
-    const int variables[] = { SCE_SH_SCALAR, SCE_SH_PARAM, SCE_SH_HERE_DELIM };
-    style_range(hEdit, variables, 3, p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_OPERATOR, (LPARAM)p->operatorColour);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_ERROR, (LPARAM)p->keyword);
-}
-
-static void apply_powershell_styles(HWND hEdit, const SyntaxPalette *p) {
-    const int comments[] = { SCE_POWERSHELL_COMMENT, SCE_POWERSHELL_COMMENTSTREAM,
-                             SCE_POWERSHELL_COMMENTDOCKEYWORD };
-    style_range(hEdit, comments, 3, p->comment);
-    const int strings[] = { SCE_POWERSHELL_STRING, SCE_POWERSHELL_CHARACTER,
-                            SCE_POWERSHELL_HERE_STRING, SCE_POWERSHELL_HERE_CHARACTER };
-    style_range(hEdit, strings, 4, p->string);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_KEYWORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_NUMBER, (LPARAM)p->number);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_VARIABLE, (LPARAM)p->variable);
-    const int functions[] = { SCE_POWERSHELL_CMDLET, SCE_POWERSHELL_FUNCTION, SCE_POWERSHELL_ALIAS };
-    style_range(hEdit, functions, 3, p->function);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_OPERATOR, (LPARAM)p->operatorColour);
-}
-
-static void apply_lua_styles(HWND hEdit, const SyntaxPalette *p) {
-    const int comments[] = { SCE_LUA_COMMENT, SCE_LUA_COMMENTLINE, SCE_LUA_COMMENTDOC };
-    style_range(hEdit, comments, 3, p->comment);
-    const int strings[] = { SCE_LUA_STRING, SCE_LUA_CHARACTER, SCE_LUA_LITERALSTRING, SCE_LUA_STRINGEOL };
-    style_range(hEdit, strings, 4, p->string);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_WORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_NUMBER, (LPARAM)p->number);
-    const int functions[] = { SCE_LUA_WORD2, SCE_LUA_WORD3 };
-    style_range(hEdit, functions, 2, p->function);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_IDENTIFIER, (LPARAM)p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_PREPROCESSOR, (LPARAM)p->variable);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_OPERATOR, (LPARAM)p->operatorColour);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_LABEL, (LPARAM)p->function);
-}
-
-/* Applies the current theme colours for whichever language is active. */
-static void apply_language_styles(HWND hEdit) {
-    if (g_activeLanguage == LANG_MARKDOWN) {
-        apply_markdown_lexer_styles(hEdit);
-        return;
-    }
-
-    SyntaxPalette palette = syntax_palette();
-    switch (g_activeLanguage) {
-        case LANG_JSON: apply_json_styles(hEdit, &palette); break;
-        case LANG_XML:
-        case LANG_HTML: apply_markup_styles(hEdit, &palette); break;
-        case LANG_YAML: apply_yaml_styles(hEdit, &palette); break;
-        case LANG_CPP: apply_cpp_styles(hEdit, &palette); break;
-        case LANG_PYTHON: apply_python_styles(hEdit, &palette); break;
-        case LANG_BASH: apply_bash_styles(hEdit, &palette); break;
-        case LANG_POWERSHELL: apply_powershell_styles(hEdit, &palette); break;
-        case LANG_LUA: apply_lua_styles(hEdit, &palette); break;
-        default: break;
-    }
 }
 
 /* Switches the editor to the lexer for `path`, reapplying the theme so the
@@ -1348,7 +1045,8 @@ static void apply_document_language(HWND hEdit, const WCHAR *path) {
     g_activeLanguage = language->id;
 
     void *lexer = CreateLexer(language->lexer);
-    if (lexer) SendMessageA(hEdit, SCI_SETILEXER, 0, (LPARAM)lexer);
+    /* NULL explicitly clears the previous lexer when switching to plain text. */
+    SendMessageA(hEdit, SCI_SETILEXER, 0, (LPARAM)lexer);
     if (language->keywords)
         SendMessageA(hEdit, SCI_SETKEYWORDS, 0, (LPARAM)language->keywords);
 
@@ -2061,64 +1759,6 @@ static char *get_document_text(int index, Sci_Position *outLength) {
     return text;
 }
 
-static int write_bytes_file(const WCHAR *path, const char *bytes, size_t length) {
-    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return 0;
-    size_t total = 0;
-    int ok = 1;
-    while (total < length) {
-        DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : length - total);
-        DWORD written = 0;
-        if (!WriteFile(file, bytes + total, chunk, &written, NULL) || written != chunk) {
-            ok = 0;
-            break;
-        }
-        total += written;
-    }
-    if (!CloseHandle(file)) ok = 0;
-    return ok;
-}
-
-static char *read_bytes_file(const WCHAR *path, int *outLength) {
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    if (file == INVALID_HANDLE_VALUE) return NULL;
-    LARGE_INTEGER size;
-    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > INT_MAX) {
-        CloseHandle(file);
-        return NULL;
-    }
-    int length = (int)size.QuadPart;
-    char *text = (char *)malloc((size_t)length + 1);
-    DWORD read = 0;
-    int ok = text && ReadFile(file, text, (DWORD)length, &read, NULL) && read == (DWORD)length;
-    CloseHandle(file);
-    if (!ok) { free(text); return NULL; }
-    text[length] = 0;
-    if (outLength) *outLength = length;
-    return text;
-}
-
-/* Reads a text file the way load_file() interprets one - detecting its
-   encoding (see detect_text_encoding()) - as NUL-terminated UTF-8, for
-   features that read files without opening them in a tab. */
-static char *read_text_file(const WCHAR *path, int *outLength, int *outEncoding, int *outHasBom) {
-    int length = 0;
-    char *bytes = read_bytes_file(path, &length);
-    if (!bytes) return NULL;
-    size_t bom = 0;
-    TextEncoding encoding = detect_text_encoding(bytes, (size_t)length, 1, &bom);
-    size_t decodedLength = 0;
-    char *text = text_decode_all(encoding, bytes + bom, (size_t)length - bom, &decodedLength);
-    free(bytes);
-    if (!text || decodedLength > INT_MAX) { free(text); return NULL; }
-    if (outLength) *outLength = (int)decodedLength;
-    if (outEncoding) *outEncoding = encoding;
-    if (outHasBom) *outHasBom = bom > 0;
-    return text;
-}
-
 static void clear_recovery_snapshot(void) {
     WCHAR *directory = get_recovery_directory();
     if (!directory) return;
@@ -2360,102 +2000,10 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
 /* ---- recently opened files and workspace folders, most-recent-first,
    stored in the same INI. Both lists share one implementation; only the
    backing array, its cap, and the INI section/key names differ. ---- */
-typedef struct {
-    WCHAR **items;
-    int *count;
-    int max;
-    const WCHAR *section;   /* e.g. L"RecentFiles" */
-    const WCHAR *keyPrefix; /* e.g. L"File" -> File0, File1, ... */
-} RecentList;
-
 static const RecentList g_recentFileList = {g_recentFiles, &g_recentFileCount, MAX_RECENT_FILES,
                                             L"RecentFiles", L"File"};
 static const RecentList g_recentFolderList = {g_recentFolders, &g_recentFolderCount, MAX_RECENT_FOLDERS,
                                               L"RecentFolders", L"Folder"};
-
-static void recent_list_load(const RecentList *list) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    for (int i = 0; i < *list->count; i++) free(list->items[i]);
-    *list->count = 0;
-    for (int i = 0; i < list->max; i++) {
-        WCHAR key[32];
-        swprintf(key, 32, L"%ls%d", list->keyPrefix, i);
-        WCHAR *value = read_profile_string(list->section, key, path);
-        if (!value) break;
-        list->items[(*list->count)++] = value;
-    }
-    free(path);
-}
-
-/* WritePrivateProfileSectionW replaces the whole section in one file
-   read-modify-write pass, rather than the N+1 passes that clearing the
-   section and then calling WritePrivateProfileStringW once per entry would
-   cost - this runs on every single file open, so it isn't a one-off. */
-static void recent_list_save(const RecentList *list) {
-    WCHAR *path = get_settings_path();
-    if (!path) return;
-    size_t prefixLen = wcslen(list->keyPrefix);
-    size_t cap = 1;
-    for (int i = 0; i < *list->count; i++) cap += prefixLen + 16 + wcslen(list->items[i]);
-    WCHAR *section = (WCHAR *)malloc(cap * sizeof(WCHAR));
-    if (section) {
-        size_t pos = 0;
-        for (int i = 0; i < *list->count; i++) {
-            int written = swprintf(section + pos, cap - pos, L"%ls%d=%ls", list->keyPrefix, i, list->items[i]);
-            pos += (size_t)written + 1; /* step past the entry's own NUL */
-        }
-        section[pos] = 0; /* second, block-terminating NUL */
-        WritePrivateProfileSectionW(list->section, *list->count ? section : NULL, path);
-        free(section);
-    }
-    free(path);
-}
-
-/* Move (or insert) path to the front of the list, deduping
-   case-insensitively (Windows paths), capping at list->max. */
-static void recent_list_add(const RecentList *list, const WCHAR *path) {
-    WCHAR *copy = wcsdup_heap(path);
-    if (!copy) return;
-    int count = *list->count;
-    int existing = -1;
-    for (int i = 0; i < count; i++) {
-        if (_wcsicmp(list->items[i], path) == 0) { existing = i; break; }
-    }
-    int start = (existing >= 0) ? existing : (count < list->max ? count : list->max - 1);
-    if (existing >= 0) free(list->items[existing]);
-    else if (count == list->max) free(list->items[list->max - 1]);
-    for (int i = start; i > 0; i--) {
-        list->items[i] = list->items[i - 1];
-    }
-    list->items[0] = copy;
-    if (existing < 0 && count < list->max) (*list->count)++;
-    recent_list_save(list);
-}
-
-static void recent_list_clear(const RecentList *list) {
-    for (int i = 0; i < *list->count; i++) {
-        free(list->items[i]);
-        list->items[i] = NULL;
-    }
-    *list->count = 0;
-    recent_list_save(list);
-}
-
-/* Remove path from the list (e.g. because it no longer exists on disk) and
-   persist the change. */
-static void recent_list_remove(const RecentList *list, const WCHAR *path) {
-    int idx = -1;
-    for (int i = 0; i < *list->count; i++) {
-        if (_wcsicmp(list->items[i], path) == 0) { idx = i; break; }
-    }
-    if (idx < 0) return;
-    free(list->items[idx]);
-    for (int i = idx; i < *list->count - 1; i++) list->items[i] = list->items[i + 1];
-    (*list->count)--;
-    list->items[*list->count] = NULL;
-    recent_list_save(list);
-}
 
 /* Drop any recent-file entries whose file no longer exists on disk. Called
    right before the menu is (re)built so the list stays accurate without
@@ -2494,212 +2042,6 @@ static void save_workspace_settings(void) {
 
 
 /* ================= WebView2 host page ================= */
-
-/* Used only when the WebView2 Runtime lacks ICoreWebView2_3 (no virtual-host
-   folder mapping), so NavigateToString() gives this page an opaque origin
-   that cannot resolve relative script/stylesheet URLs. mermaid.min.js, KaTeX,
-   and highlight.js are therefore left out entirely rather than added as
-   broken references. Some shared feature styling remains for parity with
-   preview_shell.html, although those features are inactive in this fallback. */
-static const char *HTML_SHELL =
-"<!doctype html><html><head><meta charset=\"utf-8\">"
-"<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src https: http: data:; font-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'\">"
-"<style>"
-"html,body{margin:0;padding:0;background:#ffffff;font-family:'Segoe UI',sans-serif;color:#141414;height:100%;color-scheme:light;}"
-"#content{padding:12px 20px 60px 20px;min-height:calc(100% - 72px);display:flex;flex-direction:column;}"
-"#content.solo-diagram{padding:12px 20px;height:calc(100vh - 24px);min-height:calc(100vh - 24px);}"
-"h1{font-size:1.9em;font-weight:700;margin:0.5em 0 0.3em 0;}"
-"h2{font-size:1.5em;font-weight:700;margin:0.5em 0 0.3em 0;}"
-"h3{font-size:1.2em;font-weight:700;margin:0.5em 0 0.3em 0;}"
-"p{margin:0.4em 0;line-height:1.5;}"
-"code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-family:Consolas,monospace;font-size:0.95em;}"
-"pre.codeblock{background:#eaeaea;padding:8px 10px;border-radius:4px;overflow-x:auto;}"
-"pre.codeblock code{background:none;padding:0;}"
-".markdown-body pre{position:relative;}"
-".code-copy-button{position:absolute;top:6px;right:6px;border:1px solid #d0d7de;border-radius:5px;background:#f6f8fa;color:#1f2328;padding:3px 8px;cursor:pointer;}"
-"blockquote{border-left:3px solid #ccc;margin:0.4em 0;padding:0.1em 1em;color:#5a5a5a;font-style:italic;}"
-"hr{border:none;border-top:1px solid #bbb;margin:1em 0;}"
-"ul,ol{margin:0.3em 0;padding-left:1.6em;}"
-"li{margin:0.15em 0;}"
-"li:has(> input[type=\"checkbox\"]){list-style:none;margin-left:-1.2em;}"
-"li>input[type=\"checkbox\"]{margin-right:0.4em;}"
-"table{border-collapse:collapse;margin:0.6em 0;}"
-"th,td{border:1px solid #ccc;padding:4px 10px;text-align:left;}"
-"th{background:#f0f0f0;font-weight:700;}"
-"a{color:#0969da;}"
-"img{max-width:100%;}"
-".mermaid-wrap{position:relative;border:1px solid #e0e0e0;border-radius:6px;margin:0.6em 0;overflow:auto;background:#fff;max-height:70vh;cursor:grab;}"
-".mermaid-wrap.panning{cursor:grabbing;user-select:none;}"
-".mermaid-inner{transform-origin:0 0;display:inline-block;padding:12px;}"
-".mermaid-toolbar{position:sticky;top:0;left:0;display:flex;gap:4px;justify-content:flex-end;padding:4px;background:rgba(255,255,255,0.9);border-bottom:1px solid #eee;z-index:5;}"
-".mermaid-toolbar button{cursor:pointer;border:1px solid #ccc;background:#fafafa;border-radius:4px;width:26px;height:24px;font-size:14px;line-height:1;}"
-".mermaid-toolbar .zoom-readout{width:52px;font-variant-numeric:tabular-nums;}"
-".mermaid-toolbar button:hover{background:#eee;}"
-".markdown-body blockquote.markdown-alert{--alert-color:#0969da;margin:1rem 0;padding:.5rem 1rem;border-left:.25em solid var(--alert-color);color:inherit;font-style:normal;}"
-".markdown-alert>:first-child{margin-top:0;}"
-".markdown-alert>:last-child{margin-bottom:0;}"
-".markdown-alert-title{margin:0 0 .35rem!important;color:var(--alert-color);font-weight:600;line-height:1.5;}"
-".markdown-alert-note{--alert-color:#0969da;}"
-".markdown-alert-tip{--alert-color:#1a7f37;}"
-".markdown-alert-important{--alert-color:#8250df;}"
-".markdown-alert-warning{--alert-color:#9a6700;}"
-".markdown-alert-caution{--alert-color:#cf222e;}"
-".wikilink{text-decoration-style:dotted;}"
-".heading-anchor{margin-left:.35em;color:inherit!important;text-decoration:none!important;opacity:0;}"
-"h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:hover>.heading-anchor,h5:hover>.heading-anchor,h6:hover>.heading-anchor,.heading-anchor:focus{opacity:.55;}"
-".document-outline{position:fixed;top:8px;right:12px;z-index:20;max-width:min(300px,70vw);border:1px solid #d0d7de;border-radius:6px;background:rgba(255,255,255,.96);box-shadow:0 3px 12px rgba(31,35,40,.15);font-size:13px;}"
-".document-outline[hidden]{display:none;}"
-".document-outline summary{cursor:pointer;padding:5px 9px;font-weight:600;user-select:none;}"
-".document-outline nav{max-height:60vh;overflow:auto;border-top:1px solid #d8dee4;padding:6px 8px 8px;}"
-".document-outline ol{margin:0;padding:0;list-style:none;}"
-".document-outline li{margin:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
-".document-outline a{color:#0969da;text-decoration:none;}"
-".document-outline a:hover{text-decoration:underline;}"
-".math-display{margin:1em 0;overflow-x:auto;overflow-y:hidden;text-align:center;}"
-".math-display>.katex-display{margin:0;padding:.2em 0;}"
-".theme-dark,.theme-dark body{background:#161b22;color:#e6edf3;color-scheme:dark;}"
-".theme-dark code{background:#21262d;color:#e6edf3;}"
-".theme-dark pre.codeblock{background:#21262d;}"
-".theme-dark .code-copy-button{border-color:#3d444d;background:#30363d;color:#e6edf3;}"
-".theme-dark blockquote{border-left-color:#30363d;color:#8b949e;}"
-".theme-dark hr{border-top-color:#30363d;}"
-".theme-dark th,.theme-dark td{border-color:#30363d;}"
-".theme-dark th{background:#21262d;}"
-".theme-dark a{color:#58a6ff;}"
-".theme-dark .mermaid-wrap{border-color:#30363d;background:#161b22;}"
-".theme-dark .mermaid-toolbar{background:rgba(22,27,34,0.9);border-color:#30363d;}"
-".theme-dark .mermaid-toolbar button{background:#21262d;color:#e6edf3;border-color:#30363d;}"
-".theme-dark .mermaid-toolbar button:hover{background:#30363d;}"
-".theme-dark .document-outline{border-color:#30363d;background:rgba(22,27,34,.96);box-shadow:0 3px 12px rgba(0,0,0,.45);}"
-".theme-dark .document-outline nav{border-color:#30363d;}"
-".theme-dark .document-outline a{color:#58a6ff;}"
-".theme-dark .markdown-body blockquote.markdown-alert{border-left-color:var(--alert-color);color:inherit;}"
-"</style>"
-"</head><body>"
-"<details id=\"document-outline\" class=\"document-outline\" hidden><summary>Outline</summary><nav aria-label=\"Document outline\"><ol></ol></nav></details>"
-"<div id=\"content\"></div>"
-"<script>"
-/* mermaid.min.js is intentionally not <script src>'d here: this shell is
-   only used via NavigateToString(), whose opaque origin cannot resolve a
-   relative script URL. Diagrams render as plain fenced code on this path. */
-"function applyTheme(theme){"
-"  const isDark = theme === 'dark';"
-"  document.documentElement.classList.toggle('theme-dark', isDark);"
-"  document.body.classList.toggle('theme-dark', isDark);"
-"}"
-"window.setTheme = function(theme){ applyTheme(theme === 'dark' ? 'dark' : 'light'); };"
-"let suppressScrollPost=false,scrollPostPending=false;"
-"function sourceLine(el){const m=el&&el.getAttribute('data-sourcepos')?.match(/^(\\d+):/);return m?Number(m[1]):0;}"
-"function sourceBlocks(){return Array.from(document.querySelectorAll('#content [data-sourcepos]')).filter((el)=>sourceLine(el)>0&&el.offsetParent!==null);}"
-"function sourceTop(el){return el.getBoundingClientRect().top+window.scrollY;}"
-"window.scrollToSourceLine=function(line){const blocks=sourceBlocks();if(!blocks.length)return;let current=blocks[0],next=null;for(let i=0;i<blocks.length;i++){if(sourceLine(blocks[i])>line){next=blocks[i];break;}current=blocks[i];}let top=sourceTop(current);if(next){const first=sourceLine(current),last=sourceLine(next),ratio=last>first?Math.max(0,Math.min(1,(line-first)/(last-first))):0;top+=(sourceTop(next)-sourceTop(current))*ratio;}suppressScrollPost=true;window.scrollTo(0,Math.max(0,top-12));setTimeout(()=>suppressScrollPost=false,80);};"
-"window.addEventListener('scroll',()=>{if(suppressScrollPost||scrollPostPending)return;scrollPostPending=true;requestAnimationFrame(()=>{scrollPostPending=false;if(suppressScrollPost||!window.chrome?.webview)return;const blocks=sourceBlocks();if(!blocks.length)return;const top=window.scrollY+18;let current=blocks[0];for(const block of blocks){if(sourceTop(block)>top)break;current=block;}const line=sourceLine(current);if(line)window.chrome.webview.postMessage('scroll:'+line);});},{passive:true});"
-"const EMOJI_MAP={smile:'\xF0\x9F\x98\x84',smiley:'\xF0\x9F\x98\x83',grinning:'\xF0\x9F\x98\x80',laughing:'\xF0\x9F\x98\x86',joy:'\xF0\x9F\x98\x82',rofl:'\xF0\x9F\xA4\xA3',wink:'\xF0\x9F\x98\x89',blush:'\xF0\x9F\x98\x8A',slight_smile:'\xF0\x9F\x99\x82',upside_down:'\xF0\x9F\x99\x83',"
-"heart:'\xE2\x9D\xA4\xEF\xB8\x8F',heart_eyes:'\xF0\x9F\x98\x8D',kissing_heart:'\xF0\x9F\x98\x98',two_hearts:'\xF0\x9F\x92\x95',broken_heart:'\xF0\x9F\x92\x94',yellow_heart:'\xF0\x9F\x92\x9B',blue_heart:'\xF0\x9F\x92\x99',green_heart:'\xF0\x9F\x92\x9A',purple_heart:'\xF0\x9F\x92\x9C',"
-"thinking:'\xF0\x9F\xA4\x94',neutral_face:'\xF0\x9F\x98\x90',confused:'\xF0\x9F\x98\x95',worried:'\xF0\x9F\x98\x9F',cry:'\xF0\x9F\x98\xA2',sob:'\xF0\x9F\x98\xAD',angry:'\xF0\x9F\x98\xA0',rage:'\xF0\x9F\x98\xA1',scream:'\xF0\x9F\x98\xB1',flushed:'\xF0\x9F\x98\xB3',sweat_smile:'\xF0\x9F\x98\x85',sleepy:'\xF0\x9F\x98\xAA',sleeping:'\xF0\x9F\x98\xB4',yum:'\xF0\x9F\x98\x8B',stuck_out_tongue:'\xF0\x9F\x98\x9B',"
-"thumbsup:'\xF0\x9F\x91\x8D','+1':'\xF0\x9F\x91\x8D',thumbsdown:'\xF0\x9F\x91\x8E','-1':'\xF0\x9F\x91\x8E',clap:'\xF0\x9F\x91\x8F',pray:'\xF0\x9F\x99\x8F',raised_hands:'\xF0\x9F\x99\x8C',wave:'\xF0\x9F\x91\x8B',ok_hand:'\xF0\x9F\x91\x8C',muscle:'\xF0\x9F\x92\xAA',point_right:'\xF0\x9F\x91\x89',point_left:'\xF0\x9F\x91\x88',point_up:'\xF0\x9F\x91\x86',point_down:'\xF0\x9F\x91\x87',eyes:'\xF0\x9F\x91\x80',raised_hand:'\xE2\x9C\x8B',"
-"fire:'\xF0\x9F\x94\xA5',sparkles:'\xE2\x9C\xA8',star:'\xE2\xAD\x90',star2:'\xF0\x9F\x8C\x9F',zap:'\xE2\x9A\xA1',boom:'\xF0\x9F\x92\xA5',tada:'\xF0\x9F\x8E\x89',confetti_ball:'\xF0\x9F\x8E\x8A',balloon:'\xF0\x9F\x8E\x88',gift:'\xF0\x9F\x8E\x81',rocket:'\xF0\x9F\x9A\x80',trophy:'\xF0\x9F\x8F\x86',medal:'\xF0\x9F\x8F\x85',"
-"100:'\xF0\x9F\x92\xAF',warning:'\xE2\x9A\xA0\xEF\xB8\x8F',x:'\xE2\x9D\x8C',heavy_check_mark:'\xE2\x9C\x94\xEF\xB8\x8F',white_check_mark:'\xE2\x9C\x85',question:'\xE2\x9D\x93',exclamation:'\xE2\x9D\x97',bulb:'\xF0\x9F\x92\xA1',memo:'\xF0\x9F\x93\x9D',pencil2:'\xE2\x9C\x8F\xEF\xB8\x8F',"
-"wrench:'\xF0\x9F\x94\xA7',gear:'\xE2\x9A\x99\xEF\xB8\x8F',hammer:'\xF0\x9F\x94\xA8',lock:'\xF0\x9F\x94\x92',unlock:'\xF0\x9F\x94\x93',key:'\xF0\x9F\x94\x91',mag:'\xF0\x9F\x94\x8D',bell:'\xF0\x9F\x94\x94',no_bell:'\xF0\x9F\x94\x95',calendar:'\xF0\x9F\x93\x85',clock1:'\xF0\x9F\x95\x90',hourglass:'\xE2\x8F\xB3',stopwatch:'\xE2\x8F\xB1\xEF\xB8\x8F',recycle:'\xE2\x99\xBB\xEF\xB8\x8F',globe_with_meridians:'\xF0\x9F\x8C\x90',"
-"bug:'\xF0\x9F\x90\x9B',computer:'\xF0\x9F\x92\xBB',keyboard:'\xE2\x8C\xA8\xEF\xB8\x8F',floppy_disk:'\xF0\x9F\x92\xBE',package:'\xF0\x9F\x93\xA6',file_folder:'\xF0\x9F\x93\x81',open_file_folder:'\xF0\x9F\x93\x82',page_facing_up:'\xF0\x9F\x93\x84',link:'\xF0\x9F\x94\x97',paperclip:'\xF0\x9F\x93\x8E',chart_with_upwards_trend:'\xF0\x9F\x93\x88',bar_chart:'\xF0\x9F\x93\x8A',"
-"coffee:'\xE2\x98\x95',beer:'\xF0\x9F\x8D\xBA',beers:'\xF0\x9F\x8D\xBB',pizza:'\xF0\x9F\x8D\x95',cake:'\xF0\x9F\x8D\xB0',birthday:'\xF0\x9F\x8E\x82',apple:'\xF0\x9F\x8D\x8E',sunny:'\xE2\x98\x80\xEF\xB8\x8F',cloud:'\xE2\x98\x81\xEF\xB8\x8F',rainbow:'\xF0\x9F\x8C\x88',snowflake:'\xE2\x9D\x84\xEF\xB8\x8F',umbrella:'\xE2\x98\x82\xEF\xB8\x8F',"
-"dog:'\xF0\x9F\x90\xB6',cat:'\xF0\x9F\x90\xB1',unicorn:'\xF0\x9F\xA6\x84',see_no_evil:'\xF0\x9F\x99\x88',hear_no_evil:'\xF0\x9F\x99\x89',speak_no_evil:'\xF0\x9F\x99\x8A',"
-"arrow_up:'\xE2\xAC\x86\xEF\xB8\x8F',arrow_down:'\xE2\xAC\x87\xEF\xB8\x8F',arrow_left:'\xE2\xAC\x85\xEF\xB8\x8F',arrow_right:'\xE2\x9E\xA1\xEF\xB8\x8F',arrows_counterclockwise:'\xF0\x9F\x94\x84',"
-"red_circle:'\xF0\x9F\x94\xB4',green_circle:'\xF0\x9F\x9F\xA2',yellow_circle:'\xF0\x9F\x9F\xA1',large_blue_circle:'\xF0\x9F\x94\xB5',white_circle:'\xE2\x9A\xAA',black_circle:'\xE2\x9A\xAB',"
-"checkered_flag:'\xF0\x9F\x8F\x81',construction:'\xF0\x9F\x9A\xA7',no_entry:'\xE2\x9B\x94',rotating_light:'\xF0\x9F\x9A\xA8'};"
-"function enhanceInlineText(root){"
-"  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode(node){const skip=node.parentElement&&node.parentElement.closest('a,code,pre,script,style');return skip?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;}});"
-"  const nodes=[];let node;while((node=walker.nextNode()))nodes.push(node);"
-"  const pattern=/:([a-z0-9_+-]+):|\\[\\[([^\\[\\]|]+)(?:\\|([^\\[\\]]+))?\\]\\]/g;"
-"  nodes.forEach((textNode)=>{const text=textNode.nodeValue;pattern.lastIndex=0;if(!pattern.test(text))return;pattern.lastIndex=0;"
-"    const frag=document.createDocumentFragment();let last=0,match;"
-"    while((match=pattern.exec(text))){if(match.index>last)frag.appendChild(document.createTextNode(text.slice(last,match.index)));"
-"      if(match[1]!==undefined){const emoji=EMOJI_MAP[match[1]];frag.appendChild(document.createTextNode(emoji||match[0]));}"
-"      else{const target=match[2].trim();const label=(match[3]||match[2]).trim();const link=document.createElement('a');link.href='#';link.className='wikilink';link.textContent=label;"
-"        link.addEventListener('click',(e)=>{e.preventDefault();window.chrome?.webview?.postMessage('wikilink:'+encodeURIComponent(target));});frag.appendChild(link);}"
-"      last=match.index+match[0].length;}"
-"    if(last<text.length)frag.appendChild(document.createTextNode(text.slice(last)));textNode.replaceWith(frag);"
-"  });"
-"}"
-"function enhanceAlerts(root){"
-"  const names={NOTE:'Note',TIP:'Tip',IMPORTANT:'Important',WARNING:'Warning',CAUTION:'Caution'};"
-"  root.querySelectorAll('blockquote').forEach((quote)=>{"
-"    const p=quote.firstElementChild;const text=p&&p.tagName==='P'?p.firstChild:null;"
-"    if(!text||text.nodeType!==Node.TEXT_NODE)return;"
-"    const match=text.nodeValue.match(/^\\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\\](?:[ \\t]*\\n|[ \\t]+|$)/i);"
-"    if(!match)return;const type=match[1].toUpperCase();text.nodeValue=text.nodeValue.slice(match[0].length);"
-"    quote.classList.add('markdown-alert','markdown-alert-'+type.toLowerCase());"
-"    const title=document.createElement('p');title.className='markdown-alert-title';title.textContent=names[type];quote.insertBefore(title,p);"
-"    if(p.textContent.trim()===''&&p.children.length===0)p.remove();"
-"  });"
-"}"
-"function headingSlug(text){return text.toLowerCase().normalize('NFKD').replace(/[\\u0300-\\u036f]/g,'').replace(/['’]/g,'').replace(/[^a-z0-9\\u00c0-\\uffff]+/g,'-').replace(/^-+|-+$/g,'')||'section';}"
-"function navigateToHeading(e,heading,id){e.preventDefault();heading.scrollIntoView({behavior:'smooth',block:'start'});const url=new URL(window.location.href);url.hash=id;history.replaceState(null,'',url.href);}"
-"function enhanceFragmentLinks(root){"
-"  root.querySelectorAll('a[href^=\"#\"]').forEach((link)=>{const raw=link.getAttribute('href');if(!raw||raw.length<2)return;"
-"    link.addEventListener('click',(e)=>{let id;try{id=decodeURIComponent(raw.slice(1));}catch(_){return;}const target=document.getElementById(id);if(target)navigateToHeading(e,target,id);});"
-"  });"
-"}"
-"function enhanceHeadings(root){"
-"  const headings=Array.from(root.querySelectorAll('h1,h2,h3,h4,h5,h6'));const outline=document.getElementById('document-outline');const list=outline.querySelector('ol');const used=new Map();list.replaceChildren();"
-"  headings.forEach((heading)=>{const label=heading.textContent.trim();const base=headingSlug(label);const duplicate=used.get(base)||0;used.set(base,duplicate+1);const id=duplicate?base+'-'+duplicate:base;heading.id=id;"
-"    const anchor=document.createElement('a');anchor.className='heading-anchor';anchor.href='#'+id;anchor.textContent='#';anchor.setAttribute('aria-label','Permalink to '+label);anchor.addEventListener('click',(e)=>navigateToHeading(e,heading,id));heading.appendChild(anchor);"
-"    const item=document.createElement('li');item.style.marginLeft=((Number(heading.tagName.slice(1))-1)*10)+'px';const link=document.createElement('a');link.href='#'+id;link.textContent=label;link.addEventListener('click',(e)=>navigateToHeading(e,heading,id));item.appendChild(link);list.appendChild(item);"
-"  });outline.hidden=headings.length<2;if(outline.hidden)outline.open=false;"
-"}"
-"function enhanceCodeCopy(root){root.querySelectorAll('pre > code').forEach((code)=>{const pre=code.parentElement;if(!pre||pre.querySelector('.code-copy-button'))return;"
-"  const button=document.createElement('button');button.type='button';button.className='code-copy-button';button.textContent='Copy';button.onclick=()=>{"
-"    const area=document.createElement('textarea');area.value=code.textContent;area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();button.textContent='Copied';setTimeout(()=>button.textContent='Copy',1200);};pre.appendChild(button);});}"
-"function setContent(html){"
-"  document.getElementById('content').innerHTML = '<article class=\"markdown-body\">' + html + '</article>';"
-"  const article=document.querySelector('#content > .markdown-body');enhanceAlerts(article);enhanceInlineText(article);enhanceFragmentLinks(article);enhanceHeadings(article);enhanceCodeCopy(article);"
-"}"
-"window.setContent = setContent;"
-"window.exportRenderedHTML=function(baseHref,title){const source=document.querySelector('#content > .markdown-body');if(!source)return '';const article=source.cloneNode(true);article.querySelectorAll('.code-copy-button,.heading-anchor').forEach((el)=>el.remove());"
-"let css='';Array.from(document.styleSheets).forEach((sheet)=>{try{css+=Array.from(sheet.cssRules).map((rule)=>rule.cssText).join('\\n');}catch(_){}});"
-"const esc=(v)=>String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');const attr=(v)=>esc(v).replace(/\"/g,'&quot;');"
-"return '<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>'+esc(title)+'</title><base href=\"'+attr(baseHref)+'\"><style>'+css+'</style></head><body><main style=\"max-width:980px;margin:0 auto;padding:24px\">'+article.outerHTML+'</main></body></html>';};"
-"</script>"
-"</body></html>";
-
-/* Read a reasonably-sized UTF-8 text file. Custom preview stylesheets are
-   deliberately injected as text instead of linked directly, which keeps the
-   preview's restrictive CSP intact and also makes exported HTML self-contained. */
-static char *read_utf8_text_file(const WCHAR *path, size_t maximumSize) {
-    if (!path) return _strdup("");
-    WCHAR *ioPath = extended_path(path);
-    HANDLE file = CreateFileW(ioPath ? ioPath : path, GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    free(ioPath);
-    if (file == INVALID_HANDLE_VALUE) return NULL;
-    LARGE_INTEGER size;
-    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
-        (unsigned long long)size.QuadPart > maximumSize) {
-        CloseHandle(file);
-        return NULL;
-    }
-    size_t length = (size_t)size.QuadPart;
-    char *buffer = (char *)malloc(length + 1);
-    size_t total = 0;
-    while (buffer && total < length) {
-        DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : length - total);
-        DWORD got = 0;
-        if (!ReadFile(file, buffer + total, chunk, &got, NULL) || got == 0) break;
-        total += got;
-    }
-    CloseHandle(file);
-    if (!buffer || total != length) { free(buffer); return NULL; }
-    buffer[length] = 0;
-    size_t offset = has_utf8_bom(buffer, (int)length) ? 3 : 0;
-    if (length > offset && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            buffer + offset, (int)(length - offset), NULL, 0) <= 0) {
-        free(buffer);
-        return NULL;
-    }
-    if (offset) memmove(buffer, buffer + offset, length - offset + 1);
-    return buffer;
-}
 
 /* WebView2 accepts UTF-16 scripts. Centralizing the conversion keeps every
    fire-and-forget call on the same allocation/error path and lets LTO inline
@@ -2822,10 +2164,12 @@ static ICoreWebView2ExecuteScriptCompletedHandler g_scriptHandler = { &g_scriptV
 
 static HRESULT STDMETHODCALLTYPE ExportDone_Invoke(ICoreWebView2ExecuteScriptCompletedHandler *this_, HRESULT errorCode, LPCWSTR result) {
     (void)this_;
+    if (!g_exportPath) return S_OK;
+    KillTimer(g_hMainWnd, IDT_HTML_EXPORT);
     WCHAR *html = SUCCEEDED(errorCode) ? decode_json_string(result) : NULL;
     char *utf8 = html ? to_utf8(html) : NULL;
     int ok = 0;
-    if (utf8 && g_exportPath) {
+    if (utf8 && *utf8 && g_exportPath) {
         WCHAR *ioPath = extended_path(g_exportPath);
         ok = write_bytes_file(ioPath ? ioPath : g_exportPath, utf8, strlen(utf8));
         free(ioPath);
@@ -2837,8 +2181,16 @@ static HRESULT STDMETHODCALLTYPE ExportDone_Invoke(ICoreWebView2ExecuteScriptCom
     g_exportPath = NULL;
     return S_OK;
 }
+/* ExecuteScript reports only whether the asynchronous export was started.
+   The resolved HTML arrives through WebMessage_Invoke. */
+static HRESULT STDMETHODCALLTYPE ExportStarted_Invoke(ICoreWebView2ExecuteScriptCompletedHandler *this_,
+                                                       HRESULT errorCode, LPCWSTR result) {
+    if (FAILED(errorCode) || !result || wcscmp(result, L"true") != 0)
+        return ExportDone_Invoke(this_, E_FAIL, NULL);
+    return S_OK;
+}
 static ICoreWebView2ExecuteScriptCompletedHandlerVtbl g_exportScriptVtbl = {
-    (void*)ScriptHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)ExportDone_Invoke
+    (void*)ScriptHandler_QI, (void*)Handler_AddRef, (void*)Handler_Release, (void*)ExportStarted_Invoke
 };
 static ICoreWebView2ExecuteScriptCompletedHandler g_exportScriptHandler = { &g_exportScriptVtbl };
 
@@ -2875,6 +2227,21 @@ static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceiv
     LPWSTR message = NULL;
     if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_TryGetWebMessageAsString(args, &message)) ||
         !message) return S_OK;
+    WCHAR exportPrefix[64];
+    swprintf(exportPrefix, 64, L"export-html:%lu:", g_exportRequest);
+    if (g_exportPath && wcsncmp(message, exportPrefix, wcslen(exportPrefix)) == 0) {
+        LPWSTR source = NULL;
+        HRESULT sourceResult = ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source);
+        /* Only our preview shell may complete a pending filesystem write. */
+        if (SUCCEEDED(sourceResult) && source &&
+            ((wcsncmp(source, L"https://markedit.local/preview_shell.html", 39) == 0 &&
+              (source[39] == 0 || source[39] == L'?' || source[39] == L'#')) ||
+             (!g_webview3 && wcscmp(source, L"about:blank") == 0)))
+            ExportDone_Invoke(NULL, S_OK, message + wcslen(exportPrefix));
+        CoTaskMemFree(source);
+        CoTaskMemFree(message);
+        return S_OK;
+    }
     /* Scroll sync only makes sense with both panes on screen; wiki-link
        navigation should work regardless of which panes are visible. */
     if (g_editorVisible && g_previewVisible && wcsncmp(message, L"scroll:", 7) == 0) {
@@ -3031,7 +2398,6 @@ static WCHAR *decode_document_url(const WCHAR *uri) {
 }
 
 static int open_file_in_tab(const WCHAR *path);
-static void convert_indentation(HWND hEdit, int toSpaces);
 
 /* Records the current document as a "Go Back" target, called right before a
    wiki-link jump actually navigates away from it. Bounded and FIFO like
@@ -3280,7 +2646,7 @@ static void navigate_to_shell(void) {
             : L"https://markedit.local/preview_shell.html?theme=light";
         ICoreWebView2_Navigate(g_webview, shellUrl);
     } else {
-        WCHAR *wHtml = to_wide(HTML_SHELL);
+        WCHAR *wHtml = to_wide(preview_fallback_html);
         if (wHtml) ICoreWebView2_NavigateToString(g_webview, wHtml);
         free(wHtml);
     }
@@ -4699,19 +4065,25 @@ static void do_export_html(void) {
         free(path); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
         return;
     }
-    size_t scriptCap = strlen(baseEscaped) + strlen(titleEscaped) + 128;
+    size_t scriptCap = strlen(baseEscaped) + strlen(titleEscaped) + 512;
     char *script = (char *)malloc(scriptCap);
     if (!script) {
         free(path); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
         return;
     }
+    g_exportRequest++;
     snprintf(script, scriptCap,
-        "window.exportRenderedHTML ? window.exportRenderedHTML('%s','%s') : ''",
-        baseEscaped, titleEscaped);
+        "(()=>{if(!window.exportRenderedHTML)return false;"
+        "Promise.resolve().then(()=>window.exportRenderedHTML('%s','%s'))"
+        ".then(html=>chrome.webview.postMessage('export-html:%lu:'+JSON.stringify(html)))"
+        ".catch(()=>chrome.webview.postMessage('export-html:%lu:null'));return true;})()",
+        baseEscaped, titleEscaped, g_exportRequest, g_exportRequest);
     g_exportPath = path;
+    SetTimer(g_hMainWnd, IDT_HTML_EXPORT, 30000, NULL);
     update_preview();
     HRESULT hr = execute_webview_script(script, &g_exportScriptHandler);
     if (FAILED(hr)) {
+        KillTimer(g_hMainWnd, IDT_HTML_EXPORT);
         free(g_exportPath);
         g_exportPath = NULL;
         MessageBoxW(g_hMainWnd, L"Could not start the HTML export.", L"MarkEdit", MB_OK | MB_ICONERROR);
@@ -6861,22 +6233,6 @@ static void select_next_occurrence(HWND hEdit) {
     SendMessageA(hEdit, SCI_MULTIPLESELECTADDNEXT, 0, 0);
 }
 
-static int is_brace_char(char c) {
-    return c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}';
-}
-
-/* The position of the brace adjacent to the caret - preferring the character
-   just before it, so the match follows the caret the way editors expect -
-   or -1 if the caret isn't next to one. */
-static Sci_Position brace_position_near_caret(HWND hEdit) {
-    Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
-    if (pos > 0 && is_brace_char((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(pos - 1), 0)))
-        return pos - 1;
-    if (is_brace_char((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)pos, 0)))
-        return pos;
-    return -1;
-}
-
 /* Keeps the matching-brace highlight (STYLE_BRACELIGHT/STYLE_BRACEBAD, set up
    in apply_editor_theme) in sync with the caret. Called on every SCN_UPDATEUI. */
 static void update_brace_highlight(void) {
@@ -7008,171 +6364,6 @@ static void update_word_completions(void) {
         free(list);
     }
     for (int w = 0; w < wordCount; w++) free(words[w]);
-}
-
-static void jump_to_matching_brace(HWND hEdit) {
-    Sci_Position bracePos = brace_position_near_caret(hEdit);
-    if (bracePos < 0) return;
-    Sci_Position match = (Sci_Position)SendMessageA(hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
-    if (match < 0) return;
-    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)match, (LPARAM)match);
-    SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
-}
-
-/* Uppercases the first letter of each word in the selection and lowercases
-   the rest. Non-ASCII bytes (including UTF-8 continuation bytes) are left
-   untouched rather than mangled. */
-static void apply_title_case(HWND hEdit) {
-    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
-    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
-    Sci_Position length = end - start;
-    if (length <= 0) return;
-    char *text = (char *)malloc((size_t)length + 1);
-    if (!text) return;
-    SendMessageA(hEdit, SCI_GETSELTEXT, 0, (LPARAM)text);
-    int atWordStart = 1;
-    for (Sci_Position i = 0; i < length; i++) {
-        unsigned char c = (unsigned char)text[i];
-        if (isalpha(c)) {
-            text[i] = (char)(atWordStart ? toupper(c) : tolower(c));
-            atWordStart = 0;
-        } else {
-            atWordStart = 1;
-        }
-    }
-    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)end);
-    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)text);
-    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)start, (LPARAM)(start + length));
-    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
-    free(text);
-}
-
-static int compare_lines_asc(const void *a, const void *b) {
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
-static int compare_lines_desc(const void *a, const void *b) {
-    return strcmp(*(char *const *)b, *(char *const *)a);
-}
-
-/* mode: 0 = sort ascending, 1 = sort descending, 2 = remove duplicate lines
-   (first occurrence kept, order otherwise preserved). Operates on the lines
-   touched by the current selection, as one undo step. */
-static void transform_selected_lines(HWND hEdit, int mode) {
-    Sci_Position firstLine, lastLine;
-    toolbar_selected_line_range(hEdit, &firstLine, &lastLine);
-    if (lastLine <= firstLine) return;
-
-    Sci_Position rangeStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-    Sci_Position rangeEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lastLine, 0);
-    Sci_Position totalLength = rangeEnd - rangeStart;
-    char *buffer = (char *)malloc((size_t)totalLength + 1);
-    if (!buffer) return;
-    struct Sci_TextRangeFull tr;
-    tr.chrg.cpMin = rangeStart;
-    tr.chrg.cpMax = rangeEnd;
-    tr.lpstrText = buffer;
-    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&tr);
-
-    Sci_Position lineCount = lastLine - firstLine + 1;
-    char **lines = (char **)malloc((size_t)lineCount * sizeof(char *));
-    if (!lines) { free(buffer); return; }
-    Sci_Position n = 0;
-    char *cursor = buffer;
-    for (Sci_Position i = 0; i < lineCount; i++) {
-        char *eol = strchr(cursor, '\n');
-        size_t len = eol ? (size_t)(eol - cursor) : strlen(cursor);
-        if (len > 0 && cursor[len - 1] == '\r') len--;
-        char *copy = (char *)malloc(len + 1);
-        if (!copy) {
-            for (Sci_Position j = 0; j < n; j++) free(lines[j]);
-            free(lines);
-            free(buffer);
-            return;
-        }
-        memcpy(copy, cursor, len);
-        copy[len] = 0;
-        lines[n++] = copy;
-        cursor = eol ? eol + 1 : cursor + strlen(cursor);
-    }
-
-    if (mode == 2) {
-        int kept = 0;
-        for (Sci_Position i = 0; i < n; i++) {
-            int dup = 0;
-            for (int j = 0; j < kept; j++) {
-                if (strcmp(lines[j], lines[i]) == 0) { dup = 1; break; }
-            }
-            if (dup) free(lines[i]);
-            else lines[kept++] = lines[i];
-        }
-        n = kept;
-    } else {
-        qsort(lines, (size_t)n, sizeof(char *), mode == 1 ? compare_lines_desc : compare_lines_asc);
-    }
-
-    const char *eol = editor_eol_sequence();
-    size_t outCap = 1;
-    for (Sci_Position i = 0; i < n; i++) outCap += strlen(lines[i]) + strlen(eol);
-    char *out = (char *)malloc(outCap);
-    if (out) {
-        out[0] = 0;
-        for (Sci_Position i = 0; i < n; i++) {
-            strcat(out, lines[i]);
-            if (i < n - 1) strcat(out, eol);
-        }
-        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)rangeStart, (LPARAM)rangeEnd);
-        SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)out);
-        free(out);
-    }
-    for (Sci_Position i = 0; i < n; i++) free(lines[i]);
-    free(lines);
-    free(buffer);
-}
-
-/* Rewrites each line's leading indentation between tabs and spaces, using the
-   editor's configured tab width. Only leading whitespace is touched - tabs or
-   spaces elsewhere on the line (inside a string, say) are left alone. */
-static void convert_indentation(HWND hEdit, int toSpaces) {
-    int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
-    if (tabWidth <= 0) tabWidth = 4;
-    Sci_Position lineCount = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
-    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    for (Sci_Position line = lineCount - 1; line >= 0; line--) {
-        Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-        Sci_Position indentEnd = lineStart;
-        int column = 0;
-        while (indentEnd < lineEnd) {
-            char ch = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)indentEnd, 0);
-            if (ch == ' ') { column++; indentEnd++; }
-            else if (ch == '\t') { column += tabWidth - (column % tabWidth); indentEnd++; }
-            else break;
-        }
-        if (indentEnd == lineStart) continue;
-        int newLen;
-        char *newIndent;
-        if (toSpaces) {
-            newLen = column;
-            newIndent = (char *)malloc((size_t)newLen + 1);
-            if (!newIndent) continue;
-            memset(newIndent, ' ', (size_t)newLen);
-        } else {
-            int tabs = column / tabWidth;
-            int spaces = column % tabWidth;
-            newLen = tabs + spaces;
-            newIndent = (char *)malloc((size_t)newLen + 1);
-            if (!newIndent) continue;
-            memset(newIndent, '\t', (size_t)tabs);
-            memset(newIndent + tabs, ' ', (size_t)spaces);
-        }
-        newIndent[newLen] = 0;
-        SendMessageA(hEdit, SCI_SETTARGETRANGE, (WPARAM)lineStart, (LPARAM)indentEnd);
-        SendMessageA(hEdit, SCI_REPLACETARGET, (WPARAM)newLen, (LPARAM)newIndent);
-        free(newIndent);
-    }
-    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
 }
 
 /* Rewrites every line ending to eolMode (SC_EOL_CRLF/CR/LF) and switches the
@@ -8234,6 +7425,7 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
                              : executable_on_search_path(L"gdb.exe"))
         : NULL;
     if (!compiler) {
+        free(debugger);
         MessageBoxW(g_hMainWnd,
                     debug
                         ? L"No GDB-compatible C/C++ compiler was found. Install GCC/G++ or Clang and add it to PATH."
@@ -8414,35 +7606,6 @@ static void launch_active_source_file(int debug) {
 
 /* Strip trailing spaces and tabs from every line, as one undo action. Lines
    are rewritten back to front so earlier line positions stay valid. */
-static void trim_trailing_whitespace(HWND hEdit) {
-    Sci_Position lineCount = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
-    Sci_Position caret = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
-    int trimmed = 0;
-
-    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
-    for (Sci_Position line = lineCount - 1; line >= 0; line--) {
-        Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-        Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-        Sci_Position cut = lineEnd;
-        while (cut > lineStart) {
-            char ch = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(cut - 1), 0);
-            if (ch != ' ' && ch != '\t') break;
-            cut--;
-        }
-        if (cut == lineEnd) continue;
-
-        SendMessageA(hEdit, SCI_SETTARGETRANGE, (WPARAM)cut, (LPARAM)lineEnd);
-        SendMessageA(hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
-        if (caret > lineEnd) caret -= lineEnd - cut;
-        else if (caret > cut) caret = cut;
-        trimmed = 1;
-    }
-    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
-
-    if (trimmed) SendMessageA(hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
-    SetFocus(hEdit);
-}
-
 /* True when `line` (length lineLen) is exactly an HTML comment delimiter,
    ignoring surrounding whitespace. */
 static int line_is_comment_delimiter(const char *line, Sci_Position lineLen, const char *delimiter) {
@@ -8458,7 +7621,7 @@ static int line_is_comment_delimiter(const char *line, Sci_Position lineLen, con
    that. */
 static void toggle_comment(HWND hEdit) {
     Sci_Position firstLine, lastLine;
-    toolbar_selected_line_range(hEdit, &firstLine, &lastLine);
+    editor_selected_line_range(hEdit, &firstLine, &lastLine);
 
     Sci_Position length;
     char *text = get_edit_text(hEdit, &length);
@@ -10902,13 +10065,13 @@ static int handle_edit_command(WORD cmd) {
             apply_title_case(active_edit_view());
             break;
         case IDM_EDIT_SORT_ASC:
-            transform_selected_lines(active_edit_view(), 0);
+            transform_selected_lines(active_edit_view(), 0, editor_eol_sequence());
             break;
         case IDM_EDIT_SORT_DESC:
-            transform_selected_lines(active_edit_view(), 1);
+            transform_selected_lines(active_edit_view(), 1, editor_eol_sequence());
             break;
         case IDM_EDIT_SORT_DEDUPE:
-            transform_selected_lines(active_edit_view(), 2);
+            transform_selected_lines(active_edit_view(), 2, editor_eol_sequence());
             break;
         case IDM_EDIT_TABS_TO_SPACES:
             convert_indentation(active_edit_view(), 1);
@@ -12308,6 +11471,7 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_OUTLINE_UPDATE);
     KillTimer(hwnd, IDT_STATUS_UPDATE);
     KillTimer(hwnd, IDT_PRINT_PREVIEW);
+    KillTimer(hwnd, IDT_HTML_EXPORT);
     KillTimer(hwnd, IDT_EXPLORER_REFRESH);
     explorer_shutdown();
     stop_debug_location_tracking();
@@ -12438,6 +11602,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 1;
         }
         case WM_TIMER:
+            if (wParam == IDT_HTML_EXPORT) {
+                ExportDone_Invoke(NULL, E_FAIL, NULL);
+                return 0;
+            }
             if (wParam == IDT_PREVIEW_UPDATE) {
                 update_preview();
                 return 0;

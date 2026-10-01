@@ -83,7 +83,7 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
-; Markdown: the extensions markedit.c's LANGUAGES table treats as Markdown.
+; Markdown: the extensions editor_language.c's LANGUAGES table treats as Markdown.
 ; Registered through OpenWithProgids, so MarkEdit is offered for them
 ; without overriding a default the user already chose.
 Root: HKA; Subkey: "Software\Classes\MarkEdit.md"; ValueType: string; ValueName: ""; ValueData: "Markdown Document"; Flags: uninsdeletekey; Tasks: assocmd
