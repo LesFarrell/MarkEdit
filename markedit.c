@@ -41,6 +41,7 @@
 #include "preview_fallback.h"
 #include "file_explorer.h"
 #include "file_io.h"
+#include "recovery.h"
 #include "help_reference.h"
 #include "json_formatter.h"
 #include "markdown.h"
@@ -49,6 +50,7 @@
 #include "recent_list.h"
 #include "text_codec.h"
 #include "theme.h"
+#include "themed_scrollbar.h"
 #include "toolbar_icons.h"
 
 #include <WebView2.h>
@@ -130,7 +132,7 @@ static HANDLE g_debugProcess = NULL;
 static int g_debugLocationSeen = 0;
 static int g_lastDebugLine = -1;
 static int g_activeDebuggerKind = 0; /* 1 = pdb, 2 = GDB */
-#define MAX_DOCUMENTS 32
+#define MAX_DOCUMENTS RECOVERY_MAX_DOCUMENTS
 typedef struct Document {
     sptr_t sciDocument;
     WCHAR *path;
@@ -945,9 +947,9 @@ static void update_linenumber_margin_width(HWND hEdit) {
    Called once at startup and whenever the selected theme changes. */
 static void apply_editor_theme(HWND hEdit) {
     /* Scintilla draws its own client area but leaves the scrollbars to the
-       system, which paints them light unless the window opts into the dark
-       explorer theme. */
-    apply_explorer_theme(hEdit);
+       system, which can't paint the track in the editor's background colour -
+       so they're replaced with themed ones (see themed_scrollbar.h). */
+    themed_scrollbar_refresh(hEdit);
 
     if (g_editorDarkMode) {
         SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, THEME_DARK_FG);
@@ -1310,11 +1312,10 @@ static void apply_main_theme(HWND hwnd) {
     g_mainBkBrush = CreateSolidBrush(theme_bg_color());
     if (hwnd) InvalidateRect(hwnd, NULL, TRUE);
 
-    /* The outline's own content is owner-drawn (see draw_themed_listbox_item()),
-       but its scrollbar is still system-drawn and needs the same explorer
-       dark-mode opt-in the editor gets in apply_editor_theme(). */
+    /* The outline's content is owner-drawn (see draw_themed_listbox_item());
+       its scrollbar is themed separately (see themed_scrollbar.h). */
     if (g_hOutline) {
-        apply_explorer_theme(g_hOutline);
+        themed_scrollbar_refresh(g_hOutline);
         InvalidateRect(g_hOutline, NULL, TRUE);
     }
     explorer_apply_theme();
@@ -1566,6 +1567,7 @@ static void apply_indentation(HWND hEdit) {
 }
 
 static void configure_scintilla(HWND hEdit) {
+    themed_scrollbar_attach(hEdit, THEMED_SCROLL_SCINTILLA);
     SendMessageA(hEdit, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
     SendMessageA(hEdit, SCI_SETEOLMODE, SC_EOL_CRLF, 0);
     apply_indentation(hEdit);
@@ -1759,134 +1761,81 @@ static char *get_document_text(int index, Sci_Position *outLength) {
     return text;
 }
 
-static void clear_recovery_snapshot(void) {
+static int clear_recovery_snapshot(void) {
     WCHAR *directory = get_recovery_directory();
-    if (!directory) return;
-    WCHAR *manifest = path_join(directory, L"manifest.ini");
-    if (manifest) { DeleteFileW(manifest); free(manifest); }
-    for (int i = 0; i < MAX_DOCUMENTS; i++) {
-        WCHAR name[32];
-        swprintf(name, sizeof(name) / sizeof(name[0]), L"document-%d.txt", i);
-        WCHAR *path = path_join(directory, name);
-        if (path) { DeleteFileW(path); free(path); }
-    }
+    int ok = directory && recovery_clear(directory);
     free(directory);
+    return ok;
+}
+
+static char *read_recovery_editor_text(void *context, int index, size_t *outLength) {
+    (void)context;
+    Sci_Position length = 0;
+    char *text = get_document_text(index, &length);
+    *outLength = (size_t)length;
+    return text;
 }
 
 static void write_recovery_snapshot(void) {
-    if (!g_hEdit || g_commandLinePreviewMode) return;
-    if (!g_recoverySnapshotStale) return;
-    g_recoverySnapshotStale = 0;
-    int dirtyCount = 0;
-    for (int i = 0; i < g_documentCount; i++)
-        if (g_documents[i].dirty && !g_documents[i].largeFile) dirtyCount++;
-    if (!dirtyCount) {
-        clear_recovery_snapshot();
-        update_status_position();
-        return;
-    }
-
-    WCHAR *directory = get_recovery_directory();
-    WCHAR *manifest = directory ? path_join(directory, L"manifest.ini") : NULL;
-    if (!directory || !manifest) { free(directory); free(manifest); return; }
-    DeleteFileW(manifest);
-    int writtenCount = 0;
+    if (!g_hEdit || g_commandLinePreviewMode || !g_recoverySnapshotStale) return;
+    RecoveryDocument documents[RECOVERY_MAX_DOCUMENTS];
+    int count = 0;
     for (int i = 0; i < g_documentCount; i++) {
         Document *doc = &g_documents[i];
-        /* Rewriting a large-file document on every autosave tick would
-           stall the UI thread for as long as the write takes. */
         if (!doc->dirty || doc->largeFile) continue;
-        Sci_Position length = 0;
-        char *text = get_document_text(i, &length);
-        WCHAR fileName[32], key[32], value[32];
-        swprintf(fileName, sizeof(fileName) / sizeof(fileName[0]), L"document-%d.txt", writtenCount);
-        WCHAR *contentPath = path_join(directory, fileName);
-        if (!text || !contentPath || !write_bytes_file(contentPath, text, (size_t)length)) {
-            free(text); free(contentPath); continue;
-        }
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", writtenCount);
-        WritePrivateProfileStringW(L"Recovery", key, fileName, manifest);
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Path%d", writtenCount);
-        WritePrivateProfileStringW(L"Recovery", key, doc->path ? doc->path : L"", manifest);
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Untitled%d", writtenCount);
-        swprintf(value, sizeof(value) / sizeof(value[0]), L"%u", doc->untitledNumber);
-        WritePrivateProfileStringW(L"Recovery", key, value, manifest);
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Bom%d", writtenCount);
-        WritePrivateProfileStringW(L"Recovery", key, doc->hasBom ? L"1" : L"0", manifest);
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Encoding%d", writtenCount);
-        swprintf(value, sizeof(value) / sizeof(value[0]), L"%d", doc->encoding);
-        WritePrivateProfileStringW(L"Recovery", key, value, manifest);
-        writtenCount++;
-        free(text);
-        free(contentPath);
+        documents[count++] = (RecoveryDocument){ doc->path, doc->untitledNumber,
+            doc->hasBom, (TextEncoding)doc->encoding, i };
     }
-    WCHAR count[32];
-    swprintf(count, sizeof(count) / sizeof(count[0]), L"%d", writtenCount);
-    WritePrivateProfileStringW(L"Recovery", L"Count", count, manifest);
-    free(manifest);
+    WCHAR *directory = get_recovery_directory();
+    if (directory && recovery_write(directory, documents, count, read_recovery_editor_text, NULL))
+        g_recoverySnapshotStale = 0;
     free(directory);
     update_status_bar();
 }
 
 static int restore_recovery_snapshot(void) {
     WCHAR *directory = get_recovery_directory();
-    WCHAR *manifest = directory ? path_join(directory, L"manifest.ini") : NULL;
-    if (!directory || !manifest) { free(directory); free(manifest); return 0; }
-    int count = GetPrivateProfileIntW(L"Recovery", L"Count", 0, manifest);
+    if (!directory) return 0;
+    recovery_cleanup(directory);
+    int count = recovery_count(directory);
     if (count <= 0 || count > MAX_DOCUMENTS) {
-        free(directory); free(manifest); return 0;
+        free(directory); return 0;
     }
     int answer = MessageBoxW(g_hMainWnd,
         L"MarkEdit found autosaved documents from an interrupted session. Recover them?",
         L"Recover Documents", MB_YESNO | MB_ICONQUESTION);
     if (answer != IDYES) {
-        free(directory); free(manifest);
+        free(directory);
         clear_recovery_snapshot();
         return 0;
     }
 
     int restored = 0;
     for (int i = 0; i < count; i++) {
-        WCHAR key[32], fileName[64], originalPath[32768];
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", i);
-        GetPrivateProfileStringW(L"Recovery", key, L"", fileName,
-                                 sizeof(fileName) / sizeof(fileName[0]), manifest);
-        if (!fileName[0]) continue;
-        WCHAR *contentPath = path_join(directory, fileName);
-        int length = 0;
-        char *text = contentPath ? read_bytes_file(contentPath, &length) : NULL;
-        free(contentPath);
-        if (!text) continue;
-        if (restored > 0 && !create_document_tab()) { free(text); break; }
+        RecoveryEntry entry;
+        if (!recovery_read(directory, i, &entry)) continue;
+        char *text = entry.text;
+        int length = entry.length;
+        if (restored > 0 && !create_document_tab()) { recovery_entry_free(&entry); break; }
         if (restored == 0 && !active_document_is_reusable() && !create_document_tab()) {
-            free(text); break;
+            recovery_entry_free(&entry); break;
         }
         g_switchingDocument = 1;
         set_edit_text(g_hEdit, text, length);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         g_switchingDocument = 0;
-        free(text);
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Path%d", i);
-        GetPrivateProfileStringW(L"Recovery", key, L"", originalPath,
-                                 sizeof(originalPath) / sizeof(originalPath[0]), manifest);
-        replace_wstring(&g_currentFile, originalPath[0] ? originalPath : NULL);
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Untitled%d", i);
-        g_documents[g_activeDocument].untitledNumber =
-            (unsigned)GetPrivateProfileIntW(L"Recovery", key, 0, manifest);
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Bom%d", i);
-        g_hasBom = GetPrivateProfileIntW(L"Recovery", key, 0, manifest) != 0;
-        /* Absent from snapshots written before encodings were tracked: those
-           were all UTF-8. The snapshot text itself is always UTF-8. */
-        swprintf(key, sizeof(key) / sizeof(key[0]), L"Encoding%d", i);
-        int encoding = (int)GetPrivateProfileIntW(L"Recovery", key, TEXT_ENCODING_UTF8, manifest);
-        g_encoding = encoding >= TEXT_ENCODING_UTF8 && encoding <= TEXT_ENCODING_ANSI ? encoding : TEXT_ENCODING_UTF8;
+        replace_wstring(&g_currentFile, entry.path[0] ? entry.path : NULL);
+        g_documents[g_activeDocument].untitledNumber = entry.untitledNumber;
+        g_hasBom = entry.hasBom;
+        g_encoding = entry.encoding;
+        recovery_entry_free(&entry);
         apply_document_language(g_hEdit, g_currentFile);
         if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
         set_dirty(1);
         restored++;
     }
     free(directory);
-    free(manifest);
+
     if (restored) {
         update_document_mapping();
         update_preview();
@@ -3437,8 +3386,7 @@ static int confirm_discard_if_dirty(void) {
     int r = MessageBoxW(g_hMainWnd, L"Save changes to the current document?", L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
     if (r == IDCANCEL) return 0;
     if (r == IDYES) {
-        do_save();
-        if (g_dirty) return 0; /* save was cancelled */
+        if (!do_save()) return 0;
     }
     return 1;
 }
@@ -3525,8 +3473,7 @@ static int create_image_destination(const WCHAR *preferredName, const WCHAR *def
     *destinationOut = NULL;
     *relativeOut = NULL;
     if (!g_currentFile) {
-        do_save();
-        if (!g_currentFile) return 0;
+        if (!do_save()) return 0;
     }
     WCHAR *documentDirectory = path_directory(g_currentFile);
     WCHAR *imagesDirectory = documentDirectory ? path_join(documentDirectory, L"images") : NULL;
@@ -3735,8 +3682,7 @@ static int paste_image_from_clipboard(void) {
        bitmap. Text is what the user means to paste into Markdown source. */
     if (IsClipboardFormatAvailable(CF_UNICODETEXT) || IsClipboardFormatAvailable(CF_TEXT)) return 0;
     if (!g_currentFile) {
-        do_save();
-        if (!g_currentFile) return 1;
+        if (!do_save()) return 1;
     }
     if (!OpenClipboard(g_hMainWnd)) return 1;
     HBITMAP bitmap = (HBITMAP)GetClipboardData(CF_BITMAP);
@@ -3803,74 +3749,6 @@ static void handle_dropfiles(HDROP hDrop) {
     }
     if (undoActive) SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
     DragFinish(hDrop);
-}
-
-/* Crash-safe write: content goes to a sibling temp file first, which then
-   replaces `target` in one filesystem operation (ReplaceFileW, or a plain
-   move for a file that doesn't exist yet), so a failure partway through
-   never leaves a half-written document on disk. `text` is UTF-8 and is
-   converted to `encoding` on the way out. `target` must already be an
-   I/O-ready (extended-length) path. Shared by save_to_path() and
-   workspace-wide replace. */
-static int write_file_atomic(const WCHAR *target, const char *text, size_t len,
-                             TextEncoding encoding, int hasBom) {
-    size_t pathLen = wcslen(target);
-    WCHAR *temporary = (WCHAR *)malloc((pathLen + 64) * sizeof(WCHAR));
-    HANDLE hFile = INVALID_HANDLE_VALUE;
-    if (temporary) {
-        for (unsigned attempt = 0; attempt < 100 && hFile == INVALID_HANDLE_VALUE; attempt++) {
-            swprintf(temporary, pathLen + 64, L"%ls.markedit-%lu-%u.tmp", target, GetCurrentProcessId(), attempt);
-            hFile = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW,
-                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
-            if (hFile == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
-        }
-    }
-    if (hFile == INVALID_HANDLE_VALUE) {
-        free(temporary);
-        return 0;
-    }
-    size_t bomLength = 0;
-    const char *bom = text_encoding_bom(encoding, &bomLength);
-    size_t total = 0;
-    BOOL ok = TRUE;
-    if (hasBom && bomLength) {
-        DWORD written = 0;
-        if (!WriteFile(hFile, bom, (DWORD)bomLength, &written, NULL) || written != bomLength) ok = FALSE;
-    }
-    /* `text` is UTF-8; anything else is converted a chunk at a time. */
-    TextCodecState codec = { encoding, {0}, 0 };
-    size_t encodedCapacity = text_encode_capacity(1024 * 1024);
-    char *encoded = encoding == TEXT_ENCODING_UTF8 ? NULL : (char *)malloc(encodedCapacity);
-    if (encoding != TEXT_ENCODING_UTF8 && !encoded) ok = FALSE;
-    while (ok && total < len) {
-        size_t piece = (len - total) > 1024 * 1024 ? 1024 * 1024 : (len - total);
-        const char *bytes = text + total;
-        size_t byteCount = piece;
-        if (encoded) {
-            if (!text_encode(&codec, text + total, piece, total + piece == len, encoded,
-                             encodedCapacity, &byteCount, NULL)) { ok = FALSE; break; }
-            bytes = encoded;
-        }
-        DWORD written = 0;
-        if (byteCount && (!WriteFile(hFile, bytes, (DWORD)byteCount, &written, NULL) || written != byteCount)) {
-            ok = FALSE;
-            break;
-        }
-        total += piece;
-    }
-    free(encoded);
-    if (ok) ok = FlushFileBuffers(hFile);
-    if (!CloseHandle(hFile)) ok = FALSE;
-    if (ok) {
-        DWORD attrs = GetFileAttributesW(target);
-        if (attrs != INVALID_FILE_ATTRIBUTES)
-            ok = ReplaceFileW(target, temporary, NULL, REPLACEFILE_WRITE_THROUGH, NULL, NULL);
-        else
-            ok = MoveFileExW(temporary, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-    }
-    if (!ok) DeleteFileW(temporary);
-    free(temporary);
-    return ok;
 }
 
 static int save_to_path(const WCHAR *path) {
@@ -3982,26 +3860,25 @@ static int do_saveas(void) {
     return result;
 }
 
-void do_save(void) {
-    if (g_currentFile) {
-        save_to_path(g_currentFile);
-    } else {
-        do_saveas();
-    }
+int do_save(void) {
+    return g_currentFile ? save_to_path(g_currentFile) : do_saveas();
 }
 
 /* Saves every dirty tab in turn, the same switch-to-it-then-act pattern
    do_exit() uses to visit every document through the single shared editor.
    An untitled dirty document still prompts for a path via do_save()'s own
-   Save As fallback, same as saving it individually would. */
-static void do_save_all(void) {
+   Save As fallback, same as saving it individually would. Stop on the first
+   cancellation or failure, and return to the originally selected tab. */
+static int do_save_all(void) {
     int original = g_activeDocument;
+    int ok = 1;
     for (int i = 0; i < g_documentCount; i++) {
         if (!g_documents[i].dirty) continue;
         switch_document(i);
-        do_save();
+        if (!do_save()) { ok = 0; break; }
     }
     if (original < g_documentCount) switch_document(original);
+    return ok;
 }
 
 static void do_export_html(void) {
@@ -4219,6 +4096,8 @@ static void do_close_document_at(int index) {
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
         g_switchingDocument = 0;
         push_closed_document(removed, 0);
+        g_recoverySnapshotStale = 1;
+        write_recovery_snapshot();
         update_tab_label(0);
         update_document_mapping();
         update_preview();
@@ -4242,6 +4121,8 @@ static void do_close_document_at(int index) {
                  (LPARAM)g_documents[g_activeDocument].caret);
     g_switchingDocument = 0;
     push_closed_document(removed, removeIndex);
+    g_recoverySnapshotStale = 1;
+    write_recovery_snapshot();
     TabCtrl_SetCurSel(g_hTabs, g_activeDocument);
     update_linenumber_margin_width(g_hEdit);
     update_document_mapping();
@@ -4306,6 +4187,8 @@ static void do_reopen_closed_tab(void) {
     TabCtrl_SetCurSel(g_hTabs, index);
     update_tab_label(index);
     update_linenumber_margin_width(g_hEdit);
+    g_recoverySnapshotStale = 1;
+    write_recovery_snapshot();
     update_document_mapping();
     update_preview();
     update_title();
@@ -4524,7 +4407,7 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             12, 32, 556, 25, hwnd, (HMENU)10, GetModuleHandleW(NULL), NULL);
         state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
             12, 64, 556, 286, hwnd, (HMENU)11, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Open",
@@ -4532,10 +4415,7 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             404, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             490, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
-        /* Item content is owner-drawn (draw_themed_listbox_item), but the
-           scrollbar itself is still system-drawn and needs the same
-           explorer dark-mode opt-in the editor/outline scrollbars get. */
-        apply_explorer_theme(state->list);
+        themed_scrollbar_attach(state->list, THEMED_SCROLL_LISTBOX);
         refill_choice_list(state);
         SetFocus(state->edit);
         popup_dialog_theme_opened(hwnd);
@@ -4811,7 +4691,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         state->countLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT,
             456, 10, 112, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
         state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
             12, 34, 556, 316, hwnd, (HMENU)11, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Select All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -4823,7 +4703,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             412, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             496, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
-        apply_explorer_theme(state->list);
+        themed_scrollbar_attach(state->list, THEMED_SCROLL_LISTBOX);
         SetWindowSubclass(state->list, ReplaceListSubclassProc, 1, (DWORD_PTR)state);
         refill_replace_list(state);
         SetFocus(state->list);
@@ -5030,14 +4910,14 @@ static void handle_findmsg(FINDREPLACEW *fr) {
     } else if (fr->Flags & FR_REPLACE) {
         replace_selection_and_find(findUtf8, replaceUtf8, matchCase);
     } else if (fr->Flags & FR_REPLACEALL) {
-        int count = 0;
+        size_t count = 0;
         int findLen = (int)strlen(findUtf8);
         int replaceLen = (int)strlen(replaceUtf8);
         Sci_Position position = 0;
         Sci_Position documentLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
         SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
-        while (findLen > 0 && position <= documentLength && count <= 100000) {
+        while (findLen > 0 && position <= documentLength) {
             SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)position, 0);
             SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)documentLength, 0);
             Sci_Position found = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET,
@@ -5051,7 +4931,7 @@ static void handle_findmsg(FINDREPLACEW *fr) {
         }
         SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
         WCHAR msg[64];
-        swprintf(msg, sizeof(msg) / sizeof(msg[0]), L"Replaced %d occurrence(s).", count);
+        swprintf(msg, sizeof(msg) / sizeof(msg[0]), L"Replaced %zu occurrence(s).", count);
         MessageBoxW(g_hMainWnd, msg, L"MarkEdit", MB_OK | MB_ICONINFORMATION);
     }
     free(findUtf8);
@@ -6267,9 +6147,10 @@ static BOOL CALLBACK find_autocomplete_popup_proc(HWND hwnd, LPARAM lParam) {
 
 /* SCI_AUTOCSHOW's popup is a native listbox (Win32 class "ListBoxX", with
    the actual WC_LISTBOX scrollbar-owning control as its one child) that
-   Scintilla itself never dark-mode themes - like hEdit's own scrollbars
-   (see apply_editor_theme()'s comment on that), it's left to the system and
-   paints a plain light scrollbar even in dark mode. Scintilla doesn't hand
+   Scintilla itself never dark-mode themes - its scrollbar is left to the
+   system and paints a plain light scrollbar even in dark mode (unlike
+   hEdit's, it can't be swapped for a themed_scrollbar.h one, since Scintilla
+   creates and owns this window). Scintilla doesn't hand
    back the popup's HWND, so it's found by class name right after showing it
    (SCI_AUTOCSHOW creates/shows the popup synchronously), scoped to this
    process so a second Scintilla-based app's own popup is never touched.
@@ -7579,8 +7460,7 @@ native_launch_cleanup:
 
 static void launch_active_source_file(int debug) {
     if (!g_currentFile) {
-        do_save();
-        if (!g_currentFile) return;
+        if (!do_save()) return;
     } else if (g_dirty && !save_to_path(g_currentFile)) {
         return;
     }
@@ -11289,9 +11169,10 @@ static void initialize_main_window(HWND hwnd) {
        LB_ADDSTRING data as an opaque per-item value, which here is a
        heap pointer that update_outline() frees right after inserting it. */
     g_hOutline = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-        WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+        WS_CHILD | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
         LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
         0, 0, 0, 0, hwnd, (HMENU)ID_OUTLINE, GetModuleHandleW(NULL), NULL);
+    themed_scrollbar_attach(g_hOutline, THEMED_SCROLL_LISTBOX);
 
     explorer_init(hwnd, explorer_request_open, show_text_input, reveal_path_in_explorer);
     if (g_explorerVisible && g_currentWorkspaceFolder) explorer_set_root(g_currentWorkspaceFolder);
@@ -11315,7 +11196,7 @@ static void initialize_main_window(HWND hwnd) {
     /* No WS_EX_CLIENTEDGE on either pane: its sunken border is drawn in fixed
        system greys, which reads as a light seam against the dark theme. */
     g_hEdit = CreateWindowExA(0, "Scintilla", "",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
+        WS_CHILD | WS_VISIBLE,
         0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, GetModuleHandleA(NULL), NULL);
     SetWindowSubclass(g_hEdit, EditSubclassProc, 2, 0);
     configure_scintilla(g_hEdit);

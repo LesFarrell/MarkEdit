@@ -240,6 +240,7 @@ project "markedit"
         "preview_fallback.c", "preview_fallback.h",
         "path_utils.c", "path_utils.h",
         "file_io.c", "file_io.h",
+        "recovery.c", "recovery.h",
         "text_codec.c", "text_codec.h",
         "json_formatter.c", "json_formatter.h",
         "markdown.c", "markdown.h",
@@ -353,6 +354,24 @@ project "test_core"
     objdir "build/obj/test_core"
     files { "tests/test_core.c", "json_formatter.c", "text_codec.c", "file_io.c", "path_utils.c" }
     includedirs { "." }
+    warnings "Extra"
+    optimize "Size"
+    filter "toolset:gcc or clang"
+        buildoptions { "-Werror" }
+    filter "toolset:msc"
+        buildoptions { "/WX" }
+    filter {}
+
+project "test_recovery"
+    kind "ConsoleApp"
+    language "C"
+    cdialect "C11"
+    targetname "test_recovery"
+    targetdir "tests"
+    objdir "build/obj/test_recovery"
+    files { "tests/test_recovery.c", "recovery.c", "file_io.c", "text_codec.c", "path_utils.c" }
+    includedirs { "." }
+    links { "ole32" }
     warnings "Extra"
     optimize "Size"
     filter "toolset:gcc or clang"

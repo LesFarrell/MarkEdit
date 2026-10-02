@@ -209,7 +209,8 @@
 /* ---- forward declarations for functions defined in markedit.c ----
    Grouped roughly by area: preview/theme, menu/layout, spell check,
    status/outline, recovery, dialogs, and document/tab management. */
-void do_save(void);
+/* Nonzero on success; zero on cancellation or write failure. */
+int do_save(void);
 static void update_preview(void);
 void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
@@ -225,7 +226,7 @@ static void update_status_position(void);
 static void update_status_bar(void);
 static void update_outline(void);
 static void write_recovery_snapshot(void);
-static void clear_recovery_snapshot(void);
+static int clear_recovery_snapshot(void);
 static int restore_recovery_snapshot(void);
 static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
                               WCHAR **labels, int count);

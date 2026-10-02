@@ -2,6 +2,7 @@
 #include "file_io.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -103,4 +104,72 @@ char *read_utf8_text_file(const WCHAR *path, size_t maximumSize) {
     }
     if (offset) memmove(buffer, buffer + offset, length - offset + 1);
     return buffer;
+}
+
+/* Crash-safe write: content goes to a sibling temp file first, which then
+   replaces `target` in one filesystem operation (ReplaceFileW, or a plain
+   move for a file that doesn't exist yet), so a failure partway through
+   never leaves a half-written document on disk. `text` is UTF-8 and is
+   converted to `encoding` on the way out. `target` must already be an
+   I/O-ready (extended-length) path. Shared by save_to_path() and
+   workspace-wide replace. */
+int write_file_atomic(const WCHAR *target, const char *text, size_t len,
+                             TextEncoding encoding, int hasBom) {
+    size_t pathLen = wcslen(target);
+    WCHAR *temporary = (WCHAR *)malloc((pathLen + 64) * sizeof(WCHAR));
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    if (temporary) {
+        for (unsigned attempt = 0; attempt < 100 && hFile == INVALID_HANDLE_VALUE; attempt++) {
+            swprintf(temporary, pathLen + 64, L"%ls.markedit-%lu-%u.tmp", target, GetCurrentProcessId(), attempt);
+            hFile = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
+            if (hFile == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
+        }
+    }
+    if (hFile == INVALID_HANDLE_VALUE) {
+        free(temporary);
+        return 0;
+    }
+    size_t bomLength = 0;
+    const char *bom = text_encoding_bom(encoding, &bomLength);
+    size_t total = 0;
+    BOOL ok = TRUE;
+    if (hasBom && bomLength) {
+        DWORD written = 0;
+        if (!WriteFile(hFile, bom, (DWORD)bomLength, &written, NULL) || written != bomLength) ok = FALSE;
+    }
+    /* `text` is UTF-8; anything else is converted a chunk at a time. */
+    TextCodecState codec = { encoding, {0}, 0 };
+    size_t encodedCapacity = text_encode_capacity(1024 * 1024);
+    char *encoded = encoding == TEXT_ENCODING_UTF8 ? NULL : (char *)malloc(encodedCapacity);
+    if (encoding != TEXT_ENCODING_UTF8 && !encoded) ok = FALSE;
+    while (ok && total < len) {
+        size_t piece = (len - total) > 1024 * 1024 ? 1024 * 1024 : (len - total);
+        const char *bytes = text + total;
+        size_t byteCount = piece;
+        if (encoded) {
+            if (!text_encode(&codec, text + total, piece, total + piece == len, encoded,
+                             encodedCapacity, &byteCount, NULL)) { ok = FALSE; break; }
+            bytes = encoded;
+        }
+        DWORD written = 0;
+        if (byteCount && (!WriteFile(hFile, bytes, (DWORD)byteCount, &written, NULL) || written != byteCount)) {
+            ok = FALSE;
+            break;
+        }
+        total += piece;
+    }
+    free(encoded);
+    if (ok) ok = FlushFileBuffers(hFile);
+    if (!CloseHandle(hFile)) ok = FALSE;
+    if (ok) {
+        DWORD attrs = GetFileAttributesW(target);
+        if (attrs != INVALID_FILE_ATTRIBUTES)
+            ok = ReplaceFileW(target, temporary, NULL, REPLACEFILE_WRITE_THROUGH, NULL, NULL);
+        else
+            ok = MoveFileExW(temporary, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    }
+    if (!ok) DeleteFileW(temporary);
+    free(temporary);
+    return ok;
 }

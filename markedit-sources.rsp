@@ -12,3 +12,5 @@ recent_list.c
 help_reference.c
 file_explorer.c
 toolbar_icons.c
+themed_scrollbar.c
+recovery.c

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <windows.h>
+#include "text_codec.h"
 
 /* Creates or truncates path. Returns nonzero only when all bytes and the
    final handle close succeed; a failure may leave a partial file. */
@@ -16,5 +17,9 @@ char *read_text_file(const WCHAR *path, int *outLength, int *outEncoding, int *o
 /* Validates UTF-8, strips its BOM, and rejects files larger than maximumSize.
    A NULL path returns an allocated empty string. Intended for small assets. */
 char *read_utf8_text_file(const WCHAR *path, size_t maximumSize);
+
+/* Atomically publishes encoded UTF-8 input. target is an I/O-ready path. */
+int write_file_atomic(const WCHAR *target, const char *text, size_t length,
+                      TextEncoding encoding, int hasBom);
 
 #endif

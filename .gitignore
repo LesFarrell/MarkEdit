@@ -55,3 +55,6 @@ third_party/webview2/x64/WebView2LoaderStatic.lib
 
 /tests/test_core.exe
 /tests/test_core.pdb
+
+/tests/test_recovery.exe
+/tests/test_recovery.pdb

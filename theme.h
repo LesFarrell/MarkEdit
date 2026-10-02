@@ -19,12 +19,22 @@
 #define THEME_LIGHT_BORDER RGB(0xD0, 0xD7, 0xDE)
 #define THEME_LIGHT_ACCENT RGB(0x09, 0x69, 0xDA)
 
+#define THEME_DARK_SCROLL_THUMB        RGB(0x48, 0x4F, 0x58)
+#define THEME_DARK_SCROLL_THUMB_HOT    RGB(0x6E, 0x76, 0x81)
+#define THEME_DARK_SCROLL_THUMB_DRAG   RGB(0x8B, 0x94, 0x9E)
+#define THEME_LIGHT_SCROLL_THUMB       RGB(0xC8, 0xCD, 0xD3)
+#define THEME_LIGHT_SCROLL_THUMB_HOT   RGB(0xA8, 0xB0, 0xB9)
+#define THEME_LIGHT_SCROLL_THUMB_DRAG  RGB(0x8C, 0x95, 0x9F)
+
 /* Editor-side chrome follows g_editorDarkMode; the preview pane host
    follows g_previewDarkMode. */
 static inline COLORREF theme_bg_color(void) { return g_editorDarkMode ? THEME_DARK_BG : THEME_LIGHT_BG; }
 static inline COLORREF theme_fg_color(void) { return g_editorDarkMode ? THEME_DARK_FG : THEME_LIGHT_FG; }
 static inline COLORREF theme_border_color(void) { return g_editorDarkMode ? THEME_DARK_BORDER : THEME_LIGHT_BORDER; }
 static inline COLORREF theme_accent_color(void) { return g_editorDarkMode ? THEME_DARK_ACCENT : THEME_LIGHT_ACCENT; }
+static inline COLORREF theme_scroll_thumb_color(void) { return g_editorDarkMode ? THEME_DARK_SCROLL_THUMB : THEME_LIGHT_SCROLL_THUMB; }
+static inline COLORREF theme_scroll_thumb_hot_color(void) { return g_editorDarkMode ? THEME_DARK_SCROLL_THUMB_HOT : THEME_LIGHT_SCROLL_THUMB_HOT; }
+static inline COLORREF theme_scroll_thumb_drag_color(void) { return g_editorDarkMode ? THEME_DARK_SCROLL_THUMB_DRAG : THEME_LIGHT_SCROLL_THUMB_DRAG; }
 static inline COLORREF preview_bg_color(void) { return g_previewDarkMode ? THEME_DARK_BG : THEME_LIGHT_BG; }
 
 /* Opts a control's system-drawn parts (scrollbars, tree/list chrome) into
