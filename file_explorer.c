@@ -29,6 +29,7 @@
 #include "path_utils.h"
 #include "settings.h"
 #include "theme.h"
+#include "themed_scrollbar.h"
 
 HWND g_hExplorerTree = NULL;
 RECT g_explorerSplitterRect = {0};
@@ -685,7 +686,7 @@ void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptText
     s_revealPath = revealPath;
     InitializeCriticalSection(&s_pendingLock);
 
-    g_hExplorerTree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+    g_hExplorerTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
         WS_CHILD | WS_VSCROLL | TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT |
         TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
         0, 0, 0, 0, hParent, (HMENU)(UINT_PTR)ID_EXPLORER_TREE, GetModuleHandleW(NULL), NULL);
@@ -703,6 +704,7 @@ void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptText
     if (s_iconList) TreeView_SetImageList(g_hExplorerTree, s_iconList, TVSIL_NORMAL);
 
     TreeView_SetItemHeight(g_hExplorerTree, MulDiv(18, GetDpiForWindow(hParent), 96));
+    themed_scrollbar_attach(g_hExplorerTree, THEMED_SCROLL_TREEVIEW);
     explorer_apply_theme();
 }
 
@@ -711,6 +713,7 @@ void explorer_apply_theme(void) {
     apply_explorer_theme(g_hExplorerTree);
     TreeView_SetBkColor(g_hExplorerTree, theme_bg_color());
     TreeView_SetTextColor(g_hExplorerTree, theme_fg_color());
+    themed_scrollbar_refresh(g_hExplorerTree);
     InvalidateRect(g_hExplorerTree, NULL, TRUE);
 }
 

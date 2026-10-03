@@ -8,7 +8,8 @@
    replace them with bars drawn in the non-client area in the theme colours. */
 typedef enum {
     THEMED_SCROLL_SCINTILLA, /* vertical + horizontal; the control's own bars are turned off */
-    THEMED_SCROLL_LISTBOX    /* vertical; create the LISTBOX without WS_VSCROLL */
+    THEMED_SCROLL_LISTBOX,   /* vertical; create the LISTBOX without WS_VSCROLL */
+    THEMED_SCROLL_TREEVIEW   /* vertical + horizontal; native bars are replaced */
 } ThemedScrollKind;
 
 /* Subclasses hwnd and takes over its scrollbars. Safe to call once per window;

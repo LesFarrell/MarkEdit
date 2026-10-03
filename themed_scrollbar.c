@@ -8,19 +8,19 @@
 #include "theme.h"
 #include "third_party/scintilla/include/Scintilla.h"
 
-/* The bars live in the target window's non-client area, exactly where native
-   ones would, so nothing about the surrounding layout changes: WM_NCCALCSIZE
-   reserves the strip, WM_NCPAINT paints it, and WM_NCHITTEST/WM_NCLBUTTONDOWN
-   drive it. The target must not carry WS_VSCROLL/WS_HSCROLL (Scintilla's own
-   bars are switched off in attach) or the system would draw its own on top.
-   Scroll state is read back from the control after every message (see
-   should_sync()) because neither Scintilla nor LISTBOX tells us when it
-   scrolls on its own, and moved with the control's own scroll messages. */
+/* Scintilla and list-box bars live in the target window's non-client area.
+   TreeView must retain its native bars to maintain both real scroll ranges,
+   so sibling overlay windows cover those allocations instead; Windows can
+   animate/repaint underneath them without ever becoming visible. Scroll
+   state is read back after control messages because these controls do not
+   consistently notify their parent when they scroll themselves. */
 
 #define SUBCLASS_ID    0x5342
 #define BAR_VERTICAL   0
 #define BAR_HORIZONTAL 1
 #define BAR_COUNT      2
+#define OVERLAY_ID_BASE 0x5340
+#define OVERLAY_CLASS   L"MarkEditThemedScrollbarOverlay"
 
 #define BAR_THICKNESS_DIP  14
 #define THUMB_INSET_DIP    3
@@ -34,6 +34,13 @@ typedef struct {
 
 typedef struct {
     ThemedScrollKind kind;
+    HWND target;
+    HWND overlay[BAR_COUNT];
+    HWND cornerOverlay;
+    int clipWidth;
+    int clipHeight;
+    int clipVertical;
+    int clipHorizontal;
     ScrollAxis axis[BAR_COUNT];
     int visible[BAR_COUNT];
     int hot;         /* bar whose thumb the mouse is over, or -1 */
@@ -45,6 +52,9 @@ typedef struct {
     int widthSeen;   /* widest line painted so far; see track_line_widths() */
     int scanWidths;  /* set around WM_PAINT so sync() re-measures the visible lines */
 } BarState;
+
+static LRESULT CALLBACK overlay_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+static void position_tree_overlays(HWND hwnd, BarState *state);
 
 static int max_scroll_pos(const ScrollAxis *axis) {
     int range = axis->total - axis->page;
@@ -123,9 +133,50 @@ static void query_listbox(HWND hwnd, BarState *state, int want[BAR_COUNT]) {
     state->axis[BAR_HORIZONTAL] = (ScrollAxis){0, 0, 0};
 }
 
+static void query_treeview(HWND hwnd, BarState *state, int want[BAR_COUNT]) {
+    RECT client;
+    GetClientRect(hwnd, &client);
+    int itemHeight = (int)TreeView_GetItemHeight(hwnd);
+    if (itemHeight <= 0) itemHeight = 1;
+
+    /* TreeView_GetCount includes descendants of collapsed folders. Walking
+       TVGN_NEXTVISIBLE gives the range represented by the vertical bar. */
+    ScrollAxis *v = &state->axis[BAR_VERTICAL];
+    HTREEITEM first = TreeView_GetFirstVisible(hwnd);
+    HTREEITEM item = TreeView_GetRoot(hwnd);
+    int firstIndex = 0;
+    int count = 0;
+    while (item) {
+        if (item == first) firstIndex = count;
+        count++;
+        item = TreeView_GetNextVisible(hwnd, item);
+    }
+    v->total = count;
+    v->page = (client.bottom - client.top) / itemHeight;
+    if (v->page < 1) v->page = 1;
+    v->pos = firstIndex;
+    want[BAR_VERTICAL] = v->total > v->page;
+
+    /* The control keeps its logical range after its system-drawn bar is
+       hidden, allowing the themed horizontal bar to mirror it. */
+    ScrollAxis *h = &state->axis[BAR_HORIZONTAL];
+    SCROLLINFO info = {0};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    if (GetScrollInfo(hwnd, SB_HORZ, &info)) {
+        h->total = info.nMax >= info.nMin ? info.nMax - info.nMin + 1 : 0;
+        h->page = (int)info.nPage;
+        h->pos = info.nPos - info.nMin;
+    } else {
+        *h = (ScrollAxis){0, 0, 0};
+    }
+    want[BAR_HORIZONTAL] = h->page > 0 && h->total > h->page;
+}
+
 static void query_axes(HWND hwnd, BarState *state, int want[BAR_COUNT]) {
     if (state->kind == THEMED_SCROLL_SCINTILLA) query_scintilla(hwnd, state, want);
-    else query_listbox(hwnd, state, want);
+    else if (state->kind == THEMED_SCROLL_LISTBOX) query_listbox(hwnd, state, want);
+    else query_treeview(hwnd, state, want);
 }
 
 /* ---- geometry (all in window coordinates, i.e. what GetWindowDC paints in) ---- */
@@ -140,15 +191,26 @@ static void get_layout(HWND hwnd, const BarState *state, RECT bar[BAR_COUNT], RE
     GetWindowRect(hwnd, &windowRect);
     ClientToScreen(hwnd, &origin);
     GetClientRect(hwnd, &client);
-    int thick = bar_thickness(hwnd);
     int left = origin.x - windowRect.left;
     int top = origin.y - windowRect.top;
     int width = client.right - client.left;
     int height = client.bottom - client.top;
 
-    SetRect(&bar[BAR_VERTICAL], left + width, top, left + width + thick, top + height);
-    SetRect(&bar[BAR_HORIZONTAL], left, top + height, left + width, top + height + thick);
-    SetRect(corner, left + width, top + height, left + width + thick, top + height + thick);
+    if (state->kind == THEMED_SCROLL_TREEVIEW) {
+        /* Paint over the TreeView's existing native scrollbar allocation.
+           This keeps its real vertical and horizontal ranges while avoiding
+           a second non-client strip beside the system one. */
+        int windowWidth = windowRect.right - windowRect.left;
+        int windowHeight = windowRect.bottom - windowRect.top;
+        SetRect(&bar[BAR_VERTICAL], left + width, top, windowWidth - left, top + height);
+        SetRect(&bar[BAR_HORIZONTAL], left, top + height, left + width, windowHeight - top);
+        SetRect(corner, left + width, top + height, windowWidth - left, windowHeight - top);
+    } else {
+        int thick = bar_thickness(hwnd);
+        SetRect(&bar[BAR_VERTICAL], left + width, top, left + width + thick, top + height);
+        SetRect(&bar[BAR_HORIZONTAL], left, top + height, left + width, top + height + thick);
+        SetRect(corner, left + width, top + height, left + width + thick, top + height + thick);
+    }
     if (!state->visible[BAR_VERTICAL]) SetRectEmpty(&bar[BAR_VERTICAL]);
     if (!state->visible[BAR_HORIZONTAL]) SetRectEmpty(&bar[BAR_HORIZONTAL]);
     if (!(state->visible[BAR_VERTICAL] && state->visible[BAR_HORIZONTAL])) SetRectEmpty(corner);
@@ -212,8 +274,31 @@ static void paint_bar(HDC hdc, HWND hwnd, const BarState *state, int bar, const 
     DeleteObject(region);
 }
 
+static void paint_overlay(HWND overlay, BarState *state, int bar) {
+    PAINTSTRUCT paint;
+    HDC hdc = BeginPaint(overlay, &paint);
+    RECT client;
+    GetClientRect(overlay, &client);
+    fill_rect_color(hdc, &client, theme_bg_color());
+    if (bar >= 0) paint_bar(hdc, state->target, state, bar, &client);
+    EndPaint(overlay, &paint);
+}
+
 static void paint_bars(HWND hwnd, const BarState *state) {
     if (!state->visible[BAR_VERTICAL] && !state->visible[BAR_HORIZONTAL]) return;
+    if (state->kind == THEMED_SCROLL_TREEVIEW) {
+        for (int i = 0; i < BAR_COUNT; i++) {
+            if (state->overlay[i]) {
+                InvalidateRect(state->overlay[i], NULL, TRUE);
+                UpdateWindow(state->overlay[i]);
+            }
+        }
+        if (state->cornerOverlay) {
+            InvalidateRect(state->cornerOverlay, NULL, TRUE);
+            UpdateWindow(state->cornerOverlay);
+        }
+        return;
+    }
     HDC hdc = GetDCEx(hwnd, NULL, DCX_WINDOW | DCX_CACHE | DCX_CLIPSIBLINGS);
     if (!hdc) return;
     RECT bar[BAR_COUNT], corner;
@@ -228,25 +313,133 @@ static void paint_bars(HWND hwnd, const BarState *state) {
 static void reframe(HWND hwnd) {
     SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    /* A former non-client bar can become client area when the frame changes.
+       Invalidate both regions so its old thumb/track cannot remain as a
+       second, stale-looking scrollbar until some later full repaint. */
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+}
+
+static int strip_native_bars(HWND hwnd) {
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if (!(style & (WS_VSCROLL | WS_HSCROLL))) return 0;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~(LONG_PTR)(WS_VSCROLL | WS_HSCROLL));
+    return 1;
+}
+
+static int set_tree_bar_styles(HWND hwnd, const int want[BAR_COUNT]) {
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    LONG_PTR wanted = style & ~(LONG_PTR)(WS_VSCROLL | WS_HSCROLL);
+    if (want[BAR_VERTICAL]) wanted |= WS_VSCROLL;
+    if (want[BAR_HORIZONTAL]) wanted |= WS_HSCROLL;
+    if (wanted == style) return 0;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, wanted);
+    return 1;
+}
+
+static void set_overlay_position(HWND overlay, int show, int x, int y, int width, int height) {
+    if (!overlay) return;
+    if (!show || width <= 0 || height <= 0) {
+        ShowWindow(overlay, SW_HIDE);
+        return;
+    }
+    SetWindowPos(overlay, HWND_TOP, x, y, width, height,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+static void position_tree_overlays(HWND hwnd, BarState *state) {
+    if (!state->overlay[0] || !state->overlay[1]) return;
+    HWND parent = GetParent(hwnd);
+    if (!parent || !IsWindowVisible(hwnd)) {
+        ShowWindow(state->overlay[0], SW_HIDE);
+        ShowWindow(state->overlay[1], SW_HIDE);
+        if (state->cornerOverlay) ShowWindow(state->cornerOverlay, SW_HIDE);
+        return;
+    }
+
+    RECT windowRect, client;
+    POINT clientOrigin = {0, 0};
+    GetWindowRect(hwnd, &windowRect);
+    GetClientRect(hwnd, &client);
+    ClientToScreen(hwnd, &clientOrigin);
+    POINT windowOrigin = {windowRect.left, windowRect.top};
+    ScreenToClient(parent, &windowOrigin);
+    ScreenToClient(parent, &clientOrigin);
+
+    int leftBorder = clientOrigin.x - windowOrigin.x;
+    int topBorder = clientOrigin.y - windowOrigin.y;
+    int innerRight = windowOrigin.x + (windowRect.right - windowRect.left) - leftBorder;
+    int innerBottom = windowOrigin.y + (windowRect.bottom - windowRect.top) - topBorder;
+    int clientRight = clientOrigin.x + client.right;
+    int clientBottom = clientOrigin.y + client.bottom;
+    int vWidth = innerRight - clientRight;
+    int hHeight = innerBottom - clientBottom;
+
+    /* A sibling cannot cover another window's non-client pixels reliably:
+       DWM may composite an animated native scrollbar above it. Remove those
+       pixels from the TreeView's window region so only the sibling overlays
+       occupy the scrollbar strips. Scroll ranges remain fully native. */
+    int windowWidth = windowRect.right - windowRect.left;
+    int windowHeight = windowRect.bottom - windowRect.top;
+    int clipWidth = state->visible[BAR_VERTICAL]
+        ? clientRight - windowOrigin.x : windowWidth;
+    int clipHeight = state->visible[BAR_HORIZONTAL]
+        ? clientBottom - windowOrigin.y : windowHeight;
+    if (clipWidth != state->clipWidth || clipHeight != state->clipHeight ||
+        state->visible[BAR_VERTICAL] != state->clipVertical ||
+        state->visible[BAR_HORIZONTAL] != state->clipHorizontal) {
+        if (state->visible[BAR_VERTICAL] || state->visible[BAR_HORIZONTAL]) {
+            HRGN clip = CreateRectRgn(0, 0, clipWidth, clipHeight);
+            if (!SetWindowRgn(hwnd, clip, TRUE)) DeleteObject(clip);
+        } else {
+            SetWindowRgn(hwnd, NULL, TRUE);
+        }
+        state->clipWidth = clipWidth;
+        state->clipHeight = clipHeight;
+        state->clipVertical = state->visible[BAR_VERTICAL];
+        state->clipHorizontal = state->visible[BAR_HORIZONTAL];
+    }
+
+    set_overlay_position(state->overlay[BAR_VERTICAL], state->visible[BAR_VERTICAL],
+                         clientRight, clientOrigin.y, vWidth, client.bottom);
+    set_overlay_position(state->overlay[BAR_HORIZONTAL], state->visible[BAR_HORIZONTAL],
+                         clientOrigin.x, clientBottom, client.right, hHeight);
+    set_overlay_position(state->cornerOverlay,
+                         state->visible[BAR_VERTICAL] && state->visible[BAR_HORIZONTAL],
+                         clientRight, clientBottom, vWidth, hHeight);
 }
 
 static void sync(HWND hwnd, BarState *state) {
     if (state->syncing) return;
     state->syncing = 1;
 
+    if (state->kind != THEMED_SCROLL_TREEVIEW && strip_native_bars(hwnd)) reframe(hwnd);
+
     ScrollAxis before[BAR_COUNT] = {state->axis[0], state->axis[1]};
     int want[BAR_COUNT];
     query_axes(hwnd, state, want);
 
     int changed = memcmp(before, state->axis, sizeof(before)) != 0;
-    if (want[BAR_VERTICAL] != state->visible[BAR_VERTICAL] ||
-        want[BAR_HORIZONTAL] != state->visible[BAR_HORIZONTAL]) {
+    int visibilityChanged = want[BAR_VERTICAL] != state->visible[BAR_VERTICAL] ||
+                            want[BAR_HORIZONTAL] != state->visible[BAR_HORIZONTAL];
+    if (state->kind == THEMED_SCROLL_TREEVIEW) {
+        state->visible[BAR_VERTICAL] = want[BAR_VERTICAL];
+        state->visible[BAR_HORIZONTAL] = want[BAR_HORIZONTAL];
+        if (set_tree_bar_styles(hwnd, want)) {
+            reframe(hwnd);
+            query_axes(hwnd, state, want);
+            state->visible[BAR_VERTICAL] = want[BAR_VERTICAL];
+            state->visible[BAR_HORIZONTAL] = want[BAR_HORIZONTAL];
+            changed = 1;
+        }
+        if (visibilityChanged) changed = 1;
+    } else if (visibilityChanged) {
         state->visible[BAR_VERTICAL] = want[BAR_VERTICAL];
         state->visible[BAR_HORIZONTAL] = want[BAR_HORIZONTAL];
         reframe(hwnd); /* the strip is reserved in WM_NCCALCSIZE, so the client area resizes */
         query_axes(hwnd, state, want); /* page sizes changed with the client area */
         changed = 1;
     }
+    if (state->kind == THEMED_SCROLL_TREEVIEW) position_tree_overlays(hwnd, state);
     if (changed) paint_bars(hwnd, state);
     state->syncing = 0;
 }
@@ -256,10 +449,39 @@ static void scroll_to(HWND hwnd, BarState *state, int bar, int pos) {
     if (state->kind == THEMED_SCROLL_SCINTILLA) {
         if (bar == BAR_VERTICAL) SendMessageA(hwnd, SCI_SETFIRSTVISIBLELINE, (WPARAM)pos, 0);
         else SendMessageA(hwnd, SCI_SETXOFFSET, (WPARAM)pos, 0);
-    } else {
+    } else if (state->kind == THEMED_SCROLL_LISTBOX) {
         SendMessageW(hwnd, LB_SETTOPINDEX, (WPARAM)pos, 0);
+    } else if (bar == BAR_VERTICAL) {
+        HTREEITEM item = TreeView_GetRoot(hwnd);
+        for (int index = 0; item && index < pos; index++)
+            item = TreeView_GetNextVisible(hwnd, item);
+        if (item) SendMessageW(hwnd, TVM_SELECTITEM, TVGN_FIRSTVISIBLE, (LPARAM)item);
+    } else {
+        SendMessageW(hwnd, WM_HSCROLL, MAKEWPARAM(SB_THUMBPOSITION, pos), 0);
     }
     sync(hwnd, state);
+}
+
+static void ensure_tree_selection_visible(HWND hwnd, BarState *state) {
+    HTREEITEM selected = TreeView_GetSelection(hwnd);
+    HTREEITEM first = TreeView_GetFirstVisible(hwnd);
+    if (!selected || !first) return;
+
+    int selectedIndex = -1;
+    int firstIndex = -1;
+    int index = 0;
+    for (HTREEITEM item = TreeView_GetRoot(hwnd); item;
+         item = TreeView_GetNextVisible(hwnd, item), index++) {
+        if (item == selected) selectedIndex = index;
+        if (item == first) firstIndex = index;
+    }
+    if (selectedIndex < 0 || firstIndex < 0) return;
+    int page = state->axis[BAR_VERTICAL].page;
+    if (page < 1) page = 1;
+    if (selectedIndex < firstIndex)
+        scroll_to(hwnd, state, BAR_VERTICAL, selectedIndex);
+    else if (selectedIndex >= firstIndex + page)
+        scroll_to(hwnd, state, BAR_VERTICAL, selectedIndex - page + 1);
 }
 
 static int should_sync(UINT msg) {
@@ -341,7 +563,7 @@ static void drag_thumb(HWND hwnd, BarState *state) {
     scroll_to(hwnd, state, bar, (int)((long long)start * max_scroll_pos(&state->axis[bar]) / range));
 }
 
-static void wheel_listbox(HWND hwnd, BarState *state, int delta) {
+static void wheel_vertical(HWND hwnd, BarState *state, int delta) {
     UINT lines = 3;
     SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
     state->wheelRemainder += delta;
@@ -351,6 +573,92 @@ static void wheel_listbox(HWND hwnd, BarState *state, int delta) {
     const ScrollAxis *axis = &state->axis[BAR_VERTICAL];
     int step = lines == WHEEL_PAGESCROLL ? axis->page : (int)lines;
     scroll_to(hwnd, state, BAR_VERTICAL, axis->pos - notches * step);
+}
+
+static LRESULT CALLBACK overlay_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    BarState *state = (BarState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_NCCREATE) {
+        CREATESTRUCTW *create = (CREATESTRUCTW *)lParam;
+        state = (BarState *)create->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+    }
+    if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+    int bar = GetDlgCtrlID(hwnd) - OVERLAY_ID_BASE;
+    if (bar < 0 || bar >= BAR_COUNT) bar = -1; /* the corner overlay */
+    switch (msg) {
+        case WM_PAINT:
+            paint_overlay(hwnd, state, bar);
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32512)));
+            return TRUE;
+        case WM_MOUSEMOVE:
+            if (bar >= 0) {
+                RECT client;
+                POINT cursor;
+                GetClientRect(hwnd, &client);
+                GetCursorPos(&cursor);
+                ScreenToClient(hwnd, &cursor);
+                RECT thumb = thumb_rect(state->target, state, bar, &client);
+                set_hot(state->target, state, PtInRect(&thumb, cursor) ? bar : -1);
+                TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&track);
+            }
+            return 0;
+        case WM_MOUSELEAVE:
+            if (state->drag < 0) set_hot(state->target, state, -1);
+            return 0;
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONDBLCLK:
+            if (bar >= 0) begin_track(state->target, state, bar);
+            return 0;
+        case WM_MOUSEWHEEL:
+            wheel_vertical(state->target, state, GET_WHEEL_DELTA_WPARAM(wParam));
+            return 0;
+        case WM_NCDESTROY:
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static int ensure_overlay_class(HINSTANCE instance) {
+    WNDCLASSW existing;
+    if (GetClassInfoW(instance, OVERLAY_CLASS, &existing)) return 1;
+    WNDCLASSW cls = {0};
+    cls.lpfnWndProc = overlay_proc;
+    cls.hInstance = instance;
+    cls.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+    cls.lpszClassName = OVERLAY_CLASS;
+    return RegisterClassW(&cls) != 0;
+}
+
+static int create_tree_overlays(BarState *state) {
+    HWND parent = GetParent(state->target);
+    HINSTANCE instance = (HINSTANCE)GetWindowLongPtrW(state->target, GWLP_HINSTANCE);
+    if (!parent || !ensure_overlay_class(instance)) return 0;
+    for (int i = 0; i < BAR_COUNT; i++) {
+        state->overlay[i] = CreateWindowExW(0, OVERLAY_CLASS, L"",
+            WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent,
+            (HMENU)(UINT_PTR)(OVERLAY_ID_BASE + i), instance, state);
+        if (!state->overlay[i]) return 0;
+    }
+    state->cornerOverlay = CreateWindowExW(0, OVERLAY_CLASS, L"",
+        WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent,
+        (HMENU)(UINT_PTR)(OVERLAY_ID_BASE + BAR_COUNT), instance, state);
+    return state->cornerOverlay != NULL;
+}
+
+static void destroy_tree_overlays(BarState *state) {
+    for (int i = 0; i < BAR_COUNT; i++) {
+        if (state->overlay[i]) DestroyWindow(state->overlay[i]);
+        state->overlay[i] = NULL;
+    }
+    if (state->cornerOverlay) DestroyWindow(state->cornerOverlay);
+    state->cornerOverlay = NULL;
 }
 
 /* ---- window procedure ---- */
@@ -365,10 +673,12 @@ static LRESULT CALLBACK bar_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LP
             break;
         case WM_NCCALCSIZE: {
             LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
-            RECT *rc = wParam ? &((NCCALCSIZE_PARAMS *)lParam)->rgrc[0] : (RECT *)lParam;
-            int thick = bar_thickness(hwnd);
-            if (state->visible[BAR_VERTICAL]) rc->right -= thick;
-            if (state->visible[BAR_HORIZONTAL]) rc->bottom -= thick;
+            if (state->kind != THEMED_SCROLL_TREEVIEW) {
+                RECT *rc = wParam ? &((NCCALCSIZE_PARAMS *)lParam)->rgrc[0] : (RECT *)lParam;
+                int thick = bar_thickness(hwnd);
+                if (state->visible[BAR_VERTICAL]) rc->right -= thick;
+                if (state->visible[BAR_HORIZONTAL]) rc->bottom -= thick;
+            }
             return result;
         }
         case WM_NCPAINT: {
@@ -377,14 +687,19 @@ static LRESULT CALLBACK bar_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LP
             return result;
         }
         case WM_NCHITTEST: {
-            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
             RECT bar[BAR_COUNT];
             POINT screen = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             int hit = hit_bar(state, hwnd, screen, bar);
             if (hit == BAR_VERTICAL) return HTVSCROLL;
             if (hit == BAR_HORIZONTAL) return HTHSCROLL;
-            return result;
+            return DefSubclassProc(hwnd, msg, wParam, lParam);
         }
+        case WM_SETCURSOR:
+            if (LOWORD(lParam) == HTVSCROLL || LOWORD(lParam) == HTHSCROLL) {
+                SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32512)));
+                return TRUE;
+            }
+            break;
         case WM_NCLBUTTONDOWN: case WM_NCLBUTTONDBLCLK:
             if (wParam == HTVSCROLL || wParam == HTHSCROLL) {
                 begin_track(hwnd, state, wParam == HTVSCROLL ? BAR_VERTICAL : BAR_HORIZONTAL);
@@ -409,11 +724,14 @@ static LRESULT CALLBACK bar_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LP
             } else {
                 set_hot(hwnd, state, -1);
             }
-            break;
+            /* The native TreeView handler starts its own scrollbar hover
+               painting here. Our bars occupy that same allocation, so do
+               not let the system repaint over them after set_hot(). */
+            return 0;
         case WM_NCMOUSELEAVE:
             state->tracking = 0;
             if (state->drag < 0) set_hot(hwnd, state, -1);
-            break;
+            return 0;
         case WM_MOUSEMOVE:
             if (state->drag >= 0) { drag_thumb(hwnd, state); return 0; }
             break;
@@ -430,12 +748,13 @@ static LRESULT CALLBACK bar_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LP
             }
             break;
         case WM_MOUSEWHEEL:
-            if (state->kind == THEMED_SCROLL_LISTBOX) {
-                wheel_listbox(hwnd, state, GET_WHEEL_DELTA_WPARAM(wParam));
+            if (state->kind != THEMED_SCROLL_SCINTILLA) {
+                wheel_vertical(hwnd, state, GET_WHEEL_DELTA_WPARAM(wParam));
                 return 0;
             }
             break;
         case WM_NCDESTROY: {
+            destroy_tree_overlays(state);
             RemoveWindowSubclass(hwnd, bar_subclass_proc, id);
             LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
             free(state);
@@ -444,6 +763,10 @@ static LRESULT CALLBACK bar_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LP
     }
 
     LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+    if (msg == WM_SIZE)
+        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+    if (state->kind == THEMED_SCROLL_TREEVIEW && msg == WM_KEYDOWN)
+        ensure_tree_selection_visible(hwnd, state);
     if (!state->syncing && should_sync(msg)) { /* our own queries re-enter this proc */
         state->scanWidths = msg == WM_PAINT;
         sync(hwnd, state);
@@ -457,6 +780,7 @@ void themed_scrollbar_attach(HWND hwnd, ThemedScrollKind kind) {
     BarState *state = calloc(1, sizeof(*state));
     if (!state) return;
     state->kind = kind;
+    state->target = hwnd;
     state->hot = -1;
     state->drag = -1;
 
@@ -465,15 +789,18 @@ void themed_scrollbar_attach(HWND hwnd, ThemedScrollKind kind) {
         SendMessageA(hwnd, SCI_SETVSCROLLBAR, FALSE, 0);
         SendMessageA(hwnd, SCI_SETHSCROLLBAR, FALSE, 0);
     }
-    /* Any native bar left in the style would be drawn by the system as well. */
-    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-    if (style & (WS_VSCROLL | WS_HSCROLL))
-        SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~(LONG_PTR)(WS_VSCROLL | WS_HSCROLL));
-
     if (!SetWindowSubclass(hwnd, bar_subclass_proc, SUBCLASS_ID, (DWORD_PTR)state)) {
         free(state);
         return;
     }
+    if (kind == THEMED_SCROLL_TREEVIEW && !create_tree_overlays(state)) {
+        destroy_tree_overlays(state);
+        RemoveWindowSubclass(hwnd, bar_subclass_proc, SUBCLASS_ID);
+        free(state);
+        return;
+    }
+    /* sync() removes any native bar and reframes through the subclass before
+       it measures and reserves space for the themed replacement. */
     sync(hwnd, state);
 }
 
