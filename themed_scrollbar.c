@@ -452,10 +452,21 @@ static void scroll_to(HWND hwnd, BarState *state, int bar, int pos) {
     } else if (state->kind == THEMED_SCROLL_LISTBOX) {
         SendMessageW(hwnd, LB_SETTOPINDEX, (WPARAM)pos, 0);
     } else if (bar == BAR_VERTICAL) {
+        SCROLLINFO horizontal = {0};
+        horizontal.cbSize = sizeof(horizontal);
+        horizontal.fMask = SIF_POS;
+        GetScrollInfo(hwnd, SB_HORZ, &horizontal);
+
         HTREEITEM item = TreeView_GetRoot(hwnd);
         for (int index = 0; item && index < pos; index++)
             item = TreeView_GetNextVisible(hwnd, item);
         if (item) SendMessageW(hwnd, TVM_SELECTITEM, TVGN_FIRSTVISIBLE, (LPARAM)item);
+
+        /* TVGN_FIRSTVISIBLE may also shift sideways to reveal the target.
+           Put the exact previous horizontal offset back after it has moved
+           the vertical viewport. */
+        SendMessageW(hwnd, WM_HSCROLL,
+                     MAKEWPARAM(SB_THUMBPOSITION, horizontal.nPos), 0);
     } else {
         SendMessageW(hwnd, WM_HSCROLL, MAKEWPARAM(SB_THUMBPOSITION, pos), 0);
     }
