@@ -30,6 +30,7 @@
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
 #define WM_APP_DEFERRED_INIT (WM_APP + 2)
+#define WM_APP_APPLY_LARGE_FILE_MODE (WM_APP + 4)
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
 #define MINIMAP_WIDTH 120
@@ -210,9 +211,9 @@
    Grouped roughly by area: preview/theme, menu/layout, spell check,
    status/outline, recovery, dialogs, and document/tab management. */
 /* Nonzero on success; zero on cancellation or write failure. */
-int do_save(void);
+static int do_save(void);
 static void update_preview(void);
-void push_html_to_webview(const char *htmlFragment);
+static void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
 static void apply_word_wrap(HWND hEdit);
@@ -251,5 +252,6 @@ static void restore_session_documents(void);
 static void sync_preview_to_editor_scroll(void);
 static void apply_custom_preview_css(int reportErrors);
 static int paste_image_from_clipboard(void);
+static void apply_large_file_mode_after_growth(int documentIndex);
 
 #endif

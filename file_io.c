@@ -113,8 +113,9 @@ char *read_utf8_text_file(const WCHAR *path, size_t maximumSize) {
    converted to `encoding` on the way out. `target` must already be an
    I/O-ready (extended-length) path. Shared by save_to_path() and
    workspace-wide replace. */
-int write_file_atomic(const WCHAR *target, const char *text, size_t len,
-                             TextEncoding encoding, int hasBom) {
+int write_file_atomic_progress(const WCHAR *target, const char *text, size_t len,
+                               TextEncoding encoding, int hasBom,
+                               TextProgressCallback progress, void *context) {
     size_t pathLen = wcslen(target);
     WCHAR *temporary = (WCHAR *)malloc((pathLen + 64) * sizeof(WCHAR));
     HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -158,6 +159,10 @@ int write_file_atomic(const WCHAR *target, const char *text, size_t len,
             break;
         }
         total += piece;
+        if (progress && !progress(total, len, context)) {
+            ok = FALSE;
+            break;
+        }
     }
     free(encoded);
     if (ok) ok = FlushFileBuffers(hFile);
@@ -172,4 +177,9 @@ int write_file_atomic(const WCHAR *target, const char *text, size_t len,
     if (!ok) DeleteFileW(temporary);
     free(temporary);
     return ok;
+}
+
+int write_file_atomic(const WCHAR *target, const char *text, size_t len,
+                      TextEncoding encoding, int hasBom) {
+    return write_file_atomic_progress(target, text, len, encoding, hasBom, NULL, NULL);
 }

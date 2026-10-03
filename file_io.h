@@ -21,5 +21,8 @@ char *read_utf8_text_file(const WCHAR *path, size_t maximumSize);
 /* Atomically publishes encoded UTF-8 input. target is an I/O-ready path. */
 int write_file_atomic(const WCHAR *target, const char *text, size_t length,
                       TextEncoding encoding, int hasBom);
+int write_file_atomic_progress(const WCHAR *target, const char *text, size_t length,
+                               TextEncoding encoding, int hasBom,
+                               TextProgressCallback progress, void *context);
 
 #endif

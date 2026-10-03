@@ -21,6 +21,7 @@
 #include <ctype.h>
 #include <shlwapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <spellcheck.h>
 #include <uxtheme.h>
@@ -149,12 +150,12 @@ typedef struct Document {
     int xOffset;
     unsigned untitledNumber;
     int closedIndex;
-    int isReference; /* a ReferenceKind: a Help page, so Help reuses its tab */
-    int largeFile; /* opened in large-file mode, see LARGE_FILE_FEATURES */
+    int isReference; /* 0, or a ReferenceKind for a Help page so Help reuses its tab */
+    int largeFile; /* using large-file mode, either from open or after growing past the threshold */
 } Document;
 
 /* The Help pages opened as unsaved Markdown tabs (see show_help_page()). */
-typedef enum { REFERENCE_NONE = 0, REFERENCE_MARKDOWN, REFERENCE_SHORTCUTS } ReferenceKind;
+typedef enum { REFERENCE_MARKDOWN = 1, REFERENCE_SHORTCUTS } ReferenceKind;
 
 static const WCHAR *reference_title(int kind) {
     return kind == REFERENCE_SHORTCUTS ? L"Keyboard Shortcuts" : L"Markdown Reference";
@@ -194,8 +195,10 @@ static int g_wikiBackCount = 0;
 #define g_largeFile   (g_documents[g_activeDocument].largeFile)
 /* LARGE_FILE_FEATURES: a file of at least this many MiB opens in large-file
    mode - streamed straight into a style-less, 64-bit-position Scintilla
-   document (see read_large_file_document()) with every full-document feature that
-   would otherwise rescan it on each pause in typing switched off: lexing
+   document (see read_large_file_document()). A smaller ordinary document
+   that grows past the threshold also enters the same reduced-feature mode
+   without destructively replacing its buffer or undo history. Every
+   full-document feature that would otherwise rescan it on each pause in typing is switched off: lexing
    and folding, word wrap, preview, outline, word count, word completion,
    brace matching, smart Enter/Tab, and recovery snapshots. Plain editing, find/replace, and
    save still work. Persisted as [View] LargeFileThresholdMB. */
@@ -207,7 +210,7 @@ int g_splitterRatio = 500; /* left pane width as thousandths of the available sp
 int g_splitterPos = -1; /* pixel x of splitter, initialized from g_splitterRatio */
 int g_splitEditorVisible = 0;
 int g_splitEditorRatio = 500; /* main pane height as thousandths of the editor region's height */
-int g_splitEditorPos = -1; /* pixel y of the split-editor splitter, local to the editor region */
+static int g_splitEditorPos = -1; /* pixel y of the split-editor splitter, local to the editor region */
 static RECT g_splitEditorSplitterRect = {0};
 static RECT g_splitterRect = {0}; /* the main editor/preview splitter's own bounds, for drawing its line */
 static int g_splitEditorRegionY = 0; /* window-relative y the editor region starts at, refreshed every layout() */
@@ -242,6 +245,62 @@ static int g_tabDragIndex = -1;
 static int g_tabDragged = 0;
 static int g_activeLanguage = 0; /* Language of the active document; 0 is LANG_MARKDOWN. */
 static ISpellChecker *g_spellChecker = NULL;
+
+/* The Shell progress dialog owns its own responsive UI while the caller
+   performs synchronous streaming work. This keeps Scintilla access on its
+   UI thread while still giving multi-gigabyte opens/saves progress and a
+   working Cancel button. */
+typedef struct LargeOperationProgress {
+    IProgressDialog *dialog;
+    int cancelled;
+} LargeOperationProgress;
+
+static void large_operation_progress_begin(LargeOperationProgress *progress,
+                                           const WCHAR *title, const WCHAR *line) {
+    memset(progress, 0, sizeof(*progress));
+    if (!g_comInitialized || FAILED(CoCreateInstance(&CLSID_ProgressDialog, NULL,
+            CLSCTX_INPROC_SERVER, &IID_IProgressDialog, (void **)&progress->dialog)) ||
+            !progress->dialog) return;
+    progress->dialog->lpVtbl->SetTitle(progress->dialog, title);
+    progress->dialog->lpVtbl->SetLine(progress->dialog, 1, line, FALSE, NULL);
+    progress->dialog->lpVtbl->SetCancelMsg(progress->dialog,
+        L"Cancelling after the current block...", NULL);
+    if (FAILED(progress->dialog->lpVtbl->StartProgressDialog(progress->dialog,
+            g_hMainWnd, NULL, PROGDLG_MODAL | PROGDLG_AUTOTIME | PROGDLG_NOMINIMIZE, NULL))) {
+        IUnknown_Release((IUnknown *)progress->dialog);
+        progress->dialog = NULL;
+    }
+}
+
+static void large_operation_progress_set_line(LargeOperationProgress *progress,
+                                              const WCHAR *line) {
+    if (!progress->dialog) return;
+    progress->dialog->lpVtbl->SetLine(progress->dialog, 1, line, FALSE, NULL);
+    progress->dialog->lpVtbl->SetProgress64(progress->dialog, 0, 1);
+}
+
+static int large_operation_progress_update(LargeOperationProgress *progress,
+                                           size_t completed, size_t total) {
+    if (!progress || !progress->dialog) return 1;
+    progress->dialog->lpVtbl->SetProgress64(progress->dialog,
+        (ULONGLONG)completed, (ULONGLONG)(total ? total : 1));
+    if (progress->dialog->lpVtbl->HasUserCancelled(progress->dialog)) {
+        progress->cancelled = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int large_operation_progress_callback(size_t completed, size_t total, void *context) {
+    return large_operation_progress_update((LargeOperationProgress *)context, completed, total);
+}
+
+static void large_operation_progress_end(LargeOperationProgress *progress) {
+    if (!progress || !progress->dialog) return;
+    progress->dialog->lpVtbl->StopProgressDialog(progress->dialog);
+    IUnknown_Release((IUnknown *)progress->dialog);
+    progress->dialog = NULL;
+}
 
 #define MAX_RECENT_FILES 10
 static WCHAR *g_recentFiles[MAX_RECENT_FILES];
@@ -1220,6 +1279,10 @@ static int markdown_style_is_prose(int style) {
 
 static void schedule_spell_check(void) {
     if (!g_hMainWnd) return;
+    if (g_largeFile) {
+        KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
+        return;
+    }
     SetTimer(g_hMainWnd, IDT_SPELL_CHECK, 350, NULL);
 }
 
@@ -1238,6 +1301,7 @@ static void schedule_spell_check(void) {
 static void perform_spell_check(void) {
     if (!g_hEdit) return;
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
+    if (g_largeFile) return;
 
     Sci_Position textLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
@@ -2553,7 +2617,7 @@ static void apply_preview_theme(void) {
     execute_webview_script(script, &g_scriptHandler);
 }
 
-void push_html_to_webview(const char *htmlFragment) {
+static void push_html_to_webview(const char *htmlFragment) {
     if (!htmlFragment) return;
     if (!g_webviewReady || !g_webview) {
         free(g_pendingHtmlBody);
@@ -3012,6 +3076,19 @@ static void replace_active_scintilla_document(sptr_t sciDoc, int largeFile) {
     g_switchingDocument = oldSwitching;
 }
 
+/* A preview-only layout cannot show a large document because its rendered
+   preview is deliberately disabled. Reveal the editor automatically; for a
+   command-line/file-association launch, replace the preview pane outright so
+   the initial window contains the document rather than only an explanation. */
+static void ensure_large_file_editor_visible(void) {
+    if (!g_largeFile || g_editorVisible) return;
+    g_editorVisible = 1;
+    if (g_commandLinePreviewMode) g_previewVisible = 0;
+    update_view_menu(g_hMainWnd);
+    layout(g_hMainWnd);
+    InvalidateRect(g_hMainWnd, NULL, TRUE);
+}
+
 /* Scintilla's ILoader (ILoader.h) is a C++ interface. It has no virtual
    destructor, so its vtable is exactly these three slots in declaration
    order and can be called from C the same way the COM interfaces are. */
@@ -3037,7 +3114,8 @@ struct SciLoader { const SciLoaderVtbl *lpVtbl; };
    later chunk turns out not to be. Returns 0 on failure, with *outOfMemory
    set when Scintilla couldn't allocate the text. */
 static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEncoding,
-                                       int *outEncoding, int *outHasBom, int *outOfMemory) {
+                                       int *outEncoding, int *outHasBom, int *outOfMemory,
+                                       LargeOperationProgress *progress) {
     *outOfMemory = 0;
     char *chunk = (char *)malloc(LARGE_FILE_READ_CHUNK);
     char *decoded = (char *)malloc(text_decode_capacity(LARGE_FILE_READ_CHUNK));
@@ -3050,6 +3128,7 @@ static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEnc
     for (int attempt = 0; attempt < 2; attempt++) {
         LARGE_INTEGER start = {0};
         if (attempt && !SetFilePointerEx(file, start, NULL, FILE_BEGIN)) break;
+        if (!large_operation_progress_update(progress, 0, length)) break;
         SciLoader *loader = (SciLoader *)SendMessageA(g_hEdit, SCI_CREATELOADER, (WPARAM)length,
             (LPARAM)(SC_DOCUMENTOPTION_STYLES_NONE | SC_DOCUMENTOPTION_TEXT_LARGE));
         if (!loader) { *outOfMemory = 1; break; }
@@ -3080,6 +3159,7 @@ static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEnc
                 dataLength -= bom;
             }
             total += got;
+            if (!large_operation_progress_update(progress, total, length)) { ok = 0; break; }
             if (validating && !utf8_validator_feed(&validator, data, dataLength)) { restart = 1; break; }
             if (codec.encoding != TEXT_ENCODING_UTF8) {
                 size_t produced = 0;
@@ -3140,7 +3220,7 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
                     size.QuadPart > INT_MAX;
     char *buf = NULL;
     size_t total = 0;
-    int ok = 0, loaded = 0, outOfMemory = 0, tooLarge = 0;
+    int ok = 0, loaded = 0, outOfMemory = 0, tooLarge = 0, cancelled = 0;
     char *decoded = NULL;
     if (largeFile) {
         /* SCI_CREATELOADER resets g_hEdit's per-view line state as a side
@@ -3151,8 +3231,12 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
         save_active_document_view();
         HCURSOR oldCursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
         int hasBom = 0, encoding = TEXT_ENCODING_UTF8;
+        LargeOperationProgress progress;
+        large_operation_progress_begin(&progress, L"Opening large file", L"Loading text...");
         sptr_t sciDoc = read_large_file_document(hFile, length, forcedEncoding, &encoding,
-                                                 &hasBom, &outOfMemory);
+                                                 &hasBom, &outOfMemory, &progress);
+        cancelled = progress.cancelled;
+        large_operation_progress_end(&progress);
         SetCursor(oldCursor);
         if (!sciDoc) {
             const Document *doc = &g_documents[g_activeDocument];
@@ -3213,12 +3297,18 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
             content = outOfMemory || tooLarge ? NULL : decoded;
         }
         if (content) {
+            int decodedLargeMode = contentLength >=
+                (size_t)g_largeFileThresholdMB * 1024 * 1024;
             /* Reloading a tab that was in large-file mode with a file that's
                since shrunk needs an ordinary, lexable document again. */
             if (g_largeFile) {
                 sptr_t sciDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
                 if (sciDoc) replace_active_scintilla_document(sciDoc, 0);
+                else decodedLargeMode = 1; /* keep the existing style-less document mode */
             }
+            /* The threshold describes editor size, not merely bytes on disk:
+               ANSI text can expand to three UTF-8 bytes per source byte. */
+            g_largeFile = decodedLargeMode;
             g_hasBom = bom > 0;
             g_encoding = encoding;
             g_documents[g_activeDocument].encodingForced = forcedEncoding >= 0;
@@ -3230,7 +3320,7 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
                Done inside the g_switchingDocument window and before
                SCI_EMPTYUNDOBUFFER so it's folded into the loaded state - no
                spurious dirty flag and nothing to undo back into tabs. */
-            if (g_indentUseSpaces) convert_indentation(g_hEdit, 1);
+            if (g_indentUseSpaces && !g_largeFile) convert_indentation(g_hEdit, 1);
             SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
             SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
             g_switchingDocument = 0;
@@ -3241,6 +3331,7 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
         replace_wstring(&g_currentFile, displayPath ? displayPath : path);
         apply_document_language(g_hEdit, g_currentFile);
         if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
+        ensure_large_file_editor_visible();
         /* An ordinary load's SCN_MODIFIED schedules this; a large-file
            load raises none, so clear the outline the old text built. */
         if (g_largeFile) update_outline();
@@ -3252,10 +3343,12 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
         refresh_menu(g_hMainWnd);
         ok = 1;
     } else {
-        MessageBoxW(g_hMainWnd, outOfMemory ? L"Not enough memory to open this file."
+        if (largeFile && cancelled) {
+            /* Cancellation is an expected outcome, not a read error. */
+        } else MessageBoxW(g_hMainWnd, outOfMemory ? L"Not enough memory to open this file."
                     : tooLarge ? L"This file is too large to open as text below the large-file "
-                                 L"threshold. Lower [View] LargeFileThresholdMB in markedit.ini "
-                                 L"to open it in large-file mode."
+                                  L"threshold. Lower [View] LargeFileThresholdMB in markedit.ini "
+                                  L"to open it in large-file mode."
                     : L"Could not read file.",
                     L"MarkEdit", MB_OK | MB_ICONERROR);
     }
@@ -3268,6 +3361,28 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
 
 static int load_file(const WCHAR *path) {
     return load_file_as(path, -1);
+}
+
+/* SCN_MODIFIED is delivered from inside Scintilla's edit operation, so the
+   notification only flips the cheap per-document flag and posts this work.
+   Reconfiguring lexers/views after control returns avoids replacing view
+   state re-entrantly while preserving the ordinary document's undo history. */
+static void apply_large_file_mode_after_growth(int documentIndex) {
+    if (documentIndex < 0 || documentIndex >= g_documentCount ||
+        documentIndex != g_activeDocument || !g_largeFile) return;
+    KillTimer(g_hMainWnd, IDT_PREVIEW_UPDATE);
+    KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
+    KillTimer(g_hMainWnd, IDT_OUTLINE_UPDATE);
+    apply_document_language(g_hEdit, g_currentFile);
+    if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
+    ensure_large_file_editor_visible();
+    update_outline();
+    update_status_bar();
+    if (g_previewVisible) update_preview();
+    /* Remove any now-stale recovery copy made while the document was still
+       below the threshold; large-file documents are intentionally excluded. */
+    write_recovery_snapshot();
+    refresh_menu(g_hMainWnd);
 }
 
 /* File > Reopen with Encoding: rereads the file from disk as `encoding`,
@@ -3777,12 +3892,22 @@ static int save_to_path(const WCHAR *path) {
     }
     TextEncoding encoding = (TextEncoding)g_encoding;
     int hasBom = g_hasBom;
-    int lossless = text_encoding_is_lossless(text, (size_t)len, encoding);
+    LargeOperationProgress progress = {0};
+    if (g_largeFile)
+        large_operation_progress_begin(&progress, L"Saving large file", L"Checking text encoding...");
+    int lossless = text_encoding_is_lossless_progress(text, (size_t)len, encoding,
+        progress.dialog ? large_operation_progress_callback : NULL, &progress);
+    if (lossless == -2) {
+        large_operation_progress_end(&progress);
+        return 0;
+    }
     if (lossless < 0) {
+        large_operation_progress_end(&progress);
         MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
     if (!lossless) {
+        large_operation_progress_end(&progress);
         WCHAR message[400];
         if (encoding == TEXT_ENCODING_ANSI)
             swprintf(message, sizeof(message) / sizeof(message[0]),
@@ -3810,15 +3935,23 @@ static int save_to_path(const WCHAR *path) {
             MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
             return 0;
         }
+        if (g_largeFile)
+            large_operation_progress_begin(&progress, L"Saving large file", L"Writing text...");
+    } else {
+        large_operation_progress_set_line(&progress, L"Writing text...");
     }
     WCHAR *displayPath = absolute_path(path);
     WCHAR *ioPath = extended_path(path);
     const WCHAR *target = ioPath ? ioPath : path;
-    int ok = write_file_atomic(target, text, (size_t)len, encoding, hasBom);
+    int ok = write_file_atomic_progress(target, text, (size_t)len, encoding, hasBom,
+        progress.dialog ? large_operation_progress_callback : NULL, &progress);
+    int cancelled = progress.cancelled;
+    large_operation_progress_end(&progress);
     if (!ok) {
         free(displayPath);
         free(ioPath);
-        MessageBoxW(g_hMainWnd, L"Could not write the complete file; the original was left unchanged.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        if (!cancelled)
+            MessageBoxW(g_hMainWnd, L"Could not write the complete file; the original was left unchanged.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
     g_encoding = encoding;
@@ -3870,7 +4003,7 @@ static int do_saveas(void) {
     return result;
 }
 
-int do_save(void) {
+static int do_save(void) {
     return g_currentFile ? save_to_path(g_currentFile) : do_saveas();
 }
 
@@ -7688,6 +7821,7 @@ static void update_outline(void) {
     if (!g_hOutline) return;
     SendMessageW(g_hOutline, LB_RESETCONTENT, 0, 0);
     g_outlineCount = 0;
+    if (g_largeFile) return;
     /* The list is only read back by clicks on it, and toggle_outline()
        rebuilds it when the pane is shown, so a hidden pane skips the scan. */
     if (!g_outlineVisible || g_activeLanguage != LANG_MARKDOWN) return;
@@ -11334,18 +11468,26 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
        snapshot, silently losing track of real unsaved edits). */
     if (!g_switchingDocument && !g_dirty) set_dirty(1);
     if (!g_switchingDocument) g_recoverySnapshotStale = 1;
+    if (!g_switchingDocument && !g_largeFile) {
+        Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+        Sci_Position threshold = (Sci_Position)g_largeFileThresholdMB * 1024 * 1024;
+        if (length >= threshold) {
+            g_largeFile = 1;
+            PostMessageW(hwnd, WM_APP_APPLY_LARGE_FILE_MODE, (WPARAM)g_activeDocument, 0);
+        }
+    }
     /* An HTML preview shows the saved file (refreshed from save_to_path()),
        so re-rendering it after each pause in typing would just reload the
        same page; every other language previews the unsaved text. */
-    if (g_previewVisible && g_activeLanguage != LANG_HTML)
+    if (!g_largeFile && g_previewVisible && g_activeLanguage != LANG_HTML)
         SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
-    schedule_spell_check();
+    if (!g_largeFile) schedule_spell_check();
     /* update_status_bar() does a full-document SCI_GETTEXT copy plus an O(n)
        word-count scan - too costly to run on every single keystroke.
        Debounced like the outline update just below it, so a burst of typing
        pays for one scan at the pause instead of one per character. */
     SetTimer(hwnd, IDT_STATUS_UPDATE, 200, NULL);
-    SetTimer(hwnd, IDT_OUTLINE_UPDATE, 500, NULL);
+    if (!g_largeFile) SetTimer(hwnd, IDT_OUTLINE_UPDATE, 500, NULL);
     if (scn->linesAdded != 0) {
         update_linenumber_margin_width(g_hEdit);
         if (g_hSplitEdit) update_linenumber_margin_width(g_hSplitEdit);
@@ -11400,6 +11542,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
     switch (msg) {
+        case WM_APP_APPLY_LARGE_FILE_MODE:
+            apply_large_file_mode_after_growth((int)wParam);
+            return 0;
         case WM_CREATE:
             initialize_main_window(hwnd);
             return 0;
