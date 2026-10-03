@@ -692,6 +692,13 @@ void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptText
         0, 0, 0, 0, hParent, (HMENU)(UINT_PTR)ID_EXPLORER_TREE, GetModuleHandleW(NULL), NULL);
     if (!g_hExplorerTree) return;
 
+    /* Buffer the complete tree into an off-screen surface before presenting
+       it. Without this, scrolling exposes and erases intermediate rows before
+       their icons/text are repainted, which is especially visible beside the
+       independently painted themed scrollbar overlays. */
+    TreeView_SetExtendedStyle(g_hExplorerTree, TVS_EX_DOUBLEBUFFER,
+                              TVS_EX_DOUBLEBUFFER);
+
     /* ILC_COLOR32 alone (no ILC_MASK) stores icons with no legacy 1-bit mask
        at all, so ImageList_Draw has no choice but to alpha-blend the real
        per-pixel alpha channel against whatever's already painted underneath -
