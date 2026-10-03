@@ -15,7 +15,7 @@
 /* Pixel width of the editor/preview splitter; save_layout_settings() converts
    the live splitter position to/from a ratio using this. Also used by the
    splitter's own layout/hit-testing code in markedit.c. */
-#define SPLITTER_WIDTH 6
+#define SPLITTER_WIDTH 4
 
 /* User-configurable Run/Debug C/C++ compiler backend; see load_compiler_settings()
    and find_native_compiler(). Auto keeps the existing GCC/Clang/Zig/MSVC

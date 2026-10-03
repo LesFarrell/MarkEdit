@@ -34,7 +34,7 @@
 #define TAB_HEIGHT 28
 #define MINIMAP_WIDTH 120
 #define MINIMAP_SPLITTER_WIDTH 1
-#define SPLIT_EDITOR_SPLITTER_HEIGHT 6
+#define SPLIT_EDITOR_SPLITTER_HEIGHT 4
 
 /* ---- menu command IDs: File, Edit, View, Help ---- */
 #define IDM_FILE_NEW      201
