@@ -144,6 +144,10 @@ void load_layout_settings(void) {
     g_minimapVisible = read_profile_int(L"View", L"MinimapVisible", g_minimapVisible, path) != 0;
     g_explorerVisible = read_profile_int(L"View", L"ExplorerVisible", g_explorerVisible, path) != 0;
     g_explorerWidthRatio = clamp_ratio(read_profile_int(L"View", L"ExplorerWidthRatio", g_explorerWidthRatio, path));
+    /* Keep the panel at the width the user dragged it to. Older settings
+       only have a ratio, which layout() still uses when this key is absent. */
+    int explorerWidth = read_profile_int(L"View", L"ExplorerWidth", -1, path);
+    g_explorerWidth = explorerWidth > 0 ? explorerWidth : -1;
     g_editorZoom = read_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     if (g_editorZoom < -10) g_editorZoom = -10;
     if (g_editorZoom > 20) g_editorZoom = 20;
@@ -214,6 +218,8 @@ void save_layout_settings(void) {
     }
     write_profile_int(L"View", L"SplitterRatio", g_splitterRatio, path);
     write_profile_int(L"View", L"ExplorerWidthRatio", g_explorerWidthRatio, path);
+    if (g_explorerWidth > 0)
+        write_profile_int(L"View", L"ExplorerWidth", g_explorerWidth, path);
     write_profile_int(L"View", L"SplitEditorVisible", g_splitEditorVisible, path);
     write_profile_int(L"View", L"SplitEditorRatio", g_splitEditorRatio, path);
 

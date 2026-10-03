@@ -943,6 +943,18 @@ static void update_linenumber_margin_width(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_LINENUMBERS, width);
 }
 
+/* apply_editor_theme() bolds several per-construct styles (Markdown headings/
+   strong text, and various lexers' keywords) to make them stand out in the
+   full-size editor. At the minimap's tiny fixed size (MINIMAP_FONT_SIZE_HUNDREDTHS)
+   bold weight just reads as thick, smudged blocks rather than legible text,
+   so every style is forced back to regular weight there after the theme is
+   applied. */
+static void strip_minimap_bold(void) {
+    if (!g_hMinimap) return;
+    for (int style = 0; style <= STYLE_MAX; style++)
+        SendMessageA(g_hMinimap, SCI_STYLESETBOLD, (WPARAM)style, FALSE);
+}
+
 /* Apply GitHub's light/dark palette to the editor so it matches the preview.
    Called once at startup and whenever the selected theme changes. */
 static void apply_editor_theme(HWND hEdit) {
@@ -1064,6 +1076,16 @@ static void apply_document_language(HWND hEdit, const WCHAR *path) {
     apply_editor_theme(hEdit);
     apply_word_wrap(hEdit);
     if (!g_largeFile) SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
+
+    /* Style bytes live in the shared Scintilla document, but the colours
+       assigned to those style numbers belong to each view. Keep the minimap's
+       palette in step when the main view changes language (tab switches,
+       Open, Save As, and large-file mode all come through here). It does not
+       need its own lexer or a second colourising pass. */
+    if (hEdit == g_hEdit && g_hMinimap) {
+        apply_editor_theme(g_hMinimap);
+        strip_minimap_bold();
+    }
     schedule_spell_check();
 }
 
@@ -1643,18 +1665,6 @@ static void configure_scintilla(HWND hEdit) {
     SendMessageA(hEdit, SCI_AUTOCSETAUTOHIDE, TRUE, 0);
     SendMessageA(hEdit, SCI_AUTOCSETORDER, SC_ORDER_PRESORTED, 0);
     SendMessageA(hEdit, SCI_AUTOCSETMAXHEIGHT, 8, 0);
-}
-
-/* apply_editor_theme() bolds several per-construct styles (Markdown headings/
-   strong text, and various lexers' keywords) to make them stand out in the
-   full-size editor. At the minimap's tiny fixed size (MINIMAP_FONT_SIZE_HUNDREDTHS)
-   bold weight just reads as thick, smudged blocks rather than legible text,
-   so every style is forced back to regular weight there after the theme is
-   applied - see the two callers below. */
-static void strip_minimap_bold(void) {
-    if (!g_hMinimap) return;
-    for (int style = 0; style <= STYLE_MAX; style++)
-        SendMessageA(g_hMinimap, SCI_STYLESETBOLD, (WPARAM)style, FALSE);
 }
 
 /* Apply a font face/point size to the Scintilla control by setting the
