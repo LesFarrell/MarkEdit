@@ -13,6 +13,10 @@
 #define ID_OUTLINE 105
 #define ID_MINIMAP 106
 #define ID_SPLIT_EDIT 107
+#define ID_DEBUG_PANEL 108
+#define ID_DEBUG_VARIABLES 109
+#define ID_DEBUG_STATUS 110
+#define ID_DEBUG_CLOSE 111
 
 /* ---- timer IDs ---- */
 #define IDT_PREVIEW_UPDATE 1
@@ -152,6 +156,7 @@
 #define IDM_DEBUG_CONTINUE       312
 #define IDM_DEBUG_STEP_OVER      313
 #define IDM_DEBUG_STEP_INTO      314
+#define IDM_DEBUG_STEP_OUT       324
 #define IDM_VIEW_ZOOM_IN         315
 #define IDM_VIEW_ZOOM_OUT        316
 #define IDM_VIEW_ZOOM_RESET      317

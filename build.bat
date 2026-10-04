@@ -110,8 +110,13 @@ for %%F in (
 xcopy /e /i /y /q katex "%DIST_DIR%\katex" >nul
 if %errorlevel% neq 0 (echo Failed to stage KaTeX assets. & exit /b 1)
 
-for %%D in (cmark-gfm highlightjs katex lexilla scintilla webview2) do (
+for %%D in (cmark-gfm gdb highlightjs katex lexilla scintilla webview2) do (
     mkdir "%DIST_DIR%\third_party\%%D" >nul 2>nul
+)
+mkdir "%DIST_DIR%\third_party\gdb\bin" >nul 2>nul
+copy /y third_party\gdb\bin\gdb.exe "%DIST_DIR%\third_party\gdb\bin\" >nul || exit /b 1
+for %%F in (COPYING.txt COPYING.MinGW-w64-runtime.txt VERSION.txt SOURCE.md SHA256SUMS.txt) do (
+    copy /y "third_party\gdb\%%F" "%DIST_DIR%\third_party\gdb\" >nul || exit /b 1
 )
 copy /y third_party\cmark-gfm\COPYING "%DIST_DIR%\third_party\cmark-gfm\" >nul || exit /b 1
 copy /y third_party\highlightjs\LICENSE "%DIST_DIR%\third_party\highlightjs\" >nul || exit /b 1

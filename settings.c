@@ -29,13 +29,13 @@ WCHAR *get_settings_path(void) {
    heap copy the caller frees, or NULL (nothing allocated) when the key is
    absent or empty. */
 WCHAR *read_profile_string(const WCHAR *section, const WCHAR *key, const WCHAR *path) {
-    DWORD cap = 512, n = 0;
+    DWORD cap = 512;
     WCHAR *value = NULL;
     do {
         free(value);
         value = (WCHAR *)calloc(cap, sizeof(WCHAR));
         if (!value) return NULL;
-        n = GetPrivateProfileStringW(section, key, L"", value, cap, path);
+        DWORD n = GetPrivateProfileStringW(section, key, L"", value, cap, path);
         if (n < cap - 1) break;
         cap *= 2;
     } while (cap <= 32768);

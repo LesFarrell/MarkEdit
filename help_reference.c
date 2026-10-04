@@ -266,7 +266,7 @@ const char *help_shortcuts_markdown(void) {
 "| Ctrl+Shift+X | Toggle file explorer |\r\n"
 "| Ctrl+\\\\ | Toggle split editor |\r\n"
 "| Ctrl+F6 / Ctrl+Shift+F6 | Cycle panes forward / back |\r\n"
-"| F11 | Toggle focus mode |\r\n"
+"| Ctrl+Shift+F11 | Toggle focus mode |\r\n"
 "| Alt+Z | Toggle word wrap |\r\n"
 "| Ctrl+= / Ctrl+- | Zoom in / out |\r\n"
 "| Ctrl+0 | Reset zoom |\r\n"
@@ -279,7 +279,8 @@ const char *help_shortcuts_markdown(void) {
 "| F5 | Debug active Python, C, or C++ file |\r\n"
 "| F6 | Continue the active debug session |\r\n"
 "| F10 | Step over the current line |\r\n"
-"| Shift+F11 | Step into the current call |\r\n"
+"| F11 | Step into the current call |\r\n"
+"| Shift+F11 | Step out of the current call |\r\n"
 "| F9 | Toggle debugger breakpoint |\r\n";
     return text;
 }

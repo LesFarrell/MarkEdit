@@ -1,38 +1,33 @@
-# Build outputs
-markedit.exe
-markedit.pdb
-markedit.res
-tests/test_parser.exe
-tests/test_parser.pdb
-/dist/
-/dist.previous/
-/dest/
+# Root build outputs
+/markedit.exe
+/markedit.pdb
+/markedit.res
+/markedit.lib
 /Scintilla.dll
 /WebView2Loader.dll
 /Lexilla.lib
 /Lexilla.pdb
-
-# Lexilla is linked straight into markedit.exe (see build.bat); its sources
-# are compiled to same-named .o files in the project root before linking.
-# markedit.lib is lld-link's side-effect companion import lib, produced
-# because Lexilla.cxx unconditionally __declspec(dllexport)s its API even
-# when compiled into an exe rather than a DLL.
 /*.o
 /lexilla-objects.rsp
-/markedit.lib
 
-# premake5-generated Makefiles (premake5.lua is the checked-in source)
+# Test executables and debug symbols
+/tests/
+
+
+# Generated build, package, and installer trees
 /build/
-
-# Inno Setup's default output directory (markedit.iss is the checked-in source)
+/dist/
+/dist.previous/
+/dest/
 /Output/
 
-# WebView2 browser profile/cache that builds before it moved to
-# %LOCALAPPDATA%\MarkEdit\WebView2 created beside markedit.exe
-webview2_data/
+# Runtime state and local tool configuration
+/webview2_data/
+/markedit.ini
+/.claude/
 
-# User settings persisted at runtime
-markedit.ini
+# Interrupted atomic writes
+*.markedit-*.tmp
 
 # Keep the vendored Scintilla headers, runtime, version, and licence; ignore the
 # upstream source/documentation tree because MarkEdit does not build it.
@@ -46,15 +41,4 @@ third_party/scintilla/bin/*
 !third_party/scintilla/version.txt
 
 # The dynamic-loader import library is used; the static loader is not.
-third_party/webview2/x64/WebView2LoaderStatic.lib
-.claude/settings.json
-.claude/
-
-/tests/test_editor_commands.exe
-/tests/test_editor_commands.pdb
-
-/tests/test_core.exe
-/tests/test_core.pdb
-
-/tests/test_recovery.exe
-/tests/test_recovery.pdb
+/third_party/webview2/x64/WebView2LoaderStatic.lib

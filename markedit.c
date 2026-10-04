@@ -68,6 +68,14 @@ static HWND g_hStatus;
 static HWND g_hOutline;
 static HWND g_hMinimap; /* zoomed-out Scintilla view sharing g_hEdit's document */
 static HWND g_hSplitEdit; /* fully-interactive second view sharing g_hEdit's document, stacked below it */
+static HWND g_hDebugPanel; /* integrated debug controls and variables, shown while a session is active */
+static HWND g_hDebugStatus;
+static HWND g_hDebugVariables;
+static HWND g_hDebugContinue;
+static HWND g_hDebugStepOver;
+static HWND g_hDebugStepInto;
+static HWND g_hDebugStepOut;
+static HWND g_hDebugClose;
 HWND g_hMainWnd;
 /* The main window's accelerator table, forwarded into from the preview's
    AcceleratorKeyPressed handler - see AccelKey_Invoke() - since disabling
@@ -123,16 +131,25 @@ WCHAR *g_gccBinOverride = NULL;   /* [Compiler] GccPath: folder to search for gc
 WCHAR *g_clangBinOverride = NULL; /* [Compiler] ClangPath: folder to search for clang.exe/clang++.exe instead of PATH */
 WCHAR *g_zigBinOverride = NULL;   /* [Compiler] ZigPath: folder to search for zig.exe instead of PATH */
 WCHAR *g_luaBinOverride = NULL;   /* [Compiler] LuaPath: folder to search for a Lua interpreter instead of PATH */
-WCHAR *g_gdbBinOverride = NULL;   /* [Compiler] GdbPath: folder to search for gdb.exe instead of PATH */
+WCHAR *g_gdbBinOverride = NULL;   /* [Compiler] GdbPath: optional folder overriding bundled/PATH GDB */
 WCHAR *g_compilerExtraFlags = NULL; /* [Compiler] ExtraFlags appended to Run/Debug C/C++ builds; set via Settings > Compiler */
 WCHAR *g_customCssPath = NULL;
 static WCHAR *g_debugLocationPath = NULL;
 static WCHAR *g_debugWorkingDirectory = NULL;
+static WCHAR *g_debugCommandPath = NULL;
+static WCHAR *g_debugOutputPath = NULL;
 static WCHAR *g_lastDebugSource = NULL;
 static HANDLE g_debugProcess = NULL;
+static HANDLE g_debugJob = NULL; /* owns the hidden GDB process tree so it cannot outlive MarkEdit */
 static int g_debugLocationSeen = 0;
 static int g_lastDebugLine = -1;
 static int g_activeDebuggerKind = 0; /* 1 = pdb, 2 = GDB */
+static int g_debugPanelVisible = 0;
+static char *g_lastDebugState = NULL;
+static void apply_debug_panel_theme(void);
+static void restore_persisted_breakpoints(const WCHAR *path);
+static void save_breakpoints_for_active_document(const WCHAR *path);
+static void save_all_document_breakpoints(void);
 #define MAX_DOCUMENTS RECOVERY_MAX_DOCUMENTS
 typedef struct Document {
     sptr_t sciDocument;
@@ -977,6 +994,7 @@ static void set_edit_text(HWND hEdit, const char *text, Sci_Position length) {
 #define MARKER_BOOKMARK 1
 #define MARKER_BREAKPOINT 2
 #define MARKER_DEBUG_LINE 3
+#define MARKER_DEBUG_ARROW 4
 #define FOLD_MARGIN_WIDTH 14
 #define INDICATOR_SPELLING 20
 static int g_lineNumberDigits = 0;
@@ -1098,7 +1116,11 @@ static void apply_editor_theme(HWND hEdit) {
                  (LPARAM)(g_editorDarkMode ? RGB(0xF8, 0x51, 0x49) : RGB(0xCF, 0x22, 0x2E)));
     SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_DEBUG_LINE,
                  (LPARAM)(g_editorDarkMode ? RGB(0x9E, 0x6A, 0x03) : RGB(0xFF, 0xDF, 0x5D)));
-    SendMessageA(hEdit, SCI_MARKERSETALPHA, MARKER_DEBUG_LINE, 90);
+    SendMessageA(hEdit, SCI_MARKERSETALPHA, MARKER_DEBUG_LINE, 110);
+    SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_DEBUG_ARROW,
+                 (LPARAM)(g_editorDarkMode ? THEME_DARK_BG : RGB(0xFF, 0xFF, 0xFF)));
+    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_DEBUG_ARROW,
+                 (LPARAM)(g_editorDarkMode ? RGB(0xD2, 0x99, 0x22) : RGB(0x9A, 0x67, 0x00)));
 
     SendMessageA(hEdit, SCI_INDICSETSTYLE, INDICATOR_SPELLING, INDIC_SQUIGGLE);
     SendMessageA(hEdit, SCI_INDICSETFORE, INDICATOR_SPELLING,
@@ -1404,6 +1426,7 @@ static void apply_main_theme(HWND hwnd) {
         themed_scrollbar_refresh(g_hOutline);
         InvalidateRect(g_hOutline, NULL, TRUE);
     }
+    apply_debug_panel_theme();
     explorer_apply_theme();
 }
 
@@ -1680,12 +1703,14 @@ static void configure_scintilla(HWND hEdit) {
        set once here and survive the SCI_SETDOCPOINTER swaps done by tabs. */
     SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_BOOKMARKS, SC_MARGIN_SYMBOL);
     SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_BOOKMARKS,
-                 (LPARAM)((1 << MARKER_BOOKMARK) | (1 << MARKER_BREAKPOINT)));
+                 (LPARAM)((1 << MARKER_BOOKMARK) | (1 << MARKER_BREAKPOINT) |
+                          (1 << MARKER_DEBUG_ARROW)));
     SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_BOOKMARKS, 14);
     SendMessageA(hEdit, SCI_SETMARGINSENSITIVEN, MARGIN_BOOKMARKS, TRUE);
     SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_BOOKMARK, SC_MARK_BOOKMARK);
     SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_BREAKPOINT, SC_MARK_CIRCLE);
     SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_DEBUG_LINE, SC_MARK_BACKGROUND);
+    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_DEBUG_ARROW, SC_MARK_SHORTARROW);
 
     SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_FOLD, SC_MARGIN_SYMBOL);
     SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_FOLD, (LPARAM)SC_MASK_FOLDERS);
@@ -1905,6 +1930,9 @@ static int restore_recovery_snapshot(void) {
         recovery_entry_free(&entry);
         apply_document_language(g_hEdit, g_currentFile);
         if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
+        /* Matches load_file_as(): a recovered tab keeps the breakpoints that
+           were persisted for the file it was snapshotted from. */
+        restore_persisted_breakpoints(g_currentFile);
         set_dirty(1);
         restored++;
     }
@@ -2005,7 +2033,7 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         SetTextColor(dc, theme_fg_color());
         SetBkMode(dc, TRANSPARENT);
         for (int i = 0; i < 4; i++) {
-            RECT partRect;
+            RECT partRect = {0};
             if (!SendMessageW(hwnd, SB_GETRECT, (WPARAM)i, (LPARAM)&partRect)) continue;
             partRect.left += 4;
             partRect.right -= 4;
@@ -3331,6 +3359,7 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
         replace_wstring(&g_currentFile, displayPath ? displayPath : path);
         apply_document_language(g_hEdit, g_currentFile);
         if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
+        restore_persisted_breakpoints(g_currentFile);
         ensure_large_file_editor_visible();
         /* An ordinary load's SCN_MODIFIED schedules this; a large-file
            load raises none, so clear the outline the old text built. */
@@ -3962,6 +3991,9 @@ static int save_to_path(const WCHAR *path) {
     replace_wstring(&g_currentFile, displayPath ? displayPath : path);
     apply_document_language(g_hEdit, g_currentFile);
     if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
+    /* Save As changes the persistence key from the old path to the new one;
+       write the current markers immediately instead of waiting for exit. */
+    save_breakpoints_for_active_document(g_currentFile);
     free(ioPath);
     record_document_file_time(g_activeDocument);
     update_document_mapping();
@@ -4217,6 +4249,7 @@ static void do_close_document_at(int index) {
     if (index < 0 || index >= g_documentCount) return;
     if (index != g_activeDocument) switch_document(index);
     if (!confirm_discard_if_dirty()) return;
+    save_all_document_breakpoints();
     save_active_document_view();
     int removeIndex = g_activeDocument;
     Document removed = g_documents[removeIndex];
@@ -4394,6 +4427,7 @@ static void do_exit(void) {
         }
     }
     if (original < g_documentCount) switch_document(original);
+    save_all_document_breakpoints();
     save_layout_settings();
     save_session_documents();
     clear_recovery_snapshot();
@@ -4778,7 +4812,9 @@ static void refill_replace_list(ReplaceReviewState *state) {
         size_t cap = wcslen(state->matches[i].label) + 8;
         WCHAR *row = (WCHAR *)malloc(cap * sizeof(WCHAR));
         if (!row) continue;
-        swprintf(row, cap, L"[%lc] %ls", state->matches[i].accepted ? L'x' : L' ', state->matches[i].label);
+        swprintf(row, cap, L"[%lc] %ls",
+                 (wint_t)(state->matches[i].accepted ? L'x' : L' '),
+                 state->matches[i].label);
         int idx = (int)SendMessageW(state->list, LB_ADDSTRING, 0, (LPARAM)row);
         if (idx >= 0) SendMessageW(state->list, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)i);
         free(row);
@@ -4798,7 +4834,8 @@ static void toggle_replace_row(ReplaceReviewState *state, int row) {
     size_t cap = wcslen(state->matches[matchIndex].label) + 8;
     WCHAR *text = (WCHAR *)malloc(cap * sizeof(WCHAR));
     if (text) {
-        swprintf(text, cap, L"[%lc] %ls", state->matches[matchIndex].accepted ? L'x' : L' ',
+        swprintf(text, cap, L"[%lc] %ls",
+                 (wint_t)(state->matches[matchIndex].accepted ? L'x' : L' '),
                  state->matches[matchIndex].label);
         SendMessageW(state->list, LB_DELETESTRING, (WPARAM)row, 0);
         SendMessageW(state->list, LB_INSERTSTRING, (WPARAM)row, (LPARAM)text);
@@ -4958,7 +4995,6 @@ static void find_in_edit(const char *needle, int matchCase, int down) {
     Sci_Position selEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETSELECTIONEND, 0, 0);
     int needleLen = (int)strlen(needle);
     Sci_Position foundAt = -1;
-    Sci_Position foundEnd = -1;
     SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, matchCase ? SCFIND_MATCHCASE : 0, 0);
 
     if (down) {
@@ -4982,7 +5018,7 @@ static void find_in_edit(const char *needle, int matchCase, int down) {
     }
 
     if (foundAt >= 0) {
-        foundEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        Sci_Position foundEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)foundAt, (LPARAM)foundEnd);
         SendMessageA(g_hEdit, SCI_SCROLLCARET, 0, 0);
         SetFocus(g_hEdit);
@@ -5517,7 +5553,7 @@ static HMENU build_menu(void) {
     AppendMenuA(hView, MF_STRING | (g_previewOnLeft ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_PREVIEW_ON_LEFT, "Preview on &Left");
     AppendMenuA(hView, MF_STRING | (g_focusMode ? MF_CHECKED : MF_UNCHECKED),
-                IDM_VIEW_FOCUS_MODE, "&Focus Mode\tF11");
+                IDM_VIEW_FOCUS_MODE, "&Focus Mode\tCtrl+Shift+F11");
     AppendMenuA(hView, MF_STRING | (g_wordWrap ? MF_CHECKED : MF_UNCHECKED),
                 IDM_VIEW_WORD_WRAP, "&Word Wrap\tAlt+Z");
     AppendMenuA(hView, MF_STRING | (g_spellCheckEnabled ? MF_CHECKED : MF_UNCHECKED) |
@@ -5631,7 +5667,8 @@ static HMENU build_menu(void) {
     AppendMenuA(hRun, MF_STRING, IDM_DEBUG_FILE, "&Debug File\tF5");
     AppendMenuA(hRun, MF_STRING, IDM_DEBUG_CONTINUE, "&Continue\tF6");
     AppendMenuA(hRun, MF_STRING, IDM_DEBUG_STEP_OVER, "Step &Over\tF10");
-    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_STEP_INTO, "Step &Into\tShift+F11");
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_STEP_INTO, "Step &Into\tF11");
+    AppendMenuA(hRun, MF_STRING, IDM_DEBUG_STEP_OUT, "Step O&ut\tShift+F11");
     AppendMenuA(hRun, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hRun, MF_STRING, IDM_DEBUG_BREAKPOINT, "Toggle &Breakpoint\tF9");
     AppendMenuA(hRun, MF_STRING, IDM_DEBUG_CLEAR_BREAKPOINTS, "&Clear All Breakpoints");
@@ -5806,6 +5843,222 @@ static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
     TOOLBAR_BUTTONS[index].paint(dis->hDC, &iconRc, fg);
 }
 
+/* The debugger stays in the main window instead of opening another tool
+   window. Its buttons remain native controls for keyboard/accessibility,
+   with owner-drawing used only to match the app's exact border palette. */
+static void apply_debug_panel_theme(void) {
+    if (!g_hDebugPanel) return;
+    HWND controls[] = { g_hDebugPanel, g_hDebugContinue, g_hDebugStepOver,
+                        g_hDebugStepInto, g_hDebugStepOut, g_hDebugClose,
+                        g_hDebugVariables };
+    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++)
+        if (controls[i]) {
+            apply_explorer_theme(controls[i]);
+            InvalidateRect(controls[i], NULL, TRUE);
+        }
+    if (g_hDebugVariables) {
+        ListView_SetBkColor(g_hDebugVariables, theme_bg_color());
+        ListView_SetTextBkColor(g_hDebugVariables, theme_bg_color());
+        ListView_SetTextColor(g_hDebugVariables, theme_fg_color());
+        HWND header = ListView_GetHeader(g_hDebugVariables);
+        if (header) {
+            apply_explorer_theme(header);
+            InvalidateRect(header, NULL, TRUE);
+        }
+    }
+    InvalidateRect(g_hDebugPanel, NULL, TRUE);
+}
+
+static void paint_debug_header(HWND header, HDC hdc) {
+    RECT client;
+    GetClientRect(header, &client);
+    fill_rect_color(hdc, &client, theme_bg_color());
+
+    HFONT font = (HFONT)SendMessageW(header, WM_GETFONT, 0, 0);
+    if (!font) font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    int count = (int)SendMessageW(header, HDM_GETITEMCOUNT, 0, 0);
+    for (int column = 0; column < count; column++) {
+        RECT rc = {0};
+        if (!SendMessageW(header, HDM_GETITEMRECT, (WPARAM)column, (LPARAM)&rc)) continue;
+        WCHAR label[64] = L"";
+        HDITEMW item = {0};
+        item.mask = HDI_TEXT;
+        item.pszText = label;
+        item.cchTextMax = sizeof(label) / sizeof(label[0]);
+        SendMessageW(header, HDM_GETITEMW, (WPARAM)column, (LPARAM)&item);
+
+        RECT divider = { rc.right - 1, rc.top, rc.right, rc.bottom };
+        fill_rect_color(hdc, &divider, theme_border_color());
+        rc.left += 7;
+        rc.right -= 5;
+        SetTextColor(hdc, theme_fg_color());
+        SetBkMode(hdc, TRANSPARENT);
+        DrawTextW(hdc, label, -1, &rc,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    RECT bottom = { client.left, client.bottom - 1, client.right, client.bottom };
+    fill_rect_color(hdc, &bottom, theme_border_color());
+    SelectObject(hdc, oldFont);
+}
+
+static LRESULT CALLBACK DebugHeaderSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                                 LPARAM lParam, UINT_PTR id,
+                                                 DWORD_PTR data) {
+    (void)lParam; (void)id; (void)data;
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        paint_debug_header(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_PRINTCLIENT) {
+        paint_debug_header(hwnd, (HDC)wParam);
+        return 0;
+    }
+    if (msg == WM_THEMECHANGED) {
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY)
+        RemoveWindowSubclass(hwnd, DebugHeaderSubclassProc, 1);
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void draw_debug_panel_button(const DRAWITEMSTRUCT *dis) {
+    int pressed = (dis->itemState & ODS_SELECTED) != 0;
+    int disabled = (dis->itemState & ODS_DISABLED) != 0;
+    COLORREF fill = pressed
+        ? (g_editorDarkMode ? THEME_DARK_BORDER : RGB(0xE1, 0xE7, 0xEC))
+        : theme_bg_color();
+    COLORREF text = disabled
+        ? (g_editorDarkMode ? RGB(0x7D, 0x85, 0x90) : RGB(0x8C, 0x95, 0x9F))
+        : theme_fg_color();
+    fill_rect_color(dis->hDC, &dis->rcItem, fill);
+
+    HPEN pen = CreatePen(PS_SOLID, 1, theme_border_color());
+    HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top,
+              dis->rcItem.right, dis->rcItem.bottom);
+    SelectObject(dis->hDC, oldBrush);
+    SelectObject(dis->hDC, oldPen);
+    DeleteObject(pen);
+
+    WCHAR label[64];
+    GetWindowTextW(dis->hwndItem, label, sizeof(label) / sizeof(label[0]));
+    RECT textRect = dis->rcItem;
+    SetTextColor(dis->hDC, text);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    DrawTextW(dis->hDC, label, -1, &textRect,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (dis->itemState & ODS_FOCUS) {
+        InflateRect(&textRect, -3, -3);
+        DrawFocusRect(dis->hDC, &textRect);
+    }
+}
+
+static LRESULT CALLBACK DebugPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                                LPARAM lParam, UINT_PTR id,
+                                                DWORD_PTR data) {
+    (void)id; (void)data;
+    if (msg == WM_SIZE) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int dpi = GetDpiForWindow(hwnd);
+        int pad = MulDiv(8, dpi, 96);
+        int row = MulDiv(26, dpi, 96);
+        int buttonWidth = MulDiv(112, dpi, 96);
+        int closeWidth = MulDiv(30, dpi, 96);
+        int availableForButtons = rc.right - closeWidth - pad * 7;
+        if (availableForButtons > 0 && buttonWidth * 4 > availableForButtons)
+            buttonWidth = availableForButtons / 4;
+        /* A panel too narrow for legible buttons hides them rather than
+           honouring the minimum width, which would push the leftmost button's
+           coordinates off the panel entirely. */
+        int showButtons = buttonWidth >= MulDiv(48, dpi, 96);
+        HWND buttons[] = { g_hDebugContinue, g_hDebugStepOver,
+                           g_hDebugStepInto, g_hDebugStepOut };
+        int x = rc.right - pad - closeWidth;
+        MoveWindow(g_hDebugClose, x, pad / 2, closeWidth, row, TRUE);
+        int statusWidth = 0;
+        if (showButtons) {
+            for (int i = 3; i >= 0; i--) {
+                x -= pad + buttonWidth;
+                MoveWindow(buttons[i], x, pad / 2, buttonWidth, row, TRUE);
+                ShowWindow(buttons[i], SW_SHOW);
+            }
+            statusWidth = x - pad * 2;
+        } else {
+            for (int i = 0; i < 4; i++) ShowWindow(buttons[i], SW_HIDE);
+        }
+        if (showButtons && statusWidth > MulDiv(40, dpi, 96)) {
+            MoveWindow(g_hDebugStatus, pad, pad / 2, statusWidth, row, TRUE);
+            ShowWindow(g_hDebugStatus, SW_SHOW);
+        } else {
+            ShowWindow(g_hDebugStatus, SW_HIDE);
+        }
+        int top = row + pad;
+        MoveWindow(g_hDebugVariables, pad + 1, top + 1, rc.right - pad * 2 - 2,
+                   rc.bottom - top - pad - 2, TRUE);
+        return 0;
+    }
+    if (msg == WM_COMMAND) {
+        WORD command = LOWORD(wParam);
+        if (command == ID_DEBUG_CLOSE) {
+            g_debugPanelVisible = 0;
+            ShowWindow(g_hDebugPanel, SW_HIDE);
+            if (g_hMainWnd) {
+                SendMessageW(g_hMainWnd, WM_SIZE, 0, 0);
+                SetFocus(g_hEdit);
+            }
+            return 0;
+        }
+        if (command == IDM_DEBUG_CONTINUE || command == IDM_DEBUG_STEP_OVER ||
+            command == IDM_DEBUG_STEP_INTO || command == IDM_DEBUG_STEP_OUT) {
+            SendMessageW(g_hMainWnd, WM_COMMAND, command, 0);
+            return 0;
+        }
+    }
+    if (msg == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        fill_rect_color((HDC)wParam, &rc, theme_bg_color());
+        RECT border = { rc.left, rc.top, rc.right, rc.top + 1 };
+        fill_rect_color((HDC)wParam, &border, theme_border_color());
+        int dpi = GetDpiForWindow(hwnd);
+        int pad = MulDiv(8, dpi, 96);
+        int top = MulDiv(26, dpi, 96) + pad;
+        RECT edge = { pad, top, rc.right - pad, top + 1 };
+        fill_rect_color((HDC)wParam, &edge, theme_border_color());
+        edge = (RECT){ pad, rc.bottom - pad - 1, rc.right - pad, rc.bottom - pad };
+        fill_rect_color((HDC)wParam, &edge, theme_border_color());
+        edge = (RECT){ pad, top, pad + 1, rc.bottom - pad };
+        fill_rect_color((HDC)wParam, &edge, theme_border_color());
+        edge = (RECT){ rc.right - pad - 1, top, rc.right - pad, rc.bottom - pad };
+        fill_rect_color((HDC)wParam, &edge, theme_border_color());
+        return 1;
+    }
+    if (msg == WM_DRAWITEM) {
+        const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+        if (dis->CtlType == ODT_BUTTON) {
+            draw_debug_panel_button(dis);
+            return TRUE;
+        }
+    }
+    if (msg == WM_CTLCOLORSTATIC) {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, theme_fg_color());
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)(g_mainBkBrush ? g_mainBkBrush : GetStockObject(WHITE_BRUSH));
+    }
+    if (msg == WM_NCDESTROY)
+        RemoveWindowSubclass(hwnd, DebugPanelSubclassProc, 1);
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 /* Lay the toolbar buttons out left-to-right along the reserved top strip,
    with a wider gap standing in for a separator between groups. All buttons
    are the same size, sized to the toolbar's height. xOffset shifts the whole
@@ -5972,6 +6225,19 @@ static void layout(HWND hwnd) {
     w -= contentX;
     if (w < 0) w = 0;
 
+    /* A debug session owns a docked strip beneath the editor/preview area.
+       The explorer remains full-height, while code, preview, and outline all
+       give up the same amount of vertical space so their bottoms stay level. */
+    if (g_hDebugPanel && g_debugPanelVisible && !g_focusMode && h >= 160) {
+        int debugHeight = MulDiv(190, GetDpiForWindow(hwnd), 96);
+        if (debugHeight > h / 2) debugHeight = h / 2;
+        MoveWindow(g_hDebugPanel, contentX, y + h - debugHeight, w, debugHeight, TRUE);
+        ShowWindow(g_hDebugPanel, SW_SHOW);
+        h -= debugHeight;
+    } else if (g_hDebugPanel) {
+        ShowWindow(g_hDebugPanel, SW_HIDE);
+    }
+
     int paneWidth = w;
     if (g_hOutline && g_outlineVisible && g_editorVisible && !g_focusMode) {
         int outlineWidth = MulDiv(230, GetDpiForWindow(hwnd), 96);
@@ -6102,9 +6368,9 @@ static void toggle_focus_mode(HWND hwnd) {
     layout(hwnd);
     InvalidateRect(hwnd, NULL, TRUE);
     save_layout_settings();
-    /* Focus mode hides the menu, so F11 is the only way back out. Keep it on
-       the editor where the accelerator is reachable - WebView2 claims F11 for
-       its own fullscreen whenever the preview has focus. */
+    /* Focus mode hides the menu, so Ctrl+Shift+F11 is the only way back out.
+       Keep focus on the editor where the accelerator is reachable - WebView2
+       claims F11 for its own fullscreen whenever the preview has focus. */
     if (g_editorVisible) SetFocus(g_hEdit);
 }
 
@@ -6466,6 +6732,104 @@ static int is_debuggable_source(DebugSourceKind kind) {
     return kind == DEBUG_SOURCE_PYTHON || kind == DEBUG_SOURCE_C || kind == DEBUG_SOURCE_CPP;
 }
 
+static int collect_breakpoint_lines(int **outLines);
+
+/* INI keys cannot safely contain arbitrary Windows paths, so each absolute,
+   case-folded path gets a stable 64-bit FNV-1a key. The value is simply a
+   comma-separated list of 1-based line numbers; deleting every breakpoint
+   deletes the key as well. */
+static int breakpoint_profile_key(const WCHAR *path, WCHAR *key, size_t capacity) {
+    if (!path || !path[0] || !key || capacity < 18) return 0;
+    WCHAR *normalized = absolute_path(path);
+    if (!normalized) normalized = wcsdup_heap(path);
+    if (!normalized) return 0;
+    CharLowerBuffW(normalized, (DWORD)wcslen(normalized));
+    ULONGLONG hash = 1469598103934665603ULL;
+    for (const WCHAR *character = normalized; *character; character++) {
+        hash ^= (unsigned char)(*character & 0xFF);
+        hash *= 1099511628211ULL;
+        hash ^= (unsigned char)((*character >> 8) & 0xFF);
+        hash *= 1099511628211ULL;
+    }
+    free(normalized);
+    return swprintf(key, capacity, L"F%016llX", (unsigned long long)hash) > 0;
+}
+
+static void save_breakpoints_for_active_document(const WCHAR *path) {
+    if (!path || !is_debuggable_source(debug_source_kind(path))) return;
+    WCHAR key[32];
+    WCHAR *settings = get_settings_path();
+    if (!settings || !breakpoint_profile_key(path, key, sizeof(key) / sizeof(key[0]))) {
+        free(settings);
+        return;
+    }
+    int *lines = NULL;
+    int count = collect_breakpoint_lines(&lines);
+    if (count <= 0) {
+        WritePrivateProfileStringW(L"Breakpoints", key, NULL, settings);
+    } else {
+        size_t capacity = (size_t)count * 24 + 1;
+        WCHAR *value = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+        if (value) {
+            size_t used = 0;
+            value[0] = 0;
+            for (int i = 0; i < count; i++) {
+                int written = swprintf(value + used, capacity - used,
+                                       i ? L",%d" : L"%d", lines[i] + 1);
+                if (written < 0) break;
+                used += (size_t)written;
+            }
+            WritePrivateProfileStringW(L"Breakpoints", key, value, settings);
+            free(value);
+        }
+    }
+    free(lines);
+    free(settings);
+}
+
+static void restore_persisted_breakpoints(const WCHAR *path) {
+    SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BREAKPOINT, 0);
+    if (!path || !is_debuggable_source(debug_source_kind(path))) return;
+    WCHAR key[32];
+    WCHAR *settings = get_settings_path();
+    if (!settings || !breakpoint_profile_key(path, key, sizeof(key) / sizeof(key[0]))) {
+        free(settings);
+        return;
+    }
+    WCHAR *value = read_profile_string(L"Breakpoints", key, settings);
+    free(settings);
+    if (!value) return;
+    Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    WCHAR *cursor = value;
+    while (*cursor) {
+        WCHAR *end = NULL;
+        long line = wcstol(cursor, &end, 10);
+        if (end == cursor) {
+            cursor++;
+            continue;
+        }
+        if (line > 0 && (Sci_Position)line <= lineCount)
+            SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)(line - 1), MARKER_BREAKPOINT);
+        cursor = end;
+        while (*cursor == L',' || *cursor == L' ' || *cursor == L'\t') cursor++;
+    }
+    free(value);
+}
+
+static void save_all_document_breakpoints(void) {
+    if (!g_hEdit || g_documentCount <= 0) return;
+    sptr_t active = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    int oldSwitching = g_switchingDocument;
+    g_switchingDocument = 1;
+    for (int i = 0; i < g_documentCount; i++) {
+        if (!g_documents[i].sciDocument || !g_documents[i].path) continue;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[i].sciDocument);
+        save_breakpoints_for_active_document(g_documents[i].path);
+    }
+    if (active) SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)active);
+    g_switchingDocument = oldSwitching;
+}
+
 /* Debugger breakpoints are separate from general-purpose bookmarks, but share
    the same narrow marker margin. Scintilla keeps them attached to their lines
    as text is inserted or removed. */
@@ -6480,6 +6844,7 @@ static void toggle_breakpoint_at_line(Sci_Position line) {
         SendMessageA(g_hEdit, SCI_MARKERDELETE, (WPARAM)line, (LPARAM)MARKER_BREAKPOINT);
     else
         SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)line, (LPARAM)MARKER_BREAKPOINT);
+    save_breakpoints_for_active_document(g_currentFile);
 }
 
 static void toggle_breakpoint_at_cursor(void) {
@@ -6489,7 +6854,25 @@ static void toggle_breakpoint_at_cursor(void) {
 }
 
 static void clear_debug_breakpoints(void) {
-    SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BREAKPOINT, 0);
+    if (!g_hEdit || g_documentCount <= 0) return;
+    sptr_t active = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    int oldSwitching = g_switchingDocument;
+    g_switchingDocument = 1;
+    for (int i = 0; i < g_documentCount; i++) {
+        if (!g_documents[i].sciDocument) continue;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[i].sciDocument);
+        SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BREAKPOINT, 0);
+    }
+    if (active) SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)active);
+    g_switchingDocument = oldSwitching;
+
+    /* The command says "all", so remove entries for closed files too rather
+       than allowing their persisted markers to reappear when reopened. */
+    WCHAR *settings = get_settings_path();
+    if (settings) {
+        WritePrivateProfileStringW(L"Breakpoints", NULL, NULL, settings);
+        free(settings);
+    }
 }
 
 static int is_runnable_python_path(const WCHAR *path) {
@@ -6576,6 +6959,25 @@ static WCHAR *executable_in_directory(const WCHAR *directory, const WCHAR *name)
     if (candidate && is_existing_file(candidate)) return candidate;
     free(candidate);
     return NULL;
+}
+
+/* A release keeps GDB beside MarkEdit under third_party/gdb/bin. Developer
+   builds use the same layout at the repository root. An explicit setting is
+   authoritative; otherwise prefer that reproducibly packaged copy and retain
+   PATH as a fallback for older/custom distributions. */
+static WCHAR *find_gdb_executable(void) {
+    if (g_gdbBinOverride) return executable_in_directory(g_gdbBinOverride, L"gdb.exe");
+
+    WCHAR *module = get_module_path();
+    WCHAR *directory = module ? path_directory(module) : NULL;
+    WCHAR *candidate = directory
+        ? path_join(directory, L"third_party\\gdb\\bin\\gdb.exe")
+        : NULL;
+    free(module);
+    free(directory);
+    if (candidate && is_existing_file(candidate)) return candidate;
+    free(candidate);
+    return executable_on_search_path(L"gdb.exe");
 }
 
 /* Prefer an activated environment, then a project-local .venv/venv found by
@@ -6714,36 +7116,145 @@ static void clear_debug_execution_markers(void) {
     for (int i = 0; i < g_documentCount; i++) {
         SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[i].sciDocument);
         SendMessageA(g_hEdit, SCI_MARKERDELETEALL, MARKER_DEBUG_LINE, 0);
+        SendMessageA(g_hEdit, SCI_MARKERDELETEALL, MARKER_DEBUG_ARROW, 0);
     }
     SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)active);
     g_switchingDocument = oldSwitching;
 }
 
+static WCHAR *debug_location_to_wide(const char *text);
+
+static void set_debug_panel_status(const WCHAR *status) {
+    if (g_hDebugStatus) SetWindowTextW(g_hDebugStatus, status ? status : L"Debugger");
+}
+
+static void show_debug_panel(void) {
+    g_debugPanelVisible = 1;
+    if (g_hMainWnd) layout(g_hMainWnd);
+}
+
+static void add_debug_variable(const char *name, const char *value) {
+    if (!g_hDebugVariables || !name || !name[0]) return;
+    WCHAR *wideName = debug_location_to_wide(name);
+    WCHAR *wideValue = debug_location_to_wide(value ? value : "");
+    if (!wideName || !wideValue) {
+        free(wideName); free(wideValue);
+        return;
+    }
+    LVITEMW item = {0};
+    item.mask = LVIF_TEXT;
+    item.iItem = ListView_GetItemCount(g_hDebugVariables);
+    item.pszText = wideName;
+    int row = (int)SendMessageW(g_hDebugVariables, LVM_INSERTITEMW, 0, (LPARAM)&item);
+    if (row >= 0) {
+        LVITEMW subitem = {0};
+        subitem.mask = LVIF_TEXT;
+        subitem.iSubItem = 1; subitem.pszText = wideValue;
+        SendMessageW(g_hDebugVariables, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&subitem);
+    }
+    free(wideName); free(wideValue);
+}
+
+/* Both debugger backends append a small variables section to the same state
+   snapshot that carries the source location. Python emits tab-separated
+   name/type/value rows; GDB emits its native `name = value` rows. Rewrites
+   `snapshot` in place, and only ever at or after the marker, so a location
+   prefix parsed either side of this call still reads correctly. */
+static void update_debug_variables(char *snapshot) {
+    if (!g_hDebugVariables || !snapshot) return;
+    char *variables = strstr(snapshot, "__MARKEDIT_VARIABLES__");
+    if (!variables) return;
+    variables += strlen("__MARKEDIT_VARIABLES__");
+    while (*variables == '\r' || *variables == '\n') variables++;
+    ListView_DeleteAllItems(g_hDebugVariables);
+    char *line = variables;
+    while (line && *line) {
+        char *next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        size_t length = strlen(line);
+        while (length && (line[length - 1] == '\r' || line[length - 1] == ' '))
+            line[--length] = 0;
+        if (line[0] && strcmp(line, "Arguments:") != 0 && strcmp(line, "Locals:") != 0) {
+            char *firstTab = strchr(line, '\t');
+            if (firstTab) {
+                *firstTab++ = 0;
+                char *secondTab = strchr(firstTab, '\t');
+                if (secondTab) {
+                    *secondTab++ = 0;
+                    add_debug_variable(line, secondTab);
+                }
+            } else {
+                char *equals = strstr(line, " = ");
+                if (equals) {
+                    *equals = 0;
+                    add_debug_variable(line, equals + 3);
+                }
+            }
+        }
+        line = next;
+    }
+}
+
 static void stop_debug_location_tracking(void) {
+    int hadSession = g_activeDebuggerKind != 0;
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_DEBUG_LOCATION);
+    if (g_debugJob) {
+        /* JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates PowerShell, GDB, and
+           the inferior together, including when MarkEdit itself is exiting. */
+        CloseHandle(g_debugJob);
+        g_debugJob = NULL;
+        /* Closing the job requests termination; wait briefly for its file
+           handles to close before removing the generated debugger files. */
+        if (g_debugProcess) WaitForSingleObject(g_debugProcess, 1000);
+    }
     if (g_debugProcess) {
         CloseHandle(g_debugProcess);
         g_debugProcess = NULL;
     }
     if (g_debugLocationPath) DeleteFileW(g_debugLocationPath);
+    if (g_debugCommandPath) DeleteFileW(g_debugCommandPath);
+    if (g_debugOutputPath) DeleteFileW(g_debugOutputPath);
     free(g_debugLocationPath); g_debugLocationPath = NULL;
     free(g_debugWorkingDirectory); g_debugWorkingDirectory = NULL;
+    free(g_debugCommandPath); g_debugCommandPath = NULL;
+    free(g_debugOutputPath); g_debugOutputPath = NULL;
     free(g_lastDebugSource); g_lastDebugSource = NULL;
+    free(g_lastDebugState); g_lastDebugState = NULL;
     g_debugLocationSeen = 0;
     g_lastDebugLine = -1;
     g_activeDebuggerKind = 0;
     clear_debug_execution_markers();
+    if (hadSession) set_debug_panel_status(L"Debug session ended");
 }
 
 static void start_debug_location_tracking(const WCHAR *locationPath,
                                           const WCHAR *workingDirectory,
-                                          int debuggerKind, HANDLE process) {
+                                          int debuggerKind, HANDLE process,
+                                          const WCHAR *commandPath,
+                                          const WCHAR *outputPath) {
     stop_debug_location_tracking();
     g_debugLocationPath = wcsdup_heap(locationPath);
     g_debugWorkingDirectory = wcsdup_heap(workingDirectory);
+    g_debugCommandPath = wcsdup_heap(commandPath);
+    g_debugOutputPath = wcsdup_heap(outputPath);
     g_debugProcess = process;
+    if (debuggerKind == 2 && process) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = {0};
+        jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        g_debugJob = CreateJobObjectW(NULL, NULL);
+        if (!g_debugJob ||
+            !SetInformationJobObject(g_debugJob, JobObjectExtendedLimitInformation,
+                                     &jobInfo, sizeof(jobInfo)) ||
+            !AssignProcessToJobObject(g_debugJob, process)) {
+            if (g_debugJob) CloseHandle(g_debugJob);
+            g_debugJob = NULL;
+        }
+    }
     g_debugLocationSeen = 1; /* The launcher creates a `starting` sentinel. */
     g_activeDebuggerKind = debuggerKind;
+    if (g_hDebugVariables) ListView_DeleteAllItems(g_hDebugVariables);
+    set_debug_panel_status(L"Debugger starting...");
+    show_debug_panel();
     if (g_hMainWnd) SetTimer(g_hMainWnd, IDT_DEBUG_LOCATION, 150, NULL);
 }
 
@@ -6822,11 +7333,41 @@ static void poll_debug_location(void) {
         return;
     }
     g_debugLocationSeen = 1;
+    /* GDB invokes hook-stop once more after the inferior exits. At that
+       point `frame` reports "No stack" instead of a source location. Treat
+       that sentinel as session completion; closing the job also closes the
+       otherwise-idle hidden GDB prompt. */
+    if (g_activeDebuggerKind == 2 && strstr(text, "Error while running hook_stop:") &&
+        strstr(text, "No stack.")) {
+        free(text);
+        stop_debug_location_tracking();
+        return;
+    }
+    if (g_lastDebugState && strcmp(g_lastDebugState, text) == 0) {
+        free(text);
+        return;
+    }
+    char *stateCopy = (char *)malloc((size_t)length + 1);
+    if (stateCopy) {
+        memcpy(stateCopy, text, (size_t)length + 1);
+        free(g_lastDebugState);
+        g_lastDebugState = stateCopy;
+    }
+/* Order matters: the variables section is located with strstr() from the start
+       of the snapshot, so it has to run before parse_debug_location()
+       NUL-terminates the snapshot just after the leading "file\nline". In
+       exchange it only rewrites separators at or after the marker, which
+       leaves the location prefix both backends put first intact. */
+    update_debug_variables(text);
     WCHAR *source = NULL;
     int line = 0;
     int parsed = parse_debug_location(text, &source, &line);
     free(text);
     if (!parsed) return;
+    WCHAR status[MAX_PATH + 64];
+    swprintf(status, sizeof(status) / sizeof(status[0]), L"Paused at %ls:%d",
+             PathFindFileNameW(source), line);
+    set_debug_panel_status(status);
     if (g_lastDebugSource && _wcsicmp(g_lastDebugSource, source) == 0 &&
         g_lastDebugLine == line) {
         free(source);
@@ -6838,6 +7379,7 @@ static void poll_debug_location(void) {
     }
     clear_debug_execution_markers();
     SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)(line - 1), MARKER_DEBUG_LINE);
+    SendMessageA(g_hEdit, SCI_MARKERADD, (WPARAM)(line - 1), MARKER_DEBUG_ARROW);
     SendMessageA(g_hEdit, SCI_ENSUREVISIBLE, (WPARAM)(line - 1), 0);
     Sci_Position visibleLines = (Sci_Position)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
     SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE,
@@ -6895,10 +7437,12 @@ static void run_debugger_command(int action) {
     const WCHAR *command = NULL;
     if (g_activeDebuggerKind == 1)
         command = action == IDM_DEBUG_STEP_OVER ? L"nv" :
-                  action == IDM_DEBUG_STEP_INTO ? L"sv" : L"cv";
+                  action == IDM_DEBUG_STEP_INTO ? L"sv" :
+                  action == IDM_DEBUG_STEP_OUT ? L"rv" : L"cv";
     else if (g_activeDebuggerKind == 2)
         command = action == IDM_DEBUG_STEP_OVER ? L"next" :
-                  action == IDM_DEBUG_STEP_INTO ? L"step" : L"continue";
+                  action == IDM_DEBUG_STEP_INTO ? L"step" :
+                  action == IDM_DEBUG_STEP_OUT ? L"finish" : L"continue";
     if (!command || !send_debug_console_command(command))
         MessageBoxW(g_hMainWnd, L"Start a debug session with F5 before using this command.",
                     L"Debugging", MB_OK | MB_ICONINFORMATION);
@@ -6928,7 +7472,7 @@ static int write_pdb_driver(const WCHAR *path, const WCHAR *statePath, const WCH
         return 0;
     }
     size_t capacity = wcslen(stateLiteral) + wcslen(scriptLiteral) +
-                      (size_t)breakpointCount * 64 + 3072;
+                      (size_t)breakpointCount * 64 + 5120;
     WCHAR *driver = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!driver) {
         free(stateLiteral); free(scriptLiteral);
@@ -6957,7 +7501,20 @@ static int write_pdb_driver(const WCHAR *path, const WCHAR *statePath, const WCH
         L"    def interaction(self, frame, traceback, _markedit_state=STATE, _markedit_pprint=pprint):\n"
         L"        try:\n"
         L"            with open(_markedit_state, 'w', encoding='utf-8') as stream:\n"
-        L"                stream.write(frame.f_code.co_filename + '\\n' + str(frame.f_lineno))\n"
+        L"                stream.write(frame.f_code.co_filename + '\\n' + str(frame.f_lineno) + "
+        L"'\\n__MARKEDIT_VARIABLES__\\n')\n"
+        L"                for key in sorted(frame.f_locals, key=str):\n"
+        L"                    if str(key).startswith('__'):\n"
+        L"                        continue\n"
+        L"                    value = frame.f_locals[key]\n"
+        L"                    try:\n"
+        L"                        rendered = _markedit_pprint.pformat(value, width=100, compact=True)\n"
+        L"                    except Exception as error:\n"
+        L"                        rendered = '<unavailable: ' + repr(error) + '>'\n"
+        L"                    rendered = rendered.replace('\\\\', '\\\\\\\\').replace('\\t', '\\\\t').replace('\\r', '\\\\r').replace('\\n', '\\\\n')\n"
+        L"                    if len(rendered) > 2000:\n"
+        L"                        rendered = rendered[:1997] + '...'\n"
+        L"                    stream.write(str(key) + '\\t' + type(value).__name__ + '\\t' + rendered + '\\n')\n"
         L"        except OSError:\n"
         L"            pass\n"
         L"        print('\\nLocals:')\n"
@@ -6970,6 +7527,7 @@ static int write_pdb_driver(const WCHAR *path, const WCHAR *statePath, const WCH
         L"    'alias globals pp globals()',\n"
         L"    'alias nv next',\n"
         L"    'alias sv step',\n"
+        L"    'alias rv return',\n"
         L"    'alias cv continue',\n"
         L"])\n",
         stateLiteral, scriptLiteral);
@@ -7087,7 +7645,7 @@ static void launch_python_file(int debug) {
     if (debug) {
         written = swprintf(parameters, capacity,
             L"-NoLogo -NoProfile -NoExit -Command \"Write-Host "
-            L"'pdb: F10/n next, Shift+F11/s step, F6/c continue; vars, globals, b <line>, p <expr>, where, q'; "
+            L"'pdb: F10/n next, F11/s step, Shift+F11/r return, F6/c continue; vars, globals, b <line>, p <expr>, where, q'; "
             L"& %ls%ls '-c' 'import runpy,sys; "
             L"runpy.run_path(sys.argv[1],run_name=\"markedit_pdb_driver\")' %ls; "
             L"try { [System.IO.File]::Delete(%ls) } catch {}; "
@@ -7119,7 +7677,8 @@ static void launch_python_file(int debug) {
     } else {
         if (debug) {
             filesHandedOff = 1;
-            start_debug_location_tracking(debugLocation, directory, 1, execute.hProcess);
+            start_debug_location_tracking(debugLocation, directory, 1, execute.hProcess,
+                                          pdbDriver, NULL);
         } else if (execute.hProcess) {
             CloseHandle(execute.hProcess);
         }
@@ -7322,6 +7881,10 @@ static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const 
     if (!commands) return 0;
     int written = swprintf(commands, capacity,
         L"set pagination off\n"
+        /* GDB stays hidden, but its inferior gets an independent visible
+           console so the program's own output and input remain accessible. */
+        L"set new-console on\n"
+        L"set width 0\n"
         L"set breakpoint pending on\n"
         L"set print pretty on\n"
         L"set print object on\n"
@@ -7337,7 +7900,14 @@ static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const 
         L"define hook-stop\n"
         L"  set logging enabled on\n"
         L"  frame\n"
+        L"  set print pretty off\n"
+        L"  echo \\n__MARKEDIT_VARIABLES__\\n\n"
+        L"  echo Arguments:\\n\n"
+        L"  info args\n"
+        L"  echo Locals:\\n\n"
+        L"  info locals\n"
         L"  set logging enabled off\n"
+        L"  set print pretty on\n"
         L"  vars\n"
         L"end\n", locationPath);
     if (written < 0) {
@@ -7444,10 +8014,7 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
         launch_msvc_file(kind, compiler);
         return;
     }
-    WCHAR *debugger = debug
-        ? (g_gdbBinOverride ? executable_in_directory(g_gdbBinOverride, L"gdb.exe")
-                             : executable_on_search_path(L"gdb.exe"))
-        : NULL;
+    WCHAR *debugger = debug ? find_gdb_executable() : NULL;
     if (!compiler) {
         free(debugger);
         MessageBoxW(g_hMainWnd,
@@ -7461,7 +8028,8 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
     if (debug && !debugger) {
         free(compiler);
         MessageBoxW(g_hMainWnd,
-                    L"GDB was not found on PATH. Install a Windows GDB toolchain to step through C/C++ code.",
+                    L"GDB was not found. Restore third_party\\gdb\\bin\\gdb.exe, "
+                    L"choose a GDB folder in Settings, or add gdb.exe to PATH.",
                     L"Debug C/C++", MB_OK | MB_ICONERROR);
         return;
     }
@@ -7515,18 +8083,24 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
     const WCHAR *standard = kind == DEBUG_SOURCE_C ? L"-std=gnu11" : L"-std=gnu++17";
     const WCHAR *buildFlags = debug
         ? L"'-g' '-O0' '-fno-omit-frame-pointer'" : L"'-O2'";
+    /* Debugger output and controls now live in MarkEdit. Keep the host
+       PowerShell console hidden for GDB sessions and let it exit with GDB;
+       ordinary Run still leaves its visible results console open. */
+    const WCHAR *shellOptions = debug
+        ? L"-NoLogo -NoProfile -WindowStyle Hidden -Command"
+        : L"-NoLogo -NoProfile -NoExit -Command";
     int written = swprintf(parameters, capacity,
-        L"-NoLogo -NoProfile -NoExit -Command \"Write-Host 'Building %ls...'; "
+        L"%ls \"Write-Host 'Building %ls...'; "
         L"& %ls%ls '%ls' %ls %ls '-o' %ls %ls; "
         L"if ($LASTEXITCODE -eq 0) { ",
-        kind == DEBUG_SOURCE_C ? L"C" : L"C++", quotedCompiler, compilerMode,
+        shellOptions, kind == DEBUG_SOURCE_C ? L"C" : L"C++", quotedCompiler, compilerMode,
         standard, buildFlags, extraFlags ? extraFlags : L"", quotedOutput, quotedSource);
     if (written < 0) goto native_parameters_cleanup;
     size_t used = (size_t)written;
 
     if (debug) {
         written = swprintf(parameters + used, capacity - used,
-            L"Write-Host 'gdb: next/n, step/s, continue/c, vars, print <expr>, bt, watch <expr>, quit'; "
+            L"Write-Host 'gdb: next/n, step/s, finish, continue/c, vars, print <expr>, bt, watch <expr>, quit'; "
             L"Write-Host 'Arguments and locals are shown automatically whenever execution stops.'; "
             L"& %ls '-q' '-x' %ls %ls; ",
             quotedDebugger, quotedGdbCommands, quotedOutput);
@@ -7565,14 +8139,15 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
     execute.lpFile = shell;
     execute.lpParameters = parameters;
     execute.lpDirectory = directory;
-    execute.nShow = SW_SHOWNORMAL;
+    execute.nShow = debug ? SW_HIDE : SW_SHOWNORMAL;
     if (!ShellExecuteExW(&execute)) {
         MessageBoxW(g_hMainWnd, L"The C/C++ build console could not be started.",
                     debug ? L"Debug C/C++" : L"Run C/C++", MB_OK | MB_ICONERROR);
     } else {
         if (debug) {
             commandFileHandedOff = 1;
-            start_debug_location_tracking(debugLocation, directory, 2, execute.hProcess);
+            start_debug_location_tracking(debugLocation, directory, 2, execute.hProcess,
+                                          gdbCommands, output);
         } else if (execute.hProcess) {
             CloseHandle(execute.hProcess);
         }
@@ -8509,7 +9084,8 @@ static int table_cell_is_numeric(const char *cell) {
 static int compare_table_sort_rows(const void *a, const void *b) {
     const char *keyA = ((const TableSortRow *)a)->key;
     const char *keyB = ((const TableSortRow *)b)->key;
-    if (!keyA) keyA = ""; if (!keyB) keyB = "";
+    if (!keyA) keyA = "";
+    if (!keyB) keyB = "";
     int result;
     if (g_tableSortNumeric) {
         double valueA = strtod(keyA, NULL), valueB = strtod(keyB, NULL);
@@ -9285,6 +9861,7 @@ static const PaletteCommand PALETTE_COMMANDS[] = {
     {L"Run: Run File", IDM_RUN_FILE}, {L"Run: Debug File", IDM_DEBUG_FILE},
     {L"Run: Continue", IDM_DEBUG_CONTINUE}, {L"Run: Step Over", IDM_DEBUG_STEP_OVER},
     {L"Run: Step Into", IDM_DEBUG_STEP_INTO},
+    {L"Run: Step Out", IDM_DEBUG_STEP_OUT},
     {L"Run: Toggle Breakpoint", IDM_DEBUG_BREAKPOINT},
     {L"Run: Clear All Breakpoints", IDM_DEBUG_CLEAR_BREAKPOINTS},
     {L"View: Toggle Preview", IDM_VIEW_TOGGLEPREVIEW}, {L"View: Toggle Editor", IDM_VIEW_TOGGLEEDITOR},
@@ -10280,6 +10857,9 @@ static int handle_debug_command(WORD cmd) {
         case IDM_DEBUG_STEP_INTO:
             run_debugger_command(IDM_DEBUG_STEP_INTO);
             break;
+        case IDM_DEBUG_STEP_OUT:
+            run_debugger_command(IDM_DEBUG_STEP_OUT);
+            break;
         case IDM_DEBUG_BREAKPOINT:
             toggle_breakpoint_at_cursor();
             break;
@@ -10681,8 +11261,6 @@ static int smart_markdown_newline(HWND hEdit) {
             markerEnd = i;
             ordered = 1;
             nextNumber = (int)number + 1;
-        } else {
-            i = markerStart;
         }
     }
     int hasMarker = markerEnd > markerStart;
@@ -11318,6 +11896,50 @@ static void initialize_main_window(HWND hwnd) {
         0, 0, 0, 0, hwnd, (HMENU)ID_OUTLINE, GetModuleHandleW(NULL), NULL);
     themed_scrollbar_attach(g_hOutline, THEMED_SCROLL_LISTBOX);
 
+    g_hDebugPanel = CreateWindowExW(0, L"STATIC", L"",
+        WS_CHILD | WS_CLIPCHILDREN,
+        0, 0, 0, 0, hwnd, (HMENU)ID_DEBUG_PANEL, GetModuleHandleW(NULL), NULL);
+    SetWindowSubclass(g_hDebugPanel, DebugPanelSubclassProc, 1, 0);
+    g_hDebugStatus = CreateWindowExW(0, L"STATIC", L"Debugger",
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP,
+        0, 0, 0, 0, g_hDebugPanel, (HMENU)ID_DEBUG_STATUS, GetModuleHandleW(NULL), NULL);
+    g_hDebugContinue = CreateWindowExW(0, L"BUTTON", L"Continue  F6",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_CONTINUE, GetModuleHandleW(NULL), NULL);
+    g_hDebugStepOver = CreateWindowExW(0, L"BUTTON", L"Step Over  F10",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_STEP_OVER, GetModuleHandleW(NULL), NULL);
+    g_hDebugStepInto = CreateWindowExW(0, L"BUTTON", L"Step Into  F11",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_STEP_INTO, GetModuleHandleW(NULL), NULL);
+    g_hDebugStepOut = CreateWindowExW(0, L"BUTTON", L"Step Out  Shift+F11",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_STEP_OUT, GetModuleHandleW(NULL), NULL);
+    g_hDebugClose = CreateWindowExW(0, L"BUTTON", L"X",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, g_hDebugPanel, (HMENU)ID_DEBUG_CLOSE, GetModuleHandleW(NULL), NULL);
+    g_hDebugVariables = CreateWindowExW(0, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL |
+        LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
+        0, 0, 0, 0, g_hDebugPanel, (HMENU)ID_DEBUG_VARIABLES, GetModuleHandleW(NULL), NULL);
+    ListView_SetExtendedListViewStyle(g_hDebugVariables,
+        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+    LVCOLUMNW debugColumn = {0};
+    debugColumn.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    debugColumn.pszText = L"Name"; debugColumn.cx = MulDiv(220, dpi, 96);
+    SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 0, (LPARAM)&debugColumn);
+    debugColumn.pszText = L"Value"; debugColumn.cx = MulDiv(640, dpi, 96); debugColumn.iSubItem = 1;
+    SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 1, (LPARAM)&debugColumn);
+    HWND debugHeader = ListView_GetHeader(g_hDebugVariables);
+    if (debugHeader) SetWindowSubclass(debugHeader, DebugHeaderSubclassProc, 1, 0);
+    HFONT debugFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HWND debugControls[] = { g_hDebugStatus, g_hDebugContinue, g_hDebugStepOver,
+                             g_hDebugStepInto, g_hDebugStepOut, g_hDebugClose,
+                             g_hDebugVariables };
+    for (size_t i = 0; i < sizeof(debugControls) / sizeof(debugControls[0]); i++)
+        SendMessageW(debugControls[i], WM_SETFONT, (WPARAM)debugFont, TRUE);
+    apply_debug_panel_theme();
+
     explorer_init(hwnd, explorer_request_open, show_text_input, reveal_path_in_explorer);
     if (g_explorerVisible && g_currentWorkspaceFolder) explorer_set_root(g_currentWorkspaceFolder);
 
@@ -11495,6 +12117,7 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
 }
 
 static void destroy_main_window(HWND hwnd) {
+    save_all_document_breakpoints();
     save_layout_settings();
     KillTimer(hwnd, IDT_PREVIEW_UPDATE);
     KillTimer(hwnd, IDT_FILE_WATCH);
@@ -11569,6 +12192,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetBkColor(hdcStatic, preview_bg_color());
                 SetTextColor(hdcStatic, g_previewDarkMode ? THEME_DARK_FG : RGB(0x00, 0x00, 0x00));
                 return (LRESULT)g_previewBkBrush;
+            }
+            /* g_hDebugPanel is itself a STATIC child, so its class asks the
+               main window for a brush after WM_ERASEBKGND. Returning the app
+               brush here prevents the class's default COLOR_WINDOW paint
+               from putting white seams back over the themed background. */
+            if ((HWND)lParam == g_hDebugPanel && g_mainBkBrush) {
+                HDC hdcStatic = (HDC)wParam;
+                SetBkColor(hdcStatic, theme_bg_color());
+                SetTextColor(hdcStatic, theme_fg_color());
+                return (LRESULT)g_mainBkBrush;
             }
             break;
         }
@@ -11822,6 +12455,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             do_exit();
             return 0;
         case WM_QUERYENDSESSION:
+            save_all_document_breakpoints();
             save_layout_settings();
             save_session_documents();
             write_recovery_snapshot();
@@ -11838,7 +12472,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     (void)lpCmdLine;
 
     INITCOMMONCONTROLSEX commonControls = { sizeof(commonControls),
-        ICC_TAB_CLASSES | ICC_BAR_CLASSES | ICC_TREEVIEW_CLASSES };
+        ICC_TAB_CLASSES | ICC_BAR_CLASSES | ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&commonControls);
 
     int argc = 0;
@@ -11953,7 +12587,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL | FSHIFT, 'V', IDM_VIEW_TOGGLEPREVIEW },
         { FVIRTKEY | FCONTROL | FSHIFT, 'E', IDM_VIEW_TOGGLEEDITOR },
         { FVIRTKEY | FCONTROL | FSHIFT, 'X', IDM_VIEW_EXPLORER },
-        { FVIRTKEY, VK_F11, IDM_VIEW_FOCUS_MODE },
+        { FVIRTKEY | FCONTROL | FSHIFT, VK_F11, IDM_VIEW_FOCUS_MODE },
         { FVIRTKEY | FALT, 'Z', IDM_VIEW_WORD_WRAP },
         { FVIRTKEY | FCONTROL, 'D', IDM_EDIT_DUPLICATE_LINE },
         { FVIRTKEY | FALT, VK_UP, IDM_EDIT_MOVE_LINE_UP },
@@ -11971,7 +12605,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         { FVIRTKEY | FCONTROL, VK_F6, IDM_VIEW_CYCLE_PANE },
         { FVIRTKEY | FCONTROL | FSHIFT, VK_F6, IDM_VIEW_CYCLE_PANE_PREV },
         { FVIRTKEY, VK_F10, IDM_DEBUG_STEP_OVER },
-        { FVIRTKEY | FSHIFT, VK_F11, IDM_DEBUG_STEP_INTO },
+        { FVIRTKEY, VK_F11, IDM_DEBUG_STEP_INTO },
+        { FVIRTKEY | FSHIFT, VK_F11, IDM_DEBUG_STEP_OUT },
         { FVIRTKEY, VK_F9, IDM_DEBUG_BREAKPOINT },
         { FVIRTKEY | FCONTROL, VK_F2, IDM_EDIT_BOOKMARK_TOGGLE },
         { FVIRTKEY, VK_F2, IDM_EDIT_BOOKMARK_NEXT },

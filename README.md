@@ -19,10 +19,10 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Wiki-style `[[Page Name]]` and `[[Page Name|label]]` links open the named Markdown file from the same folder as the current document, offering to create it if it doesn't exist yet. File → Go Back (Alt+Left) returns to wherever the jump was made from.
 - Local syntax highlighting for named code fences in the preview, and for Markdown source in the editor, with matching light and dark themes.
 - Editor syntax highlighting follows the file extension: Markdown, JSON, XML, HTML, YAML, C/C++/JavaScript/TypeScript, Python, Bash, PowerShell, and Lua. Unrecognised extensions fall back to Markdown.
-- Python files can be run with Ctrl+F5 or debugged with F5 through the standard `pdb` debugger. The current execution line is highlighted in MarkEdit and all local variables are printed at every stop. Use F10 to step over, Shift+F11 to step into, and F6 to continue from either the editor or the Run menu; `vars` and `globals` remain available in the console. MarkEdit prefers an activated virtual environment, then a project-local `.venv`/`venv`, then Python on `PATH`.
-- Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. Editor breakpoints are loaded before execution and the current execution line is highlighted in MarkEdit. Use F10 to step over, Shift+F11 to step into, and F6 to continue; `print expression`, `watch expression`, and `vars` are available in the console. Function arguments and local variables are shown automatically at each stop. Running can use GCC/G++, Clang, Zig, or MSVC (`cl.exe`, found via a standard Visual Studio/Build Tools install or `[Compiler] VcvarsallPath` in `markedit.ini`); debugging requires GCC/G++ or Clang plus GDB on `PATH` (MSVC is Run-only — there's no bundled debugger for it). `[Compiler] Backend` in `markedit.ini` pins Run/Debug to one of GCC, Clang, Zig, or MSVC instead of the default auto-detect order.
+- Python files can be run with Ctrl+F5 or debugged with F5 through the standard `pdb` debugger. At every stop, an integrated panel shows local variable names and values alongside Continue, Step Over, Step Into, and Step Out controls. The current execution line has a full-line highlight and gutter arrow. The same values are still printed in the console, where `vars` and `globals` remain available. MarkEdit prefers an activated virtual environment, then a project-local `.venv`/`venv`, then Python on `PATH`.
+- Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. GDB itself stays hidden while the debugged program opens its own visible console for input and output. Editor breakpoints are loaded before execution; at every stop, the integrated debugger shows function arguments and local values and highlights the current line. Use F10 to step over, F11 to step into, Shift+F11 to step out, and F6 to continue from the panel, editor, or Run menu; `print expression`, `watch expression`, and `vars` remain available in the console. Running can use GCC/G++, Clang, Zig, or MSVC (`cl.exe`, found via a standard Visual Studio/Build Tools install or `[Compiler] VcvarsallPath` in `markedit.ini`); debugging requires GCC/G++ or Clang and uses the bundled GDB 17.1. `[Compiler] GdbPath` can select another GDB folder, and `PATH` remains a fallback if the bundled copy is absent. MSVC is Run-only. `[Compiler] Backend` pins Run/Debug to one of GCC, Clang, Zig, or MSVC instead of the default auto-detect order.
 - Lua files (`.lua`) can be run with Ctrl+F5 using `lua`, a versioned `lua5.x`, or `luajit` found on `PATH`. Lua is Run-only; there is no Lua debugger integration.
-- F9 (or a click in the marker gutter) toggles per-document Python/C/C++ breakpoints, and Run → Clear All Breakpoints removes them together.
+- F9 (or a click in the marker gutter) toggles per-file Python/C/C++ breakpoints. Breakpoints follow edited lines and are restored for that file in later MarkEdit sessions; Run → Clear All Breakpoints removes them together.
 - Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
 - Tabs can be reordered by dragging. Dirty and unsaved tabs are snapshotted every five seconds to a recovery area under Local AppData and can be restored after an interrupted session.
 - A formatting toolbar (Bold, Italic, Strikethrough, Inline code, Code block, Headings, Blockquote, Lists, Link, Image, Table, Footnote, Horizontal rule, Alert, Toggle preview, Swap panel sides), shown while the editor pane is visible.
@@ -56,7 +56,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Editor zoom (View → Zoom In/Out/Reset or Ctrl+=/Ctrl+-/Ctrl+0) scales the editor text independently of the configured font size and is remembered between sessions.
 - Open Terminal Here (File menu or toolbar) opens Windows Terminal, falling back to Command Prompt, in the current file's folder. Show in Explorer (File menu) opens Explorer with the current file pre-selected.
 - An optional UTF-8 custom preview stylesheet (View → Markdown Theme → Custom Preview CSS), embedded into rendered HTML exports and remembered between sessions.
-- Focus mode (View → Focus Mode or F11) hides the menu, tabs, and formatting toolbar and is remembered between sessions.
+- Focus mode (View → Focus Mode or Ctrl+Shift+F11) hides the menu, tabs, and formatting toolbar and is remembered between sessions.
 - Window position/size/maximized state, editor/preview order, workspace visibility, active workspace folder, and splitter position are remembered between sessions; View → Preview on Left controls the editor/preview order.
 - Find/Replace, Go to Line, Undo/Redo, standard clipboard shortcuts. The search and replacement text, match-case setting, and search direction are remembered between sessions.
 - A Markdown syntax reference (Help → Markdown Reference), opened as a live Markdown document so the preview renders every construct it documents. Help → Keyboard Shortcuts opens the shortcut list the same way, and Help → About MarkEdit shows the version.
@@ -106,7 +106,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | Ctrl+Shift+X | Toggle file explorer |
 | Ctrl+\\ | Toggle split editor |
 | Ctrl+F6 / Ctrl+Shift+F6 | Cycle panes forward / back |
-| F11 | Toggle focus mode |
+| Ctrl+Shift+F11 | Toggle focus mode |
 | Alt+Z | Toggle word wrap |
 | Ctrl+= / Ctrl+- | Zoom in / out |
 | Ctrl+0 | Reset zoom |
@@ -114,7 +114,8 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | F5 | Debug active Python, C, or C++ file |
 | F6 | Continue the active debug session |
 | F10 | Step over the current line |
-| Shift+F11 | Step into the current call |
+| F11 | Step into the current call |
+| Shift+F11 | Step out of the current call |
 | F9 | Toggle debugger breakpoint |
 
 ## Building
@@ -160,9 +161,9 @@ Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https
 
 `dist/` is the clean, unpacked release staging folder generated by `build.bat`. It contains only:
 
-- `markedit.exe` (Lexilla is linked straight into it, not shipped separately) and the two required runtime DLLs: `Scintilla.dll` and `WebView2Loader.dll`;
+- `markedit.exe` (Lexilla is linked straight into it, not shipped separately), the two required runtime DLLs (`Scintilla.dll` and `WebView2Loader.dll`), and the standalone bundled GDB 17.1 executable;
 - the preview shell, Mermaid, Highlight.js, GitHub Markdown CSS, and the complete `katex/` asset tree needed for offline rendering; and
-- `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`.
+- `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`. The packaged GDB folder contains only `gdb.exe` and its small licence/provenance files; corresponding source remains in the MarkEdit source repository rather than the binary distribution.
 
 Do not package `markedit.ini`, debug symbols, import libraries, compiler objects, or temporary archives. Per-user state is created on first run outside the install folder: settings in `%APPDATA%\markedit\markedit.ini`, and the WebView2 browser profile and recovery snapshots under `%LOCALAPPDATA%\MarkEdit`. The Inno Setup and GitHub Actions manifests mirror this runtime-and-licences layout.
 
@@ -199,6 +200,7 @@ third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
 third_party/lexilla/     Lexilla 5.5.1 lexer sources and licence, trimmed to the supported languages
 third_party/cmark-gfm/   cmark-gfm 0.29.0.gfm.13 source (config.h adjusted for MSVC) and BSD-2-Clause licence
+third_party/gdb/         standalone GDB 17.1 runtime, GPLv3 text, corresponding source, and build recipe (only runtime/licence metadata is packaged)
 third_party/highlightjs/ Highlight.js 11.11.1 licence and provenance
 third_party/katex/       KaTeX 0.17.0 licence and provenance
 ```

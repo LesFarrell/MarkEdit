@@ -1,6 +1,7 @@
 #include "path_utils.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -50,8 +51,11 @@ WCHAR *path_directory(const WCHAR *path) {
 }
 
 WCHAR *path_join(const WCHAR *directory, const WCHAR *name) {
+    if (!directory || !name) return NULL;
     size_t directoryLength = wcslen(directory);
     size_t nameLength = wcslen(name);
+    if (nameLength > SIZE_MAX - 2 || directoryLength > SIZE_MAX - nameLength - 2)
+        return NULL;
     int addSlash = directoryLength > 0 && directory[directoryLength - 1] != L'\\' &&
                    directory[directoryLength - 1] != L'/';
     WCHAR *joined = (WCHAR *)malloc(
@@ -64,6 +68,7 @@ WCHAR *path_join(const WCHAR *directory, const WCHAR *name) {
 }
 
 WCHAR *absolute_path(const WCHAR *path) {
+    if (!path) return NULL;
     DWORD capacity = GetFullPathNameW(path, 0, NULL, NULL);
     if (!capacity) return wcsdup_heap(path);
     WCHAR *full = (WCHAR *)malloc((size_t)capacity * sizeof(WCHAR));
@@ -91,6 +96,7 @@ WCHAR *extended_path(const WCHAR *path) {
    in markedit.c) and the file explorer's live watcher (file_explorer.c), so
    both agree on which directories are noisy/uninteresting to recurse into. */
 int skipped_workspace_directory(const WCHAR *name) {
+    if (!name) return 0;
     static const WCHAR *skipped[] = {
         L".git", L".svn", L".hg", L"node_modules", L"build", L"dist", L"Output",
         L"webview2_data", L".vs", L".vscode"

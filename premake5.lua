@@ -172,6 +172,13 @@ local function staging_commands(posix)
     else
         table.insert(commands, 'xcopy /E /I /Y /Q "'..at("katex")..'" "'..at("dist/katex")..'" >nul')
     end
+    mkdir("dist/third_party/gdb/bin")
+    copy("third_party/gdb/bin/gdb.exe", "dist/third_party/gdb/bin/")
+    for _, file in ipairs({
+        "COPYING.txt", "COPYING.MinGW-w64-runtime.txt", "VERSION.txt", "SOURCE.md", "SHA256SUMS.txt"
+    }) do
+        copy("third_party/gdb/"..file, "dist/third_party/gdb/")
+    end
     local components = {}
     for component in pairs(DIST_LICENCES) do table.insert(components, component) end
     table.sort(components) -- a stable command order from run to run
