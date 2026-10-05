@@ -145,7 +145,10 @@ const documentBase = document.createElement('base');
 documentBase.href = 'https://document.local/';
 document.head.appendChild(documentBase);
 let zoomSeq = 0;
-let suppressScrollPost = false;
+let contentRenderPending = false;
+let contentRenderGeneration = 0;
+let programmaticScrollPending = false;
+let programmaticScrollGeneration = 0;
 let scrollPostPending = false;
 
 function sourceLine(element) {
@@ -177,17 +180,20 @@ window.scrollToSourceLine = function(line) {
     const ratio = last > first ? Math.max(0, Math.min(1, (line - first) / (last - first))) : 0;
     top += (sourceTop(next) - sourceTop(current)) * ratio;
   }
-  suppressScrollPost = true;
+  const generation = ++programmaticScrollGeneration;
+  programmaticScrollPending = true;
   window.scrollTo(0, Math.max(0, top - 12));
-  setTimeout(() => { suppressScrollPost = false; }, 80);
+  setTimeout(() => {
+    if (generation === programmaticScrollGeneration) programmaticScrollPending = false;
+  }, 80);
 };
 
 window.addEventListener('scroll', () => {
-  if (suppressScrollPost || scrollPostPending) return;
+  if (contentRenderPending || programmaticScrollPending || scrollPostPending) return;
   scrollPostPending = true;
   requestAnimationFrame(() => {
     scrollPostPending = false;
-    if (suppressScrollPost || !window.chrome?.webview) return;
+    if (contentRenderPending || programmaticScrollPending || !window.chrome?.webview) return;
     const blocks = sourceBlocks();
     if (!blocks.length) return;
     const top = window.scrollY + 18;
@@ -544,6 +550,12 @@ function updateSoloDiagramLayout() {
 }
 
 function setContent(html) {
+  /* Replacing the preview DOM can clamp scrollY to zero while the new
+     document (especially Mermaid diagrams) is still taking shape.  That is
+     a programmatic layout change, not a preview scroll from the user, so do
+     not feed its transient line 1 back into the editor. */
+  const renderGeneration = ++contentRenderGeneration;
+  contentRenderPending = true;
   // Wrap preview HTML in a container that GitHub's CSS targets.
   document.getElementById('content').innerHTML = '<article class="markdown-body">' + html + '</article>';
   const article = document.querySelector('#content > .markdown-body');
@@ -556,6 +568,9 @@ function setContent(html) {
   enhanceCodeCopy(article);
   wrapMermaidBlocks();
   window.__markeditRenderPromise = mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => updateSoloDiagramLayout());
+  window.__markeditRenderPromise.then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (renderGeneration === contentRenderGeneration) contentRenderPending = false;
+  })));
   updateSoloDiagramLayout();
   window.setTheme(window.__markeditTheme || 'light');
 }
