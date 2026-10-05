@@ -1,17 +1,17 @@
 name: build
 
 on:
-  push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install MinGW-w64
-        run: choco install mingw --no-progress -y
-      - name: Test parser
+      - name: Install Zig
+        run: choco install zig --version=0.15.2 --no-progress -y
+      - name: Run test suite
         shell: cmd
         run: test.bat
       - name: Build application
@@ -20,22 +20,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: markedit-windows-x64
-          path: |
-            markedit.exe
-            Scintilla.dll
-            WebView2Loader.dll
-            preview_shell.html
-            github-markdown.css
-            mermaid.min.js
-            highlight.min.js
-            highlight-powershell.min.js
-            highlight-github.min.css
-            highlight-github-dark.min.css
-            katex/**
-            LICENSE
-            THIRD_PARTY_NOTICES.md
-            third_party/cmark-gfm/COPYING
-            third_party/highlightjs/LICENSE
-            third_party/highlightjs/VERSION.txt
-            third_party/katex/LICENSE
-            third_party/katex/VERSION.txt
+          path: dist/**
