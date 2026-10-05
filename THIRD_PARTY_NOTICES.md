@@ -18,6 +18,23 @@ GCC-only features only under GCC/Clang, so the same copy also builds with MSVC.
 copyright (c) 2014–2022 Knut Sveidqvist and contributors, licensed under the
 MIT License.
 
+## GNU GDB 17.1
+
+C/C++ debugging launches a separate copy of
+[GNU GDB](https://sourceware.org/gdb/) built by w64devkit 2.7.0. GDB is not
+linked into `markedit.exe`; it remains a standalone program distributed under
+the GNU General Public License, version 3. The licence is reproduced at
+`third_party/gdb/COPYING.txt`.
+
+The complete corresponding source inputs, including GDB 17.1, its statically
+linked Expat 2.7.5, GNU libiconv 1.19 and PDCurses 3.9 sources, plus the exact
+w64devkit Dockerfile and GDB patches used for this binary, are available in the
+[MarkEdit source repository](https://github.com/LesFarrell/MarkEdit/tree/main/third_party/gdb/source).
+They are not duplicated in the smaller binary package. Provenance and checksums are recorded in
+`third_party/gdb/SOURCE.md` and `third_party/gdb/SHA256SUMS.txt`. Applicable
+MinGW-w64 runtime notices are reproduced at
+`third_party/gdb/COPYING.MinGW-w64-runtime.txt`.
+
 ## Highlight.js 11.11.1
 
 Fenced-code syntax highlighting uses

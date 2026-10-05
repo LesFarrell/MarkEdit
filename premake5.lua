@@ -249,6 +249,7 @@ project "markedit"
         "file_io.c", "file_io.h",
         "recovery.c", "recovery.h",
         "text_codec.c", "text_codec.h",
+        "workspace_text.c", "workspace_text.h",
         "json_formatter.c", "json_formatter.h",
         "markdown.c", "markdown.h",
         "settings.c", "settings.h",
@@ -359,7 +360,7 @@ project "test_core"
     targetname "test_core"
     targetdir "tests"
     objdir "build/obj/test_core"
-    files { "tests/test_core.c", "json_formatter.c", "text_codec.c", "file_io.c", "path_utils.c" }
+    files { "tests/test_core.c", "json_formatter.c", "text_codec.c", "workspace_text.c", "file_io.c", "path_utils.c" }
     includedirs { "." }
     warnings "Extra"
     optimize "Size"

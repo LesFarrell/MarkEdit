@@ -10,8 +10,11 @@
 /*.o
 /lexilla-objects.rsp
 
-# Test executables and debug symbols
-/tests/
+# Keep test sources in version control while ignoring their generated binaries.
+!/tests/
+/tests/*
+!/tests/*.c
+!/tests/*.js
 
 
 # Generated build, package, and installer trees

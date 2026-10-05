@@ -32,7 +32,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Toggle Comment wraps the selected lines in an HTML comment (Markdown has no line-comment syntax) and unwraps them again.
 - Select All Occurrences (Ctrl+Shift+L) turns every match of the word under the caret, or of the current selection, into its own selection for multi-caret editing.
 - Convert Line Endings (Edit → Convert → Line Endings) rewrites the document to CRLF, LF, or CR and switches the editor's save format to match.
-- Format JSON and Minify JSON (Tools menu) reindent the fenced code block at the caret, or the current selection. Text that cannot be read as JSON is left untouched. These re-indent rather than validate: bracket balance and string termination are checked, but grammar errors between tokens (a trailing comma, a missing colon) pass through unchanged.
+- Format JSON and Minify JSON (Tools menu) reindent the fenced code block at the caret, or the current selection. Input is validated first; malformed JSON, including trailing commas or missing separators, is left untouched.
 - Word wrap (View → Word Wrap or Alt+Z), remembered between sessions.
 - A live status bar reports the caret line/column, word and Unicode character counts, UTF-8/BOM state, line endings, and save/recovery state.
 - Native Windows spell checking (View → Spell Check), remembered between sessions. Misspelled Markdown prose gets a themed squiggle; links, inline code, and fenced code are excluded. Right-click a marked word for corrections, Ignore Word, or Add to Dictionary. View → Spell Check Language selects any installed Windows dictionary.

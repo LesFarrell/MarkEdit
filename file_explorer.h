@@ -27,11 +27,15 @@ typedef int (*ExplorerPromptTextFn)(const WCHAR *title, const WCHAR *prompt,
    rather than file_explorer.c reimplementing the same ShellExecuteW call. */
 typedef void (*ExplorerRevealFn)(const WCHAR *path);
 
+/* Reports a successful filesystem rename so open tabs and Markdown links can
+   be retargeted by the application layer. */
+typedef void (*ExplorerRenameFn)(const WCHAR *oldPath, const WCHAR *newPath, int isDirectory);
+
 /* Creates the explorer's TreeView child control (initially hidden) and
    records the callbacks used to reach markedit.c's static functions. Call
    once, from initialize_main_window(). */
 void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptTextFn promptText,
-                   ExplorerRevealFn revealPath);
+                   ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath);
 
 /* Re-applies dark/light native theming (scrollbars, background/text colour)
    to the tree control. Call whenever g_previewDarkMode changes. */

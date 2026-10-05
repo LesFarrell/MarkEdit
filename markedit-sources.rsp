@@ -5,6 +5,7 @@ preview_fallback.c
 path_utils.c
 file_io.c
 text_codec.c
+workspace_text.c
 json_formatter.c
 markdown.c
 settings.c

@@ -30,6 +30,9 @@ typedef struct {
     unsigned char low, high;
 } Utf8Validator;
 
+/* Return nonzero to continue or zero to cancel a long streaming operation. */
+typedef int (*TextProgressCallback)(size_t completed, size_t total, void *context);
+
 UINT text_ansi_code_page(void);
 /* Length of `encoding`'s byte-order mark at the start of `bytes`, or 0. */
 size_t text_bom_length(const char *bytes, size_t length, TextEncoding encoding);
@@ -52,7 +55,10 @@ int text_encode(TextCodecState *state, const char *input, size_t inputLength, in
 /* Whole-buffer decode to a NUL-terminated UTF-8 heap string. */
 char *text_decode_all(TextEncoding encoding, const char *bytes, size_t length, size_t *outLength);
 /* 1 when every character of `utf8` survives being saved as `encoding`,
-   0 when some wouldn't, -1 when there wasn't memory to find out. */
+   0 when some wouldn't, -1 when there wasn't memory to find out. The
+   progress variant additionally returns -2 when its callback cancels. */
 int text_encoding_is_lossless(const char *utf8, size_t length, TextEncoding encoding);
+int text_encoding_is_lossless_progress(const char *utf8, size_t length, TextEncoding encoding,
+                                       TextProgressCallback progress, void *context);
 
 #endif

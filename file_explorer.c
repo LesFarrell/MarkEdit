@@ -6,8 +6,8 @@
  * markedit.h's own forward declarations are static to markedit.c's
  * translation unit (that header is only ever included there), so this file
  * cannot call markedit.c functions like open_file_in_tab() or
- * show_text_input() by name. The two it needs are instead handed in once, as
- * plain function pointers, by explorer_init().
+ * show_text_input() by name. The operations it needs are instead handed in
+ * once as plain function pointers by explorer_init().
  */
 #define COBJMACROS
 
@@ -62,6 +62,7 @@ static HWND s_hParent = NULL;
 static ExplorerOpenFileFn s_openFile = NULL;
 static ExplorerPromptTextFn s_promptText = NULL;
 static ExplorerRevealFn s_revealPath = NULL;
+static ExplorerRenameFn s_renamedPath = NULL;
 static WCHAR *s_root = NULL;
 static HTREEITEM s_rootItem = NULL;
 static ExplorerWatcher *s_watcher = NULL;
@@ -387,6 +388,7 @@ static void rename_entry(HTREEITEM item, ExplorerItemData *data) {
         MessageBoxW(s_hParent, L"Could not rename - that name may already be in use.",
                     L"Rename", MB_OK | MB_ICONWARNING);
     } else {
+        if (s_renamedPath) s_renamedPath(data->fullPath, newPath, data->isDirectory);
         HTREEITEM parent = TreeView_GetParent(g_hExplorerTree, item);
         ExplorerItemData *parentData = parent ? tree_item_data(parent) : NULL;
         if (parentData) reload_directory_children(parent, parentData);
@@ -679,11 +681,12 @@ void explorer_handle_change_message(void) {
 /* ---- public API ---- */
 
 void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptTextFn promptText,
-                   ExplorerRevealFn revealPath) {
+                   ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath) {
     s_hParent = hParent;
     s_openFile = openFile;
     s_promptText = promptText;
     s_revealPath = revealPath;
+    s_renamedPath = renamedPath;
     InitializeCriticalSection(&s_pendingLock);
 
     g_hExplorerTree = CreateWindowExW(0, WC_TREEVIEWW, L"",

@@ -422,15 +422,24 @@ char *text_decode_all(TextEncoding encoding, const char *bytes, size_t length, s
     return output;
 }
 
-int text_encoding_is_lossless(const char *utf8, size_t length, TextEncoding encoding) {
+int text_encoding_is_lossless_progress(const char *utf8, size_t length, TextEncoding encoding,
+                                       TextProgressCallback progress, void *context) {
     /* UTF-8 output is the buffer's bytes as they are, so nothing is lost. */
-    if (encoding == TEXT_ENCODING_UTF8) return 1;
+    if (encoding == TEXT_ENCODING_UTF8)
+        return !progress || progress(length, length, context) ? 1 : -2;
     /* UTF-16 holds every character, but bytes that aren't valid UTF-8 (a
        file reopened with the wrong encoding) would become U+FFFD. */
     if (encoding != TEXT_ENCODING_ANSI) {
         Utf8Validator validator;
         utf8_validator_init(&validator);
-        return utf8_validator_feed(&validator, utf8, length) && utf8_validator_finish(&validator);
+        size_t offset = 0;
+        do {
+            size_t piece = length - offset > TEXT_CODEC_PIECE ? TEXT_CODEC_PIECE : length - offset;
+            if (!utf8_validator_feed(&validator, utf8 + offset, piece)) return 0;
+            offset += piece;
+            if (progress && !progress(offset, length, context)) return -2;
+        } while (offset < length);
+        return utf8_validator_finish(&validator);
     }
     TextCodecState state = { encoding, {0}, 0 };
     char *scratch = (char *)malloc(text_encode_capacity(TEXT_CODEC_PIECE));
@@ -443,7 +452,16 @@ int text_encoding_is_lossless(const char *utf8, size_t length, TextEncoding enco
         if (!text_encode(&state, utf8 + offset, piece, offset + piece == length, scratch,
                          text_encode_capacity(TEXT_CODEC_PIECE), &produced, &lossy)) lossy = 1;
         offset += piece;
+        if (progress && !progress(offset, length, context)) {
+            free(scratch);
+            return -2;
+        }
     } while (offset < length && !lossy);
     free(scratch);
     return !lossy;
+}
+
+int text_encoding_is_lossless(const char *utf8, size_t length, TextEncoding encoding) {
+    int result = text_encoding_is_lossless_progress(utf8, length, encoding, NULL, NULL);
+    return result == -2 ? -1 : result;
 }

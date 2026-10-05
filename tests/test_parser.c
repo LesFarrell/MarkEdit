@@ -79,6 +79,12 @@ int main(void) {
     expect_contains("mermaid breakout escaped", "```mermaid\n</pre><img onerror=alert(1)>\n```\n", "&lt;/pre&gt;&lt;img onerror=alert(1)&gt;");
     expect_contains("unicode", "# Caf\xC3\xA9 \xE2\x98\x95\n", "Caf\xC3\xA9 \xE2\x98\x95");
 
+    expect_contains_raw("front matter source positions", "---\ntitle: Example\n---\n# Body\n",
+                        "data-sourcepos=\"4:1-4:6\"");
+    expect_contains_raw("CRLF front matter source positions", "---\r\ntitle: Example\r\n---\r\n# Body\r\n",
+                        "data-sourcepos=\"4:1-4:6\"");
+    expect_contains_raw("CR front matter source positions", "---\rtitle: Example\r---\r# Body\r",
+                        "data-sourcepos=\"4:1-4:6\"");
     if (failures) return 1;
     puts("All parser tests passed.");
     return 0;

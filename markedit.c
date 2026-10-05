@@ -50,6 +50,7 @@
 #include "settings.h"
 #include "recent_list.h"
 #include "text_codec.h"
+#include "workspace_text.h"
 #include "theme.h"
 #include "themed_scrollbar.h"
 #include "toolbar_icons.h"
@@ -68,6 +69,7 @@ static HWND g_hStatus;
 static HWND g_hOutline;
 static HWND g_hMinimap; /* zoomed-out Scintilla view sharing g_hEdit's document */
 static HWND g_hSplitEdit; /* fully-interactive second view sharing g_hEdit's document, stacked below it */
+static HWND g_lastEditView; /* most recently active/updated editor pane */
 static HWND g_hDebugPanel; /* integrated debug controls and variables, shown while a session is active */
 static HWND g_hDebugStatus;
 static HWND g_hDebugVariables;
@@ -161,6 +163,7 @@ typedef struct Document {
     FILETIME fileTime;
     int hasFileTime;
     int externalChanged;
+    int externalDeleted;
     Sci_Position caret;
     Sci_Position anchor;
     Sci_Position firstVisibleLine;
@@ -229,6 +232,12 @@ int g_splitEditorVisible = 0;
 int g_splitEditorRatio = 500; /* main pane height as thousandths of the editor region's height */
 static int g_splitEditorPos = -1; /* pixel y of the split-editor splitter, local to the editor region */
 static RECT g_splitEditorSplitterRect = {0};
+
+static HWND tracked_edit_view(void) {
+    if (g_lastEditView == g_hSplitEdit && g_hSplitEdit && g_splitEditorVisible)
+        return g_hSplitEdit;
+    return g_hEdit;
+}
 static RECT g_splitterRect = {0}; /* the main editor/preview splitter's own bounds, for drawing its line */
 static int g_splitEditorRegionY = 0; /* window-relative y the editor region starts at, refreshed every layout() */
 static int g_draggingSplitEditor = 0;
@@ -1964,11 +1973,12 @@ static WCHAR g_statusPartText[4][128];
 
 static void update_status_position(void) {
     if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
-    Sci_Position position = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
-    Sci_Position column = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
+    HWND view = tracked_edit_view();
+    Sci_Position position = (Sci_Position)SendMessageA(view, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position line = (Sci_Position)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
+    Sci_Position column = (Sci_Position)SendMessageA(view, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
     swprintf(g_statusPartText[0], 128, L"Ln %lld, Col %lld", (long long)line, (long long)column);
-    int eol = (int)SendMessageA(g_hEdit, SCI_GETEOLMODE, 0, 0);
+    int eol = (int)SendMessageA(view, SCI_GETEOLMODE, 0, 0);
     const WCHAR *eolName = eol == SC_EOL_LF ? L"LF" : eol == SC_EOL_CR ? L"CR" : L"CRLF";
     WCHAR encodingName[40];
     switch (g_encoding) {
@@ -2302,7 +2312,7 @@ static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceiv
         if (end && *end == 0 && line >= 1 && line <= lineCount) {
             g_ignoreNextEditorScroll = 1;
             KillTimer(g_hMainWnd, IDT_SCROLL_SYNC);
-            SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)(line - 1), 0);
+            SendMessageA(tracked_edit_view(), SCI_SETFIRSTVISIBLELINE, (WPARAM)(line - 1), 0);
         }
     } else if (wcsncmp(message, L"wikilink:", 9) == 0) {
         open_wikilink_target(message + 9);
@@ -2921,7 +2931,8 @@ static void update_preview(void) {
 static void sync_preview_to_editor_scroll(void) {
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SCROLL_SYNC);
     if (!g_webviewReady || !g_webview || !g_editorVisible || !g_previewVisible) return;
-    Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0) + 1;
+    HWND view = tracked_edit_view();
+    Sci_Position line = (Sci_Position)SendMessageA(view, SCI_GETFIRSTVISIBLELINE, 0, 0) + 1;
     char script[96];
     snprintf(script, sizeof(script),
              "if(window.scrollToSourceLine)window.scrollToSourceLine(%lld);", (long long)line);
@@ -2981,6 +2992,7 @@ static void record_document_file_time(int index) {
         doc->hasFileTime = 1;
     }
     doc->externalChanged = 0;
+    doc->externalDeleted = 0;
     if (g_hTabs) InvalidateRect(g_hTabs, NULL, FALSE);
     free(ioPath);
 }
@@ -4378,6 +4390,14 @@ static void prompt_reload_active_external_change(void) {
     Document *doc = &g_documents[g_activeDocument];
     doc->externalChanged = 0;
     InvalidateRect(g_hTabs, NULL, FALSE);
+    if (doc->externalDeleted) {
+        MessageBoxW(g_hMainWnd,
+                    g_dirty
+                        ? L"This file was deleted or moved on disk. Your unsaved text is still open; saving will recreate the old path."
+                        : L"This file was deleted or moved on disk. Its text remains open; saving will recreate the old path.",
+                    L"MarkEdit", MB_OK | MB_ICONWARNING);
+        return;
+    }
     const WCHAR *message = g_dirty
         ? L"This file changed on disk. Reload it and discard your unsaved changes?"
         : L"This file changed on disk. Reload the updated version?";
@@ -4394,16 +4414,30 @@ static void check_external_file_change(void) {
         Document *doc = &g_documents[i];
         if (!doc->path) continue;
         WCHAR *ioPath = extended_path(doc->path);
+        if (!ioPath) continue;
         WIN32_FILE_ATTRIBUTE_DATA data;
-        int exists = ioPath && GetFileAttributesExW(ioPath, GetFileExInfoStandard, &data);
+        int exists = GetFileAttributesExW(ioPath, GetFileExInfoStandard, &data);
+        DWORD attributeError = exists ? ERROR_SUCCESS : GetLastError();
         free(ioPath);
         if (!exists) {
+            if (attributeError != ERROR_FILE_NOT_FOUND && attributeError != ERROR_PATH_NOT_FOUND)
+                continue;
+            if (doc->hasFileTime && !doc->externalDeleted) {
+                doc->externalDeleted = 1;
+                doc->externalChanged = 1;
+                changedVisual = 1;
+            }
             doc->hasFileTime = 0;
             continue;
         }
         if (!doc->hasFileTime) {
             doc->fileTime = data.ftLastWriteTime;
             doc->hasFileTime = 1;
+            if (doc->externalDeleted) {
+                doc->externalDeleted = 0;
+                doc->externalChanged = 1;
+                changedVisual = 1;
+            }
             continue;
         }
         if (CompareFileTime(&doc->fileTime, &data.ftLastWriteTime) != 0) {
@@ -6524,17 +6558,19 @@ static void select_next_occurrence(HWND hEdit) {
 
 /* Keeps the matching-brace highlight (STYLE_BRACELIGHT/STYLE_BRACEBAD, set up
    in apply_editor_theme) in sync with the caret. Called on every SCN_UPDATEUI. */
-static void update_brace_highlight(void) {
+static void update_brace_highlight(HWND hEdit) {
     /* An unmatched brace makes SCI_BRACEMATCH scan to the document's end,
        on every caret move. */
-    Sci_Position bracePos = g_largeFile ? -1 : brace_position_near_caret(g_hEdit);
+    HWND other = hEdit == g_hSplitEdit ? g_hEdit : g_hSplitEdit;
+    if (other) SendMessageA(other, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
+    Sci_Position bracePos = g_largeFile ? -1 : brace_position_near_caret(hEdit);
     if (bracePos < 0) {
-        SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
+        SendMessageA(hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
         return;
     }
-    Sci_Position match = (Sci_Position)SendMessageA(g_hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
-    if (match >= 0) SendMessageA(g_hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)bracePos, (LPARAM)match);
-    else SendMessageA(g_hEdit, SCI_BRACEBADLIGHT, (WPARAM)bracePos, 0);
+    Sci_Position match = (Sci_Position)SendMessageA(hEdit, SCI_BRACEMATCH, (WPARAM)bracePos, 0);
+    if (match >= 0) SendMessageA(hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)bracePos, (LPARAM)match);
+    else SendMessageA(hEdit, SCI_BRACEBADLIGHT, (WPARAM)bracePos, 0);
 }
 
 #define WORD_COMPLETION_MIN_PREFIX 2
@@ -6585,43 +6621,43 @@ static void theme_autocomplete_popup(void) {
    SCN_CHARADDED; does nothing once the list is already showing, since
    Scintilla narrows the visible entries itself as more of the word is
    typed. */
-static void update_word_completions(void) {
+static void update_word_completions(HWND hEdit) {
     if (g_largeFile) return;
-    Sci_Position pos = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    Sci_Position wordStart = (Sci_Position)SendMessageA(g_hEdit, SCI_WORDSTARTPOSITION, (WPARAM)pos, (LPARAM)1);
+    Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position wordStart = (Sci_Position)SendMessageA(hEdit, SCI_WORDSTARTPOSITION, (WPARAM)pos, (LPARAM)1);
     Sci_Position prefixLen = pos - wordStart;
     if (prefixLen < WORD_COMPLETION_MIN_PREFIX) return;
-    if (SendMessageA(g_hEdit, SCI_AUTOCACTIVE, 0, 0)) return;
+    if (SendMessageA(hEdit, SCI_AUTOCACTIVE, 0, 0)) return;
 
     char *prefix = (char *)malloc((size_t)prefixLen + 1);
     if (!prefix) return;
     struct Sci_TextRangeFull prefixRange = { { wordStart, pos }, prefix };
-    SendMessageA(g_hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&prefixRange);
+    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&prefixRange);
     prefix[prefixLen] = 0;
 
-    Sci_Position docLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    SendMessageA(g_hEdit, SCI_SETSEARCHFLAGS, SCFIND_WORDSTART, 0);
+    Sci_Position docLength = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(hEdit, SCI_SETSEARCHFLAGS, SCFIND_WORDSTART, 0);
 
     char *words[WORD_COMPLETION_MAX_WORDS];
     int wordCount = 0;
     Sci_Position searchFrom = 0;
     while (wordCount < WORD_COMPLETION_MAX_WORDS) {
-        SendMessageA(g_hEdit, SCI_SETTARGETSTART, (WPARAM)searchFrom, 0);
-        SendMessageA(g_hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
-        Sci_Position matchStart = (Sci_Position)SendMessageA(g_hEdit, SCI_SEARCHINTARGET, (WPARAM)prefixLen, (LPARAM)prefix);
+        SendMessageA(hEdit, SCI_SETTARGETSTART, (WPARAM)searchFrom, 0);
+        SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
+        Sci_Position matchStart = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)prefixLen, (LPARAM)prefix);
         if (matchStart < 0) break;
-        Sci_Position matchTargetEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_GETTARGETEND, 0, 0);
+        Sci_Position matchTargetEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETTARGETEND, 0, 0);
         searchFrom = matchTargetEnd;
 
         if (matchStart == wordStart) continue; /* the word being typed itself */
-        Sci_Position wordEnd = (Sci_Position)SendMessageA(g_hEdit, SCI_WORDENDPOSITION, (WPARAM)matchStart, (LPARAM)1);
+        Sci_Position wordEnd = (Sci_Position)SendMessageA(hEdit, SCI_WORDENDPOSITION, (WPARAM)matchStart, (LPARAM)1);
         Sci_Position candidateLen = wordEnd - matchStart;
         if (candidateLen <= prefixLen) continue;
 
         char *candidate = (char *)malloc((size_t)candidateLen + 1);
         if (!candidate) continue;
         struct Sci_TextRangeFull candidateRange = { { matchStart, wordEnd }, candidate };
-        SendMessageA(g_hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&candidateRange);
+        SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&candidateRange);
         candidate[candidateLen] = 0;
 
         int duplicate = 0;
@@ -6633,7 +6669,7 @@ static void update_word_completions(void) {
     }
     free(prefix);
 
-    if (wordCount == 0) { SendMessageA(g_hEdit, SCI_AUTOCCANCEL, 0, 0); return; }
+    if (wordCount == 0) { SendMessageA(hEdit, SCI_AUTOCCANCEL, 0, 0); return; }
 
     qsort(words, (size_t)wordCount, sizeof(char *), compare_words_ordinal);
 
@@ -6649,7 +6685,7 @@ static void update_word_completions(void) {
             if (w + 1 < wordCount) list[o++] = ' ';
         }
         list[o] = 0;
-        SendMessageA(g_hEdit, SCI_AUTOCSHOW, (WPARAM)prefixLen, (LPARAM)list);
+        SendMessageA(hEdit, SCI_AUTOCSHOW, (WPARAM)prefixLen, (LPARAM)list);
         theme_autocomplete_popup();
         free(list);
     }
@@ -8482,11 +8518,12 @@ static void configure_minimap(HWND hMinimap) {
    changes size, or the minimap is resized/shown. */
 static void update_minimap_viewport(void) {
     if (!g_hMinimap || !g_hEdit || !g_minimapVisible || !IsWindowVisible(g_hMinimap)) return;
+    HWND view = tracked_edit_view();
 
-    Sci_Position totalLines = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-    Sci_Position mainFirstVisible = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
-    Sci_Position mainFirstDocLine = (Sci_Position)SendMessageA(g_hEdit, SCI_DOCLINEFROMVISIBLE, (WPARAM)mainFirstVisible, 0);
-    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position totalLines = (Sci_Position)SendMessageA(view, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position mainFirstVisible = (Sci_Position)SendMessageA(view, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    Sci_Position mainFirstDocLine = (Sci_Position)SendMessageA(view, SCI_DOCLINEFROMVISIBLE, (WPARAM)mainFirstVisible, 0);
+    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(view, SCI_LINESONSCREEN, 0, 0);
 
     int minimapLineHeight = (int)SendMessageA(g_hMinimap, SCI_TEXTHEIGHT, 0, 0);
     if (minimapLineHeight < 1) minimapLineHeight = 1;
@@ -8526,14 +8563,15 @@ static void update_minimap_viewport(void) {
    centered in its viewport - used for both a single click and drag-to-scroll. */
 static void minimap_scroll_main_to_y(int y) {
     if (!g_hEdit || !g_hMinimap) return;
+    HWND view = tracked_edit_view();
     Sci_Position pos = (Sci_Position)SendMessageA(g_hMinimap, SCI_POSITIONFROMPOINT, (WPARAM)0, (LPARAM)y);
     if (pos < 0) return;
     Sci_Position docLine = (Sci_Position)SendMessageA(g_hMinimap, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
-    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(g_hEdit, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(view, SCI_LINESONSCREEN, 0, 0);
     Sci_Position target = docLine - mainLinesOnScreen / 2;
     if (target < 0) target = 0;
-    Sci_Position targetVisible = (Sci_Position)SendMessageA(g_hEdit, SCI_VISIBLEFROMDOCLINE, (WPARAM)target, 0);
-    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)targetVisible, 0);
+    Sci_Position targetVisible = (Sci_Position)SendMessageA(view, SCI_VISIBLEFROMDOCLINE, (WPARAM)target, 0);
+    SendMessageA(view, SCI_SETFIRSTVISIBLELINE, (WPARAM)targetVisible, 0);
 }
 
 static LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
@@ -8563,7 +8601,7 @@ static LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_LBUTTONDBLCLK:
             return 0;
         case WM_MOUSEWHEEL:
-            if (g_hEdit) SendMessageA(g_hEdit, WM_MOUSEWHEEL, wParam, lParam);
+            if (g_hEdit) SendMessageA(tracked_edit_view(), WM_MOUSEWHEEL, wParam, lParam);
             return 0;
         case WM_PAINT: {
             LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -8598,6 +8636,7 @@ static void toggle_minimap(HWND hwnd) {
 
 static void toggle_split_editor(HWND hwnd) {
     g_splitEditorVisible = !g_splitEditorVisible;
+    if (!g_splitEditorVisible) g_lastEditView = g_hEdit;
     update_view_menu(hwnd);
     layout(hwnd);
     InvalidateRect(hwnd, NULL, TRUE);
@@ -9213,6 +9252,7 @@ typedef struct WorkspaceFiles {
     int *lines;
     int count;
     int capacity;
+    int truncated;
     WCHAR *root;
 } WorkspaceFiles;
 
@@ -9289,7 +9329,7 @@ static int workspace_file_extension(const WCHAR *name) {
 }
 
 static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *directory, int depth) {
-    if (depth > 24 || files->count >= 5000) return;
+    if (depth > 24 || files->count >= 5000) { files->truncated = 1; return; }
     WCHAR *pattern = path_join(directory, L"*");
     if (!pattern) return;
     WIN32_FIND_DATAW data;
@@ -9316,7 +9356,32 @@ static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *direct
         }
         free(full);
     } while (files->count < 5000 && FindNextFileW(search, &data));
+    if (files->count >= 5000) files->truncated = 1;
     FindClose(search);
+}
+
+static void warn_incomplete_workspace_scan(const WCHAR *title, int enumerationTruncated,
+                                           int skippedLarge, int readFailed,
+                                           int resultsTruncated) {
+    if (!enumerationTruncated && !skippedLarge && !readFailed && !resultsTruncated) return;
+    WCHAR message[640];
+    int used = swprintf(message, sizeof(message) / sizeof(message[0]),
+                        L"Some workspace content was not searched:");
+    if (enumerationTruncated && used > 0)
+        used += swprintf(message + used, sizeof(message) / sizeof(message[0]) - (size_t)used,
+                         L"\n\u2022 The 5,000-file or 24-folder-depth limit was reached.");
+    if (skippedLarge && used > 0)
+        used += swprintf(message + used, sizeof(message) / sizeof(message[0]) - (size_t)used,
+                         L"\n\u2022 %d file%ls larger than 4 MB %ls skipped.", skippedLarge,
+                         skippedLarge == 1 ? L"" : L"s", skippedLarge == 1 ? L"was" : L"were");
+    if (readFailed && used > 0)
+        used += swprintf(message + used, sizeof(message) / sizeof(message[0]) - (size_t)used,
+                         L"\n\u2022 %d file%ls could not be read.", readFailed,
+                         readFailed == 1 ? L"" : L"s");
+    if (resultsTruncated && used > 0)
+        swprintf(message + used, sizeof(message) / sizeof(message[0]) - (size_t)used,
+                 L"\n\u2022 Only the first 2,000 matches are shown.");
+    MessageBoxW(g_hMainWnd, message, title, MB_OK | MB_ICONWARNING);
 }
 
 static int collect_workspace_files_at(WorkspaceFiles *files, const WCHAR *root) {
@@ -9338,6 +9403,8 @@ static int collect_workspace_files(WorkspaceFiles *files) {
 static void do_quick_open_in(const WCHAR *root) {
     WorkspaceFiles files;
     if (!collect_workspace_files_at(&files, root)) return;
+    if (files.truncated)
+        warn_incomplete_workspace_scan(L"Quick Open", 1, 0, 0, 0);
     if (!files.count) {
         MessageBoxW(g_hMainWnd, L"No supported text files were found in that folder.",
                     L"Quick Open", MB_OK | MB_ICONINFORMATION);
@@ -9437,21 +9504,32 @@ static void do_find_in_folder(void) {
     if (!query) { free_workspace_files(&files); return; }
     WorkspaceFiles results = {0};
     results.root = wcsdup_heap(files.root);
+    int skippedLarge = 0, readFailed = 0, resultsTruncated = 0;
     for (int i = 0; i < files.count && results.count < 2000; i++) {
         WIN32_FILE_ATTRIBUTE_DATA attributes;
-        if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes) ||
-            attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) continue;
+        if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes)) {
+            readFailed++;
+            continue;
+        }
+        if (attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) {
+            skippedLarge++;
+            continue;
+        }
         char *content = read_text_file(files.paths[i], NULL, NULL, NULL);
-        if (!content) continue;
+        if (!content) { readFailed++; continue; }
         char *cursor = content;
         int lineNumber = 1;
         while (*cursor && results.count < 2000) {
-            char *end = strchr(cursor, '\n');
-            if (end) *end = 0;
-            if (StrStrIA(cursor, query)) {
+            size_t terminatorLength = 0;
+            char *end = text_line_break(cursor, &terminatorLength);
+            char saved = *end;
+            *end = 0;
+            if (utf8_case_find(cursor, query)) {
                 char snippet[181];
                 size_t snippetLength = strlen(cursor);
                 if (snippetLength > 180) snippetLength = 180;
+                while (snippetLength && ((unsigned char)cursor[snippetLength] & 0xC0) == 0x80)
+                    snippetLength--;
                 memcpy(snippet, cursor, snippetLength); snippet[snippetLength] = 0;
                 while (snippetLength && (snippet[snippetLength - 1] == '\r' ||
                        snippet[snippetLength - 1] == '\n')) snippet[--snippetLength] = 0;
@@ -9466,13 +9544,19 @@ static void do_find_in_folder(void) {
                 }
                 free(wideSnippet);
             }
-            if (!end) break;
-            *end = '\n'; cursor = end + 1; lineNumber++;
+            *end = saved;
+            if (!terminatorLength) break;
+            cursor = end + terminatorLength; lineNumber++;
         }
+        if (results.count >= 2000) resultsTruncated = 1;
         free(content);
     }
+    if (results.count >= 2000 && files.count > 0) resultsTruncated = 1;
+    int enumerationTruncated = files.truncated;
     free(query);
     free_workspace_files(&files);
+    warn_incomplete_workspace_scan(L"Find in Folder", enumerationTruncated, skippedLarge,
+                                   readFailed, resultsTruncated);
     if (!results.count) {
         MessageBoxW(g_hMainWnd, L"No matches were found.", L"Find in Folder",
                     MB_OK | MB_ICONINFORMATION);
@@ -9531,7 +9615,7 @@ static void reload_document_buffer(int index, const char *content) {
    occur (or is empty - callers must not pass one, since StrStrIA would
    "find" it at every position and loop forever). */
 static char *replace_all_in_line(const char *line, const char *find, const char *replace) {
-    if (!find[0] || !StrStrIA(line, find)) return NULL;
+    if (!find[0] || !utf8_case_find(line, find)) return NULL;
     size_t findLen = strlen(find), replaceLen = strlen(replace);
     size_t cap = strlen(line) + replaceLen + 64;
     char *out = (char *)malloc(cap);
@@ -9539,7 +9623,7 @@ static char *replace_all_in_line(const char *line, const char *find, const char 
     size_t outLen = 0;
     const char *cursor = line;
     const char *hit;
-    while ((hit = StrStrIA(cursor, find)) != NULL) {
+    while ((hit = utf8_case_find(cursor, find)) != NULL) {
         size_t prefixLen = (size_t)(hit - cursor);
         size_t needed = outLen + prefixLen + replaceLen + 1;
         if (needed > cap) {
@@ -9596,7 +9680,7 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
             content = read_text_file(path, &fileLength, &encoding, &hasBom);
             length = fileLength;
         }
-        if (!content) { i = fileEnd; continue; }
+        if (!content) { filesFailed++; i = fileEnd; continue; }
         /* The line rebuild below walks NUL-terminated lines, so text with a
            NUL in it (possible in a UTF-16 file) would be written back cut
            short - leave such a file alone. */
@@ -9616,8 +9700,11 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
             char *cursor = body;
             int lineNumber = 1;
             while (*cursor) {
-                char *end = strchr(cursor, '\n');
-                if (end) *end = 0;
+                size_t terminatorLength = 0;
+                char *end = text_line_break(cursor, &terminatorLength);
+                char terminator[2] = {0, 0};
+                if (terminatorLength) memcpy(terminator, end, terminatorLength);
+                *end = 0;
                 int accept = 0;
                 for (int j = i; j < fileEnd; j++)
                     if (matches[j].line == lineNumber && matches[j].accepted) { accept = 1; break; }
@@ -9625,7 +9712,7 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
                 const char *piece = lineOut ? lineOut : cursor;
                 size_t pieceLen = strlen(piece);
                 if (lineOut) changed = 1;
-                size_t needed = outLength + pieceLen + 2;
+                size_t needed = outLength + pieceLen + terminatorLength + 1;
                 if (needed > outCapacity) {
                     outCapacity = needed * 2;
                     char *grown = (char *)realloc(out, outCapacity);
@@ -9634,10 +9721,11 @@ static void apply_workspace_replace(ReplaceMatch *matches, int count, const char
                 }
                 memcpy(out + outLength, piece, pieceLen); outLength += pieceLen;
                 free(lineOut);
-                if (!end) break;
-                *end = '\n';
-                out[outLength++] = '\n';
-                cursor = end + 1;
+                if (!terminatorLength) break;
+                memcpy(out + outLength, terminator, terminatorLength);
+                outLength += terminatorLength;
+                memcpy(end, terminator, terminatorLength);
+                cursor = end + terminatorLength;
                 lineNumber++;
             }
             if (out) out[outLength] = 0;
@@ -9716,21 +9804,32 @@ static void do_replace_in_workspace(void) {
 
     ReplaceMatch *matches = NULL;
     int matchCount = 0, matchCapacity = 0;
+    int skippedLarge = 0, readFailed = 0, resultsTruncated = 0;
     for (int i = 0; i < files.count && matchCount < 2000; i++) {
         WIN32_FILE_ATTRIBUTE_DATA attributes;
-        if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes) ||
-            attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) continue;
+        if (!GetFileAttributesExW(files.paths[i], GetFileExInfoStandard, &attributes)) {
+            readFailed++;
+            continue;
+        }
+        if (attributes.nFileSizeHigh || attributes.nFileSizeLow > 4 * 1024 * 1024) {
+            skippedLarge++;
+            continue;
+        }
         char *content = read_text_file(files.paths[i], NULL, NULL, NULL);
-        if (!content) continue;
+        if (!content) { readFailed++; continue; }
         char *cursor = content;
         int lineNumber = 1;
         while (*cursor && matchCount < 2000) {
-            char *end = strchr(cursor, '\n');
-            if (end) *end = 0;
-            if (StrStrIA(cursor, find)) {
+            size_t terminatorLength = 0;
+            char *end = text_line_break(cursor, &terminatorLength);
+            char saved = *end;
+            *end = 0;
+            if (utf8_case_find(cursor, find)) {
                 char snippet[181];
                 size_t snippetLength = strlen(cursor);
                 if (snippetLength > 180) snippetLength = 180;
+                while (snippetLength && ((unsigned char)cursor[snippetLength] & 0xC0) == 0x80)
+                    snippetLength--;
                 memcpy(snippet, cursor, snippetLength); snippet[snippetLength] = 0;
                 while (snippetLength && (snippet[snippetLength - 1] == '\r' ||
                        snippet[snippetLength - 1] == '\n')) snippet[--snippetLength] = 0;
@@ -9757,12 +9856,18 @@ static void do_replace_in_workspace(void) {
                 free(label);
                 free(wideSnippet);
             }
-            if (!end) break;
-            *end = '\n'; cursor = end + 1; lineNumber++;
+            *end = saved;
+            if (!terminatorLength) break;
+            cursor = end + terminatorLength; lineNumber++;
         }
+        if (matchCount >= 2000) resultsTruncated = 1;
         free(content);
     }
+    if (matchCount >= 2000 && files.count > 0) resultsTruncated = 1;
+    int enumerationTruncated = files.truncated;
     free_workspace_files(&files);
+    warn_incomplete_workspace_scan(L"Replace in Folder", enumerationTruncated, skippedLarge,
+                                   readFailed, resultsTruncated);
 
     if (matchCount == 0) {
         MessageBoxW(g_hMainWnd, L"No matches were found in that folder.", L"Replace in Folder",
@@ -9778,6 +9883,172 @@ static void do_replace_in_workspace(void) {
     free(matches);
     free(find);
     free(replace);
+}
+
+static int path_at_or_below(const WCHAR *path, const WCHAR *parent) {
+    size_t length = path && parent ? wcslen(parent) : 0;
+    if (!length || _wcsnicmp(path, parent, length) != 0) return 0;
+    return path[length] == 0 || path[length] == L'\\' || path[length] == L'/';
+}
+
+static char *relative_markdown_target(const WCHAR *sourcePath, const WCHAR *targetPath) {
+    WCHAR *directory = path_directory(sourcePath);
+    WCHAR relative[MAX_PATH];
+    int ok = directory && PathRelativePathToW(relative, directory, FILE_ATTRIBUTE_DIRECTORY,
+                                               targetPath, FILE_ATTRIBUTE_NORMAL);
+    free(directory);
+    if (!ok) return NULL;
+    WCHAR *start = relative;
+    if (start[0] == L'.' && (start[1] == L'\\' || start[1] == L'/')) start += 2;
+    for (WCHAR *character = start; *character; character++)
+        if (*character == L'\\') *character = L'/';
+    return to_utf8(start);
+}
+
+static char *rewrite_links_for_source(const char *text, const WCHAR *sourcePath,
+                                      const WCHAR *oldPath, const WCHAR *newPath,
+                                      int *changes) {
+    *changes = 0;
+    char *oldTarget = relative_markdown_target(sourcePath, oldPath);
+    char *newTarget = relative_markdown_target(sourcePath, newPath);
+    if (!oldTarget || !newTarget) {
+        free(oldTarget); free(newTarget);
+        *changes = -1;
+        return NULL;
+    }
+    char *rewritten = markdown_rewrite_link_targets(text, oldTarget, newTarget, changes);
+    size_t oldLength = strlen(oldTarget), newLength = strlen(newTarget);
+    if (oldTarget[0] != '.' && newTarget[0] != '.' &&
+        oldLength <= SIZE_MAX - 3 && newLength <= SIZE_MAX - 3) {
+        char *dotOld = (char *)malloc(oldLength + 3);
+        char *dotNew = (char *)malloc(newLength + 3);
+        if (dotOld && dotNew) {
+            snprintf(dotOld, oldLength + 3, "./%s", oldTarget);
+            snprintf(dotNew, newLength + 3, "./%s", newTarget);
+            int dotChanges = 0;
+            char *withDots = markdown_rewrite_link_targets(rewritten ? rewritten : text,
+                                                            dotOld, dotNew, &dotChanges);
+            if (withDots) { free(rewritten); rewritten = withDots; }
+            *changes += dotChanges;
+        }
+        free(dotOld); free(dotNew);
+    }
+    free(oldTarget); free(newTarget);
+    return rewritten;
+}
+
+static void replace_open_document_text(int index, const char *text) {
+    if (index < 0 || index >= g_documentCount || !text) return;
+    sptr_t current = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    Sci_Position caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
+    Sci_Position first = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    int xOffset = (int)SendMessageA(g_hEdit, SCI_GETXOFFSET, 0, 0);
+    int oldSwitching = g_switchingDocument;
+    g_switchingDocument = 1;
+    if (current != g_documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(g_hEdit, SCI_TARGETWHOLEDOCUMENT, 0, 0);
+    SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)-1, (LPARAM)text);
+    SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
+    if (current != g_documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)current);
+    Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    if (caret > length) caret = length;
+    if (anchor > length) anchor = length;
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)anchor, (LPARAM)caret);
+    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)first, 0);
+    SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)xOffset, 0);
+    g_switchingDocument = oldSwitching;
+    g_documents[index].dirty = 1;
+    g_recoverySnapshotStale = 1;
+    update_tab_label(index);
+}
+
+static void update_workspace_links_after_rename(const WCHAR *oldPath, const WCHAR *newPath) {
+    if (!g_currentWorkspaceFolder) return;
+    WorkspaceFiles files;
+    if (!collect_workspace_files_at(&files, g_currentWorkspaceFolder)) return;
+    int updatedFiles = 0, failedFiles = 0;
+    for (int i = 0; i < files.count; i++) {
+        if (language_for_path(files.paths[i]) != LANG_MARKDOWN) continue;
+        int openIndex = find_open_document_for_path(files.paths[i]);
+        Sci_Position openLength = 0;
+        int fileLength = 0, encoding = TEXT_ENCODING_UTF8, hasBom = 0;
+        char *text = openIndex >= 0
+            ? get_document_text(openIndex, &openLength)
+            : read_text_file(files.paths[i], &fileLength, &encoding, &hasBom);
+        if (!text) { failedFiles++; continue; }
+        size_t sourceLength = openIndex >= 0 ? (size_t)openLength : (size_t)fileLength;
+        if (strlen(text) != sourceLength) { free(text); failedFiles++; continue; }
+        int changes = 0;
+        char *rewritten = rewrite_links_for_source(text, files.paths[i], oldPath, newPath, &changes);
+        free(text);
+        if (changes < 0) { free(rewritten); failedFiles++; continue; }
+        if (!rewritten || !changes) { free(rewritten); continue; }
+        if (openIndex >= 0) {
+            replace_open_document_text(openIndex, rewritten);
+            updatedFiles++;
+        } else {
+            size_t length = strlen(rewritten);
+            WCHAR *ioPath = extended_path(files.paths[i]);
+            const WCHAR *target = ioPath ? ioPath : files.paths[i];
+            if (text_encoding_is_lossless(rewritten, length, (TextEncoding)encoding) == 1 &&
+                write_file_atomic(target, rewritten, length, (TextEncoding)encoding, hasBom))
+                updatedFiles++;
+            else
+                failedFiles++;
+            free(ioPath);
+        }
+        free(rewritten);
+    }
+    int truncated = files.truncated;
+    free_workspace_files(&files);
+    if (failedFiles || truncated) {
+        WCHAR message[320];
+        if (failedFiles)
+            swprintf(message, sizeof(message) / sizeof(message[0]),
+                     L"The file was renamed and %d Markdown file%ls %ls updated, but %d file%ls could not be updated%ls.",
+                     updatedFiles, updatedFiles == 1 ? L"" : L"s", updatedFiles == 1 ? L"was" : L"were",
+                     failedFiles, failedFiles == 1 ? L"" : L"s",
+                     truncated ? L" and the workspace scan reached its limit" : L"");
+        else
+            swprintf(message, sizeof(message) / sizeof(message[0]),
+                     L"The file was renamed and %d Markdown file%ls %ls updated, but the workspace scan reached its limit.",
+                     updatedFiles, updatedFiles == 1 ? L"" : L"s",
+                     updatedFiles == 1 ? L"was" : L"were");
+        MessageBoxW(g_hMainWnd, message, L"Rename", MB_OK | MB_ICONWARNING);
+    }
+}
+
+static void explorer_path_renamed(const WCHAR *oldPath, const WCHAR *newPath, int isDirectory) {
+    if (!oldPath || !newPath) return;
+    for (int i = 0; i < g_documentCount; i++) {
+        if (!g_documents[i].path ||
+            !(isDirectory ? path_at_or_below(g_documents[i].path, oldPath)
+                           : _wcsicmp(g_documents[i].path, oldPath) == 0)) continue;
+        const WCHAR *suffix = isDirectory ? g_documents[i].path + wcslen(oldPath) : L"";
+        WCHAR *retargeted = (WCHAR *)malloc((wcslen(newPath) + wcslen(suffix) + 1) * sizeof(WCHAR));
+        if (!retargeted) continue;
+        wcscpy(retargeted, newPath);
+        wcscat(retargeted, suffix);
+        recent_list_remove(&g_recentFileList, g_documents[i].path);
+        replace_wstring(&g_documents[i].path, retargeted);
+        recent_list_add(&g_recentFileList, retargeted);
+        record_document_file_time(i);
+        update_tab_label(i);
+        free(retargeted);
+    }
+    if (!isDirectory) update_workspace_links_after_rename(oldPath, newPath);
+    apply_document_language(g_hEdit, g_currentFile);
+    if (g_hSplitEdit) apply_document_language(g_hSplitEdit, g_currentFile);
+    update_document_mapping();
+    update_title();
+    update_preview();
+    update_outline();
+    refresh_menu(g_hMainWnd);
+    g_recoverySnapshotStale = 1;
 }
 
 typedef struct PaletteCommand { const WCHAR *label; WORD command; } PaletteCommand;
@@ -11940,7 +12211,8 @@ static void initialize_main_window(HWND hwnd) {
         SendMessageW(debugControls[i], WM_SETFONT, (WPARAM)debugFont, TRUE);
     apply_debug_panel_theme();
 
-    explorer_init(hwnd, explorer_request_open, show_text_input, reveal_path_in_explorer);
+    explorer_init(hwnd, explorer_request_open, show_text_input, reveal_path_in_explorer,
+                  explorer_path_renamed);
     if (g_explorerVisible && g_currentWorkspaceFolder) explorer_set_root(g_currentWorkspaceFolder);
 
     g_hTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
@@ -11978,6 +12250,7 @@ static void initialize_main_window(HWND hwnd) {
         0, 0, 0, 0, hwnd, (HMENU)ID_SPLIT_EDIT, GetModuleHandleA(NULL), NULL);
     SetWindowSubclass(g_hSplitEdit, EditSubclassProc, 3, 0);
     configure_scintilla(g_hSplitEdit);
+    g_lastEditView = g_hEdit;
 
     apply_editor_font(g_fontFaceName, g_fontPointSize);
 
@@ -12044,24 +12317,19 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
 
     struct SCNotification *scn = (struct SCNotification *)notification;
     if (notification->code == SCN_UPDATEUI) {
-        /* Scroll-sync-to-preview, brace highlighting, and the minimap
-           viewport box all stay tied to the main pane - a known v1 scope
-           limit for the split pane, alongside Edit-menu commands (see
-           EditSubclassProc's smart-input parity, which IS shared). */
-        if (!fromMain) return;
+        g_lastEditView = notification->hwndFrom;
         if ((scn->updated & SC_UPDATE_V_SCROLL) && g_editorVisible && g_previewVisible) {
             if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
             else SetTimer(hwnd, IDT_SCROLL_SYNC, 35, NULL);
         }
-        update_brace_highlight();
+        update_brace_highlight(notification->hwndFrom);
         update_status_position();
         update_minimap_viewport();
         return;
     }
     if (notification->code == SCN_CHARADDED) {
-        /* Word completion stays tied to the main pane, same v1 scope limit
-           noted above for SCN_UPDATEUI. */
-        if (fromMain) update_word_completions();
+        g_lastEditView = notification->hwndFrom;
+        update_word_completions(notification->hwndFrom);
         return;
     }
     if (notification->code == SCN_MARGINCLICK) {
