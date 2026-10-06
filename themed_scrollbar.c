@@ -48,6 +48,7 @@ typedef struct {
     int dragGrab;    /* cursor offset from the thumb's leading edge when the drag began */
     int tracking;    /* a WM_NCMOUSELEAVE is pending */
     int syncing;     /* guards sync() against re-entry from its own queries/frame change */
+    int updateDepth; /* defers sync/overlay movement during batched content changes */
     int wheelRemainder;
     int widthSeen;   /* widest line painted so far; see track_line_widths() */
     int scanWidths;  /* set around WM_PAINT so sync() re-measures the visible lines */
@@ -778,7 +779,7 @@ static LRESULT CALLBACK bar_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LP
         RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
     if (state->kind == THEMED_SCROLL_TREEVIEW && msg == WM_KEYDOWN)
         ensure_tree_selection_visible(hwnd, state);
-    if (!state->syncing && should_sync(msg)) { /* our own queries re-enter this proc */
+    if (!state->syncing && state->updateDepth == 0 && should_sync(msg)) { /* our own queries re-enter this proc */
         state->scanWidths = msg == WM_PAINT;
         sync(hwnd, state);
         state->scanWidths = 0;
@@ -813,6 +814,22 @@ void themed_scrollbar_attach(HWND hwnd, ThemedScrollKind kind) {
     /* sync() removes any native bar and reframes through the subclass before
        it measures and reserves space for the themed replacement. */
     sync(hwnd, state);
+}
+
+void themed_scrollbar_begin_update(HWND hwnd) {
+    DWORD_PTR data;
+    if (!hwnd || !GetWindowSubclass(hwnd, bar_subclass_proc, SUBCLASS_ID, &data)) return;
+    BarState *state = (BarState *)data;
+    state->updateDepth++;
+}
+
+void themed_scrollbar_end_update(HWND hwnd) {
+    DWORD_PTR data;
+    if (!hwnd || !GetWindowSubclass(hwnd, bar_subclass_proc, SUBCLASS_ID, &data)) return;
+    BarState *state = (BarState *)data;
+    if (state->updateDepth <= 0) return;
+    state->updateDepth--;
+    if (state->updateDepth == 0) sync(hwnd, state);
 }
 
 void themed_scrollbar_refresh(HWND hwnd) {

@@ -16,6 +16,11 @@ typedef enum {
    cleaned up when the window is destroyed. */
 void themed_scrollbar_attach(HWND hwnd, ThemedScrollKind kind);
 
+/* Coalesces scrollbar measurement and overlay positioning while a control is
+   making a batch of content changes. Calls may be nested. */
+void themed_scrollbar_begin_update(HWND hwnd);
+void themed_scrollbar_end_update(HWND hwnd);
+
 /* Repaints the bars after the light/dark theme changes. No-op if hwnd was
    never attached. */
 void themed_scrollbar_refresh(HWND hwnd);

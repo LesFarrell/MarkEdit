@@ -230,6 +230,7 @@ static void insert_root_choice(const WCHAR *path, const WCHAR *label) {
 static void show_roots_view(void) {
     if (!g_hExplorerTree || !s_root) return;
     explorer_stop_watch();
+    themed_scrollbar_begin_update(g_hExplorerTree);
     TreeView_DeleteAllItems(g_hExplorerTree);
     s_rootItem = NULL;
     s_showingRoots = 1;
@@ -255,6 +256,7 @@ static void show_roots_view(void) {
     /* An un-mapped UNC share is not returned by GetLogicalDriveStringsW, so
        retain it explicitly when it was the workspace we navigated up from. */
     if (PathIsUNCW(s_root)) insert_root_choice(s_root, s_root);
+    themed_scrollbar_end_update(g_hExplorerTree);
 }
 
 typedef struct DirEntry {
@@ -323,9 +325,11 @@ static void populate_directory_children(HTREEITEM item, ExplorerItemData *data) 
 }
 
 static void reload_directory_children(HTREEITEM item, ExplorerItemData *data) {
+    themed_scrollbar_begin_update(g_hExplorerTree);
     delete_all_children(item);
     data->childrenLoaded = 0;
     populate_directory_children(item, data);
+    themed_scrollbar_end_update(g_hExplorerTree);
 }
 
 static HTREEITEM find_loaded_item_for_path(HTREEITEM item, const WCHAR *path) {
@@ -612,8 +616,10 @@ static void handle_item_expanding(NMTREEVIEWW *info) {
     if (info->action != TVE_EXPAND) return;
     ExplorerItemData *data = (ExplorerItemData *)info->itemNew.lParam;
     if (!data || !data->isDirectory || data->childrenLoaded) return;
+    themed_scrollbar_begin_update(g_hExplorerTree);
     delete_all_children(info->itemNew.hItem);
     populate_directory_children(info->itemNew.hItem, data);
+    themed_scrollbar_end_update(g_hExplorerTree);
 }
 
 static void handle_delete_item(NMTREEVIEWW *info) {
@@ -786,6 +792,7 @@ void explorer_handle_change_message(void) {
     s_pendingCapacity = 0;
     LeaveCriticalSection(&s_pendingLock);
 
+    themed_scrollbar_begin_update(g_hExplorerTree);
     for (int i = 0; i < count; i++) {
         HTREEITEM item = find_loaded_item_for_path(s_rootItem, dirs[i]);
         if (item) {
@@ -796,6 +803,7 @@ void explorer_handle_change_message(void) {
         free(dirs[i]);
     }
     free(dirs);
+    themed_scrollbar_end_update(g_hExplorerTree);
 }
 
 /* ---- public API ---- */
@@ -857,15 +865,20 @@ void explorer_set_root(const WCHAR *rootPath) {
        already keeps what's shown in step with the disk. */
     if (s_root && s_watcher && _wcsicmp(s_root, rootPath) == 0) return;
     explorer_stop_watch();
+    themed_scrollbar_begin_update(g_hExplorerTree);
     TreeView_DeleteAllItems(g_hExplorerTree); /* frees every ExplorerItemData via TVN_DELETEITEMW */
     s_rootItem = NULL;
     s_showingRoots = 0;
     replace_wstring(&s_root, rootPath);
-    if (!s_root) return;
+    if (!s_root) {
+        themed_scrollbar_end_update(g_hExplorerTree);
+        return;
+    }
 
     const WCHAR *leaf = PathFindFileNameW(s_root);
     s_rootItem = insert_tree_item(TVI_ROOT, TVI_LAST, s_root, *leaf ? leaf : s_root, 1);
     if (s_rootItem) TreeView_Expand(g_hExplorerTree, s_rootItem, TVE_EXPAND);
+    themed_scrollbar_end_update(g_hExplorerTree);
     start_watcher(s_root);
 }
 
