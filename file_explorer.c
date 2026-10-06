@@ -271,6 +271,56 @@ static int compare_dir_entries(const void *a, const void *b) {
     return _wcsicmp(entryA->name, entryB->name);
 }
 
+static void free_dir_entries(DirEntry *entries, int count) {
+    for (int i = 0; i < count; i++) free(entries[i].name);
+    free(entries);
+}
+
+/* Returns a sorted snapshot of one directory. A negative result means the
+   snapshot could not be completed, in which case callers must leave the
+   existing tree alone rather than mistake a partial result for deletions. */
+static int read_directory_entries(const WCHAR *path, DirEntry **result) {
+    WCHAR *pattern = path_join(path, L"*");
+    DirEntry *entries = NULL;
+    int count = 0, capacity = 0;
+    int complete = 1;
+    if (pattern) {
+        WIN32_FIND_DATAW findData;
+        HANDLE search = FindFirstFileW(pattern, &findData);
+        free(pattern);
+        if (search != INVALID_HANDLE_VALUE) {
+            do {
+                if (wcscmp(findData.cFileName, L".") == 0 || wcscmp(findData.cFileName, L"..") == 0)
+                    continue;
+                if (count >= capacity) {
+                    int nextCapacity = capacity ? capacity * 2 : 32;
+                    DirEntry *grown = (DirEntry *)realloc(entries, (size_t)nextCapacity * sizeof(DirEntry));
+                    if (!grown) { complete = 0; break; }
+                    entries = grown;
+                    capacity = nextCapacity;
+                }
+                entries[count].name = wcsdup_heap(findData.cFileName);
+                if (!entries[count].name) { complete = 0; break; }
+                entries[count].isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+                count++;
+            } while (FindNextFileW(search, &findData));
+            FindClose(search);
+        } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+            complete = 0;
+        }
+    } else {
+        complete = 0;
+    }
+    if (!complete) {
+        free_dir_entries(entries, count);
+        *result = NULL;
+        return -1;
+    }
+    if (count > 0) qsort(entries, (size_t)count, sizeof(DirEntry), compare_dir_entries);
+    *result = entries;
+    return count;
+}
+
 static void populate_directory_children(HTREEITEM item, ExplorerItemData *data) {
     if (item == s_rootItem) {
         WCHAR *parent = PathIsRootW(s_root) ? wcsdup_heap(s_root) : root_parent_path();
@@ -286,46 +336,80 @@ static void populate_directory_children(HTREEITEM item, ExplorerItemData *data) 
         }
     }
 
-    WCHAR *pattern = path_join(data->fullPath, L"*");
     DirEntry *entries = NULL;
-    int count = 0, capacity = 0;
-    if (pattern) {
-        WIN32_FIND_DATAW findData;
-        HANDLE search = FindFirstFileW(pattern, &findData);
-        free(pattern);
-        if (search != INVALID_HANDLE_VALUE) {
-            do {
-                if (wcscmp(findData.cFileName, L".") == 0 || wcscmp(findData.cFileName, L"..") == 0)
-                    continue;
-                if (count >= capacity) {
-                    int nextCapacity = capacity ? capacity * 2 : 32;
-                    DirEntry *grown = (DirEntry *)realloc(entries, (size_t)nextCapacity * sizeof(DirEntry));
-                    if (!grown) break;
-                    entries = grown;
-                    capacity = nextCapacity;
-                }
-                entries[count].name = wcsdup_heap(findData.cFileName);
-                entries[count].isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
-                if (entries[count].name) count++;
-            } while (FindNextFileW(search, &findData));
-            FindClose(search);
-        }
-    }
-    if (count > 0) qsort(entries, (size_t)count, sizeof(DirEntry), compare_dir_entries);
+    int count = read_directory_entries(data->fullPath, &entries);
+    if (count < 0) return;
     for (int i = 0; i < count; i++) {
         WCHAR *full = path_join(data->fullPath, entries[i].name);
         if (full) insert_tree_item(item, TVI_LAST, full, entries[i].name, entries[i].isDirectory);
         free(full);
-        free(entries[i].name);
     }
-    free(entries);
+    free_dir_entries(entries, count);
     data->childrenLoaded = 1;
 }
 
 static void reload_directory_children(HTREEITEM item, ExplorerItemData *data) {
-    delete_all_children(item);
-    data->childrenLoaded = 0;
-    populate_directory_children(item, data);
+    DirEntry *entries = NULL;
+    int count = read_directory_entries(data->fullPath, &entries);
+    if (count < 0) return;
+
+    /* Reconcile instead of deleting and recreating the branch. Besides
+       eliminating the visible empty frame during a refresh, this preserves
+       selection and every expanded descendant that did not actually change. */
+    SendMessageW(g_hExplorerTree, WM_SETREDRAW, FALSE, 0);
+
+    HTREEITEM child = TreeView_GetChild(g_hExplorerTree, item);
+    while (child) {
+        HTREEITEM next = TreeView_GetNextSibling(g_hExplorerTree, child);
+        ExplorerItemData *childData = tree_item_data(child);
+        if (childData && !childData->isParentLink) {
+            int found = 0;
+            for (int i = 0; i < count; i++) {
+                WCHAR *full = path_join(data->fullPath, entries[i].name);
+                if (full) {
+                    found = childData->isDirectory == entries[i].isDirectory &&
+                            _wcsicmp(childData->fullPath, full) == 0;
+                    free(full);
+                }
+                if (found) break;
+            }
+            if (!found) TreeView_DeleteItem(g_hExplorerTree, child);
+        }
+        child = next;
+    }
+
+    HTREEITEM previous = NULL;
+    child = TreeView_GetChild(g_hExplorerTree, item);
+    ExplorerItemData *firstData = tree_item_data(child);
+    if (firstData && firstData->isParentLink) {
+        previous = child;
+        child = TreeView_GetNextSibling(g_hExplorerTree, child);
+    }
+    for (int i = 0; i < count; i++) {
+        WCHAR *full = path_join(data->fullPath, entries[i].name);
+        if (!full) continue;
+        HTREEITEM match = NULL;
+        for (HTREEITEM candidate = child; candidate;
+             candidate = TreeView_GetNextSibling(g_hExplorerTree, candidate)) {
+            ExplorerItemData *candidateData = tree_item_data(candidate);
+            if (candidateData && candidateData->isDirectory == entries[i].isDirectory &&
+                _wcsicmp(candidateData->fullPath, full) == 0) {
+                match = candidate;
+                break;
+            }
+        }
+        if (!match)
+            match = insert_tree_item(item, previous ? previous : TVI_FIRST,
+                                     full, entries[i].name, entries[i].isDirectory);
+        if (match) previous = match;
+        free(full);
+    }
+
+    free_dir_entries(entries, count);
+    data->childrenLoaded = 1;
+    SendMessageW(g_hExplorerTree, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(g_hExplorerTree, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
 static HTREEITEM find_loaded_item_for_path(HTREEITEM item, const WCHAR *path) {
