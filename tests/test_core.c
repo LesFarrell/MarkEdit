@@ -52,6 +52,16 @@ static void test_json(void) {
 }
 
 static void test_codecs(void) {
+    WCHAR *decoded = decode_json_string(L"\"line\\n\\u20ac\"");
+    CHECK(decoded && wcscmp(decoded, L"line\n\u20ac") == 0);
+    free(decoded);
+    decoded = decode_json_string(L"\"ok\" trailing");
+    CHECK(decoded == NULL);
+    free(decoded);
+    decoded = decode_json_string(L"\"raw\nnewline\"");
+    CHECK(decoded == NULL);
+    free(decoded);
+
     const char *text = "A\xC3\xA9\xF0\x9F\x98\x80Z";
     size_t length = strlen(text);
     for (int encoding = TEXT_ENCODING_UTF16LE; encoding <= TEXT_ENCODING_UTF16BE; encoding++) {

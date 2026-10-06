@@ -2281,6 +2281,22 @@ static ICoreWebView2PrintToPdfCompletedHandler g_pdfHandler = { &g_pdfVtbl };
 
 static void open_wikilink_target(const WCHAR *encoded);
 
+static int is_preview_shell_uri(const WCHAR *uri) {
+    static const WCHAR shellPrefix[] = L"https://markedit.local/preview_shell.html";
+    size_t shellLength = wcslen(shellPrefix);
+    return uri && ((_wcsnicmp(uri, shellPrefix, shellLength) == 0 &&
+                    (uri[shellLength] == 0 || uri[shellLength] == L'?' || uri[shellLength] == L'#')) ||
+                   (!g_webview3 && _wcsicmp(uri, L"about:blank") == 0));
+}
+
+static int web_message_from_preview_shell(ICoreWebView2WebMessageReceivedEventArgs *args) {
+    LPWSTR source = NULL;
+    int trusted = SUCCEEDED(ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source)) &&
+                  is_preview_shell_uri(source);
+    CoTaskMemFree(source);
+    return trusted;
+}
+
 static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceivedEventHandler *this_,
                                                      ICoreWebView2 *sender,
                                                      ICoreWebView2WebMessageReceivedEventArgs *args) {
@@ -2288,18 +2304,17 @@ static HRESULT STDMETHODCALLTYPE WebMessage_Invoke(ICoreWebView2WebMessageReceiv
     LPWSTR message = NULL;
     if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_TryGetWebMessageAsString(args, &message)) ||
         !message) return S_OK;
+    /* Raw HTML previews execute their own scripts. They must not be able to
+       impersonate the trusted shell and trigger native scrolling, file
+       creation through wiki links, or export writes. */
+    if (!web_message_from_preview_shell(args)) {
+        CoTaskMemFree(message);
+        return S_OK;
+    }
     WCHAR exportPrefix[64];
     swprintf(exportPrefix, 64, L"export-html:%lu:", g_exportRequest);
     if (g_exportPath && wcsncmp(message, exportPrefix, wcslen(exportPrefix)) == 0) {
-        LPWSTR source = NULL;
-        HRESULT sourceResult = ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source);
-        /* Only our preview shell may complete a pending filesystem write. */
-        if (SUCCEEDED(sourceResult) && source &&
-            ((wcsncmp(source, L"https://markedit.local/preview_shell.html", 39) == 0 &&
-              (source[39] == 0 || source[39] == L'?' || source[39] == L'#')) ||
-             (!g_webview3 && wcscmp(source, L"about:blank") == 0)))
-            ExportDone_Invoke(NULL, S_OK, message + wcslen(exportPrefix));
-        CoTaskMemFree(source);
+        ExportDone_Invoke(NULL, S_OK, message + wcslen(exportPrefix));
         CoTaskMemFree(message);
         return S_OK;
     }
@@ -2364,7 +2379,15 @@ static ICoreWebView2AcceleratorKeyPressedEventHandler g_accelKeyHandler = { &g_a
 
 /* NavigationCompleted handler: the initial shell page is ready, flush any pending content */
 static HRESULT STDMETHODCALLTYPE NavDone_Invoke(ICoreWebView2NavigationCompletedEventHandler *this_, ICoreWebView2 *sender, ICoreWebView2NavigationCompletedEventArgs *args) {
-    (void)this_; (void)sender; (void)args;
+    (void)this_;
+    BOOL success = FALSE;
+    LPWSTR source = NULL;
+    if (FAILED(ICoreWebView2NavigationCompletedEventArgs_get_IsSuccess(args, &success)) || !success ||
+        FAILED(ICoreWebView2_get_Source(sender, &source)) || !is_preview_shell_uri(source)) {
+        CoTaskMemFree(source);
+        return S_OK;
+    }
+    CoTaskMemFree(source);
     g_webviewReady = 1;
     apply_preview_theme();
     apply_custom_preview_css(0);
@@ -2435,6 +2458,40 @@ static WCHAR *percent_decode_wide(const WCHAR *encoded, const WCHAR *end) {
     decoded[wideLen] = 0;
     free(bytes);
     return decoded;
+}
+
+/* Encode a single filesystem name for use as one URL path segment. Encoding
+   every byte except RFC 3986's unreserved set also keeps '#' and '%' in valid
+   Windows filenames from being interpreted as a fragment or escape. */
+static WCHAR *percent_encode_url_segment(const WCHAR *segment) {
+    char *utf8 = to_utf8(segment);
+    if (!utf8) return NULL;
+    size_t length = strlen(utf8);
+    if (length > (SIZE_MAX - 1) / 3) {
+        free(utf8);
+        return NULL;
+    }
+    WCHAR *encoded = (WCHAR *)malloc((length * 3 + 1) * sizeof(WCHAR));
+    if (!encoded) {
+        free(utf8);
+        return NULL;
+    }
+    static const WCHAR hex[] = L"0123456789ABCDEF";
+    size_t out = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)utf8[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~') {
+            encoded[out++] = (WCHAR)c;
+        } else {
+            encoded[out++] = L'%';
+            encoded[out++] = hex[c >> 4];
+            encoded[out++] = hex[c & 0x0F];
+        }
+    }
+    encoded[out] = 0;
+    free(utf8);
+    return encoded;
 }
 
 static WCHAR *decode_document_url(const WCHAR *uri) {
@@ -2732,10 +2789,16 @@ static void show_html_file_preview(void) {
         return;
     }
     const WCHAR *name = PathFindFileNameW(g_currentFile);
-    size_t capacity = wcslen(name) + 32;
+    WCHAR *encodedName = percent_encode_url_segment(name);
+    if (!encodedName) return;
+    size_t capacity = wcslen(encodedName) + 32;
     WCHAR *url = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (!url) return;
-    swprintf(url, capacity, L"https://document.local/%ls", name);
+    if (!url) {
+        free(encodedName);
+        return;
+    }
+    swprintf(url, capacity, L"https://document.local/%ls", encodedName);
+    free(encodedName);
     replace_wstring(&g_expectedHtmlPreviewUrl, url);
     g_previewShowingRawHtml = 1;
     g_webviewReady = 0;
@@ -9252,7 +9315,7 @@ typedef struct WorkspaceFiles {
     int *lines;
     int count;
     int capacity;
-    int truncated;
+    int truncated; /* scan incomplete: a limit, allocation, or I/O failure */
     WCHAR *root;
 } WorkspaceFiles;
 
@@ -9331,15 +9394,21 @@ static int workspace_file_extension(const WCHAR *name) {
 static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *directory, int depth) {
     if (depth > 24 || files->count >= 5000) { files->truncated = 1; return; }
     WCHAR *pattern = path_join(directory, L"*");
-    if (!pattern) return;
+    if (!pattern) { files->truncated = 1; return; }
     WIN32_FIND_DATAW data;
     HANDLE search = FindFirstFileW(pattern, &data);
     free(pattern);
-    if (search == INVALID_HANDLE_VALUE) return;
+    if (search == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_NO_MORE_FILES)
+            files->truncated = 1;
+        return;
+    }
+    int stoppedEarly = 0;
     do {
         if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
         WCHAR *full = path_join(directory, data.cFileName);
-        if (!full) continue;
+        if (!full) { files->truncated = 1; continue; }
         if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
                 !skipped_workspace_directory(data.cFileName))
@@ -9352,11 +9421,17 @@ static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *direct
                 relative = full + rootLength;
                 if (*relative == L'\\' || *relative == L'/') relative++;
             }
-            add_workspace_item(files, full, relative, 0);
+            if (!add_workspace_item(files, full, relative, 0)) {
+                files->truncated = 1;
+                stoppedEarly = 1;
+            }
         }
         free(full);
+        if (stoppedEarly) break;
     } while (files->count < 5000 && FindNextFileW(search, &data));
     if (files->count >= 5000) files->truncated = 1;
+    else if (!stoppedEarly && GetLastError() != ERROR_NO_MORE_FILES)
+        files->truncated = 1;
     FindClose(search);
 }
 
@@ -9369,7 +9444,8 @@ static void warn_incomplete_workspace_scan(const WCHAR *title, int enumerationTr
                         L"Some workspace content was not searched:");
     if (enumerationTruncated && used > 0)
         used += swprintf(message + used, sizeof(message) / sizeof(message[0]) - (size_t)used,
-                         L"\n\u2022 The 5,000-file or 24-folder-depth limit was reached.");
+                         L"\n\u2022 The workspace scan was incomplete (a folder could not be read, "
+                         L"or the 5,000-file/24-folder-depth limit was reached).");
     if (skippedLarge && used > 0)
         used += swprintf(message + used, sizeof(message) / sizeof(message[0]) - (size_t)used,
                          L"\n\u2022 %d file%ls larger than 4 MB %ls skipped.", skippedLarge,
@@ -9380,7 +9456,7 @@ static void warn_incomplete_workspace_scan(const WCHAR *title, int enumerationTr
                          readFailed == 1 ? L"" : L"s");
     if (resultsTruncated && used > 0)
         swprintf(message + used, sizeof(message) / sizeof(message[0]) - (size_t)used,
-                 L"\n\u2022 Only the first 2,000 matches are shown.");
+                 L"\n\u2022 Some matches could not be collected, or only the first 2,000 are shown.");
     MessageBoxW(g_hMainWnd, message, title, MB_OK | MB_ICONWARNING);
 }
 
@@ -9842,15 +9918,25 @@ static void do_replace_in_workspace(void) {
                     if (matchCount >= matchCapacity) {
                         int next = matchCapacity ? matchCapacity * 2 : 128;
                         ReplaceMatch *grown = (ReplaceMatch *)realloc(matches, (size_t)next * sizeof(ReplaceMatch));
-                        if (grown) { matches = grown; matchCapacity = next; }
+                        if (grown) {
+                            matches = grown;
+                            matchCapacity = next;
+                        } else {
+                            resultsTruncated = 1;
+                        }
                     }
                     if (matchCount < matchCapacity) {
-                        matches[matchCount].path = wcsdup_heap(files.paths[i]);
-                        matches[matchCount].label = label;
-                        matches[matchCount].line = lineNumber;
-                        matches[matchCount].accepted = 1;
-                        matchCount++;
-                        label = NULL;
+                        WCHAR *matchPath = wcsdup_heap(files.paths[i]);
+                        if (!matchPath) {
+                            resultsTruncated = 1;
+                        } else {
+                            matches[matchCount].path = matchPath;
+                            matches[matchCount].label = label;
+                            matches[matchCount].line = lineNumber;
+                            matches[matchCount].accepted = 1;
+                            matchCount++;
+                            label = NULL;
+                        }
                     }
                 }
                 free(label);
@@ -10012,10 +10098,10 @@ static void update_workspace_links_after_rename(const WCHAR *oldPath, const WCHA
                      L"The file was renamed and %d Markdown file%ls %ls updated, but %d file%ls could not be updated%ls.",
                      updatedFiles, updatedFiles == 1 ? L"" : L"s", updatedFiles == 1 ? L"was" : L"were",
                      failedFiles, failedFiles == 1 ? L"" : L"s",
-                     truncated ? L" and the workspace scan reached its limit" : L"");
+                     truncated ? L" and the workspace scan was incomplete" : L"");
         else
             swprintf(message, sizeof(message) / sizeof(message[0]),
-                     L"The file was renamed and %d Markdown file%ls %ls updated, but the workspace scan reached its limit.",
+                     L"The file was renamed and %d Markdown file%ls %ls updated, but the workspace scan was incomplete.",
                      updatedFiles, updatedFiles == 1 ? L"" : L"s",
                      updatedFiles == 1 ? L"was" : L"were");
         MessageBoxW(g_hMainWnd, message, L"Rename", MB_OK | MB_ICONWARNING);

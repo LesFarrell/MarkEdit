@@ -39,15 +39,17 @@ int g_explorerWidth = -1;
 int g_explorerWidthRatio = 220;
 int g_draggingExplorer = 0;
 
-typedef struct ExplorerItemData {
+typedef struct ExplorerItemData
+{
     WCHAR *fullPath;
     int isDirectory;
-    int isParentLink;  /* synthetic ".." entry directly beneath the workspace root */
-    int isRootChoice;  /* drive/share entry in the virtual roots view */
+    int isParentLink;   /* synthetic ".." entry directly beneath the workspace root */
+    int isRootChoice;   /* drive/share entry in the virtual roots view */
     int childrenLoaded; /* directories only: has this node's real children been scanned yet? */
 } ExplorerItemData;
 
-typedef struct ExplorerWatcher {
+typedef struct ExplorerWatcher
+{
     HANDLE thread;
     HANDLE dirHandle;
     HANDLE stopEvent;
@@ -56,9 +58,17 @@ typedef struct ExplorerWatcher {
     BYTE buffer[64 * 1024];
 } ExplorerWatcher;
 
-enum {
-    CTX_OPEN = 1, CTX_NEW_FILE, CTX_NEW_FOLDER, CTX_RENAME, CTX_DELETE,
-    CTX_COPY_PATH, CTX_REVEAL, CTX_REFRESH, CTX_OPEN_PARENT
+enum
+{
+    CTX_OPEN = 1,
+    CTX_NEW_FILE,
+    CTX_NEW_FOLDER,
+    CTX_RENAME,
+    CTX_DELETE,
+    CTX_COPY_PATH,
+    CTX_REVEAL,
+    CTX_REFRESH,
+    CTX_OPEN_PARENT
 };
 
 static HWND s_hParent = NULL;
@@ -81,7 +91,8 @@ static int s_pendingCapacity = 0;
 
 /* ---- icon cache: the shared shell system image list, indexed by extension ---- */
 
-typedef struct IconCacheEntry {
+typedef struct IconCacheEntry
+{
     WCHAR extension[16];
     int iconIndex;
 } IconCacheEntry;
@@ -93,19 +104,25 @@ static int s_folderIconIndex = -1;
 
 /* Returns a newly allocated parent path, or NULL when the workspace is
    already a drive/UNC root (or parent navigation is unavailable). */
-static WCHAR *root_parent_path(void) {
-    if (!s_root || !s_changeRoot || PathIsRootW(s_root)) return NULL;
+static WCHAR *root_parent_path(void)
+{
+    if (!s_root || !s_changeRoot || PathIsRootW(s_root))
+        return NULL;
     WCHAR *parent = path_directory(s_root);
-    if (parent && _wcsicmp(parent, s_root) == 0) {
+    if (parent && _wcsicmp(parent, s_root) == 0)
+    {
         free(parent);
         return NULL;
     }
     return parent;
 }
 
-static int can_navigate_up(void) {
-    if (!s_root || !s_changeRoot || s_showingRoots) return 0;
-    if (PathIsRootW(s_root)) return 1; /* opens the virtual drive/share list */
+static int can_navigate_up(void)
+{
+    if (!s_root || !s_changeRoot || s_showingRoots)
+        return 0;
+    if (PathIsRootW(s_root))
+        return 1; /* opens the virtual drive/share list */
     WCHAR *parent = root_parent_path();
     int available = parent != NULL;
     free(parent);
@@ -119,31 +136,38 @@ static int can_navigate_up(void) {
    the shared list itself assumes. */
 static HIMAGELIST s_iconList = NULL;
 
-static int add_icon_to_list(HICON icon) {
-    if (!icon || !s_iconList) return -1;
+static int add_icon_to_list(HICON icon)
+{
+    if (!icon || !s_iconList)
+        return -1;
     int index = ImageList_AddIcon(s_iconList, icon);
     DestroyIcon(icon);
     return index;
 }
 
-static int icon_index_for_path(const WCHAR *path, int isDirectory) {
-    if (isDirectory) {
-        if (s_folderIconIndex < 0) {
+static int icon_index_for_path(const WCHAR *path, int isDirectory)
+{
+    if (isDirectory)
+    {
+        if (s_folderIconIndex < 0)
+        {
             SHFILEINFOW info = {0};
             SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
-                          SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                           SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
             s_folderIconIndex = add_icon_to_list(info.hIcon);
         }
         return s_folderIconIndex;
     }
     const WCHAR *extension = PathFindExtensionW(path);
     for (int i = 0; i < s_iconCacheCount; i++)
-        if (_wcsicmp(s_iconCache[i].extension, extension) == 0) return s_iconCache[i].iconIndex;
+        if (_wcsicmp(s_iconCache[i].extension, extension) == 0)
+            return s_iconCache[i].iconIndex;
     SHFILEINFOW info = {0};
     SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
-                  SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                   SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
     int index = add_icon_to_list(info.hIcon);
-    if (*extension && s_iconCacheCount < ICON_CACHE_CAPACITY) {
+    if (*extension && s_iconCacheCount < ICON_CACHE_CAPACITY)
+    {
         wcsncpy(s_iconCache[s_iconCacheCount].extension, extension, 15);
         s_iconCache[s_iconCacheCount].extension[15] = 0;
         s_iconCache[s_iconCacheCount].iconIndex = index;
@@ -161,12 +185,15 @@ static int icon_index_for_path(const WCHAR *path, int isDirectory) {
    macros. Every other TreeView_* macro used below wraps a message with no
    such ambiguity (no text payload), so those are used as-is. */
 
-static HTREEITEM tree_insert_item(TVINSERTSTRUCTW *insert) {
+static HTREEITEM tree_insert_item(TVINSERTSTRUCTW *insert)
+{
     return (HTREEITEM)SendMessageW(g_hExplorerTree, TVM_INSERTITEMW, 0, (LPARAM)insert);
 }
 
-static ExplorerItemData *tree_item_data(HTREEITEM item) {
-    if (!item) return NULL;
+static ExplorerItemData *tree_item_data(HTREEITEM item)
+{
+    if (!item)
+        return NULL;
     TVITEMW tvItem = {0};
     tvItem.mask = TVIF_PARAM;
     tvItem.hItem = item;
@@ -174,22 +201,41 @@ static ExplorerItemData *tree_item_data(HTREEITEM item) {
     return (ExplorerItemData *)tvItem.lParam;
 }
 
-static void delete_all_children(HTREEITEM item) {
+static void delete_all_children(HTREEITEM item)
+{
     HTREEITEM child = TreeView_GetChild(g_hExplorerTree, item);
-    while (child) {
+    while (child)
+    {
         HTREEITEM next = TreeView_GetNextSibling(g_hExplorerTree, child);
         TreeView_DeleteItem(g_hExplorerTree, child);
         child = next;
     }
 }
 
+static void insert_placeholder_child(HTREEITEM parent)
+{
+    TVINSERTSTRUCTW dummy = {0};
+    dummy.hParent = parent;
+    dummy.hInsertAfter = TVI_LAST;
+    dummy.item.mask = TVIF_TEXT | TVIF_PARAM;
+    dummy.item.pszText = L"";
+    dummy.item.lParam = 0;
+    tree_insert_item(&dummy);
+}
+
 static HTREEITEM insert_tree_item(HTREEITEM parent, HTREEITEM insertAfter,
-                                  const WCHAR *fullPath, const WCHAR *label, int isDirectory) {
+                                  const WCHAR *fullPath, const WCHAR *label, int isDirectory)
+{
     ExplorerItemData *data = (ExplorerItemData *)calloc(1, sizeof(ExplorerItemData));
-    if (!data) return NULL;
+    if (!data)
+        return NULL;
     data->fullPath = wcsdup_heap(fullPath);
     data->isDirectory = isDirectory;
-    if (!data->fullPath) { free(data); return NULL; }
+    if (!data->fullPath)
+    {
+        free(data);
+        return NULL;
+    }
 
     TVINSERTSTRUCTW insert = {0};
     insert.hParent = parent;
@@ -200,35 +246,40 @@ static HTREEITEM insert_tree_item(HTREEITEM parent, HTREEITEM insertAfter,
     insert.item.iImage = icon_index_for_path(fullPath, isDirectory);
     insert.item.iSelectedImage = insert.item.iImage;
     HTREEITEM created = tree_insert_item(&insert);
-    if (!created) { free(data->fullPath); free(data); return NULL; }
+    if (!created)
+    {
+        free(data->fullPath);
+        free(data);
+        return NULL;
+    }
 
-    if (isDirectory) {
+    if (isDirectory)
+    {
         /* An unconditional placeholder child gives the expand glyph without
            scanning the directory twice; TVN_ITEMEXPANDINGW deletes it and
            inserts the real children (or nothing, if it's actually empty)
            the first time the user expands this node. */
-        TVINSERTSTRUCTW dummy = {0};
-        dummy.hParent = created;
-        dummy.hInsertAfter = TVI_LAST;
-        dummy.item.mask = TVIF_TEXT | TVIF_PARAM;
-        dummy.item.pszText = L"";
-        dummy.item.lParam = 0;
-        tree_insert_item(&dummy);
+        insert_placeholder_child(created);
     }
     return created;
 }
 
-static void insert_root_choice(const WCHAR *path, const WCHAR *label) {
+static void insert_root_choice(const WCHAR *path, const WCHAR *label)
+{
     HTREEITEM item = insert_tree_item(TVI_ROOT, TVI_LAST, path, label, 1);
-    if (!item) return;
+    if (!item)
+        return;
     ExplorerItemData *data = tree_item_data(item);
-    if (data) data->isRootChoice = 1;
+    if (data)
+        data->isRootChoice = 1;
     /* Root choices switch workspace; they are not expanded in place. */
     delete_all_children(item);
 }
 
-static void show_roots_view(void) {
-    if (!g_hExplorerTree || !s_root) return;
+static void show_roots_view(void)
+{
+    if (!g_hExplorerTree || !s_root)
+        return;
     explorer_stop_watch();
     themed_scrollbar_begin_update(g_hExplorerTree);
     TreeView_DeleteAllItems(g_hExplorerTree);
@@ -237,11 +288,14 @@ static void show_roots_view(void) {
 
     DWORD capacity = GetLogicalDriveStringsW(0, NULL);
     WCHAR *drives = capacity ? (WCHAR *)calloc((size_t)capacity + 1, sizeof(WCHAR)) : NULL;
-    if (drives && GetLogicalDriveStringsW(capacity, drives)) {
-        for (const WCHAR *drive = drives; *drive; drive += wcslen(drive) + 1) {
+    if (drives && GetLogicalDriveStringsW(capacity, drives))
+    {
+        for (const WCHAR *drive = drives; *drive; drive += wcslen(drive) + 1)
+        {
             WCHAR label[1200];
             wcscpy(label, drive);
-            if (GetDriveTypeW(drive) == DRIVE_REMOTE) {
+            if (GetDriveTypeW(drive) == DRIVE_REMOTE)
+            {
                 WCHAR remote[1024];
                 DWORD remoteLength = (DWORD)(sizeof(remote) / sizeof(remote[0]));
                 WCHAR device[3] = {drive[0], L':', 0};
@@ -255,32 +309,110 @@ static void show_roots_view(void) {
 
     /* An un-mapped UNC share is not returned by GetLogicalDriveStringsW, so
        retain it explicitly when it was the workspace we navigated up from. */
-    if (PathIsUNCW(s_root)) insert_root_choice(s_root, s_root);
+    if (PathIsUNCW(s_root))
+        insert_root_choice(s_root, s_root);
     themed_scrollbar_end_update(g_hExplorerTree);
 }
 
-typedef struct DirEntry {
+typedef struct DirEntry
+{
     WCHAR *name;
     int isDirectory;
 } DirEntry;
 
 /* Sort order for the tree: directories before files, then case-insensitive
    alphabetical within each group - matches Explorer. */
-static int compare_dir_entries(const void *a, const void *b) {
+static int compare_dir_entries(const void *a, const void *b)
+{
     const DirEntry *entryA = (const DirEntry *)a;
     const DirEntry *entryB = (const DirEntry *)b;
-    if (entryA->isDirectory != entryB->isDirectory) return entryA->isDirectory ? -1 : 1;
+    if (entryA->isDirectory != entryB->isDirectory)
+        return entryA->isDirectory ? -1 : 1;
     return _wcsicmp(entryA->name, entryB->name);
 }
 
-static void populate_directory_children(HTREEITEM item, ExplorerItemData *data) {
-    if (item == s_rootItem) {
+static void free_dir_entries(DirEntry *entries, int count)
+{
+    for (int i = 0; i < count; i++)
+        free(entries[i].name);
+    free(entries);
+}
+
+/* Take a complete, sorted snapshot before changing the control. If the scan
+   runs out of memory, leave the existing tree intact rather than treating a
+   partial snapshot as a set of deleted files. */
+static int read_directory_entries(const WCHAR *path, DirEntry **result)
+{
+    WCHAR *pattern = path_join(path, L"*");
+    DirEntry *entries = NULL;
+    int count = 0, capacity = 0;
+    int complete = pattern != NULL;
+    if (pattern)
+    {
+        WIN32_FIND_DATAW findData;
+        HANDLE search = FindFirstFileW(pattern, &findData);
+        free(pattern);
+        if (search != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (wcscmp(findData.cFileName, L".") == 0 || wcscmp(findData.cFileName, L"..") == 0)
+                    continue;
+                if (count >= capacity)
+                {
+                    int nextCapacity = capacity ? capacity * 2 : 32;
+                    DirEntry *grown = (DirEntry *)realloc(entries, (size_t)nextCapacity * sizeof(DirEntry));
+                    if (!grown)
+                    {
+                        complete = 0;
+                        break;
+                    }
+                    entries = grown;
+                    capacity = nextCapacity;
+                }
+                entries[count].name = wcsdup_heap(findData.cFileName);
+                if (!entries[count].name)
+                {
+                    complete = 0;
+                    break;
+                }
+                entries[count].isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+                count++;
+            } while (FindNextFileW(search, &findData));
+            if (complete && GetLastError() != ERROR_NO_MORE_FILES)
+                complete = 0;
+            FindClose(search);
+        }
+        else if (GetLastError() != ERROR_FILE_NOT_FOUND)
+        {
+            complete = 0;
+        }
+    }
+    if (!complete)
+    {
+        free_dir_entries(entries, count);
+        *result = NULL;
+        return -1;
+    }
+    if (count > 0)
+        qsort(entries, (size_t)count, sizeof(DirEntry), compare_dir_entries);
+    *result = entries;
+    return count;
+}
+
+static void populate_directory_children(HTREEITEM item, ExplorerItemData *data)
+{
+    if (item == s_rootItem)
+    {
         WCHAR *parent = PathIsRootW(s_root) ? wcsdup_heap(s_root) : root_parent_path();
-        if (parent && can_navigate_up()) {
+        if (parent && can_navigate_up())
+        {
             HTREEITEM parentItem = insert_tree_item(item, TVI_LAST, parent, L"..", 1);
-            if (parentItem) {
+            if (parentItem)
+            {
                 ExplorerItemData *parentData = tree_item_data(parentItem);
-                if (parentData) parentData->isParentLink = 1;
+                if (parentData)
+                    parentData->isParentLink = 1;
                 /* ".." is an action, not an expandable view of the parent. */
                 delete_all_children(parentItem);
             }
@@ -288,59 +420,140 @@ static void populate_directory_children(HTREEITEM item, ExplorerItemData *data) 
         }
     }
 
-    WCHAR *pattern = path_join(data->fullPath, L"*");
     DirEntry *entries = NULL;
-    int count = 0, capacity = 0;
-    if (pattern) {
-        WIN32_FIND_DATAW findData;
-        HANDLE search = FindFirstFileW(pattern, &findData);
-        free(pattern);
-        if (search != INVALID_HANDLE_VALUE) {
-            do {
-                if (wcscmp(findData.cFileName, L".") == 0 || wcscmp(findData.cFileName, L"..") == 0)
-                    continue;
-                if (count >= capacity) {
-                    int nextCapacity = capacity ? capacity * 2 : 32;
-                    DirEntry *grown = (DirEntry *)realloc(entries, (size_t)nextCapacity * sizeof(DirEntry));
-                    if (!grown) break;
-                    entries = grown;
-                    capacity = nextCapacity;
-                }
-                entries[count].name = wcsdup_heap(findData.cFileName);
-                entries[count].isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
-                if (entries[count].name) count++;
-            } while (FindNextFileW(search, &findData));
-            FindClose(search);
-        }
+    int count = read_directory_entries(data->fullPath, &entries);
+    if (count < 0)
+    {
+        /* TVN_ITEMEXPANDING removed the original placeholder before this
+           scan. Restore it so an unavailable/network directory can be
+           collapsed and retried instead of becoming permanently leaf-like. */
+        insert_placeholder_child(item);
+        return;
     }
-    if (count > 0) qsort(entries, (size_t)count, sizeof(DirEntry), compare_dir_entries);
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
+    {
         WCHAR *full = path_join(data->fullPath, entries[i].name);
-        if (full) insert_tree_item(item, TVI_LAST, full, entries[i].name, entries[i].isDirectory);
+        if (full)
+            insert_tree_item(item, TVI_LAST, full, entries[i].name, entries[i].isDirectory);
         free(full);
-        free(entries[i].name);
     }
-    free(entries);
+    free_dir_entries(entries, count);
     data->childrenLoaded = 1;
 }
 
-static void reload_directory_children(HTREEITEM item, ExplorerItemData *data) {
+static void reload_directory_children(HTREEITEM item, ExplorerItemData *data)
+{
+    DirEntry *entries = NULL;
+    int count = read_directory_entries(data->fullPath, &entries);
+    if (count < 0)
+        return;
+
     themed_scrollbar_begin_update(g_hExplorerTree);
-    delete_all_children(item);
-    data->childrenLoaded = 0;
-    populate_directory_children(item, data);
+    /* Both lists are already in directory-first, case-insensitive order, so
+       merge them in one pass. Unchanged TreeView items stay alive, preserving
+       selection and expanded descendants. Crucially, do not use WM_SETREDRAW:
+       it passes through the themed-scrollbar subclass, where temporarily
+       hiding the TreeView also moves its sibling overlay windows and can
+       corrupt the editor's repaint/focus state. TVS_EX_DOUBLEBUFFER presents
+       these small row-level changes atomically. */
+    HTREEITEM current = TreeView_GetChild(g_hExplorerTree, item);
+    ExplorerItemData *currentData = tree_item_data(current);
+    HTREEITEM previous = NULL;
+    if (currentData && currentData->isParentLink)
+    {
+        previous = current;
+        current = TreeView_GetNextSibling(g_hExplorerTree, current);
+    }
+
+    int entryIndex = 0;
+    while (current || entryIndex < count)
+    {
+        currentData = tree_item_data(current);
+        int order;
+        if (!current)
+        {
+            order = 1;
+        }
+        else if (!currentData || currentData->isParentLink)
+        {
+            order = -1;
+        }
+        else if (entryIndex >= count)
+        {
+            order = -1;
+        }
+        else if (currentData->isDirectory != entries[entryIndex].isDirectory)
+        {
+            order = currentData->isDirectory ? -1 : 1;
+        }
+        else
+        {
+            order = _wcsicmp(PathFindFileNameW(currentData->fullPath), entries[entryIndex].name);
+        }
+
+        if (order < 0)
+        {
+            HTREEITEM next = TreeView_GetNextSibling(g_hExplorerTree, current);
+            TreeView_DeleteItem(g_hExplorerTree, current);
+            current = next;
+        }
+        else if (order > 0)
+        {
+            WCHAR *full = path_join(data->fullPath, entries[entryIndex].name);
+            if (full)
+            {
+                HTREEITEM inserted = insert_tree_item(item, previous ? previous : TVI_FIRST,
+                                                      full, entries[entryIndex].name,
+                                                      entries[entryIndex].isDirectory);
+                if (inserted)
+                    previous = inserted;
+                free(full);
+            }
+            entryIndex++;
+        }
+        else
+        {
+            const WCHAR *oldName = PathFindFileNameW(currentData->fullPath);
+            if (wcscmp(oldName, entries[entryIndex].name) != 0)
+            {
+                WCHAR *full = path_join(data->fullPath, entries[entryIndex].name);
+                if (full)
+                {
+                    TVITEMW changed = {0};
+                    changed.mask = TVIF_TEXT;
+                    changed.hItem = current;
+                    changed.pszText = entries[entryIndex].name;
+                    SendMessageW(g_hExplorerTree, TVM_SETITEMW, 0, (LPARAM)&changed);
+                    free(currentData->fullPath);
+                    currentData->fullPath = full;
+                }
+            }
+            previous = current;
+            current = TreeView_GetNextSibling(g_hExplorerTree, current);
+            entryIndex++;
+        }
+    }
+
+    free_dir_entries(entries, count);
+    data->childrenLoaded = 1;
     themed_scrollbar_end_update(g_hExplorerTree);
 }
 
-static HTREEITEM find_loaded_item_for_path(HTREEITEM item, const WCHAR *path) {
-    if (!item) return NULL;
+static HTREEITEM find_loaded_item_for_path(HTREEITEM item, const WCHAR *path)
+{
+    if (!item)
+        return NULL;
     ExplorerItemData *data = tree_item_data(item);
-    if (data && _wcsicmp(data->fullPath, path) == 0) return item;
-    if (data && data->isDirectory && data->childrenLoaded) {
+    if (data && _wcsicmp(data->fullPath, path) == 0)
+        return item;
+    if (data && data->isDirectory && data->childrenLoaded)
+    {
         HTREEITEM child = TreeView_GetChild(g_hExplorerTree, item);
-        while (child) {
+        while (child)
+        {
             HTREEITEM found = find_loaded_item_for_path(child, path);
-            if (found) return found;
+            if (found)
+                return found;
             child = TreeView_GetNextSibling(g_hExplorerTree, child);
         }
     }
@@ -349,19 +562,24 @@ static HTREEITEM find_loaded_item_for_path(HTREEITEM item, const WCHAR *path) {
 
 /* ---- filesystem operations invoked from the context menu ---- */
 
-static void copy_path_to_clipboard(const WCHAR *path) {
+static void copy_path_to_clipboard(const WCHAR *path)
+{
     size_t bytes = (wcslen(path) + 1) * sizeof(WCHAR);
     HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!global) return;
+    if (!global)
+        return;
     void *locked = GlobalLock(global);
-    if (locked) {
+    if (locked)
+    {
         memcpy(locked, path, bytes);
         GlobalUnlock(global);
-        if (OpenClipboard(s_hParent)) {
+        if (OpenClipboard(s_hParent))
+        {
             EmptyClipboard();
             HANDLE transferred = SetClipboardData(CF_UNICODETEXT, global);
             CloseClipboard();
-            if (transferred) return; /* the clipboard now owns `global` */
+            if (transferred)
+                return; /* the clipboard now owns `global` */
         }
     }
     GlobalFree(global);
@@ -373,26 +591,32 @@ static void copy_path_to_clipboard(const WCHAR *path) {
    so this is no new idiom here. SHFileOperationW is a deprecated fallback
    for the rare case COM isn't available, so Delete still works (just
    without IFileOperation's richer per-item error reporting). */
-static int delete_to_recycle_bin(const WCHAR *path) {
+static int delete_to_recycle_bin(const WCHAR *path)
+{
     IFileOperation *operation = NULL;
     HRESULT hr = CoCreateInstance(&CLSID_FileOperation, NULL, CLSCTX_ALL,
                                   &IID_IFileOperation, (void **)&operation);
-    if (SUCCEEDED(hr) && operation) {
+    if (SUCCEEDED(hr) && operation)
+    {
         IFileOperation_SetOperationFlags(operation, FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT);
         IShellItem *item = NULL;
         hr = SHCreateItemFromParsingName(path, NULL, &IID_IShellItem, (void **)&item);
-        if (SUCCEEDED(hr) && item) {
+        if (SUCCEEDED(hr) && item)
+        {
             hr = IFileOperation_DeleteItem(operation, item, NULL);
-            if (SUCCEEDED(hr)) hr = IFileOperation_PerformOperations(operation);
+            if (SUCCEEDED(hr))
+                hr = IFileOperation_PerformOperations(operation);
             BOOL aborted = TRUE;
-            if (SUCCEEDED(hr)) hr = IFileOperation_GetAnyOperationsAborted(operation, &aborted);
+            if (SUCCEEDED(hr))
+                hr = IFileOperation_GetAnyOperationsAborted(operation, &aborted);
             IShellItem_Release(item);
             IFileOperation_Release(operation);
             /* A cancelled operation must not be retried through the fallback. */
             return SUCCEEDED(hr) && !aborted;
         }
         IFileOperation_Release(operation);
-        if (SUCCEEDED(hr)) return 1;
+        if (SUCCEEDED(hr))
+            return 1;
     }
     WCHAR doubleNulPath[32768] = {0};
     wcsncpy(doubleNulPath, path, sizeof(doubleNulPath) / sizeof(doubleNulPath[0]) - 2);
@@ -407,46 +631,61 @@ static int delete_to_recycle_bin(const WCHAR *path) {
    a path separator, which would otherwise let New File/New Folder/Rename
    silently create or move something outside the folder the user actually
    right-clicked (e.g. typing "..\..\evil" into the prompt). */
-static int is_valid_entry_name(const WCHAR *name) {
-    if (!name[0] || wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0) return 0;
+static int is_valid_entry_name(const WCHAR *name)
+{
+    if (!name[0] || wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0)
+        return 0;
     return wcspbrk(name, L"\\/:*?\"<>|") == NULL;
 }
 
-static void create_new_entry(HTREEITEM containerItem, ExplorerItemData *containerData, int isDirectory) {
-    if (!s_promptText) return;
+static void create_new_entry(HTREEITEM containerItem, ExplorerItemData *containerData, int isDirectory)
+{
+    if (!s_promptText)
+        return;
     WCHAR name[260] = L"";
     const WCHAR *title = isDirectory ? L"New Folder" : L"New File";
     const WCHAR *prompt = isDirectory ? L"Folder name:" : L"File name:";
-    if (!s_promptText(title, prompt, L"", name, sizeof(name) / sizeof(name[0])) || !name[0]) return;
-    if (!is_valid_entry_name(name)) {
+    if (!s_promptText(title, prompt, L"", name, sizeof(name) / sizeof(name[0])) || !name[0])
+        return;
+    if (!is_valid_entry_name(name))
+    {
         MessageBoxW(s_hParent, L"That name isn't valid - it can't contain \\ / : * ? \" < > | or be . or ..",
                     title, MB_OK | MB_ICONWARNING);
         return;
     }
 
     WCHAR *full = path_join(containerData->fullPath, name);
-    if (!full) return;
+    if (!full)
+        return;
     int ok;
-    if (isDirectory) {
+    if (isDirectory)
+    {
         ok = CreateDirectoryW(full, NULL) != 0;
-    } else {
+    }
+    else
+    {
         HANDLE file = CreateFileW(full, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
         ok = file != INVALID_HANDLE_VALUE;
-        if (ok) CloseHandle(file);
+        if (ok)
+            CloseHandle(file);
     }
     free(full);
-    if (!ok) {
+    if (!ok)
+    {
         MessageBoxW(s_hParent, L"That name already exists or could not be created.", title,
                     MB_OK | MB_ICONWARNING);
         return;
     }
 
-    if (containerData->childrenLoaded) reload_directory_children(containerItem, containerData);
+    if (containerData->childrenLoaded)
+        reload_directory_children(containerItem, containerData);
     TreeView_Expand(g_hExplorerTree, containerItem, TVE_EXPAND);
 }
 
-static void rename_entry(HTREEITEM item, ExplorerItemData *data) {
-    if (!s_promptText || item == s_rootItem) return;
+static void rename_entry(HTREEITEM item, ExplorerItemData *data)
+{
+    if (!s_promptText || item == s_rootItem)
+        return;
     WCHAR currentName[260];
     wcsncpy(currentName, PathFindFileNameW(data->fullPath), 259);
     currentName[259] = 0;
@@ -455,8 +694,10 @@ static void rename_entry(HTREEITEM item, ExplorerItemData *data) {
     newName[259] = 0;
     if (!s_promptText(L"Rename", L"New name:", currentName, newName,
                       sizeof(newName) / sizeof(newName[0])) ||
-        wcscmp(newName, currentName) == 0) return;
-    if (!is_valid_entry_name(newName)) {
+        wcscmp(newName, currentName) == 0)
+        return;
+    if (!is_valid_entry_name(newName))
+    {
         MessageBoxW(s_hParent, L"That name isn't valid - it can't contain \\ / : * ? \" < > | or be . or ..",
                     L"Rename", MB_OK | MB_ICONWARNING);
         return;
@@ -465,67 +706,90 @@ static void rename_entry(HTREEITEM item, ExplorerItemData *data) {
     WCHAR *directory = path_directory(data->fullPath);
     WCHAR *newPath = directory ? path_join(directory, newName) : NULL;
     free(directory);
-    if (!newPath) return;
+    if (!newPath)
+        return;
 
-    if (!MoveFileW(data->fullPath, newPath)) {
+    if (!MoveFileW(data->fullPath, newPath))
+    {
         MessageBoxW(s_hParent, L"Could not rename - that name may already be in use.",
                     L"Rename", MB_OK | MB_ICONWARNING);
-    } else {
-        if (s_renamedPath) s_renamedPath(data->fullPath, newPath, data->isDirectory);
+    }
+    else
+    {
+        if (s_renamedPath)
+            s_renamedPath(data->fullPath, newPath, data->isDirectory);
         HTREEITEM parent = TreeView_GetParent(g_hExplorerTree, item);
         ExplorerItemData *parentData = parent ? tree_item_data(parent) : NULL;
-        if (parentData) reload_directory_children(parent, parentData);
+        if (parentData)
+            reload_directory_children(parent, parentData);
     }
     free(newPath);
 }
 
-static void delete_entry(HTREEITEM item, ExplorerItemData *data) {
-    if (item == s_rootItem) return;
+static void delete_entry(HTREEITEM item, ExplorerItemData *data)
+{
+    if (item == s_rootItem)
+        return;
     WCHAR message[600];
     swprintf(message, 600, L"Move \"%ls\" to the Recycle Bin?", PathFindFileNameW(data->fullPath));
-    if (MessageBoxW(s_hParent, message, L"Delete", MB_YESNO | MB_ICONWARNING) != IDYES) return;
-    if (!delete_to_recycle_bin(data->fullPath)) {
+    if (MessageBoxW(s_hParent, message, L"Delete", MB_YESNO | MB_ICONWARNING) != IDYES)
+        return;
+    if (!delete_to_recycle_bin(data->fullPath))
+    {
         MessageBoxW(s_hParent, L"Could not delete that item.", L"Delete", MB_OK | MB_ICONERROR);
         return;
     }
     HTREEITEM parent = TreeView_GetParent(g_hExplorerTree, item);
     ExplorerItemData *parentData = parent ? tree_item_data(parent) : NULL;
-    if (parentData) reload_directory_children(parent, parentData);
+    if (parentData)
+        reload_directory_children(parent, parentData);
 }
 
 /* ---- WM_NOTIFY handling ---- */
 
 static void open_parent_folder(void);
 
-static void handle_open_selected(void) {
+static void handle_open_selected(void)
+{
     HTREEITEM item = TreeView_GetSelection(g_hExplorerTree);
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
-    if (!data) return;
-    if (data->isParentLink) open_parent_folder();
-    else if (data->isRootChoice && s_changeRoot) s_changeRoot(data->fullPath);
-    else if (data->isDirectory) TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
-    else if (s_openFile) s_openFile(data->fullPath);
+    if (!data)
+        return;
+    if (data->isParentLink)
+        open_parent_folder();
+    else if (data->isRootChoice && s_changeRoot)
+        s_changeRoot(data->fullPath);
+    else if (data->isDirectory)
+        TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
+    else if (s_openFile)
+        s_openFile(data->fullPath);
 }
 
-static int can_open_parent(void) {
+static int can_open_parent(void)
+{
     return can_navigate_up();
 }
 
-static void open_parent_folder(void) {
-    if (!can_navigate_up()) return;
-    if (PathIsRootW(s_root)) {
+static void open_parent_folder(void)
+{
+    if (!can_navigate_up())
+        return;
+    if (PathIsRootW(s_root))
+    {
         show_roots_view();
         return;
     }
     WCHAR *parent = root_parent_path();
-    if (!parent) return;
+    if (!parent)
+        return;
     s_changeRoot(parent);
     free(parent);
 }
 
-static void handle_click(void) {
+static void handle_click(void)
+{
     DWORD pos = GetMessagePos();
-    POINT pt = { GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
+    POINT pt = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
     ScreenToClient(g_hExplorerTree, &pt);
     TVHITTESTINFO hit = {0};
     hit.pt = pt;
@@ -535,42 +799,48 @@ static void handle_click(void) {
         TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
 }
 
-static void handle_context_menu(HWND hwnd) {
+static void handle_context_menu(HWND hwnd)
+{
     DWORD pos = GetMessagePos();
-    POINT screenPt = { GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
+    POINT screenPt = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
     POINT clientPt = screenPt;
     ScreenToClient(g_hExplorerTree, &clientPt);
     TVHITTESTINFO hit = {0};
     hit.pt = clientPt;
     HTREEITEM item = TreeView_HitTest(g_hExplorerTree, &hit);
-    if (item) TreeView_SelectItem(g_hExplorerTree, item);
+    if (item)
+        TreeView_SelectItem(g_hExplorerTree, item);
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
     int isRoot = item && item == s_rootItem;
     int isParentLink = data && data->isParentLink;
     int isRootChoice = data && data->isRootChoice;
 
     HMENU menu = CreatePopupMenu();
-    if (can_open_parent() && !isParentLink && !isRootChoice) {
+    if (can_open_parent() && !isParentLink && !isRootChoice)
+    {
         AppendMenuW(menu, MF_STRING, CTX_OPEN_PARENT, L"Open Parent Folder\tBackspace");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     }
-    if (data) {
-        const WCHAR *openLabel = isParentLink ? L"Open Parent Folder" :
-                                   (isRootChoice ? L"Open as Workspace" :
-                                    (data->isDirectory ? L"Expand/Collapse" : L"Open"));
+    if (data)
+    {
+        const WCHAR *openLabel = isParentLink ? L"Open Parent Folder" : (isRootChoice ? L"Open as Workspace" : (data->isDirectory ? L"Expand/Collapse" : L"Open"));
         AppendMenuW(menu, MF_STRING, CTX_OPEN, openLabel);
-        if (!isParentLink && !isRootChoice) AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        if (!isParentLink && !isRootChoice)
+            AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     }
-    if (!s_showingRoots && !isParentLink && !isRootChoice) {
+    if (!s_showingRoots && !isParentLink && !isRootChoice)
+    {
         AppendMenuW(menu, MF_STRING, CTX_NEW_FILE, L"New File...");
         AppendMenuW(menu, MF_STRING, CTX_NEW_FOLDER, L"New Folder...");
     }
-    if (data && !isRoot && !isParentLink && !isRootChoice) {
+    if (data && !isRoot && !isParentLink && !isRootChoice)
+    {
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CTX_RENAME, L"Rename...");
         AppendMenuW(menu, MF_STRING, CTX_DELETE, L"Delete");
     }
-    if (data) {
+    if (data)
+    {
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CTX_COPY_PATH, L"Copy Path");
         AppendMenuW(menu, MF_STRING, CTX_REVEAL, L"Reveal in Explorer");
@@ -581,73 +851,113 @@ static void handle_context_menu(HWND hwnd) {
     UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                   screenPt.x, screenPt.y, 0, hwnd, NULL);
     DestroyMenu(menu);
-    if (!command) return;
+    if (!command)
+        return;
 
     /* New File/New Folder/Refresh operate on the clicked directory, or the
        clicked file's parent, or the tree root if nothing was clicked. */
     HTREEITEM containerItem = item ? item : s_rootItem;
     ExplorerItemData *containerData = containerItem ? tree_item_data(containerItem) : NULL;
-    if (containerData && (containerData->isParentLink || containerData->isRootChoice)) {
+    if (containerData && (containerData->isParentLink || containerData->isRootChoice))
+    {
         containerItem = s_rootItem;
         containerData = tree_item_data(containerItem);
     }
-    if (containerData && !containerData->isDirectory) {
+    if (containerData && !containerData->isDirectory)
+    {
         containerItem = TreeView_GetParent(g_hExplorerTree, containerItem);
         containerData = containerItem ? tree_item_data(containerItem) : NULL;
     }
 
-    switch (command) {
-        case CTX_OPEN_PARENT: open_parent_folder(); break;
-        case CTX_OPEN: handle_open_selected(); break;
-        case CTX_NEW_FILE: if (containerData) create_new_entry(containerItem, containerData, 0); break;
-        case CTX_NEW_FOLDER: if (containerData) create_new_entry(containerItem, containerData, 1); break;
-        case CTX_RENAME: if (data) rename_entry(item, data); break;
-        case CTX_DELETE: if (data) delete_entry(item, data); break;
-        case CTX_COPY_PATH: if (data) copy_path_to_clipboard(data->fullPath); break;
-        case CTX_REVEAL: if (data && s_revealPath) s_revealPath(data->fullPath); break;
-        case CTX_REFRESH:
-            if (s_showingRoots) show_roots_view();
-            else if (containerData) reload_directory_children(containerItem, containerData);
-            break;
+    switch (command)
+    {
+    case CTX_OPEN_PARENT:
+        open_parent_folder();
+        break;
+    case CTX_OPEN:
+        handle_open_selected();
+        break;
+    case CTX_NEW_FILE:
+        if (containerData)
+            create_new_entry(containerItem, containerData, 0);
+        break;
+    case CTX_NEW_FOLDER:
+        if (containerData)
+            create_new_entry(containerItem, containerData, 1);
+        break;
+    case CTX_RENAME:
+        if (data)
+            rename_entry(item, data);
+        break;
+    case CTX_DELETE:
+        if (data)
+            delete_entry(item, data);
+        break;
+    case CTX_COPY_PATH:
+        if (data)
+            copy_path_to_clipboard(data->fullPath);
+        break;
+    case CTX_REVEAL:
+        if (data && s_revealPath)
+            s_revealPath(data->fullPath);
+        break;
+    case CTX_REFRESH:
+        if (s_showingRoots)
+            show_roots_view();
+        else if (containerData)
+            reload_directory_children(containerItem, containerData);
+        break;
     }
 }
 
-static void handle_item_expanding(NMTREEVIEWW *info) {
-    if (info->action != TVE_EXPAND) return;
+static void handle_item_expanding(NMTREEVIEWW *info)
+{
+    if (info->action != TVE_EXPAND)
+        return;
     ExplorerItemData *data = (ExplorerItemData *)info->itemNew.lParam;
-    if (!data || !data->isDirectory || data->childrenLoaded) return;
+    if (!data || !data->isDirectory || data->childrenLoaded)
+        return;
     themed_scrollbar_begin_update(g_hExplorerTree);
     delete_all_children(info->itemNew.hItem);
     populate_directory_children(info->itemNew.hItem, data);
     themed_scrollbar_end_update(g_hExplorerTree);
 }
 
-static void handle_delete_item(NMTREEVIEWW *info) {
+static void handle_delete_item(NMTREEVIEWW *info)
+{
     ExplorerItemData *data = (ExplorerItemData *)info->itemOld.lParam;
-    if (data) { free(data->fullPath); free(data); }
+    if (data)
+    {
+        free(data->fullPath);
+        free(data);
+    }
 }
 
-void explorer_handle_notify(HWND hwnd, NMHDR *notification) {
-    switch (notification->code) {
-        case TVN_ITEMEXPANDINGW:
-            handle_item_expanding((NMTREEVIEWW *)notification);
-            return;
-        case TVN_DELETEITEMW:
-            handle_delete_item((NMTREEVIEWW *)notification);
-            return;
-        case NM_CLICK:
-            handle_click();
-            return;
-        case NM_DBLCLK:
+void explorer_handle_notify(HWND hwnd, NMHDR *notification)
+{
+    switch (notification->code)
+    {
+    case TVN_ITEMEXPANDINGW:
+        handle_item_expanding((NMTREEVIEWW *)notification);
+        return;
+    case TVN_DELETEITEMW:
+        handle_delete_item((NMTREEVIEWW *)notification);
+        return;
+    case NM_CLICK:
+        handle_click();
+        return;
+    case NM_DBLCLK:
+        handle_open_selected();
+        return;
+    case TVN_KEYDOWN:
+        if (((NMTVKEYDOWN *)notification)->wVKey == VK_RETURN)
             handle_open_selected();
-            return;
-        case TVN_KEYDOWN:
-            if (((NMTVKEYDOWN *)notification)->wVKey == VK_RETURN) handle_open_selected();
-            else if (((NMTVKEYDOWN *)notification)->wVKey == VK_BACK) open_parent_folder();
-            return;
-        case NM_RCLICK:
-            handle_context_menu(hwnd);
-            return;
+        else if (((NMTVKEYDOWN *)notification)->wVKey == VK_BACK)
+            open_parent_folder();
+        return;
+    case NM_RCLICK:
+        handle_context_menu(hwnd);
+        return;
     }
 }
 
@@ -661,46 +971,66 @@ void explorer_handle_notify(HWND hwnd, NMHDR *notification) {
    a still-pending overlapped read can never leave the thread stuck in
    GetOverlappedResult and the join in explorer_stop_watch() hanging. */
 
-static void queue_changed_directory(const WCHAR *directory) {
+static void queue_changed_directory(const WCHAR *directory)
+{
     EnterCriticalSection(&s_pendingLock);
     int exists = 0;
-    for (int i = 0; i < s_pendingCount; i++) {
-        if (_wcsicmp(s_pendingDirs[i], directory) == 0) { exists = 1; break; }
+    for (int i = 0; i < s_pendingCount; i++)
+    {
+        if (_wcsicmp(s_pendingDirs[i], directory) == 0)
+        {
+            exists = 1;
+            break;
+        }
     }
-    if (!exists) {
-        if (s_pendingCount >= s_pendingCapacity) {
+    if (!exists)
+    {
+        if (s_pendingCount >= s_pendingCapacity)
+        {
             int nextCapacity = s_pendingCapacity ? s_pendingCapacity * 2 : 8;
             WCHAR **grown = (WCHAR **)realloc(s_pendingDirs, (size_t)nextCapacity * sizeof(WCHAR *));
-            if (grown) { s_pendingDirs = grown; s_pendingCapacity = nextCapacity; }
+            if (grown)
+            {
+                s_pendingDirs = grown;
+                s_pendingCapacity = nextCapacity;
+            }
         }
-        if (s_pendingCount < s_pendingCapacity) {
+        if (s_pendingCount < s_pendingCapacity)
+        {
             WCHAR *copy = wcsdup_heap(directory);
-            if (copy) s_pendingDirs[s_pendingCount++] = copy;
+            if (copy)
+                s_pendingDirs[s_pendingCount++] = copy;
         }
     }
     LeaveCriticalSection(&s_pendingLock);
-    if (s_hParent) PostMessageW(s_hParent, MARKEDIT_WM_EXPLORER_CHANGED, 0, 0);
+    if (s_hParent)
+        PostMessageW(s_hParent, MARKEDIT_WM_EXPLORER_CHANGED, 0, 0);
 }
 
-static unsigned __stdcall explorer_watch_thread_proc(void *param) {
+static unsigned __stdcall explorer_watch_thread_proc(void *param)
+{
     ExplorerWatcher *watcher = (ExplorerWatcher *)param;
-    for (;;) {
+    for (;;)
+    {
         DWORD bytesReturned = 0;
         BOOL queued = ReadDirectoryChangesW(watcher->dirHandle, watcher->buffer, sizeof(watcher->buffer),
-            TRUE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            NULL, &watcher->overlapped, NULL);
-        if (!queued && GetLastError() != ERROR_IO_PENDING) break;
+                                            TRUE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                                            NULL, &watcher->overlapped, NULL);
+        if (!queued && GetLastError() != ERROR_IO_PENDING)
+            break;
 
-        HANDLE waitHandles[2] = { watcher->overlapped.hEvent, watcher->stopEvent };
+        HANDLE waitHandles[2] = {watcher->overlapped.hEvent, watcher->stopEvent};
         DWORD wait = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
-        if (wait != WAIT_OBJECT_0) {
+        if (wait != WAIT_OBJECT_0)
+        {
             CancelIoEx(watcher->dirHandle, &watcher->overlapped);
             GetOverlappedResult(watcher->dirHandle, &watcher->overlapped, &bytesReturned, TRUE);
             break;
         }
         if (!GetOverlappedResult(watcher->dirHandle, &watcher->overlapped, &bytesReturned, FALSE))
             continue;
-        if (bytesReturned == 0) {
+        if (bytesReturned == 0)
+        {
             /* The notification buffer overflowed - some changes were
                dropped. Fall back to refreshing from the root. */
             queue_changed_directory(watcher->root);
@@ -708,19 +1038,23 @@ static unsigned __stdcall explorer_watch_thread_proc(void *param) {
         }
 
         BYTE *cursor = watcher->buffer;
-        for (;;) {
+        for (;;)
+        {
             FILE_NOTIFY_INFORMATION *info = (FILE_NOTIFY_INFORMATION *)cursor;
             int nameLength = (int)(info->FileNameLength / sizeof(WCHAR));
             WCHAR *name = (WCHAR *)malloc(((size_t)nameLength + 1) * sizeof(WCHAR));
-            if (name) {
+            if (name)
+            {
                 memcpy(name, info->FileName, (size_t)nameLength * sizeof(WCHAR));
                 name[nameLength] = 0;
                 WCHAR *full = path_join(watcher->root, name);
                 free(name);
-                if (full) {
+                if (full)
+                {
                     WCHAR *directory = path_directory(full);
                     free(full);
-                    if (directory) {
+                    if (directory)
+                    {
                         /* Checks every path component, not just the immediate
                            parent - git itself writes deep inside .git\objects\
                            and .git\refs\, whose own immediate parent is never
@@ -731,34 +1065,50 @@ static unsigned __stdcall explorer_watch_thread_proc(void *param) {
                     }
                 }
             }
-            if (info->NextEntryOffset == 0) break;
+            if (info->NextEntryOffset == 0)
+                break;
             cursor += info->NextEntryOffset;
         }
     }
     return 0;
 }
 
-static void start_watcher(const WCHAR *root) {
+static void start_watcher(const WCHAR *root)
+{
     ExplorerWatcher *watcher = (ExplorerWatcher *)calloc(1, sizeof(ExplorerWatcher));
-    if (!watcher) return;
+    if (!watcher)
+        return;
     watcher->root = wcsdup_heap(root);
-    if (!watcher->root) { free(watcher); return; }
+    if (!watcher->root)
+    {
+        free(watcher);
+        return;
+    }
     watcher->dirHandle = CreateFileW(root, FILE_LIST_DIRECTORY,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
-    if (watcher->dirHandle == INVALID_HANDLE_VALUE) { free(watcher->root); free(watcher); return; }
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                                     FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+    if (watcher->dirHandle == INVALID_HANDLE_VALUE)
+    {
+        free(watcher->root);
+        free(watcher);
+        return;
+    }
     watcher->overlapped.hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
     watcher->stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!watcher->overlapped.hEvent || !watcher->stopEvent) {
-        if (watcher->overlapped.hEvent) CloseHandle(watcher->overlapped.hEvent);
-        if (watcher->stopEvent) CloseHandle(watcher->stopEvent);
+    if (!watcher->overlapped.hEvent || !watcher->stopEvent)
+    {
+        if (watcher->overlapped.hEvent)
+            CloseHandle(watcher->overlapped.hEvent);
+        if (watcher->stopEvent)
+            CloseHandle(watcher->stopEvent);
         CloseHandle(watcher->dirHandle);
         free(watcher->root);
         free(watcher);
         return;
     }
     watcher->thread = (HANDLE)_beginthreadex(NULL, 0, explorer_watch_thread_proc, watcher, 0, NULL);
-    if (!watcher->thread) {
+    if (!watcher->thread)
+    {
         CloseHandle(watcher->overlapped.hEvent);
         CloseHandle(watcher->stopEvent);
         CloseHandle(watcher->dirHandle);
@@ -769,8 +1119,10 @@ static void start_watcher(const WCHAR *root) {
     s_watcher = watcher;
 }
 
-void explorer_stop_watch(void) {
-    if (!s_watcher) return;
+void explorer_stop_watch(void)
+{
+    if (!s_watcher)
+        return;
     ExplorerWatcher *watcher = s_watcher;
     s_watcher = NULL;
     SetEvent(watcher->stopEvent);
@@ -783,7 +1135,8 @@ void explorer_stop_watch(void) {
     free(watcher);
 }
 
-void explorer_handle_change_message(void) {
+void explorer_handle_change_message(void)
+{
     EnterCriticalSection(&s_pendingLock);
     WCHAR **dirs = s_pendingDirs;
     int count = s_pendingCount;
@@ -793,9 +1146,11 @@ void explorer_handle_change_message(void) {
     LeaveCriticalSection(&s_pendingLock);
 
     themed_scrollbar_begin_update(g_hExplorerTree);
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
+    {
         HTREEITEM item = find_loaded_item_for_path(s_rootItem, dirs[i]);
-        if (item) {
+        if (item)
+        {
             ExplorerItemData *data = tree_item_data(item);
             if (data && data->isDirectory && data->childrenLoaded)
                 reload_directory_children(item, data);
@@ -810,7 +1165,8 @@ void explorer_handle_change_message(void) {
 
 void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptTextFn promptText,
                    ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath,
-                   ExplorerChangeRootFn changeRoot) {
+                   ExplorerChangeRootFn changeRoot)
+{
     s_hParent = hParent;
     s_openFile = openFile;
     s_promptText = promptText;
@@ -820,10 +1176,11 @@ void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptText
     InitializeCriticalSection(&s_pendingLock);
 
     g_hExplorerTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
-        WS_CHILD | WS_VSCROLL | TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT |
-        TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
-        0, 0, 0, 0, hParent, (HMENU)(UINT_PTR)ID_EXPLORER_TREE, GetModuleHandleW(NULL), NULL);
-    if (!g_hExplorerTree) return;
+                                      WS_CHILD | WS_VSCROLL | TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT |
+                                          TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
+                                      0, 0, 0, 0, hParent, (HMENU)(UINT_PTR)ID_EXPLORER_TREE, GetModuleHandleW(NULL), NULL);
+    if (!g_hExplorerTree)
+        return;
 
     /* Buffer the complete tree into an off-screen surface before presenting
        it. Without this, scrolling exposes and erases intermediate rows before
@@ -841,15 +1198,18 @@ void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptText
        black dark theme but showed as a wrong-coloured box in light mode. */
     int iconSize = GetSystemMetrics(SM_CXSMICON);
     s_iconList = ImageList_Create(iconSize, iconSize, ILC_COLOR32, 8, 32);
-    if (s_iconList) TreeView_SetImageList(g_hExplorerTree, s_iconList, TVSIL_NORMAL);
+    if (s_iconList)
+        TreeView_SetImageList(g_hExplorerTree, s_iconList, TVSIL_NORMAL);
 
     TreeView_SetItemHeight(g_hExplorerTree, MulDiv(18, GetDpiForWindow(hParent), 96));
     themed_scrollbar_attach(g_hExplorerTree, THEMED_SCROLL_TREEVIEW);
     explorer_apply_theme();
 }
 
-void explorer_apply_theme(void) {
-    if (!g_hExplorerTree) return;
+void explorer_apply_theme(void)
+{
+    if (!g_hExplorerTree)
+        return;
     apply_explorer_theme(g_hExplorerTree);
     TreeView_SetBkColor(g_hExplorerTree, theme_bg_color());
     TreeView_SetTextColor(g_hExplorerTree, theme_fg_color());
@@ -857,40 +1217,49 @@ void explorer_apply_theme(void) {
     InvalidateRect(g_hExplorerTree, NULL, TRUE);
 }
 
-void explorer_set_root(const WCHAR *rootPath) {
-    if (!g_hExplorerTree || !rootPath) return;
+void explorer_set_root(const WCHAR *rootPath)
+{
+    if (!g_hExplorerTree || !rootPath)
+        return;
     /* Re-opening the folder already being shown (e.g. toggling the panel off
        then back on) would otherwise discard every node's expand state and
        redo the same disk scan + watcher restart for no reason - the watcher
        already keeps what's shown in step with the disk. */
-    if (s_root && s_watcher && _wcsicmp(s_root, rootPath) == 0) return;
+    if (s_root && s_watcher && _wcsicmp(s_root, rootPath) == 0)
+        return;
     explorer_stop_watch();
     themed_scrollbar_begin_update(g_hExplorerTree);
     TreeView_DeleteAllItems(g_hExplorerTree); /* frees every ExplorerItemData via TVN_DELETEITEMW */
     s_rootItem = NULL;
     s_showingRoots = 0;
     replace_wstring(&s_root, rootPath);
-    if (!s_root) {
+    if (!s_root)
+    {
         themed_scrollbar_end_update(g_hExplorerTree);
         return;
     }
 
     const WCHAR *leaf = PathFindFileNameW(s_root);
     s_rootItem = insert_tree_item(TVI_ROOT, TVI_LAST, s_root, *leaf ? leaf : s_root, 1);
-    if (s_rootItem) TreeView_Expand(g_hExplorerTree, s_rootItem, TVE_EXPAND);
+    if (s_rootItem)
+        TreeView_Expand(g_hExplorerTree, s_rootItem, TVE_EXPAND);
     themed_scrollbar_end_update(g_hExplorerTree);
     start_watcher(s_root);
 }
 
-int explorer_content_x(int focusModeActive) {
-    if (!g_hExplorerTree || !g_explorerVisible || focusModeActive) return 0;
+int explorer_content_x(int focusModeActive)
+{
+    if (!g_hExplorerTree || !g_explorerVisible || focusModeActive)
+        return 0;
     return (g_explorerWidth >= 0 ? g_explorerWidth : 0) + SPLITTER_WIDTH;
 }
 
-void explorer_shutdown(void) {
+void explorer_shutdown(void)
+{
     explorer_stop_watch();
     EnterCriticalSection(&s_pendingLock);
-    for (int i = 0; i < s_pendingCount; i++) free(s_pendingDirs[i]);
+    for (int i = 0; i < s_pendingCount; i++)
+        free(s_pendingDirs[i]);
     free(s_pendingDirs);
     s_pendingDirs = NULL;
     s_pendingCount = 0;
@@ -900,5 +1269,9 @@ void explorer_shutdown(void) {
     free(s_root);
     s_root = NULL;
     s_rootItem = NULL;
-    if (s_iconList) { ImageList_Destroy(s_iconList); s_iconList = NULL; }
+    if (s_iconList)
+    {
+        ImageList_Destroy(s_iconList);
+        s_iconList = NULL;
+    }
 }

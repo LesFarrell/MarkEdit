@@ -51,6 +51,10 @@ WCHAR *decode_json_string(const WCHAR *json) {
     for (; i < length && json[i] != L'"'; i++) {
         WCHAR character = json[i];
         if (character != L'\\') {
+            if (character < 0x20) {
+                free(output);
+                return NULL;
+            }
             output[outputLength++] = character;
             continue;
         }
@@ -86,7 +90,7 @@ WCHAR *decode_json_string(const WCHAR *json) {
        that's truncated/malformed input, not a valid (possibly empty) string,
        and returning the partial content instead of NULL would let a caller
        treat garbage as a successful decode. */
-    if (i >= length) {
+    if (i >= length || i + 1 != length) {
         free(output);
         return NULL;
     }
