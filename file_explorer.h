@@ -31,11 +31,17 @@ typedef void (*ExplorerRevealFn)(const WCHAR *path);
    be retargeted by the application layer. */
 typedef void (*ExplorerRenameFn)(const WCHAR *oldPath, const WCHAR *newPath, int isDirectory);
 
+/* Requests that the application adopt a different workspace root. The
+   explorer uses this for its parent-folder action; the application owns the
+   persistence and recent-workspace bookkeeping associated with that change. */
+typedef void (*ExplorerChangeRootFn)(const WCHAR *path);
+
 /* Creates the explorer's TreeView child control (initially hidden) and
    records the callbacks used to reach markedit.c's static functions. Call
    once, from initialize_main_window(). */
 void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptTextFn promptText,
-                   ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath);
+                   ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath,
+                   ExplorerChangeRootFn changeRoot);
 
 /* Re-applies dark/light native theming (scrollbars, background/text colour)
    to the tree control. Call whenever g_previewDarkMode changes. */

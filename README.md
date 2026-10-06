@@ -45,7 +45,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Export of the enhanced preview—including highlighted code, rendered math, and available rendered diagrams—to an HTML document.
 - Printing and PDF export of the enhanced rendered preview through WebView2.
 - The table editor resizes an existing GFM table while preserving its cells, or creates a new table with a chosen number of rows and columns.
-- A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, and Refresh actions. Renaming a file updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
+- A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, and Refresh actions. Open the `..` entry, choose “Open Parent Folder”, or press Backspace while the tree is focused to move the workspace up one directory. Moving up from a filesystem root shows available drives and mapped network shares. Renaming a file updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
 - Quick Open searches file names in the active workspace, while Find in Folder searches supported text files and opens results at the matching line. If no workspace is open, either command first asks for a folder. Generated/dependency folders are skipped.
 - A searchable command palette (Tools → Command Palette or Ctrl+Shift+P) exposes the editor's commands without navigating menus.
 - Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.

@@ -49,7 +49,7 @@ zig c++ -std=c11 %COMMON_FLAGS% -Wall -Wextra -Wno-unknown-pragmas ^
     -o markedit.exe @markedit-sources.rsp @cmark-gfm-sources.rsp @lexilla-objects.rsp markedit.res ^
     third_party\webview2\x64\WebView2Loader.dll.lib ^
     -isystem third_party\webview2\include -isystem third_party\lexilla\include ^
-    -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -lshlwapi -lshell32 -lole32 ^
+    -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -lshlwapi -lshell32 -lole32 -lmpr ^
     -lwindowscodecs -luxtheme -ldwmapi -Wl,--subsystem,windows %LINK_FLAGS%
 if %errorlevel% neq 0 (
     echo Build failed.

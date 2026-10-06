@@ -25,6 +25,7 @@
 #include <uxtheme.h>
 #include <wchar.h>
 #include <windowsx.h>
+#include <winnetwk.h>
 
 #include "path_utils.h"
 #include "settings.h"
@@ -41,6 +42,8 @@ int g_draggingExplorer = 0;
 typedef struct ExplorerItemData {
     WCHAR *fullPath;
     int isDirectory;
+    int isParentLink;  /* synthetic ".." entry directly beneath the workspace root */
+    int isRootChoice;  /* drive/share entry in the virtual roots view */
     int childrenLoaded; /* directories only: has this node's real children been scanned yet? */
 } ExplorerItemData;
 
@@ -55,7 +58,7 @@ typedef struct ExplorerWatcher {
 
 enum {
     CTX_OPEN = 1, CTX_NEW_FILE, CTX_NEW_FOLDER, CTX_RENAME, CTX_DELETE,
-    CTX_COPY_PATH, CTX_REVEAL, CTX_REFRESH
+    CTX_COPY_PATH, CTX_REVEAL, CTX_REFRESH, CTX_OPEN_PARENT
 };
 
 static HWND s_hParent = NULL;
@@ -63,8 +66,10 @@ static ExplorerOpenFileFn s_openFile = NULL;
 static ExplorerPromptTextFn s_promptText = NULL;
 static ExplorerRevealFn s_revealPath = NULL;
 static ExplorerRenameFn s_renamedPath = NULL;
+static ExplorerChangeRootFn s_changeRoot = NULL;
 static WCHAR *s_root = NULL;
 static HTREEITEM s_rootItem = NULL;
+static int s_showingRoots = 0;
 static ExplorerWatcher *s_watcher = NULL;
 
 static CRITICAL_SECTION s_pendingLock;
@@ -85,6 +90,27 @@ typedef struct IconCacheEntry {
 static IconCacheEntry s_iconCache[ICON_CACHE_CAPACITY];
 static int s_iconCacheCount = 0;
 static int s_folderIconIndex = -1;
+
+/* Returns a newly allocated parent path, or NULL when the workspace is
+   already a drive/UNC root (or parent navigation is unavailable). */
+static WCHAR *root_parent_path(void) {
+    if (!s_root || !s_changeRoot || PathIsRootW(s_root)) return NULL;
+    WCHAR *parent = path_directory(s_root);
+    if (parent && _wcsicmp(parent, s_root) == 0) {
+        free(parent);
+        return NULL;
+    }
+    return parent;
+}
+
+static int can_navigate_up(void) {
+    if (!s_root || !s_changeRoot || s_showingRoots) return 0;
+    if (PathIsRootW(s_root)) return 1; /* opens the virtual drive/share list */
+    WCHAR *parent = root_parent_path();
+    int available = parent != NULL;
+    free(parent);
+    return available;
+}
 
 /* A private ILC_COLOR32 list with ImageList_SetBkColor(CLR_NONE) - rather
    than attaching the shared shell system image list via SHGFI_SYSICONINDEX -
@@ -192,6 +218,45 @@ static HTREEITEM insert_tree_item(HTREEITEM parent, HTREEITEM insertAfter,
     return created;
 }
 
+static void insert_root_choice(const WCHAR *path, const WCHAR *label) {
+    HTREEITEM item = insert_tree_item(TVI_ROOT, TVI_LAST, path, label, 1);
+    if (!item) return;
+    ExplorerItemData *data = tree_item_data(item);
+    if (data) data->isRootChoice = 1;
+    /* Root choices switch workspace; they are not expanded in place. */
+    delete_all_children(item);
+}
+
+static void show_roots_view(void) {
+    if (!g_hExplorerTree || !s_root) return;
+    explorer_stop_watch();
+    TreeView_DeleteAllItems(g_hExplorerTree);
+    s_rootItem = NULL;
+    s_showingRoots = 1;
+
+    DWORD capacity = GetLogicalDriveStringsW(0, NULL);
+    WCHAR *drives = capacity ? (WCHAR *)calloc((size_t)capacity + 1, sizeof(WCHAR)) : NULL;
+    if (drives && GetLogicalDriveStringsW(capacity, drives)) {
+        for (const WCHAR *drive = drives; *drive; drive += wcslen(drive) + 1) {
+            WCHAR label[1200];
+            wcscpy(label, drive);
+            if (GetDriveTypeW(drive) == DRIVE_REMOTE) {
+                WCHAR remote[1024];
+                DWORD remoteLength = (DWORD)(sizeof(remote) / sizeof(remote[0]));
+                WCHAR device[3] = {drive[0], L':', 0};
+                if (WNetGetConnectionW(device, remote, &remoteLength) == NO_ERROR)
+                    swprintf(label, sizeof(label) / sizeof(label[0]), L"%ls  (%ls)", drive, remote);
+            }
+            insert_root_choice(drive, label);
+        }
+    }
+    free(drives);
+
+    /* An un-mapped UNC share is not returned by GetLogicalDriveStringsW, so
+       retain it explicitly when it was the workspace we navigated up from. */
+    if (PathIsUNCW(s_root)) insert_root_choice(s_root, s_root);
+}
+
 typedef struct DirEntry {
     WCHAR *name;
     int isDirectory;
@@ -207,6 +272,20 @@ static int compare_dir_entries(const void *a, const void *b) {
 }
 
 static void populate_directory_children(HTREEITEM item, ExplorerItemData *data) {
+    if (item == s_rootItem) {
+        WCHAR *parent = PathIsRootW(s_root) ? wcsdup_heap(s_root) : root_parent_path();
+        if (parent && can_navigate_up()) {
+            HTREEITEM parentItem = insert_tree_item(item, TVI_LAST, parent, L"..", 1);
+            if (parentItem) {
+                ExplorerItemData *parentData = tree_item_data(parentItem);
+                if (parentData) parentData->isParentLink = 1;
+                /* ".." is an action, not an expandable view of the parent. */
+                delete_all_children(parentItem);
+            }
+            free(parent);
+        }
+    }
+
     WCHAR *pattern = path_join(data->fullPath, L"*");
     DirEntry *entries = NULL;
     int count = 0, capacity = 0;
@@ -412,12 +491,32 @@ static void delete_entry(HTREEITEM item, ExplorerItemData *data) {
 
 /* ---- WM_NOTIFY handling ---- */
 
+static void open_parent_folder(void);
+
 static void handle_open_selected(void) {
     HTREEITEM item = TreeView_GetSelection(g_hExplorerTree);
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
     if (!data) return;
-    if (data->isDirectory) TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
+    if (data->isParentLink) open_parent_folder();
+    else if (data->isRootChoice && s_changeRoot) s_changeRoot(data->fullPath);
+    else if (data->isDirectory) TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
     else if (s_openFile) s_openFile(data->fullPath);
+}
+
+static int can_open_parent(void) {
+    return can_navigate_up();
+}
+
+static void open_parent_folder(void) {
+    if (!can_navigate_up()) return;
+    if (PathIsRootW(s_root)) {
+        show_roots_view();
+        return;
+    }
+    WCHAR *parent = root_parent_path();
+    if (!parent) return;
+    s_changeRoot(parent);
+    free(parent);
 }
 
 static void handle_click(void) {
@@ -428,7 +527,8 @@ static void handle_click(void) {
     hit.pt = pt;
     HTREEITEM item = TreeView_HitTest(g_hExplorerTree, &hit);
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
-    if (data && data->isDirectory) TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
+    if (data && data->isDirectory && !data->isParentLink && !data->isRootChoice)
+        TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
 }
 
 static void handle_context_menu(HWND hwnd) {
@@ -442,15 +542,26 @@ static void handle_context_menu(HWND hwnd) {
     if (item) TreeView_SelectItem(g_hExplorerTree, item);
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
     int isRoot = item && item == s_rootItem;
+    int isParentLink = data && data->isParentLink;
+    int isRootChoice = data && data->isRootChoice;
 
     HMENU menu = CreatePopupMenu();
-    if (data) {
-        AppendMenuW(menu, MF_STRING, CTX_OPEN, data->isDirectory ? L"Expand/Collapse" : L"Open");
+    if (can_open_parent() && !isParentLink && !isRootChoice) {
+        AppendMenuW(menu, MF_STRING, CTX_OPEN_PARENT, L"Open Parent Folder\tBackspace");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     }
-    AppendMenuW(menu, MF_STRING, CTX_NEW_FILE, L"New File...");
-    AppendMenuW(menu, MF_STRING, CTX_NEW_FOLDER, L"New Folder...");
-    if (data && !isRoot) {
+    if (data) {
+        const WCHAR *openLabel = isParentLink ? L"Open Parent Folder" :
+                                   (isRootChoice ? L"Open as Workspace" :
+                                    (data->isDirectory ? L"Expand/Collapse" : L"Open"));
+        AppendMenuW(menu, MF_STRING, CTX_OPEN, openLabel);
+        if (!isParentLink && !isRootChoice) AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    }
+    if (!s_showingRoots && !isParentLink && !isRootChoice) {
+        AppendMenuW(menu, MF_STRING, CTX_NEW_FILE, L"New File...");
+        AppendMenuW(menu, MF_STRING, CTX_NEW_FOLDER, L"New Folder...");
+    }
+    if (data && !isRoot && !isParentLink && !isRootChoice) {
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CTX_RENAME, L"Rename...");
         AppendMenuW(menu, MF_STRING, CTX_DELETE, L"Delete");
@@ -472,12 +583,17 @@ static void handle_context_menu(HWND hwnd) {
        clicked file's parent, or the tree root if nothing was clicked. */
     HTREEITEM containerItem = item ? item : s_rootItem;
     ExplorerItemData *containerData = containerItem ? tree_item_data(containerItem) : NULL;
+    if (containerData && (containerData->isParentLink || containerData->isRootChoice)) {
+        containerItem = s_rootItem;
+        containerData = tree_item_data(containerItem);
+    }
     if (containerData && !containerData->isDirectory) {
         containerItem = TreeView_GetParent(g_hExplorerTree, containerItem);
         containerData = containerItem ? tree_item_data(containerItem) : NULL;
     }
 
     switch (command) {
+        case CTX_OPEN_PARENT: open_parent_folder(); break;
         case CTX_OPEN: handle_open_selected(); break;
         case CTX_NEW_FILE: if (containerData) create_new_entry(containerItem, containerData, 0); break;
         case CTX_NEW_FOLDER: if (containerData) create_new_entry(containerItem, containerData, 1); break;
@@ -485,7 +601,10 @@ static void handle_context_menu(HWND hwnd) {
         case CTX_DELETE: if (data) delete_entry(item, data); break;
         case CTX_COPY_PATH: if (data) copy_path_to_clipboard(data->fullPath); break;
         case CTX_REVEAL: if (data && s_revealPath) s_revealPath(data->fullPath); break;
-        case CTX_REFRESH: if (containerData) reload_directory_children(containerItem, containerData); break;
+        case CTX_REFRESH:
+            if (s_showingRoots) show_roots_view();
+            else if (containerData) reload_directory_children(containerItem, containerData);
+            break;
     }
 }
 
@@ -518,6 +637,7 @@ void explorer_handle_notify(HWND hwnd, NMHDR *notification) {
             return;
         case TVN_KEYDOWN:
             if (((NMTVKEYDOWN *)notification)->wVKey == VK_RETURN) handle_open_selected();
+            else if (((NMTVKEYDOWN *)notification)->wVKey == VK_BACK) open_parent_folder();
             return;
         case NM_RCLICK:
             handle_context_menu(hwnd);
@@ -681,12 +801,14 @@ void explorer_handle_change_message(void) {
 /* ---- public API ---- */
 
 void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptTextFn promptText,
-                   ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath) {
+                   ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath,
+                   ExplorerChangeRootFn changeRoot) {
     s_hParent = hParent;
     s_openFile = openFile;
     s_promptText = promptText;
     s_revealPath = revealPath;
     s_renamedPath = renamedPath;
+    s_changeRoot = changeRoot;
     InitializeCriticalSection(&s_pendingLock);
 
     g_hExplorerTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
@@ -737,6 +859,7 @@ void explorer_set_root(const WCHAR *rootPath) {
     explorer_stop_watch();
     TreeView_DeleteAllItems(g_hExplorerTree); /* frees every ExplorerItemData via TVN_DELETEITEMW */
     s_rootItem = NULL;
+    s_showingRoots = 0;
     replace_wstring(&s_root, rootPath);
     if (!s_root) return;
 

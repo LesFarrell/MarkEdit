@@ -12137,6 +12137,10 @@ static void explorer_request_open(const WCHAR *path) {
     open_file_in_tab(path);
 }
 
+static void explorer_request_change_root(const WCHAR *path) {
+    adopt_workspace_folder(g_hMainWnd, path);
+}
+
 static void initialize_main_window(HWND hwnd) {
     g_hMainWnd = hwnd;
 
@@ -12212,7 +12216,7 @@ static void initialize_main_window(HWND hwnd) {
     apply_debug_panel_theme();
 
     explorer_init(hwnd, explorer_request_open, show_text_input, reveal_path_in_explorer,
-                  explorer_path_renamed);
+                  explorer_path_renamed, explorer_request_change_root);
     if (g_explorerVisible && g_currentWorkspaceFolder) explorer_set_root(g_currentWorkspaceFolder);
 
     g_hTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
