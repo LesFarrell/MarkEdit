@@ -1,23 +1,33 @@
 @echo off
 setlocal
 where zig >nul 2>nul || (echo zig was not found on PATH. & exit /b 1)
-set "MARKEDIT_TEST_DIR=%TEMP%\markedit-tests"
-if not exist "%MARKEDIT_TEST_DIR%" mkdir "%MARKEDIT_TEST_DIR%"
-zig cc -std=c11 -O2 -Wall -Wextra -Werror -o "%MARKEDIT_TEST_DIR%\test_parser.exe" tests\test_parser.c markdown.c @cmark-gfm-sources.rsp
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_parser.exe tests\test_parser.c src\markdown.c @cmark-gfm-sources.rsp
 if %errorlevel% neq 0 exit /b 1
-"%MARKEDIT_TEST_DIR%\test_parser.exe"
+tests\test_parser.exe
 if %errorlevel% neq 0 exit /b 1
-zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_editor_commands.exe tests\test_editor_commands.c editor_commands.c -luser32
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_editor_commands.exe tests\test_editor_commands.c src\editor_commands.c -luser32
 if %errorlevel% neq 0 exit /b 1
 tests\test_editor_commands.exe
 if %errorlevel% neq 0 exit /b 1
-zig cc -std=c11 -O2 -Wall -Wextra -Werror -o "%MARKEDIT_TEST_DIR%\test_core.exe" tests\test_core.c json_formatter.c text_codec.c workspace_text.c file_io.c path_utils.c
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_core.exe tests\test_core.c src\text_codec.c src\file_io.c src\path_utils.c
 if %errorlevel% neq 0 exit /b 1
-"%MARKEDIT_TEST_DIR%\test_core.exe"
+tests\test_core.exe
 if %errorlevel% neq 0 exit /b 1
-zig cc -std=c11 -O2 -Wall -Wextra -Werror -o "%MARKEDIT_TEST_DIR%\test_recovery.exe" tests\test_recovery.c recovery.c file_io.c text_codec.c path_utils.c -lole32
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_recovery.exe tests\test_recovery.c src\recovery.c src\file_io.c src\text_codec.c src\path_utils.c -lole32
 if %errorlevel% neq 0 exit /b 1
-"%MARKEDIT_TEST_DIR%\test_recovery.exe"
+tests\test_recovery.exe
+if %errorlevel% neq 0 exit /b 1
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_plugin_host.exe tests\test_plugin_host.c src\plugin_host.c src\file_io.c src\text_codec.c src\path_utils.c @lua-sources.rsp -luser32
+if %errorlevel% neq 0 exit /b 1
+tests\test_plugin_host.exe
+if %errorlevel% neq 0 exit /b 1
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_menus.exe tests\test_menus.c src\menu_commands.c src\plugin_host.c src\file_io.c src\text_codec.c src\path_utils.c @lua-sources.rsp -luser32
+if %errorlevel% neq 0 exit /b 1
+tests\test_menus.exe
+if %errorlevel% neq 0 exit /b 1
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o tests\test_formatting.exe tests\test_formatting.c src\menu_commands.c src\plugin_host.c src\file_io.c src\text_codec.c src\path_utils.c @lua-sources.rsp -luser32
+if %errorlevel% neq 0 exit /b 1
+tests\test_formatting.exe
 if %errorlevel% neq 0 exit /b 1
 where node >nul 2>nul
 if %errorlevel% neq 0 (

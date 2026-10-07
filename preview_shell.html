@@ -145,11 +145,14 @@ const documentBase = document.createElement('base');
 documentBase.href = 'https://document.local/';
 document.head.appendChild(documentBase);
 let zoomSeq = 0;
-let contentRenderPending = false;
-let contentRenderGeneration = 0;
-let programmaticScrollPending = false;
-let programmaticScrollGeneration = 0;
+let suppressScrollPost = false;
 let scrollPostPending = false;
+// setContent() swaps the whole DOM, and the browser can clamp or anchor-
+// adjust scrollY while the new content lays out. Those scroll events are not
+// the user scrolling the preview, so they must not drive the editor (an edit
+// such as a paste would otherwise snap the editor back toward line 1).
+let renderSeq = 0;
+let suppressRenderScroll = false;
 
 function sourceLine(element) {
   const match = element && element.getAttribute('data-sourcepos')?.match(/^(\d+):/);
@@ -180,20 +183,17 @@ window.scrollToSourceLine = function(line) {
     const ratio = last > first ? Math.max(0, Math.min(1, (line - first) / (last - first))) : 0;
     top += (sourceTop(next) - sourceTop(current)) * ratio;
   }
-  const generation = ++programmaticScrollGeneration;
-  programmaticScrollPending = true;
+  suppressScrollPost = true;
   window.scrollTo(0, Math.max(0, top - 12));
-  setTimeout(() => {
-    if (generation === programmaticScrollGeneration) programmaticScrollPending = false;
-  }, 80);
+  setTimeout(() => { suppressScrollPost = false; }, 80);
 };
 
 window.addEventListener('scroll', () => {
-  if (contentRenderPending || programmaticScrollPending || scrollPostPending) return;
+  if (suppressScrollPost || suppressRenderScroll || scrollPostPending) return;
   scrollPostPending = true;
   requestAnimationFrame(() => {
     scrollPostPending = false;
-    if (contentRenderPending || programmaticScrollPending || !window.chrome?.webview) return;
+    if (suppressScrollPost || suppressRenderScroll || !window.chrome?.webview) return;
     const blocks = sourceBlocks();
     if (!blocks.length) return;
     const top = window.scrollY + 18;
@@ -329,8 +329,12 @@ function navigateToHeading(event, heading, id) {
 function enhanceFragmentLinks(root) {
   root.querySelectorAll('a[href^="#"]').forEach((link) => {
     const raw = link.getAttribute('href');
-    if (!raw || raw.length < 2) return;
     link.addEventListener('click', (event) => {
+      // A fragment belongs to this preview even when it is empty or does not
+      // currently match an element. Never let it resolve against <base> and
+      // escape through the native external-link handler.
+      event.preventDefault();
+      if (!raw || raw.length < 2) return;
       let id;
       try { id = decodeURIComponent(raw.slice(1)); }
       catch (_) { return; }
@@ -550,27 +554,29 @@ function updateSoloDiagramLayout() {
 }
 
 function setContent(html) {
-  /* Replacing the preview DOM can clamp scrollY to zero while the new
-     document (especially Mermaid diagrams) is still taking shape.  That is
-     a programmatic layout change, not a preview scroll from the user, so do
-     not feed its transient line 1 back into the editor. */
-  const renderGeneration = ++contentRenderGeneration;
-  contentRenderPending = true;
+  const seq = ++renderSeq;
+  suppressRenderScroll = true;
   // Wrap preview HTML in a container that GitHub's CSS targets.
   document.getElementById('content').innerHTML = '<article class="markdown-body">' + html + '</article>';
   const article = document.querySelector('#content > .markdown-body');
   enhanceAlerts(article);
   enhanceInlineText(article);
-  enhanceFragmentLinks(article);
   enhanceHeadings(article);
+  // Headings receive their generated IDs above, so fragment links can now
+  // resolve them and remain inside the preview.
+  enhanceFragmentLinks(article);
   renderMath(article);
   highlightCodeBlocks(article);
   enhanceCodeCopy(article);
   wrapMermaidBlocks();
-  window.__markeditRenderPromise = mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => updateSoloDiagramLayout());
-  window.__markeditRenderPromise.then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (renderGeneration === contentRenderGeneration) contentRenderPending = false;
-  })));
+  // Release only once diagrams have laid out, and only for the latest render,
+  // so an older render finishing can't unsuppress a newer one mid-layout.
+  window.__markeditRenderPromise = mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => {
+    updateSoloDiagramLayout();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (seq === renderSeq) suppressRenderScroll = false;
+    }));
+  });
   updateSoloDiagramLayout();
   window.setTheme(window.__markeditTheme || 'light');
 }

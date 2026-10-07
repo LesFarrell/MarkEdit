@@ -63,22 +63,19 @@ Source: "dist\highlight-powershell.min.js"; DestDir: "{app}"; Flags: ignoreversi
 Source: "dist\highlight-github.min.css"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\highlight-github-dark.min.css"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\katex\*"; DestDir: "{app}\katex"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\plugins\*"; DestDir: "{app}\plugins"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Application and redistributed-component licences.
 Source: "dist\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\third_party\cmark-gfm\COPYING"; DestDir: "{app}\third_party\cmark-gfm"; Flags: ignoreversion
-Source: "dist\third_party\gdb\bin\gdb.exe"; DestDir: "{app}\third_party\gdb\bin"; Flags: ignoreversion
-Source: "dist\third_party\gdb\COPYING.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
-Source: "dist\third_party\gdb\COPYING.MinGW-w64-runtime.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
-Source: "dist\third_party\gdb\VERSION.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
-Source: "dist\third_party\gdb\SOURCE.md"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
-Source: "dist\third_party\gdb\SHA256SUMS.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\highlightjs\LICENSE"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
 Source: "dist\third_party\highlightjs\VERSION.txt"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
 Source: "dist\third_party\katex\LICENSE"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
 Source: "dist\third_party\katex\VERSION.txt"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
 Source: "dist\third_party\lexilla\License.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
 Source: "dist\third_party\lexilla\version.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
+Source: "dist\third_party\lua\LICENSE"; DestDir: "{app}\third_party\lua"; Flags: ignoreversion
+Source: "dist\third_party\lua\VERSION.txt"; DestDir: "{app}\third_party\lua"; Flags: ignoreversion
 Source: "dist\third_party\scintilla\License.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
 Source: "dist\third_party\scintilla\version.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
 Source: "dist\third_party\webview2\LICENSE.txt"; DestDir: "{app}\third_party\webview2"; Flags: ignoreversion
