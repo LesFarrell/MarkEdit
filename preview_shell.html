@@ -1,8 +1,8 @@
 <!--
   If you change the CSP, or the base/dark-theme CSS below, also update the
-  HTML_SHELL fallback string in markedit.c (used on WebView2 Runtimes too old
+  fallback shell in src/preview_fallback.c (used on WebView2 Runtimes too old
   to support ICoreWebView2_3 / virtual-host folder mapping, so this file can't
-  be served to them directly). HTML_SHELL intentionally omits KaTeX,
+  be served to them directly). The fallback intentionally omits KaTeX,
   highlight.js, and Mermaid script tags -- see the comment above its
   definition for why. The fallback retains some shared feature styling to
   keep the two shells easy to compare, although those features are inactive;
@@ -145,6 +145,10 @@ const documentBase = document.createElement('base');
 documentBase.href = 'https://document.local/';
 document.head.appendChild(documentBase);
 let zoomSeq = 0;
+// setContent() swaps the whole DOM, and the browser can clamp or anchor-
+// adjust scrollY while the new content lays out. Those scroll events are not
+// the user scrolling the preview, so they must not drive the editor (an edit
+// such as a paste would otherwise snap the editor back toward line 1).
 let contentRenderPending = false;
 let contentRenderGeneration = 0;
 let programmaticScrollPending = false;
@@ -329,8 +333,12 @@ function navigateToHeading(event, heading, id) {
 function enhanceFragmentLinks(root) {
   root.querySelectorAll('a[href^="#"]').forEach((link) => {
     const raw = link.getAttribute('href');
-    if (!raw || raw.length < 2) return;
     link.addEventListener('click', (event) => {
+      // A fragment belongs to this preview even when it is empty or does not
+      // currently match an element. Never let it resolve against <base> and
+      // escape through the native external-link handler.
+      event.preventDefault();
+      if (!raw || raw.length < 2) return;
       let id;
       try { id = decodeURIComponent(raw.slice(1)); }
       catch (_) { return; }
@@ -446,11 +454,9 @@ function renderMath(root) {
 }
 
 function wrapMermaidBlocks() {
-  const blocks = document.querySelectorAll('pre.mermaid:not([data-wrapped]), pre > code.language-mermaid');
-  blocks.forEach((block) => {
-    const el = block.matches('code') ? block.parentElement : block;
-    if (!el || el.hasAttribute('data-wrapped')) return;
-    el.setAttribute('data-wrapped', '1');
+  // Each block is replaced by its wrapper below, so a later call never sees it again.
+  document.querySelectorAll('pre > code.language-mermaid').forEach((code) => {
+    const el = code.parentElement;
     const src = el.textContent;
     const id = 'mmd-' + (zoomSeq++);
     const wrap = document.createElement('div');
@@ -561,8 +567,10 @@ function setContent(html) {
   const article = document.querySelector('#content > .markdown-body');
   enhanceAlerts(article);
   enhanceInlineText(article);
-  enhanceFragmentLinks(article);
   enhanceHeadings(article);
+  // Headings receive their generated IDs above, so fragment links can now
+  // resolve them and remain inside the preview.
+  enhanceFragmentLinks(article);
   renderMath(article);
   highlightCodeBlocks(article);
   enhanceCodeCopy(article);

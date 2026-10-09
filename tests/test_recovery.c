@@ -1,9 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../recovery.h"
-#include "../file_io.h"
-#include "../path_utils.h"
+#include "../src/recovery.h"
+#include "../src/file_io.h"
+#include "../src/path_utils.h"
 
 static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); failures++; } } while (0)

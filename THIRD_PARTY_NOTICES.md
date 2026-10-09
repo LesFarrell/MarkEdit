@@ -79,3 +79,10 @@ as Scintilla. It's built from a trimmed copy of the upstream source under
 Markdown, JSON, XML/HTML, YAML, C/C++, Python, Bash, PowerShell and Lua
 lexers with their required support code; a copy of the licence is at
 `third_party/lexilla/License.txt`.
+
+## Lua 5.4.9
+
+Plugins run on [Lua](https://www.lua.org/), copyright (C) 1994–2026 Lua.org,
+PUC-Rio, licensed under the MIT License. It's built from the unmodified
+release sources under `third_party/lua` and linked directly into
+`markedit.exe`; a copy of the licence is at `third_party/lua/LICENSE`.

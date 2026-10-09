@@ -1,23 +1,33 @@
 #include <stdio.h>
 #include <string.h>
-#include "../editor_commands.h"
+#include "../src/editor_commands.h"
 
-static int check_transform(HWND editor, const char *input, const char *expected,
-                           int mode, const char *eol) {
+static int check_indentation(HWND editor, const char *input, int toSpaces, const char *expected) {
     char text[256];
     SendMessageA(editor, SCI_SETTEXT, 0, (LPARAM)input);
     SendMessageA(editor, SCI_EMPTYUNDOBUFFER, 0, 0);
-    SendMessageA(editor, SCI_SETSEL, 0, (LPARAM)strlen(input));
-    transform_selected_lines(editor, mode, eol);
+    convert_indentation(editor, toSpaces);
     SendMessageA(editor, SCI_GETTEXT, sizeof(text), (LPARAM)text);
     if (strcmp(text, expected)) {
-        fprintf(stderr, "Incorrect transform for mode %d\n", mode);
+        fprintf(stderr, "Incorrect indentation conversion of \"%s\": \"%s\"\n", input, text);
         return 0;
     }
     SendMessageA(editor, SCI_UNDO, 0, 0);
     SendMessageA(editor, SCI_GETTEXT, sizeof(text), (LPARAM)text);
     if (strcmp(text, input) || SendMessageA(editor, SCI_CANUNDO, 0, 0)) {
-        fprintf(stderr, "Transform was not one undo step\n");
+        fprintf(stderr, "Indentation conversion was not one undo step\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int check_brace(HWND editor, const char *input, Sci_Position caret, Sci_Position expected) {
+    SendMessageA(editor, SCI_SETTEXT, 0, (LPARAM)input);
+    SendMessageA(editor, SCI_GOTOPOS, (WPARAM)caret, 0);
+    jump_to_matching_brace(editor);
+    Sci_Position landed = (Sci_Position)SendMessageA(editor, SCI_GETCURRENTPOS, 0, 0);
+    if (landed != expected) {
+        fprintf(stderr, "Brace match in \"%s\" from %d landed at %d\n", input, (int)caret, (int)landed);
         return 0;
     }
     return 1;
@@ -36,20 +46,21 @@ int main(void) {
     HWND editor = CreateWindowExA(0, "Scintilla", "", WS_POPUP, 0, 0, 100, 100,
                                   NULL, NULL, GetModuleHandleW(NULL), NULL);
     if (!editor) { FreeLibrary(scintilla); return 1; }
+    SendMessageA(editor, SCI_SETTABWIDTH, 4, 0);
     int ok = 1;
-    const char *endings[] = { "\r", "\n", "\r\n" };
-    for (int i = 0; i < 3; i++) {
-        char input[128], ascending[128], descending[128], unique[128];
-        const char *eol = endings[i];
-        snprintf(input, sizeof(input), "b%sa%sb%s", eol, eol, eol);
-        snprintf(ascending, sizeof(ascending), "a%sb%sb%s", eol, eol, eol);
-        snprintf(descending, sizeof(descending), "b%sb%sa%s", eol, eol, eol);
-        snprintf(unique, sizeof(unique), "b%sa%s", eol, eol);
-        ok &= check_transform(editor, input, ascending, 0, eol);
-        ok &= check_transform(editor, input, descending, 1, eol);
-        ok &= check_transform(editor, input, unique, 2, eol);
-    }
-    ok &= check_transform(editor, "c\rb\na\r\n", "a\nb\nc\r\n", 0, "\n");
+
+    /* Only leading whitespace changes; a tab advances to the next tab stop. */
+    ok &= check_indentation(editor, "\tx\n  \ty\n", 1, "    x\n    y\n");
+    ok &= check_indentation(editor, "      x\n\t\ty", 0, "\t  x\n\t\ty");
+    ok &= check_indentation(editor, "a\tb\n  \"\t\"", 1, "a\tb\n  \"\t\"");
+    ok &= check_indentation(editor, "        deep", 0, "\t\tdeep");
+
+    /* The brace just before the caret is preferred, then the one after it. */
+    ok &= check_brace(editor, "f(a[b])", 2, 6);
+    ok &= check_brace(editor, "f(a[b])", 3, 5);
+    ok &= check_brace(editor, "f(a[b])", 7, 1);
+    ok &= check_brace(editor, "no braces", 3, 3);
+
     DestroyWindow(editor);
     FreeLibrary(scintilla);
     if (ok) puts("All editor command tests passed.");

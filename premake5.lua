@@ -1,7 +1,7 @@
 -- Premake5 script for MarkEdit.
 -- Alternative to the Zig-based build.bat / test.bat scripts, for three
--- toolchains (builds markedit.exe, statically linking Lexilla, and
--- test_parser, then stages dist/ the same way build.bat does):
+-- toolchains (builds markedit.exe, statically linking Lexilla, and the
+-- test programs, then stages dist/ the same way build.bat does):
 --
 --   MinGW-w64 GCC:  premake5 gmake          then  make -C build config=release_x64
 --   Zig:            premake5 --zig gmake    then  make -C build config=release_x64
@@ -64,6 +64,7 @@ CMARK_GFM_DIR = "third_party/cmark-gfm"
 WEBVIEW2_DIR = "third_party/webview2"
 SCINTILLA_DIR = "third_party/scintilla"
 LEXILLA_DIR = "third_party/lexilla"
+LUA_DIR = "third_party/lua"
 
 CMARK_GFM_SOURCES = {
     CMARK_GFM_DIR.."/src/arena.c",
@@ -113,6 +114,23 @@ function cmark_gfm_settings()
     filter {}
 end
 
+-- The Lua core plus the libraries plugins get; keep this list aligned with
+-- lua-sources.rsp (third_party/lua/VERSION.txt says why io/os/package/debug
+-- are left out).
+LUA_SOURCES = {}
+for _, name in ipairs {
+    "lapi", "lcode", "lctype", "ldebug", "ldo", "ldump", "lfunc", "lgc", "llex", "lmem",
+    "lobject", "lopcodes", "lparser", "lstate", "lstring", "ltable", "ltm", "lundump", "lvm",
+    "lzio", "lauxlib", "lbaselib", "lcorolib", "ltablib", "lstrlib", "lmathlib", "lutf8lib",
+} do
+    table.insert(LUA_SOURCES, LUA_DIR.."/src/"..name..".c")
+end
+
+function lua_settings()
+    files(LUA_SOURCES)
+    includedirs { LUA_DIR.."/src" }
+end
+
 -- ---- dist/ staging, mirroring build.bat (same file list, same
 -- third_party/<component> licence/version layout), so every build path
 -- produces a complete, ready-to-run folder. Unlike build.bat this doesn't
@@ -128,9 +146,14 @@ DIST_FILES = {
 }
 DIST_LICENCES = {
     ["cmark-gfm"]   = { CMARK_GFM_DIR.."/COPYING" },
+    ["gdb"]         = {
+        "third_party/gdb/COPYING.txt", "third_party/gdb/COPYING.MinGW-w64-runtime.txt",
+        "third_party/gdb/VERSION.txt", "third_party/gdb/SOURCE.md", "third_party/gdb/SHA256SUMS.txt",
+    },
     ["highlightjs"] = { "third_party/highlightjs/LICENSE", "third_party/highlightjs/VERSION.txt" },
     ["katex"]       = { "third_party/katex/LICENSE", "third_party/katex/VERSION.txt" },
     ["lexilla"]     = { LEXILLA_DIR.."/License.txt", LEXILLA_DIR.."/version.txt" },
+    ["lua"]         = { LUA_DIR.."/LICENSE", LUA_DIR.."/VERSION.txt" },
     ["scintilla"]   = { SCINTILLA_DIR.."/License.txt", SCINTILLA_DIR.."/version.txt" },
     ["webview2"]    = { WEBVIEW2_DIR.."/LICENSE.txt" },
 }
@@ -166,19 +189,17 @@ local function staging_commands(posix)
 
     for _, dll in ipairs(RUNTIME_DLLS) do copy(dll, "") end
     mkdir("dist/katex")
+    mkdir("dist/plugins")
     for _, file in ipairs(DIST_FILES) do copy(file, "dist/") end
     if posix then
         table.insert(commands, "cp -rf "..at("katex").."/. "..at("dist/katex").."/")
+        table.insert(commands, "cp -rf "..at("plugins").."/. "..at("dist/plugins").."/")
     else
         table.insert(commands, 'xcopy /E /I /Y /Q "'..at("katex")..'" "'..at("dist/katex")..'" >nul')
+        table.insert(commands, 'xcopy /E /I /Y /Q "'..at("plugins")..'" "'..at("dist/plugins")..'" >nul')
     end
     mkdir("dist/third_party/gdb/bin")
     copy("third_party/gdb/bin/gdb.exe", "dist/third_party/gdb/bin/")
-    for _, file in ipairs({
-        "COPYING.txt", "COPYING.MinGW-w64-runtime.txt", "VERSION.txt", "SOURCE.md", "SHA256SUMS.txt"
-    }) do
-        copy("third_party/gdb/"..file, "dist/third_party/gdb/")
-    end
     local components = {}
     for component in pairs(DIST_LICENCES) do table.insert(components, component) end
     table.sort(components) -- a stable command order from run to run
@@ -241,26 +262,30 @@ project "markedit"
     objdir "build/obj/markedit"
 
     files {
-        "markedit.c",
-        "editor_commands.c", "editor_commands.h",
-        "editor_language.c", "editor_language.h",
-        "preview_fallback.c", "preview_fallback.h",
-        "path_utils.c", "path_utils.h",
-        "file_io.c", "file_io.h",
-        "recovery.c", "recovery.h",
-        "text_codec.c", "text_codec.h",
-        "workspace_text.c", "workspace_text.h",
-        "json_formatter.c", "json_formatter.h",
-        "markdown.c", "markdown.h",
-        "settings.c", "settings.h",
-        "recent_list.c", "recent_list.h",
-        "help_reference.c", "help_reference.h",
-        "file_explorer.c", "file_explorer.h",
-        "toolbar_icons.c", "toolbar_icons.h",
-        "theme.h",
+        "src/markedit.c",
+        "src/editor_commands.c", "src/editor_commands.h",
+        "src/editor_language.c", "src/editor_language.h",
+        "src/preview_fallback.c", "src/preview_fallback.h",
+        "src/path_utils.c", "src/path_utils.h",
+        "src/file_io.c", "src/file_io.h",
+        "src/recovery.c", "src/recovery.h",
+        "src/text_codec.c", "src/text_codec.h",
+        "src/workspace_text.c", "src/workspace_text.h",
+        "src/markdown.c", "src/markdown.h",
+        "src/settings.c", "src/settings.h",
+        "src/recent_list.c", "src/recent_list.h",
+        "src/file_explorer.c", "src/file_explorer.h",
+        "src/toolbar_icons.c", "src/toolbar_icons.h",
+        "src/themed_scrollbar.c", "src/themed_scrollbar.h",
+        "src/plugin_host.c", "src/plugin_host.h",
+        "src/menu_commands.c", "src/menu_commands.h", "src/command_ids.h",
+        "src/menus.lua", "src/formatting.lua",
+        "src/help/markdown-reference.md", "src/help/keyboard-shortcuts.lua",
+        "src/theme.h",
         "markedit.rc",
     }
     cmark_gfm_settings()
+    lua_settings()
 
     includedirs { "." }
     -- windres (used to compile markedit.rc) doesn't understand gcc's -isystem,
@@ -273,7 +298,7 @@ project "markedit"
     -- The project name, not its "Lexilla" target name, so Premake treats it as
     -- the sibling project above: it links that project's output wherever it
     -- was built and orders the build after it, for both make and Visual Studio.
-    links { "lexilla", "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "windowscodecs", "uxtheme", "dwmapi" }
+    links { "lexilla", "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "mpr", "windowscodecs", "uxtheme", "dwmapi" }
 
     warnings "Extra"
     optimize "Size"
@@ -322,7 +347,7 @@ project "test_parser"
     targetdir "tests"
     objdir "build/obj/test_parser"
 
-    files { "tests/test_parser.c", "markdown.c" }
+    files { "tests/test_parser.c", "src/markdown.c" }
     cmark_gfm_settings()
 
     includedirs { "." }
@@ -342,7 +367,7 @@ project "test_editor_commands"
     targetname "test_editor_commands"
     targetdir "tests"
     objdir "build/obj/test_editor_commands"
-    files { "tests/test_editor_commands.c", "editor_commands.c", "editor_commands.h" }
+    files { "tests/test_editor_commands.c", "src/editor_commands.c", "src/editor_commands.h" }
     includedirs { "." }
     links { "user32" }
     warnings "Extra"
@@ -360,7 +385,7 @@ project "test_core"
     targetname "test_core"
     targetdir "tests"
     objdir "build/obj/test_core"
-    files { "tests/test_core.c", "json_formatter.c", "text_codec.c", "workspace_text.c", "file_io.c", "path_utils.c" }
+    files { "tests/test_core.c", "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c" }
     includedirs { "." }
     warnings "Extra"
     optimize "Size"
@@ -377,9 +402,74 @@ project "test_recovery"
     targetname "test_recovery"
     targetdir "tests"
     objdir "build/obj/test_recovery"
-    files { "tests/test_recovery.c", "recovery.c", "file_io.c", "text_codec.c", "path_utils.c" }
+    files { "tests/test_recovery.c", "src/recovery.c", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
     includedirs { "." }
     links { "ole32" }
+    warnings "Extra"
+    optimize "Size"
+    filter "toolset:gcc or clang"
+        buildoptions { "-Werror" }
+    filter "toolset:msc"
+        buildoptions { "/WX" }
+    filter {}
+
+project "test_plugin_host"
+    kind "ConsoleApp"
+    language "C"
+    cdialect "C11"
+    targetname "test_plugin_host"
+    targetdir "tests"
+    objdir "build/obj/test_plugin_host"
+    files { "tests/test_plugin_host.c", "src/plugin_host.c", "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
+    lua_settings()
+    includedirs { "." }
+    links { "user32" }
+    warnings "Extra"
+    optimize "Size"
+    filter "toolset:gcc or clang"
+        buildoptions { "-Werror" }
+    filter "toolset:msc"
+        buildoptions { "/WX" }
+    filter {}
+
+-- Run from the repository root: it reads src/menus.lua.
+project "test_menus"
+    kind "ConsoleApp"
+    language "C"
+    cdialect "C11"
+    targetname "test_menus"
+    targetdir "tests"
+    objdir "build/obj/test_menus"
+    files {
+        "tests/test_menus.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
+        "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
+    }
+    lua_settings()
+    includedirs { "." }
+    links { "user32" }
+    warnings "Extra"
+    optimize "Size"
+    filter "toolset:gcc or clang"
+        buildoptions { "-Werror" }
+    filter "toolset:msc"
+        buildoptions { "/WX" }
+    filter {}
+
+-- Run from the repository root: it reads src/formatting.lua.
+project "test_formatting"
+    kind "ConsoleApp"
+    language "C"
+    cdialect "C11"
+    targetname "test_formatting"
+    targetdir "tests"
+    objdir "build/obj/test_formatting"
+    files {
+        "tests/test_formatting.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
+        "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
+    }
+    lua_settings()
+    includedirs { "." }
+    links { "user32" }
     warnings "Extra"
     optimize "Size"
     filter "toolset:gcc or clang"

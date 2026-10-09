@@ -1,0 +1,10 @@
+Lua 5.4.9
+Source: https://www.lua.org/ftp/lua-5.4.9.tar.gz
+SHA-256: 2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6
+
+This directory contains the unmodified library sources and headers from the
+release's src/ directory. The standalone interpreter and compiler (lua.c,
+luac.c) and the Makefile are omitted. lua-sources.rsp lists the subset that
+MarkEdit compiles: the core plus the base, coroutine, table, string, math and
+utf8 libraries. The io, os, package and debug libraries are not built, so
+plugins cannot touch the file system or start processes.

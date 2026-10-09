@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../markdown.h"
+#include "../src/markdown.h"
 
 static int failures = 0;
 

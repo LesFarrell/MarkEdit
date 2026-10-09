@@ -4,10 +4,10 @@ const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const root = path.join(__dirname, '..');
-const native = fs.readFileSync(path.join(root, 'markedit.c'), 'utf8');
+const native = fs.readFileSync(path.join(root, 'src', 'markedit.c'), 'utf8');
 const exportCode = native.slice(native.indexOf('static void do_export_html(void) {'));
 const formatMatch = exportCode.match(/snprintf\(script, scriptCap,([\s\S]*?)baseEscaped, titleEscaped, g_exportRequest, g_exportRequest\);/);
-assert.ok(formatMatch, 'could not locate the export bridge snprintf() in markedit.c - update this test to match');
+assert.ok(formatMatch, 'could not locate the export bridge snprintf() in src/markedit.c - update this test to match');
 const literals = formatMatch[1].match(/"(?:\\.|[^"\\])*"/g);
 assert.ok(literals && literals.length, 'no string literals found in the export bridge format');
 let bridge = literals.map(s => JSON.parse(s)).join('');
@@ -29,7 +29,7 @@ async function run() {
     await new Promise(setImmediate);
     assert.deepEqual(messages, ['export-html:42:null']);
     assert.equal(vm.runInNewContext(bridge, {window: {}}), false);
-    // Syntax-check all inline preview scripts, including the embedded fallback.
+    // Syntax-check every inline script in preview_shell.html.
     const html = fs.readFileSync(path.join(root, 'preview_shell.html'), 'utf8');
     for (const match of html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(match[1]);
     console.log('All preview bridge tests passed.');

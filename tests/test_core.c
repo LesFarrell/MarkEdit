@@ -1,11 +1,11 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../json_formatter.h"
-#include "../text_codec.h"
-#include "../file_io.h"
-#include "../path_utils.h"
-#include "../workspace_text.h"
+#include "../src/text_codec.h"
+#include "../src/file_io.h"
+#include "../src/path_utils.h"
+#include "../src/workspace_text.h"
 
 static int failures;
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); failures++; } } while (0)
@@ -22,39 +22,23 @@ static int probe_progress(size_t completed, size_t total, void *context) {
     return probe->cancelAfter <= 0 || probe->calls < probe->cancelAfter;
 }
 
-static void test_json(void) {
-    const char *invalid[] = { "[1 2]", "{\"a\" 1}", "{\"a\":}", "[truefalse]",
-        "[01]", "[1.]", "[1e+]", "[+1]", "[NaN]", "[undefined]", "[1,]", "[,1]",
-        "{1:2}", "{\"a\":1 \"b\":2}", "[\"\\q\"]", "[\"\\u12xz\"]", "[\"a\nb\"]",
-        "{}{}", "[1}", "true false", "", "[\"unterminated]" };
-    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
-        for (int pretty = 0; pretty < 2; pretty++) {
-            char *out = json_reformat(invalid[i], (int)strlen(invalid[i]), "\n", pretty);
-            CHECK(out == NULL);
-            free(out);
-        }
-    }
-    const char *valid[] = { "null", "true", "false", "-0.25E+3", "\"hello\\u1234\"",
-        "{}", "[]", "{\"a\":[1,true,null,{\"b\":\"\\\"\"}]}" };
-    for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
-        char *pretty = json_reformat(valid[i], (int)strlen(valid[i]), "\r\n", 1);
-        CHECK(pretty != NULL);
-        char *compact = pretty ? json_reformat(pretty, (int)strlen(pretty), "\n", 0) : NULL;
-        CHECK(compact && strcmp(compact, valid[i]) == 0);
-        free(pretty); free(compact);
-    }
-    char *out = json_reformat("[1\0]", 4, "\n", 0);
-    CHECK(out == NULL); free(out);
-    char deep[515];
-    memset(deep, '[', 257); memset(deep + 257, ']', 257); deep[514] = 0;
-    out = json_reformat(deep, 514, "\n", 0);
-    CHECK(out == NULL); free(out);
-}
-
 static void test_codecs(void) {
+    char *escaped = json_escape("quote ' slash \\ line\n\xE2\x80\xA8");
+    CHECK(escaped && strcmp(escaped, "quote \\' slash \\\\ line\\n\\u2028") == 0);
+    free(escaped);
+    CHECK(json_escape(NULL) == NULL);
+
     WCHAR *decoded = decode_json_string(L"\"line\\n\\u20ac\"");
     CHECK(decoded && wcscmp(decoded, L"line\n\u20ac") == 0);
     free(decoded);
+
+    CHECK(text_decode_capacity(SIZE_MAX) == 0);
+    CHECK(text_encode_capacity(SIZE_MAX) == 0);
+    size_t emptyLength = 99;
+    char *empty = text_decode_all(TEXT_ENCODING_UTF8, NULL, 0, &emptyLength);
+    CHECK(empty && emptyLength == 0 && empty[0] == 0);
+    free(empty);
+    CHECK(text_decode_all(TEXT_ENCODING_UTF8, NULL, 1, NULL) == NULL);
     decoded = decode_json_string(L"\"ok\" trailing");
     CHECK(decoded == NULL);
     free(decoded);
@@ -176,7 +160,13 @@ static void test_files(void) {
     CHECK(write_bytes_file(path, "\xEF\xBB\xBFhello", 8));
     char *text = read_utf8_text_file(path, 8);
     CHECK(text && strcmp(text, "hello") == 0); free(text);
+    size_t utf8Length = 99;
+    text = read_utf8_text_file_length(path, 8, &utf8Length);
+    CHECK(text && utf8Length == 5 && memcmp(text, "hello", 5) == 0); free(text);
     text = read_utf8_text_file(path, 7); CHECK(text == NULL); free(text);
+    CHECK(write_bytes_file(path, "a\0b", 3));
+    text = read_utf8_text_file_length(path, 3, &utf8Length);
+    CHECK(text && utf8Length == 3 && memcmp(text, "a\0b", 3) == 0); free(text);
     CHECK(write_bytes_file(path, "\xFF\xFEh\0i\0", 6));
     int encoding = -1, bom = 0, count = 0;
     text = read_text_file(path, &count, &encoding, &bom);
@@ -210,6 +200,14 @@ static void test_workspace_text(void) {
     CHECK(utf8_case_find(unicode, "\xCE\xB1\xCE\xB8\xCF\x89\xCE\xBD\xCE\xB1") != NULL);
     CHECK(utf8_case_find(unicode, "missing") == NULL);
 
+    /* A linguistic match can differ in length from the needle: precomposed
+       "café" (5 bytes) matches decomposed "cafe" + U+0301 (6 bytes). */
+    size_t matched = 0;
+    const char *decomposed = "a cafe\xCC\x81 b";
+    CHECK(utf8_case_find_length(decomposed, "caf\xC3\xA9", &matched) == decomposed + 2 &&
+          matched == 6);
+    CHECK(utf8_case_find_length(decomposed, "CAFE", &matched) == decomposed + 2 && matched == 4);
+
     char lines[] = "one\rtwo\r\nthree\nfour";
     size_t terminator = 0;
     char *end = text_line_break(lines, &terminator);
@@ -238,10 +236,50 @@ static void test_workspace_text(void) {
                                                "./archive/New.md", &changes);
     CHECK(rewritten && changes == 1 && strstr(rewritten, "(./archive/New.md)"));
     free(rewritten);
+
+    /* A new name a bare destination can't hold moves to the <...> form,
+       keeping the fragment; an already-angled destination stays as it is. */
+    changes = 0;
+    rewritten = markdown_rewrite_link_targets("[a](notes.md#top) [b](<notes.md>)\n", "notes.md",
+                                               "my notes (old).md", &changes);
+    CHECK(rewritten && changes == 2 &&
+          strcmp(rewritten, "[a](<my notes (old).md#top>) [b](<my notes (old).md>)\n") == 0);
+    free(rewritten);
+
+    /* A renamed folder rewrites links into it, but not a folder that merely
+       shares its name as a prefix. */
+    changes = 0;
+    rewritten = markdown_rewrite_link_directory(
+        "[a](docs/intro.md) [b](Docs/sub/x.md#y) [c](docs) [d](docsextra/z.md)\n",
+        "docs", "user guide", &changes);
+    CHECK(rewritten && changes == 3 &&
+          strcmp(rewritten, "[a](<user guide/intro.md>) [b](<user guide/sub/x.md#y>) "
+                            "[c](<user guide>) [d](docsextra/z.md)\n") == 0);
+    free(rewritten);
+
+    /* Link examples are code, not workspace references, and must survive a
+       rename verbatim. Real links around them are still updated. */
+    const char *withCode = "[before](old.md) `code [link](old.md)`\n"
+                           "```markdown\n[fenced](old.md)\n```\n"
+                           "[after](old.md)\n";
+    changes = 0;
+    rewritten = markdown_rewrite_link_targets(withCode, "old.md", "new.md", &changes);
+    CHECK(rewritten && changes == 2 &&
+          strcmp(rewritten, "[before](new.md) `code [link](old.md)`\n"
+                            "```markdown\n[fenced](old.md)\n```\n"
+                            "[after](new.md)\n") == 0);
+    free(rewritten);
+
+    changes = 0;
+    rewritten = markdown_rewrite_link_targets("unmatched ` [link](old.md)\n", "old.md",
+                                               "new.md", &changes);
+    CHECK(rewritten && changes == 1 &&
+          strcmp(rewritten, "unmatched ` [link](new.md)\n") == 0);
+    free(rewritten);
 }
 
 int main(void) {
-    test_json(); test_codecs(); test_lossless_progress(); test_files(); test_workspace_text();
+    test_codecs(); test_lossless_progress(); test_files(); test_workspace_text();
     if (failures) return 1;
     puts("All core tests passed.");
     return 0;
