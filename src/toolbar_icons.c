@@ -285,9 +285,8 @@ void toolbar_icon_togglepreview(HDC hdc, const RECT *rc, COLORREF fg) {
     DeleteObject(pen);
 }
 
-/* A box with a horizontal divider and the bottom half filled - the same
-   idea as toolbar_icon_togglepreview() above, just split top/bottom instead
-   of left/right, for the toolbar's split-editor toggle button. */
+/* A box with a horizontal divider and the bottom half filled for the
+   horizontal split-editor command. */
 void toolbar_icon_splitview(HDC hdc, const RECT *rc, COLORREF fg) {
     int w = rc->right - rc->left, h = rc->bottom - rc->top;
     RECT box = { rc->left + w * 8 / 100, rc->top + h * 12 / 100, rc->right - w * 8 / 100, rc->bottom - h * 12 / 100 };

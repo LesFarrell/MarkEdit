@@ -849,9 +849,8 @@ static int explorer_splitter_contains_x(int x) {
            x >= g_explorerSplitterRect.left && x <= g_explorerSplitterRect.right;
 }
 
-/* Unlike splitter_contains_x() above (which only needs an x-range, since
-   that splitter spans the full client height), the split-editor splitter
-   is nested inside the editor region and needs both x and y bounds. */
+/* The editor divider is nested inside the editor region and may run in
+   either direction, so hit-test its complete rectangle. */
 static int split_editor_splitter_contains(int x, int y) {
     return g_hSplitEdit && g_splitEditorVisible &&
            x >= g_splitEditorSplitterRect.left && x <= g_splitEditorSplitterRect.right &&

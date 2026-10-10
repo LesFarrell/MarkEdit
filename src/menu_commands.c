@@ -96,6 +96,7 @@ static const MenuCommand COMMANDS[] = {
     {"view.file_explorer", IDM_VIEW_EXPLORER, "Ctrl+Shift+X"},
     {"view.minimap", IDM_VIEW_MINIMAP, NULL},
     {"view.split_editor", IDM_VIEW_TOGGLESPLIT, "Ctrl+\\"},
+    {"view.split_editor_vertical", IDM_VIEW_SPLIT_VERTICAL, NULL},
     {"view.reset_split_editor", IDM_VIEW_RESET_SPLIT_EDITOR, NULL},
     {"view.show_whitespace", IDM_VIEW_SHOW_WHITESPACE, NULL},
     {"view.indent_guides", IDM_VIEW_INDENT_GUIDES, NULL},

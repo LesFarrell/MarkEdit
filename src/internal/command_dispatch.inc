@@ -298,7 +298,10 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
             toggle_explorer_panel(hwnd);
             break;
         case IDM_VIEW_TOGGLESPLIT:
-            toggle_split_editor(hwnd);
+            toggle_split_editor(hwnd, 0);
+            break;
+        case IDM_VIEW_SPLIT_VERTICAL:
+            toggle_split_editor(hwnd, 1);
             break;
         case IDM_VIEW_RESET_SPLIT_EDITOR:
             reset_split_editor(hwnd);

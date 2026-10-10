@@ -54,6 +54,7 @@ extern int g_splitterRatio;
 extern int g_splitterPos;
 extern int g_splitEditorVisible;
 extern int g_splitEditorRatio;
+extern int g_splitEditorVertical;
 extern int g_commandLinePreviewMode;
 extern RECT g_savedWindowRect;
 extern int g_haveSavedWindowRect;

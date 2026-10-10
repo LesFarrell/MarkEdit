@@ -246,8 +246,9 @@ int g_previewOnLeft = 0;
 int g_splitterRatio = 500; /* left pane width as thousandths of the available split width */
 int g_splitterPos = -1; /* pixel x of splitter, initialized from g_splitterRatio */
 int g_splitEditorVisible = 0;
-int g_splitEditorRatio = 500; /* main pane height as thousandths of the editor region's height */
-static int g_splitEditorPos = -1; /* pixel y of the split-editor splitter, local to the editor region */
+int g_splitEditorRatio = 500; /* main pane size as thousandths of the editor region's split axis */
+int g_splitEditorVertical = 0; /* nonzero places the second pane to the right instead of below */
+static int g_splitEditorPos = -1; /* pixel position along the split axis, local to the editor region */
 static RECT g_splitEditorSplitterRect = {0};
 
 static HWND tracked_edit_view(void) {
@@ -257,7 +258,7 @@ static HWND tracked_edit_view(void) {
 }
 static RECT g_splitterRect = {0}; /* the main editor/preview splitter's own bounds, for drawing its line */
 static RECT g_explorerSplitterRect = {0}; /* the explorer panel's splitter, empty while the panel is hidden */
-static int g_splitEditorRegionY = 0; /* window-relative y the editor region starts at, refreshed every layout() */
+static POINT g_splitEditorRegionOrigin = {0}; /* window-relative editor origin, refreshed every layout() */
 static int g_draggingSplitEditor = 0;
 static int g_draggingExplorer = 0;
 int g_commandLinePreviewMode = 0;
@@ -2908,7 +2909,7 @@ static int set_splitter_cursor(HWND hwnd) {
     if (splitter_contains_x(point.x) || explorer_splitter_contains_x(point.x))
         SetCursor(LoadCursorA(NULL, (LPCSTR)IDC_SIZEWE));
     else if (split_editor_splitter_contains(point.x, point.y))
-        SetCursor(LoadCursorA(NULL, (LPCSTR)IDC_SIZENS));
+        SetCursor(LoadCursorA(NULL, (LPCSTR)(g_splitEditorVertical ? IDC_SIZEWE : IDC_SIZENS)));
     else
         return 0;
     return 1;
@@ -2936,9 +2937,10 @@ static void update_splitter_drag(HWND hwnd, int x, int y) {
         g_explorerWidth = x;
         positionChanged = 1;
     } else if (g_draggingSplitEditor) {
-        int contentY = y - g_splitEditorRegionY;
-        if (contentY != g_splitEditorPos) {
-            g_splitEditorPos = contentY;
+        int position = g_splitEditorVertical ? x - g_splitEditorRegionOrigin.x
+                                             : y - g_splitEditorRegionOrigin.y;
+        if (position != g_splitEditorPos) {
+            g_splitEditorPos = position;
             positionChanged = 1;
         }
     }

@@ -105,7 +105,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | Ctrl+Shift+V | Toggle preview pane |
 | Ctrl+Shift+E | Toggle editor pane |
 | Ctrl+Shift+X | Toggle file explorer |
-| Ctrl+\\ | Toggle split editor |
+| Ctrl+\\ | Toggle horizontal editor split |
 | Ctrl+F6 / Ctrl+Shift+F6 | Cycle panes forward / back |
 | Ctrl+Shift+F11 | Toggle focus mode |
 | Alt+Z | Toggle word wrap |

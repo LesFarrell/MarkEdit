@@ -42,7 +42,7 @@
 #define TAB_HEIGHT 28
 #define MINIMAP_WIDTH 120
 #define MINIMAP_SPLITTER_WIDTH 1
-#define SPLIT_EDITOR_SPLITTER_HEIGHT 4
+#define SPLIT_EDITOR_SPLITTER_SIZE 4
 
 #include "command_ids.h"
 

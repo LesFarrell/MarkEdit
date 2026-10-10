@@ -223,17 +223,20 @@ static void toggle_minimap(HWND hwnd) {
     relayout_and_save(hwnd);
 }
 
-static void toggle_split_editor(HWND hwnd) {
-    g_splitEditorVisible = !g_splitEditorVisible;
-    if (!g_splitEditorVisible) g_lastEditView = g_hEdit;
+static void toggle_split_editor(HWND hwnd, int vertical) {
+    int sameSplit = g_splitEditorVisible && g_splitEditorVertical == vertical;
+    if (sameSplit) {
+        g_splitEditorVisible = 0;
+        g_lastEditView = g_hEdit;
+    } else {
+        if (g_splitEditorVertical != vertical) g_splitEditorPos = -1;
+        g_splitEditorVertical = vertical;
+        g_splitEditorVisible = 1;
+    }
     relayout_and_save(hwnd);
 }
 
-/* Puts the split-editor divider back at an even 50/50, the same default
-   layout() falls back to for a brand-new profile. g_splitEditorPos is the
-   live pixel value layout() actually drags around; resetting only the ratio
-   would leave it untouched until the next resize recomputed a position from
-   it (see layout_editor_with_minimap()). */
+/* Puts the split-editor divider back at an even 50/50 on either axis. */
 static void reset_split_editor(HWND hwnd) {
     g_splitEditorRatio = 500;
     g_splitEditorPos = -1;

@@ -396,7 +396,8 @@ static int command_state(UINT id, CommandState *state) {
         case IDM_VIEW_OUTLINE: STATE_CHECK(g_outlineVisible); break;
         case IDM_VIEW_EXPLORER: STATE_CHECK(g_explorerVisible); break;
         case IDM_VIEW_MINIMAP: STATE_CHECK(g_minimapVisible); break;
-        case IDM_VIEW_TOGGLESPLIT: STATE_CHECK(g_splitEditorVisible); break;
+        case IDM_VIEW_TOGGLESPLIT: STATE_CHECK(g_splitEditorVisible && !g_splitEditorVertical); break;
+        case IDM_VIEW_SPLIT_VERTICAL: STATE_CHECK(g_splitEditorVisible && g_splitEditorVertical); break;
         case IDM_VIEW_RESET_SPLIT_EDITOR: state->enabled = g_splitEditorVisible != 0; break;
         case IDM_VIEW_SHOW_WHITESPACE: STATE_CHECK(g_showWhitespace); break;
         case IDM_VIEW_INDENT_GUIDES: STATE_CHECK(g_indentGuides); break;
@@ -546,7 +547,7 @@ static const struct ToolbarButtonDef TOOLBAR_BUTTONS[] = {
     { 0, NULL, NULL },
     { IDM_VIEW_TOGGLEPREVIEW, toolbar_icon_togglepreview, "Toggle preview" },
     { IDM_VIEW_PREVIEW_ON_LEFT, toolbar_icon_swappanels, "Swap panel sides" },
-    { IDM_VIEW_TOGGLESPLIT, toolbar_icon_splitview, "Toggle split editor" },
+    { IDM_VIEW_TOGGLESPLIT, toolbar_icon_splitview, "Toggle horizontal editor split" },
     { 0, NULL, NULL },
     { IDM_FILE_OPEN_TERMINAL, toolbar_icon_terminal, "Open terminal here" },
 };
@@ -878,8 +879,43 @@ static int layout_toolbar_at(int width, int top) {
    its right edge for the minimap when one should be shown - regardless of
    which side of the splitter the editor itself is on, so the minimap always
    sits immediately next to the text it overviews. */
+static int split_editor_position(int extent, int splitterSize) {
+    int available = extent - splitterSize;
+    if (available < 0) available = 0;
+    if (g_splitEditorPos < 0)
+        g_splitEditorPos = MulDiv(available, g_splitEditorRatio, 1000);
+
+    int minimum = MulDiv(available, 50, 1000);
+    if (minimum < 60) minimum = 60;
+    if (minimum * 2 > available) minimum = available / 2;
+    if (g_splitEditorPos < minimum) g_splitEditorPos = minimum;
+    if (g_splitEditorPos > available - minimum) g_splitEditorPos = available - minimum;
+    if (available > 0) g_splitEditorRatio = MulDiv(g_splitEditorPos, 1000, available);
+    return g_splitEditorPos;
+}
+
+static void layout_split_editor(HWND hwnd, int x, int y, int width, int height) {
+    int splitterSize = MulDiv(SPLIT_EDITOR_SPLITTER_SIZE, GetDpiForWindow(hwnd), 96);
+    if (splitterSize < 1) splitterSize = 1;
+    int extent = g_splitEditorVertical ? width : height;
+    int mainSize = split_editor_position(extent, splitterSize);
+    int secondSize = extent - mainSize - splitterSize;
+
+    if (g_splitEditorVertical) {
+        g_splitEditorSplitterRect = (RECT){x + mainSize, y, x + mainSize + splitterSize, y + height};
+        MoveWindow(g_hEdit, x, y, mainSize, height, TRUE);
+        MoveWindow(g_hSplitEdit, x + mainSize + splitterSize, y, secondSize, height, TRUE);
+    } else {
+        g_splitEditorSplitterRect = (RECT){x, y + mainSize, x + width, y + mainSize + splitterSize};
+        MoveWindow(g_hEdit, x, y, width, mainSize, TRUE);
+        MoveWindow(g_hSplitEdit, x, y + mainSize + splitterSize, width, secondSize, TRUE);
+    }
+    ShowWindow(g_hEdit, SW_SHOW);
+    ShowWindow(g_hSplitEdit, SW_SHOW);
+}
+
 static void layout_editor_with_minimap(HWND hwnd, int x, int y, int width, int h) {
-    g_splitEditorRegionY = y;
+    g_splitEditorRegionOrigin = (POINT){x, y};
     int minimapWidth = (g_hMinimap && g_minimapVisible && !g_focusMode) ?
         MulDiv(MINIMAP_WIDTH, GetDpiForWindow(hwnd), 96) : 0;
     if (minimapWidth > width - 80) minimapWidth = 0; /* not enough room to keep the editor usable */
@@ -894,43 +930,10 @@ static void layout_editor_with_minimap(HWND hwnd, int x, int y, int width, int h
 
     int editorWidth = width - minimapWidth - minimapGap;
 
-    /* The split pane stacks below the main editor, inside the same column
-       the minimap sits beside (the minimap always spans the full height on
-       the right - it's an overview of the whole document, not tied to
-       either sub-pane). */
+    /* Both editor views occupy the column beside the minimap. The minimap is
+       an overview of the shared document, so it spans the full height. */
     if (g_hSplitEdit && g_splitEditorVisible && !g_focusMode) {
-        int splitterHeight = MulDiv(SPLIT_EDITOR_SPLITTER_HEIGHT, GetDpiForWindow(hwnd), 96);
-        if (splitterHeight < 1) splitterHeight = 1;
-        if (g_splitEditorPos < 0)
-            g_splitEditorPos = MulDiv(h - splitterHeight, g_splitEditorRatio, 1000);
-        if (g_splitEditorPos < 60) g_splitEditorPos = 60;
-        if (g_splitEditorPos > h - 60 - splitterHeight)
-            g_splitEditorPos = (h - 60 - splitterHeight > 60) ? h - 60 - splitterHeight : 60;
-        int mainHeight = g_splitEditorPos;
-        int splitHeight = h - mainHeight - splitterHeight;
-
-        /* Set before the MoveWindow calls below, not after: MoveWindow can
-           trigger a synchronous repaint of this window before returning, and
-           WM_ERASEBKGND (which draws this rect - see WM_ERASEBKGND in
-           WndProc) would otherwise run against the stale pre-layout value. */
-        g_splitEditorSplitterRect.left = x;
-        g_splitEditorSplitterRect.right = x + editorWidth;
-        g_splitEditorSplitterRect.top = y + mainHeight;
-        g_splitEditorSplitterRect.bottom = y + mainHeight + splitterHeight;
-
-        MoveWindow(g_hEdit, x, y, editorWidth, mainHeight, TRUE);
-        ShowWindow(g_hEdit, SW_SHOW);
-        MoveWindow(g_hSplitEdit, x, y + mainHeight + splitterHeight, editorWidth, splitHeight, TRUE);
-        ShowWindow(g_hSplitEdit, SW_SHOW);
-
-        /* Keep the persisted ratio in sync with the live pixel position, the
-           same relationship save_layout_settings() maintains for the main
-           editor/preview splitter's own ratio. */
-        if (h - splitterHeight > 0) {
-            g_splitEditorRatio = MulDiv(g_splitEditorPos, 1000, h - splitterHeight);
-            if (g_splitEditorRatio < 50) g_splitEditorRatio = 50;
-            if (g_splitEditorRatio > 950) g_splitEditorRatio = 950;
-        }
+        layout_split_editor(hwnd, x, y, editorWidth, h);
     } else {
         g_splitEditorSplitterRect = (RECT){0, 0, 0, 0};
         MoveWindow(g_hEdit, x, y, editorWidth, h, TRUE);

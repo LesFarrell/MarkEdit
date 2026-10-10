@@ -152,7 +152,7 @@ void save_theme_settings(void) {
     free(path);
 }
 
-/* Every persisted pane-split ratio (splitter, explorer width, split editor)
+/* Every persisted pane-split ratio (preview, explorer, split editor)
    is a permille clamped to this same [50,950] range, both when read back at
    startup and when re-derived from live pixel positions on save. */
 static int clamp_ratio(int value) {
@@ -199,6 +199,7 @@ void load_layout_settings(void) {
 
     g_splitEditorVisible = read_profile_int(L"View", L"SplitEditorVisible", 0, path) != 0;
     g_splitEditorRatio = clamp_ratio(read_profile_int(L"View", L"SplitEditorRatio", 500, path));
+    g_splitEditorVertical = read_profile_int(L"View", L"SplitEditorVertical", 0, path) != 0;
 
     int left = read_profile_int(L"Window", L"Left", 0, path);
     int top = read_profile_int(L"Window", L"Top", 0, path);
@@ -258,6 +259,7 @@ void save_layout_settings(void) {
         write_profile_int(L"View", L"ExplorerWidth", g_explorerWidth, path);
     write_profile_int(L"View", L"SplitEditorVisible", g_splitEditorVisible, path);
     write_profile_int(L"View", L"SplitEditorRatio", g_splitEditorRatio, path);
+    write_profile_int(L"View", L"SplitEditorVertical", g_splitEditorVertical, path);
 
     WINDOWPLACEMENT placement = {0};
     placement.length = sizeof(placement);
