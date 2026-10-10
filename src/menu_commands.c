@@ -157,7 +157,6 @@ static const MenuCommand COMMANDS[] = {
     {"html.numbered_list", IDM_FMT_HTML_NUMBERLIST, NULL},
     {"html.line_break", IDM_FMT_HTML_BREAK, NULL},
 
-    {"tools.command_palette", IDM_EDIT_COMMAND_PALETTE, "Ctrl+Shift+P"},
     {"tools.settings", IDM_SETTINGS, NULL},
 
     {"run.run_file", IDM_RUN_FILE, "Ctrl+F5"},

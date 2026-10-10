@@ -263,6 +263,10 @@ project "markedit"
 
     files {
         "src/markedit.c",
+        "src/internal/preview.inc", "src/internal/documents.inc", "src/internal/dialogs.inc",
+        "src/internal/ui_shell.inc", "src/internal/debugger.inc", "src/internal/editor_input.inc",
+        "src/internal/outline_minimap.inc", "src/internal/workspace.inc",
+        "src/internal/settings_dialog.inc", "src/internal/command_dispatch.inc",
         "src/editor_commands.c", "src/editor_commands.h",
         "src/editor_language.c", "src/editor_language.h",
         "src/preview_fallback.c", "src/preview_fallback.h",
@@ -278,8 +282,11 @@ project "markedit"
         "src/toolbar_icons.c", "src/toolbar_icons.h",
         "src/themed_scrollbar.c", "src/themed_scrollbar.h",
         "src/plugin_host.c", "src/plugin_host.h",
+        "src/plugin_settings.c", "src/plugin_settings.h",
+        "src/lua_editor_api.c", "src/lua_editor_api.h",
         "src/menu_commands.c", "src/menu_commands.h", "src/command_ids.h",
-        "src/menus.lua", "src/formatting.lua",
+        "src/menus.lua", "src/lua/formatting_base.lua", "src/lua/formatting_json.lua",
+        "src/lua/formatting_tables.lua", "src/lua/formatting_text.lua",
         "src/help/markdown-reference.md", "src/help/keyboard-shortcuts.lua",
         "src/theme.h",
         "markedit.rc",
@@ -385,7 +392,7 @@ project "test_core"
     targetname "test_core"
     targetdir "tests"
     objdir "build/obj/test_core"
-    files { "tests/test_core.c", "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c" }
+    files { "tests/test_core.c", "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c", "src/plugin_settings.c", "src/plugin_settings.h" }
     includedirs { "." }
     warnings "Extra"
     optimize "Size"
@@ -420,7 +427,7 @@ project "test_plugin_host"
     targetname "test_plugin_host"
     targetdir "tests"
     objdir "build/obj/test_plugin_host"
-    files { "tests/test_plugin_host.c", "src/plugin_host.c", "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
+    files { "tests/test_plugin_host.c", "src/plugin_host.c", "src/plugin_host.h", "src/lua_editor_api.c", "src/lua_editor_api.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
     lua_settings()
     includedirs { "." }
     links { "user32" }
@@ -442,7 +449,7 @@ project "test_menus"
     objdir "build/obj/test_menus"
     files {
         "tests/test_menus.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
-        "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
+        "src/plugin_host.h", "src/lua_editor_api.c", "src/lua_editor_api.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
     }
     lua_settings()
     includedirs { "." }
@@ -455,7 +462,7 @@ project "test_menus"
         buildoptions { "/WX" }
     filter {}
 
--- Run from the repository root: it reads src/formatting.lua.
+-- Run from the repository root: it reads src/lua/formatting_*.lua.
 project "test_formatting"
     kind "ConsoleApp"
     language "C"
@@ -465,7 +472,7 @@ project "test_formatting"
     objdir "build/obj/test_formatting"
     files {
         "tests/test_formatting.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
-        "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
+        "src/plugin_host.h", "src/lua_editor_api.c", "src/lua_editor_api.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
     }
     lua_settings()
     includedirs { "." }

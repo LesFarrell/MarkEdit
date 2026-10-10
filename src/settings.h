@@ -25,7 +25,7 @@ typedef enum {
     COMPILER_BACKEND_ZIG, COMPILER_BACKEND_MSVC
 } CompilerBackendPreference;
 
-/* Shared application state persisted to %APPDATA%\markedit\markedit.ini.
+/* Shared application state persisted to %APPDATA%\markedit\settings.json.
    Defined (without static) in markedit.c; read and written here. */
 extern HWND g_hMainWnd;
 extern WCHAR g_fontFaceName[MAX_FONT_FACE_NAME];
@@ -74,6 +74,11 @@ WCHAR *get_settings_path(void);
 /* Heap copy of an arbitrarily long string value (caller frees), or NULL
    when the key is absent or empty. */
 WCHAR *read_profile_string(const WCHAR *section, const WCHAR *key, const WCHAR *path);
+int read_setting_int(const WCHAR *section, const WCHAR *key, int defaultValue,
+                     const WCHAR *path);
+int write_setting_string(const WCHAR *section, const WCHAR *key, const WCHAR *value,
+                         const WCHAR *path);
+int clear_setting_section(const WCHAR *section, const WCHAR *path);
 
 void load_font_settings(void);
 void save_font_settings(void);

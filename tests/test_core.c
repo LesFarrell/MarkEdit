@@ -5,6 +5,7 @@
 #include "../src/text_codec.h"
 #include "../src/file_io.h"
 #include "../src/path_utils.h"
+#include "../src/plugin_settings.h"
 #include "../src/workspace_text.h"
 
 static int failures;
@@ -194,6 +195,56 @@ static void test_files(void) {
     CHECK(DeleteFileW(path));
 }
 
+static void test_plugin_settings(void) {
+    WCHAR directory[MAX_PATH], path[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, directory);
+    CHECK(length && length < MAX_PATH);
+    if (!length || length >= MAX_PATH) return;
+    CHECK(GetTempFileNameW(directory, L"mps", 0, path) != 0);
+    DeleteFileW(path); /* a missing store starts as an empty JSON object */
+
+    CHECK(plugin_settings_get(path, "one.lua", "missing") == NULL);
+    CHECK(plugin_settings_set(path, "one.lua", "enabled", "1"));
+    CHECK(plugin_settings_set(path, "one.lua", "message", "quote \" slash \\ line\n\xE2\x82\xAC"));
+    CHECK(plugin_settings_set(path, "two.lua", "width", "80"));
+
+    char *value = plugin_settings_get(path, "one.lua", "enabled");
+    CHECK(value && strcmp(value, "1") == 0); free(value);
+    value = plugin_settings_get(path, "one.lua", "message");
+    CHECK(value && strcmp(value, "quote \" slash \\ line\n\xE2\x82\xAC") == 0); free(value);
+    value = plugin_settings_get(path, "two.lua", "width");
+    CHECK(value && strcmp(value, "80") == 0); free(value);
+
+    CHECK(plugin_settings_set(path, "one.lua", "enabled", "0"));
+    CHECK(plugin_settings_set(path, "one.lua", "message", NULL));
+    value = plugin_settings_get(path, "one.lua", "enabled");
+    CHECK(value && strcmp(value, "0") == 0); free(value);
+    CHECK(plugin_settings_get(path, "one.lua", "message") == NULL);
+
+    int jsonLength = 0;
+    char *json = read_bytes_file(path, &jsonLength);
+    CHECK(json && jsonLength > 0 && strstr(json, "\"one.lua\": {") &&
+          strstr(json, "\"two.lua\": {") && strstr(json, "\"width\": \"80\""));
+    free(json);
+
+    CHECK(plugin_settings_clear_section(path, "one.lua"));
+    CHECK(plugin_settings_get(path, "one.lua", "enabled") == NULL);
+    value = plugin_settings_get(path, "two.lua", "width");
+    CHECK(value && strcmp(value, "80") == 0); free(value);
+
+    const char escapedJson[] = "{\"Unicode\":{\"value\":\"\\u20ac \\ud83d\\ude00\"}}";
+    CHECK(write_bytes_file(path, escapedJson, sizeof(escapedJson) - 1));
+    value = plugin_settings_get(path, "Unicode", "value");
+    CHECK(value && strcmp(value, "\xE2\x82\xAC \xF0\x9F\x98\x80") == 0); free(value);
+
+    /* A malformed hand-edited store is never silently overwritten. */
+    CHECK(write_bytes_file(path, "{ broken", 8));
+    CHECK(!plugin_settings_set(path, "one.lua", "enabled", "1"));
+    json = read_bytes_file(path, &jsonLength);
+    CHECK(json && jsonLength == 8 && memcmp(json, "{ broken", 8) == 0); free(json);
+    CHECK(DeleteFileW(path));
+}
+
 static void test_workspace_text(void) {
     const char *unicode = "zero CAF\xC3\x89 \xCE\x91\xCE\x98\xCE\xA9\xCE\x9D\xCE\x91 end";
     CHECK(utf8_case_find(unicode, "caf\xC3\xA9") == unicode + 5);
@@ -279,7 +330,7 @@ static void test_workspace_text(void) {
 }
 
 int main(void) {
-    test_codecs(); test_lossless_progress(); test_files(); test_workspace_text();
+    test_codecs(); test_lossless_progress(); test_files(); test_plugin_settings(); test_workspace_text();
     if (failures) return 1;
     puts("All core tests passed.");
     return 0;

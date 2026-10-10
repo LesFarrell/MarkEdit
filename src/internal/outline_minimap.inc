@@ -1,0 +1,243 @@
+/* ---- document outline -------------------------------------------------- */
+
+static int parse_atx_heading(const char *line, int length, int *textStart, int *textLength) {
+    int i = 0;
+    while (i < length && i < 3 && line[i] == ' ') i++;
+    int hashes = 0;
+    while (i + hashes < length && hashes < 6 && line[i + hashes] == '#') hashes++;
+    if (!hashes || i + hashes >= length ||
+        (line[i + hashes] != ' ' && line[i + hashes] != '\t')) return 0;
+    int start = i + hashes;
+    while (start < length && (line[start] == ' ' || line[start] == '\t')) start++;
+    int end = length;
+    while (end > start && (line[end - 1] == '\r' || line[end - 1] == '\n' ||
+                            line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+    int marker = end;
+    while (marker > start && line[marker - 1] == '#') marker--;
+    if (marker < end && marker > start && (line[marker - 1] == ' ' || line[marker - 1] == '\t')) {
+        end = marker - 1;
+        while (end > start && (line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+    }
+    *textStart = start;
+    *textLength = end - start;
+    return hashes;
+}
+
+static void update_outline(void) {
+    if (!g_hOutline) return;
+    SendMessageW(g_hOutline, LB_RESETCONTENT, 0, 0);
+    g_outlineCount = 0;
+    if (g_largeFile) return;
+    /* The list is only read back by clicks on it, and toggle_outline()
+       rebuilds it when the pane is shown, so a hidden pane skips the scan. */
+    if (!g_outlineVisible || g_activeLanguage != LANG_MARKDOWN) return;
+    /* Suspend repainting so re-adding every heading doesn't flicker. */
+    SendMessageW(g_hOutline, WM_SETREDRAW, FALSE, 0);
+    Sci_Position lines = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+    for (Sci_Position lineNumber = 0; lineNumber < lines && g_outlineCount < 1024; lineNumber++) {
+        Sci_Position linePosition = (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+        int style = (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)linePosition, 0);
+        if (style < SCE_MARKDOWN_HEADER1 || style > SCE_MARKDOWN_HEADER6) continue;
+        Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
+        if (length <= 0 || length > 65535) continue;
+        char *line = (char *)malloc((size_t)length + 1);
+        if (!line) break;
+        Sci_Position got = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
+        line[got >= 0 && got <= length ? got : length] = 0;
+        int start = 0, textLength = 0;
+        int level = parse_atx_heading(line, (int)got, &start, &textLength);
+        if (level && textLength > 0) {
+            char *heading = (char *)malloc((size_t)textLength + 1);
+            if (heading) {
+                memcpy(heading, line + start, (size_t)textLength);
+                heading[textLength] = 0;
+                WCHAR *wide = to_wide(heading);
+                if (wide) {
+                    size_t capacity = wcslen(wide) + (size_t)level * 2 + 1;
+                    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+                    if (label) {
+                        int indent = (level - 1) * 2;
+                        for (int i = 0; i < indent; i++) label[i] = L' ';
+                        wcscpy(label + indent, wide);
+                        SendMessageW(g_hOutline, LB_ADDSTRING, 0, (LPARAM)label);
+                        g_outlineLines[g_outlineCount++] = lineNumber;
+                        free(label);
+                    }
+                    free(wide);
+                }
+                free(heading);
+            }
+        }
+        free(line);
+    }
+    SendMessageW(g_hOutline, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_hOutline, NULL, TRUE);
+}
+
+static void toggle_outline(HWND hwnd) {
+    g_outlineVisible = !g_outlineVisible;
+    update_outline();
+    relayout_and_save(hwnd);
+}
+
+/* One-time, document-independent setup for the minimap's Scintilla view:
+   read-only, no margins or scrollbars of its own, unwrapped so each document
+   line maps to exactly one minimap line, and no visible caret. Font, theme,
+   and zoom are applied separately (see apply_editor_font()) since those also
+   need to be reapplied whenever the editor's font or theme changes. */
+static void configure_minimap(HWND hMinimap) {
+    SendMessageA(hMinimap, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
+    SendMessageA(hMinimap, SCI_SETREADONLY, TRUE, 0);
+    SendMessageA(hMinimap, SCI_SETUNDOCOLLECTION, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETVSCROLLBAR, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETHSCROLLBAR, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
+    SendMessageA(hMinimap, SCI_SETMARGINWIDTHN, MARGIN_LINENUMBERS, 0);
+    SendMessageA(hMinimap, SCI_SETMARGINWIDTHN, MARGIN_BOOKMARKS, 0);
+    SendMessageA(hMinimap, SCI_SETMARGINWIDTHN, MARGIN_FOLD, 0);
+    SendMessageA(hMinimap, SCI_SETCARETSTYLE, CARETSTYLE_INVISIBLE, 0);
+    SendMessageA(hMinimap, SCI_SETCARETLINEVISIBLE, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETMOUSEDOWNCAPTURES, FALSE, 0);
+    SendMessageA(hMinimap, SCI_SETCURSOR, SC_CURSORARROW, 0);
+    SendMessageA(hMinimap, SCI_SETZOOM, 0, 0); /* sizing is done via STYLESETSIZEFRACTIONAL, see apply_editor_font() */
+    SendMessageA(hMinimap, SCI_SETEXTRAASCENT, (WPARAM)MINIMAP_EXTRA_ASCENT, 0);
+    SendMessageA(hMinimap, SCI_SETEXTRADESCENT, (WPARAM)MINIMAP_EXTRA_DESCENT, 0);
+}
+
+/* Recomputes the minimap's own scroll position (for documents too long to
+   fit the minimap at once) and the visible-region box drawn over it, then
+   asks for a repaint. Called whenever the main editor scrolls, its content
+   changes size, or the minimap is resized/shown. */
+static void update_minimap_viewport(void) {
+    if (!g_hMinimap || !g_hEdit || !g_minimapVisible || !IsWindowVisible(g_hMinimap)) return;
+    HWND view = tracked_edit_view();
+
+    Sci_Position totalLines = (Sci_Position)SendMessageA(view, SCI_GETLINECOUNT, 0, 0);
+    Sci_Position mainFirstVisible = (Sci_Position)SendMessageA(view, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    Sci_Position mainFirstDocLine = (Sci_Position)SendMessageA(view, SCI_DOCLINEFROMVISIBLE, (WPARAM)mainFirstVisible, 0);
+    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(view, SCI_LINESONSCREEN, 0, 0);
+
+    int minimapLineHeight = (int)SendMessageA(g_hMinimap, SCI_TEXTHEIGHT, 0, 0);
+    if (minimapLineHeight < 1) minimapLineHeight = 1;
+    RECT mmRect;
+    GetClientRect(g_hMinimap, &mmRect);
+    int minimapLinesOnScreen = (mmRect.bottom - mmRect.top) / minimapLineHeight;
+    if (minimapLinesOnScreen < 1) minimapLinesOnScreen = 1;
+
+    /* Documents that fit entirely within the minimap's height stay pinned at
+       the top; longer ones scroll to keep the main editor's viewport roughly
+       centered within the minimap. */
+    Sci_Position minimapFirstDocLine = 0;
+    if (totalLines > minimapLinesOnScreen) {
+        minimapFirstDocLine = mainFirstDocLine - (minimapLinesOnScreen - mainLinesOnScreen) / 2;
+        Sci_Position maxFirst = totalLines - minimapLinesOnScreen;
+        if (minimapFirstDocLine > maxFirst) minimapFirstDocLine = maxFirst;
+        if (minimapFirstDocLine < 0) minimapFirstDocLine = 0;
+    }
+    Sci_Position minimapFirstVisible = (Sci_Position)SendMessageA(g_hMinimap, SCI_VISIBLEFROMDOCLINE, (WPARAM)minimapFirstDocLine, 0);
+    SendMessageA(g_hMinimap, SCI_SETFIRSTVISIBLELINE, (WPARAM)minimapFirstVisible, 0);
+
+    /* Pixels within the minimap: the clamping above keeps the main view's
+       first line within one minimap height of the minimap's own. */
+    int newViewTop = (int)(mainFirstDocLine - minimapFirstDocLine) * minimapLineHeight;
+    int newViewHeight = (int)mainLinesOnScreen * minimapLineHeight;
+    if (newViewHeight < 4) newViewHeight = 4;
+
+    /* This runs on every caret move/scroll tick (see SCN_UPDATEUI), so only
+       repaint the visible-region box when it actually moved or resized. */
+    if (newViewTop == g_minimapViewTop && newViewHeight == g_minimapViewHeight) return;
+    g_minimapViewTop = newViewTop;
+    g_minimapViewHeight = newViewHeight;
+    InvalidateRect(g_hMinimap, NULL, FALSE);
+}
+
+/* Scrolls the main editor so the document line under minimap-local y is
+   centered in its viewport - used for both a single click and drag-to-scroll. */
+static void minimap_scroll_main_to_y(int y) {
+    if (!g_hEdit || !g_hMinimap) return;
+    HWND view = tracked_edit_view();
+    Sci_Position pos = (Sci_Position)SendMessageA(g_hMinimap, SCI_POSITIONFROMPOINT, (WPARAM)0, (LPARAM)y);
+    if (pos < 0) return;
+    Sci_Position docLine = (Sci_Position)SendMessageA(g_hMinimap, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    Sci_Position mainLinesOnScreen = (Sci_Position)SendMessageA(view, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position target = docLine - mainLinesOnScreen / 2;
+    if (target < 0) target = 0;
+    Sci_Position targetVisible = (Sci_Position)SendMessageA(view, SCI_VISIBLEFROMDOCLINE, (WPARAM)target, 0);
+    SendMessageA(view, SCI_SETFIRSTVISIBLELINE, (WPARAM)targetVisible, 0);
+}
+
+static LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                            UINT_PTR id, DWORD_PTR data) {
+    (void)id; (void)data;
+    switch (msg) {
+        case WM_LBUTTONDOWN:
+            g_minimapDragging = 1;
+            SetCapture(hwnd);
+            minimap_scroll_main_to_y(GET_Y_LPARAM(lParam));
+            return 0;
+        case WM_MOUSEMOVE:
+            if (g_minimapDragging) minimap_scroll_main_to_y(GET_Y_LPARAM(lParam));
+            return 0;
+        case WM_LBUTTONUP:
+            if (g_minimapDragging) { g_minimapDragging = 0; ReleaseCapture(); }
+            return 0;
+        case WM_CAPTURECHANGED:
+            g_minimapDragging = 0;
+            return 0;
+        /* Swallowed rather than forwarded to Scintilla's default handling,
+           which would otherwise open its own context menu or place a caret
+           in what is meant to be a read-only overview. */
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_CONTEXTMENU:
+        case WM_LBUTTONDBLCLK:
+            return 0;
+        case WM_MOUSEWHEEL:
+            if (g_hEdit) SendMessageA(tracked_edit_view(), WM_MOUSEWHEEL, wParam, lParam);
+            return 0;
+        case WM_PAINT: {
+            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            RECT box = { rc.left, g_minimapViewTop, rc.right, g_minimapViewTop + g_minimapViewHeight };
+            if (box.top < rc.top) box.top = rc.top;
+            if (box.bottom > rc.bottom) box.bottom = rc.bottom;
+            if (box.bottom > box.top) {
+                HDC hdc = GetDC(hwnd);
+                HBRUSH brush = CreateSolidBrush(g_editorDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0x8B, 0x94, 0x9E));
+                FrameRect(hdc, &box, brush);
+                DeleteObject(brush);
+                ReleaseDC(hwnd, hdc);
+            }
+            return result;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, MinimapSubclassProc, 1);
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void toggle_minimap(HWND hwnd) {
+    g_minimapVisible = !g_minimapVisible;
+    relayout_and_save(hwnd);
+}
+
+static void toggle_split_editor(HWND hwnd) {
+    g_splitEditorVisible = !g_splitEditorVisible;
+    if (!g_splitEditorVisible) g_lastEditView = g_hEdit;
+    relayout_and_save(hwnd);
+}
+
+/* Puts the split-editor divider back at an even 50/50, the same default
+   layout() falls back to for a brand-new profile. g_splitEditorPos is the
+   live pixel value layout() actually drags around; resetting only the ratio
+   would leave it untouched until the next resize recomputed a position from
+   it (see layout_editor_with_minimap()). */
+static void reset_split_editor(HWND hwnd) {
+    g_splitEditorRatio = 500;
+    g_splitEditorPos = -1;
+    layout(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
+    save_layout_settings();
+}

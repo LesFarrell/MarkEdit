@@ -2,7 +2,7 @@
 #define MARKEDIT_COMMAND_IDS_H
 
 /* WM_COMMAND IDs of the built-in commands, shared by the menu, the
-   toolbar, the command palette and menu_commands.c's name table. */
+   toolbar and menu_commands.c's name table. */
 
 /* ---- menu command IDs: File, Edit, View, Help ---- */
 #define IDM_FILE_NEW      201
@@ -110,7 +110,6 @@
 #define IDM_FILE_EXPORT_PDF      301
 #define IDM_FILE_QUICK_OPEN      302
 #define IDM_FILE_FIND_FOLDER     303
-#define IDM_EDIT_COMMAND_PALETTE 304
 #define IDM_FMT_TABLE_EDITOR     305
 #define IDM_RUN_FILE             306
 #define IDM_DEBUG_FILE           307

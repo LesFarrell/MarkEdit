@@ -1,12 +1,15 @@
 #include "settings.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <wchar.h>
 
 #include "file_explorer.h"
 #include "path_utils.h"
+#include "plugin_settings.h"
+#include "text_codec.h"
 
-/* ---- persisted settings, stored in %APPDATA%\markedit\markedit.ini ---- */
+/* ---- persisted settings, stored in %APPDATA%\markedit\settings.json ---- */
 WCHAR *get_settings_path(void) {
     DWORD capacity = GetEnvironmentVariableW(L"APPDATA", NULL, 0);
     WCHAR *appData = NULL;
@@ -25,56 +28,73 @@ WCHAR *get_settings_path(void) {
     free(appData);
     if (!directory) return NULL;
     CreateDirectoryW(directory, NULL);
-    WCHAR *settings = path_join(directory, L"markedit.ini");
+    WCHAR *settings = path_join(directory, L"settings.json");
     free(directory);
     return settings;
 }
 
-/* Reads a string setting that may be arbitrarily long (a filesystem path),
-   doubling the buffer until the value fits or a sane cap is hit. Returns a
-   heap copy the caller frees, or NULL (nothing allocated) when the key is
-   absent or empty. */
+/* The JSON store uses the same section/key model the application already had,
+   which keeps settings call sites small while changing the persistence format. */
 WCHAR *read_profile_string(const WCHAR *section, const WCHAR *key, const WCHAR *path) {
-    DWORD cap = 512;
-    WCHAR *value = NULL;
-    for (;;) {
-        free(value);
-        value = (WCHAR *)calloc(cap, sizeof(WCHAR));
-        if (!value) return NULL;
-        DWORD n = GetPrivateProfileStringW(section, key, L"", value, cap, path);
-        if (n < cap - 1) break;
-        if (cap == 32768) {
-            free(value);
-            return NULL;
-        }
-        cap *= 2;
-    }
-    if (value && value[0]) return value;
-    free(value);
-    return NULL;
+    char *sectionUtf8 = to_utf8(section), *keyUtf8 = to_utf8(key);
+    char *valueUtf8 = sectionUtf8 && keyUtf8
+        ? plugin_settings_get(path, sectionUtf8, keyUtf8) : NULL;
+    WCHAR *value = valueUtf8 && valueUtf8[0] ? to_wide(valueUtf8) : NULL;
+    free(valueUtf8); free(keyUtf8); free(sectionUtf8);
+    return value;
 }
 
-static int read_profile_int(const WCHAR *section, const WCHAR *key, int defaultValue,
-                            const WCHAR *path) {
-    WCHAR fallback[32], value[32], *end = NULL;
-    swprintf(fallback, 32, L"%d", defaultValue);
-    GetPrivateProfileStringW(section, key, fallback, value, 32, path);
-    long parsed = wcstol(value, &end, 10);
-    return end && end != value && *end == 0 ? (int)parsed : defaultValue;
+int read_setting_int(const WCHAR *section, const WCHAR *key, int defaultValue,
+                     const WCHAR *path) {
+    WCHAR *value = read_profile_string(section, key, path), *end = NULL;
+    long parsed = value ? wcstol(value, &end, 10) : 0;
+    int result = value && end != value && *end == 0 ? (int)parsed : defaultValue;
+    free(value);
+    return result;
+}
+
+int write_setting_string(const WCHAR *section, const WCHAR *key, const WCHAR *value,
+                         const WCHAR *path) {
+    char *sectionUtf8 = to_utf8(section), *keyUtf8 = to_utf8(key);
+    char *valueUtf8 = value ? to_utf8(value) : NULL;
+    int ok = sectionUtf8 && keyUtf8 && (!value || valueUtf8) &&
+        plugin_settings_set(path, sectionUtf8, keyUtf8, valueUtf8);
+    free(valueUtf8); free(keyUtf8); free(sectionUtf8);
+    return ok;
+}
+
+int clear_setting_section(const WCHAR *section, const WCHAR *path) {
+    /* Removing known keys is handled by callers that own bounded sections.
+       Dynamic sections use this sentinel operation in the store. */
+    char *sectionUtf8 = to_utf8(section);
+    int ok = sectionUtf8 && plugin_settings_clear_section(path, sectionUtf8);
+    free(sectionUtf8);
+    return ok;
 }
 
 static void write_profile_int(const WCHAR *section, const WCHAR *key, int value,
                               const WCHAR *path) {
     WCHAR buffer[32];
     swprintf(buffer, 32, L"%d", value);
-    WritePrivateProfileStringW(section, key, buffer, path);
+    write_setting_string(section, key, buffer, path);
+}
+
+#define read_profile_int read_setting_int
+
+static void read_setting_into(const WCHAR *section, const WCHAR *key, const WCHAR *fallback,
+                              WCHAR *output, size_t capacity, const WCHAR *path) {
+    WCHAR *value = read_profile_string(section, key, path);
+    const WCHAR *source = value ? value : fallback;
+    wcsncpy(output, source, capacity - 1);
+    output[capacity - 1] = 0;
+    free(value);
 }
 
 /* A section's Theme key: 1 for github-dark, 0 for github-light, -1 when it
    isn't set (or holds anything else). */
 static int read_theme_choice(const WCHAR *section, const WCHAR *path) {
     WCHAR value[32];
-    GetPrivateProfileStringW(section, L"Theme", L"", value, 32, path);
+    read_setting_into(section, L"Theme", L"", value, 32, path);
     if (_wcsicmp(value, L"github-dark") == 0) return 1;
     if (_wcsicmp(value, L"github-light") == 0) return 0;
     return -1;
@@ -83,8 +103,8 @@ static int read_theme_choice(const WCHAR *section, const WCHAR *path) {
 void load_font_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    GetPrivateProfileStringW(L"Font", L"FaceName", L"Consolas",
-                             g_fontFaceName, MAX_FONT_FACE_NAME, path);
+    read_setting_into(L"Font", L"FaceName", L"Consolas",
+                      g_fontFaceName, MAX_FONT_FACE_NAME, path);
     g_fontPointSize = read_profile_int(L"Font", L"PointSize", g_fontPointSize, path);
     if (g_fontPointSize < 1) g_fontPointSize = 1;
     g_fontWeight = read_profile_int(L"Font", L"Weight", FW_NORMAL, path);
@@ -102,7 +122,7 @@ void load_theme_settings(void) {
     } else {
         WCHAR value[32];
         /* Migrate settings written by releases that exposed a DarkMode toggle. */
-        GetPrivateProfileStringW(L"Preview", L"DarkMode", L"0", value, 32, path);
+        read_setting_into(L"Preview", L"DarkMode", L"0", value, 32, path);
         g_previewDarkMode = (value[0] == L'1' || value[0] == L't' || value[0] == L'T' ||
                              value[0] == L'y' || value[0] == L'Y');
     }
@@ -122,13 +142,13 @@ void load_theme_settings(void) {
 void save_theme_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WritePrivateProfileStringW(L"Preview", L"Theme",
-                               g_previewDarkMode ? L"github-dark" : L"github-light", path);
-    WritePrivateProfileStringW(L"Preview", L"DarkMode", NULL, path);
-    WritePrivateProfileStringW(L"Editor", L"Theme",
-                               g_editorDarkMode ? L"github-dark" : L"github-light", path);
-    WritePrivateProfileStringW(L"Preview", L"CustomCSS",
-                               g_customCssPath ? g_customCssPath : L"", path);
+    write_setting_string(L"Preview", L"Theme",
+                         g_previewDarkMode ? L"github-dark" : L"github-light", path);
+    write_setting_string(L"Preview", L"DarkMode", NULL, path);
+    write_setting_string(L"Editor", L"Theme",
+                         g_editorDarkMode ? L"github-dark" : L"github-light", path);
+    write_setting_string(L"Preview", L"CustomCSS",
+                         g_customCssPath ? g_customCssPath : L"", path);
     free(path);
 }
 
@@ -171,8 +191,8 @@ void load_layout_settings(void) {
     if (g_largeFileThresholdMB < 1) g_largeFileThresholdMB = 1;
     /* Above 2 GB a file opens in large-file mode regardless (see load_file()). */
     if (g_largeFileThresholdMB > 2047) g_largeFileThresholdMB = 2047;
-    GetPrivateProfileStringW(L"SpellCheck", L"Language", L"en-GB", g_spellLanguage,
-                             LOCALE_NAME_MAX_LENGTH, path);
+    read_setting_into(L"SpellCheck", L"Language", L"en-GB", g_spellLanguage,
+                      LOCALE_NAME_MAX_LENGTH, path);
     if (!g_previewVisible && !g_editorVisible) g_editorVisible = 1;
 
     g_splitterRatio = clamp_ratio(read_profile_int(L"View", L"SplitterRatio", 500, path));
@@ -210,7 +230,7 @@ void save_layout_settings(void) {
     write_profile_int(L"View", L"ExplorerVisible", g_explorerVisible, path);
     write_profile_int(L"View", L"EditorZoom", g_editorZoom, path);
     write_profile_int(L"View", L"LargeFileThresholdMB", g_largeFileThresholdMB, path);
-    WritePrivateProfileStringW(L"SpellCheck", L"Language", g_spellLanguage, path);
+    write_setting_string(L"SpellCheck", L"Language", g_spellLanguage, path);
     if (!g_commandLinePreviewMode) {
         write_profile_int(L"View", L"PreviewVisible", g_previewVisible, path);
         write_profile_int(L"View", L"EditorVisible", g_editorVisible, path);
@@ -258,20 +278,20 @@ void save_layout_settings(void) {
 void save_font_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WritePrivateProfileStringW(L"Font", L"FaceName", g_fontFaceName, path);
+    write_setting_string(L"Font", L"FaceName", g_fontFaceName, path);
     write_profile_int(L"Font", L"PointSize", g_fontPointSize, path);
     write_profile_int(L"Font", L"Weight", g_fontWeight, path);
-    WritePrivateProfileStringW(L"Font", L"Italic", g_fontItalic ? L"1" : L"0", path);
+    write_setting_string(L"Font", L"Italic", g_fontItalic ? L"1" : L"0", path);
     free(path);
 }
 
 void load_find_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    GetPrivateProfileStringW(L"Find", L"FindWhat", L"", g_findWhat,
-                             sizeof(g_findWhat) / sizeof(g_findWhat[0]), path);
-    GetPrivateProfileStringW(L"Find", L"ReplaceWith", L"", g_replaceWith,
-                             sizeof(g_replaceWith) / sizeof(g_replaceWith[0]), path);
+    read_setting_into(L"Find", L"FindWhat", L"", g_findWhat,
+                      sizeof(g_findWhat) / sizeof(g_findWhat[0]), path);
+    read_setting_into(L"Find", L"ReplaceWith", L"", g_replaceWith,
+                      sizeof(g_replaceWith) / sizeof(g_replaceWith[0]), path);
     g_findFlags = read_profile_int(L"Find", L"MatchCase", 0, path) ? FR_MATCHCASE : 0;
     if (read_profile_int(L"Find", L"SearchDown", 1, path)) g_findFlags |= FR_DOWN;
     free(path);
@@ -280,14 +300,14 @@ void load_find_settings(void) {
 void save_find_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    WritePrivateProfileStringW(L"Find", L"FindWhat", g_findWhat, path);
-    WritePrivateProfileStringW(L"Find", L"ReplaceWith", g_replaceWith, path);
+    write_setting_string(L"Find", L"FindWhat", g_findWhat, path);
+    write_setting_string(L"Find", L"ReplaceWith", g_replaceWith, path);
     write_profile_int(L"Find", L"MatchCase", (g_findFlags & FR_MATCHCASE) != 0, path);
     write_profile_int(L"Find", L"SearchDown", (g_findFlags & FR_DOWN) != 0, path);
     free(path);
 }
 
-/* Backend is hand-edited in markedit.ini rather than exposed through a menu:
+/* Backend may be hand-edited in settings.json rather than exposed through a menu:
    it pins Run/Debug C/C++ to one compiler instead of the default Auto
    priority search (GCC, Clang, Zig, then MSVC as a Run-only fallback). Every
    other key here - the per-toolchain path overrides and ExtraFlags - is what
@@ -297,7 +317,7 @@ void load_compiler_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
     WCHAR value[16];
-    GetPrivateProfileStringW(L"Compiler", L"Backend", L"Auto", value, 16, path);
+    read_setting_into(L"Compiler", L"Backend", L"Auto", value, 16, path);
     if (_wcsicmp(value, L"GCC") == 0) g_compilerBackend = COMPILER_BACKEND_GCC;
     else if (_wcsicmp(value, L"Clang") == 0) g_compilerBackend = COMPILER_BACKEND_CLANG;
     else if (_wcsicmp(value, L"Zig") == 0) g_compilerBackend = COMPILER_BACKEND_ZIG;
@@ -322,20 +342,20 @@ void save_compiler_settings(void) {
         g_compilerBackend == COMPILER_BACKEND_CLANG ? L"Clang" :
         g_compilerBackend == COMPILER_BACKEND_ZIG ? L"Zig" :
         g_compilerBackend == COMPILER_BACKEND_MSVC ? L"MSVC" : L"Auto";
-    WritePrivateProfileStringW(L"Compiler", L"Backend", backend, path);
-    WritePrivateProfileStringW(L"Compiler", L"VcvarsallPath",
-                               g_vcvarsallOverridePath ? g_vcvarsallOverridePath : L"", path);
-    WritePrivateProfileStringW(L"Compiler", L"GccPath",
-                               g_gccBinOverride ? g_gccBinOverride : L"", path);
-    WritePrivateProfileStringW(L"Compiler", L"ClangPath",
-                               g_clangBinOverride ? g_clangBinOverride : L"", path);
-    WritePrivateProfileStringW(L"Compiler", L"ZigPath",
-                               g_zigBinOverride ? g_zigBinOverride : L"", path);
-    WritePrivateProfileStringW(L"Compiler", L"LuaPath",
-                               g_luaBinOverride ? g_luaBinOverride : L"", path);
-    WritePrivateProfileStringW(L"Compiler", L"GdbPath",
-                               g_gdbBinOverride ? g_gdbBinOverride : L"", path);
-    WritePrivateProfileStringW(L"Compiler", L"ExtraFlags",
-                               g_compilerExtraFlags ? g_compilerExtraFlags : L"", path);
+    write_setting_string(L"Compiler", L"Backend", backend, path);
+    write_setting_string(L"Compiler", L"VcvarsallPath",
+                         g_vcvarsallOverridePath ? g_vcvarsallOverridePath : L"", path);
+    write_setting_string(L"Compiler", L"GccPath",
+                         g_gccBinOverride ? g_gccBinOverride : L"", path);
+    write_setting_string(L"Compiler", L"ClangPath",
+                         g_clangBinOverride ? g_clangBinOverride : L"", path);
+    write_setting_string(L"Compiler", L"ZigPath",
+                         g_zigBinOverride ? g_zigBinOverride : L"", path);
+    write_setting_string(L"Compiler", L"LuaPath",
+                         g_luaBinOverride ? g_luaBinOverride : L"", path);
+    write_setting_string(L"Compiler", L"GdbPath",
+                         g_gdbBinOverride ? g_gdbBinOverride : L"", path);
+    write_setting_string(L"Compiler", L"ExtraFlags",
+                         g_compilerExtraFlags ? g_compilerExtraFlags : L"", path);
     free(path);
 }

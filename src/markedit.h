@@ -48,9 +48,12 @@
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1
 #define IDR_DEFAULT_MENUS 2 /* src/menus.lua, the menu bar used without a user copy */
-#define IDR_BUILTIN_FORMATTING 3 /* src/formatting.lua */
+#define IDR_BUILTIN_FORMATTING_BASE 3 /* src/lua/formatting_base.lua */
 #define IDR_HELP_MARKDOWN 4 /* src/help/markdown-reference.md, Help > Markdown Reference */
 #define IDR_HELP_SHORTCUTS 5 /* src/help/keyboard-shortcuts.lua, builds Help > Keyboard Shortcuts */
+#define IDR_BUILTIN_FORMATTING_JSON 6
+#define IDR_BUILTIN_FORMATTING_TABLES 7
+#define IDR_BUILTIN_FORMATTING_TEXT 8
 
 /* ---- forward declarations for functions defined in markedit.c ----
    Grouped roughly by area: preview/theme, menu/layout, spell check,

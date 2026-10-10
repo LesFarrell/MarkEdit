@@ -22,7 +22,7 @@ This guide covers everything a plugin can do. [`example.lua`](example.lua), in t
 
 2. Choose **Plugins → Reload Plugins** (or restart MarkEdit).
 
-3. **Plugins → Say Hello** and **Plugins → Text → Shout** are now in the menu, and in the Command Palette (Ctrl+Shift+P) as `Plugins: Say Hello` and `Plugins: Text > Shout`.
+3. **Plugins → Say Hello** and **Plugins → Text → Shout** are now in the menu.
 
 For an installed copy of MarkEdit this folder is usually `C:\Program Files\MarkEdit\plugins`, and adding files there needs administrator rights.
 
@@ -48,7 +48,7 @@ Functions that take a position, range, or line number raise an error when it's o
 
 ## API reference
 
-Plugins see five tables: `menu`, `commands`, `events`, `editor`, and `ui`. Square brackets mark optional arguments.
+Plugins see seven tables: `menu`, `commands`, `events`, `editor`, `ui`, `config`, and `app`. Square brackets mark optional arguments.
 
 Names, labels, menu paths, and dialog text must be valid UTF-8 and cannot contain NUL bytes. Document text passed through `editor.*` is length-counted separately, so those functions preserve every byte in the document.
 
@@ -57,6 +57,18 @@ Names, labels, menu paths, and dialog text must be valid UTF-8 and cannot contai
 #### `menu.add(label, fn)`
 
 Adds a command. Choosing it runs `fn()`. `label` decides where it appears; see [Where commands appear](#where-commands-appear). The same label can be added more than once. Each becomes its own item.
+
+#### `menu.checkbox(label, key, default, fn)`
+
+Adds a command with a check mark. `key` identifies its saved state inside this plugin, `default` is a boolean used until a state has been saved, and choosing the item toggles it before running `fn(checked)` with the new boolean value. If the function fails, MarkEdit restores the previous state.
+
+```lua
+menu.checkbox("Text/Trim Whitespace on Save", "trim_on_save", false, function(checked)
+  ui.message(checked and "Trim on save is on." or "Trim on save is off.")
+end)
+```
+
+The state persists across restarts and plugin reloads. Read it elsewhere in the plugin with `config.get(key, default)`.
 
 #### `menu.separator([path])`
 
@@ -82,7 +94,7 @@ Separators follow the same rules as `"-"` in the menu definition: one at the sta
 
 #### `commands.register(name, fn [, title])`
 
-Makes the built-in command called `name` run `fn()` instead of its usual code, wherever it's used from: menu, toolbar, Command Palette, or keyboard shortcut. `title` is used as the title of dialogs `fn` shows (default `"MarkEdit"`). If several plugins register the same name, the last one loaded wins. See [Replacing built-in commands](#replacing-built-in-commands).
+Makes the built-in command called `name` run `fn()` instead of its usual code, wherever it's used from: menu, toolbar, or keyboard shortcut. `title` is used as the title of dialogs `fn` shows (default `"MarkEdit"`). If several plugins register the same name, the last one loaded wins. See [Replacing built-in commands](#replacing-built-in-commands).
 
 ### events
 
@@ -97,6 +109,19 @@ Runs `fn(path)` each time the event happens, where `path` is the document's file
 | `"tab_changed"` | After a different document becomes the active one: switching tabs, opening a new tab, or closing one. Brief switches MarkEdit makes itself, such as Save All visiting each tab, don't count. | The newly active document. |
 
 Handlers work on the active document, exactly as commands do. A handler that fails is reported, but doesn't stop what caused the event: a document is still saved if its `save` handler fails.
+
+### config
+
+Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.json` alongside application preferences. Keys are 1 to 64 characters and may contain letters, digits, `.`, `_`, and `-`.
+
+| Function | Does |
+|---|---|
+| `config.get(key [, default])` | Returns the saved value. If none exists, returns `default`, or `nil`. A boolean or number default converts the stored text to that type. |
+| `config.set(key, value)` | Saves a string, number, or boolean. Passing `nil` removes the value. |
+
+### app
+
+`app.date()`, `app.time()`, and `app.date_time()` return the current local time as `YYYY-MM-DD`, `HH:MM:SS`, and `YYYY-MM-DD HH:MM:SS` respectively.
 
 ### editor
 
@@ -129,6 +154,8 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.get_selection_range([n])` | Returns `start, finish` of selection `n` (an empty range at its caret when nothing is selected). Defaults to the main selection. |
 | `editor.set_selection(start, finish [, n])` | Selects a range, or changes selection `n` when supplied. Without `n`, leaves just one selection. |
 | `editor.selection_count()` | Returns the number of selections and carets. |
+| `editor.get_selections()` | Returns a snapshot table containing `{ start, finish, caret, anchor }` for every selection. |
+| `editor.replace_selections(texts)` | Replaces every selection safely. `texts` is one string used for all selections, or a table with one string per selection. Leaves a caret after each replacement. |
 | `editor.add_selection(start, finish)` | Adds a selection (an empty range adds a caret) and returns its number. |
 | `editor.drop_selection(n)` | Removes selection `n`. The only remaining selection cannot be removed. |
 | `editor.get_main_selection()` | Returns the number of the main selection. |
@@ -137,6 +164,17 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.set_caret(position [, n])` | Moves caret `n` there. Without `n`, removes the other selections. |
 
 Selection numbers are 1-based. Existing plugins that omit `n` continue to work on the main selection; selection-changing calls without `n` intentionally leave just one caret.
+
+For a transformation that applies independently to every caret, take one snapshot and replace everything in one call. This avoids offsets changing underneath a Lua loop:
+
+```lua
+local selections = editor.get_selections()
+local replacements = {}
+for i, range in ipairs(selections) do
+  replacements[i] = editor.get_range(range.start, range.finish):upper()
+end
+editor.replace_selections(replacements)
+```
 
 #### Lines
 
@@ -193,13 +231,12 @@ A command's label is a path separated by `/`. Each part before the last names a 
 - Submenus are found the same way, by name, and created when they don't exist yet.
 - A label of just `/Name` has no menu to go in, so it goes on the Plugins menu like `Name`.
 - "The Plugins menu" means wherever the menu definition puts its plugins list (see [Customizing the menu bar](#customizing-the-menu-bar)). If the definition has no plugins list, MarkEdit adds a Plugins menu for these commands.
-- Every plugin command is also in the Command Palette as `Plugins: ` followed by its path, for example `Plugins: Snippets > Insert Date`.
 - A path has at most 8 parts; anything beyond that is ignored.
 - Top-level menu names are drawn using the system's ANSI code page, so plain letters, digits, and common punctuation are safest there. Submenu and item names can use any characters.
 
 ## Replacing built-in commands
 
-`commands.register` replaces what a built-in command does, everywhere it can be used: the menu, the formatting toolbar, the Command Palette, and keyboard shortcuts. MarkEdit's own internal actions aren't affected. For example, replacing `file.save` changes the Save command and Ctrl+S, but not the save MarkEdit offers when closing a document with unsaved changes.
+`commands.register` replaces what a built-in command does everywhere it can be used: the menu, the formatting toolbar, and keyboard shortcuts. MarkEdit's own internal actions aren't affected. For example, replacing `file.save` changes the Save command and Ctrl+S, but not the save MarkEdit offers when closing a document with unsaved changes.
 
 ```lua
 -- Bold with __ instead of **.
@@ -209,7 +246,7 @@ commands.register("markdown.bold", function()
 end)
 ```
 
-MarkEdit's own Markdown, HTML, and JSON formatting commands, and the Edit menu's Toggle Comment, Trim Trailing Whitespace, Title Case, and line sorting commands (the ones marked (Lua) below), are written this way, in `src/formatting.lua` (built into `markedit.exe`). They load before any plugin, so a plugin that registers one of their names replaces them. To go back to MarkEdit's own version, remove the plugin and reload.
+MarkEdit's own Markdown, HTML, and JSON formatting commands, and the Edit menu's Toggle Comment, Trim Trailing Whitespace, Title Case, and line sorting commands (the ones marked (Lua) below), are written this way in the `src/lua/formatting_*.lua` files built into MarkEdit. They load before any plugin, so a plugin that registers one of their names replaces them. To go back to MarkEdit's own version, remove the plugin and reload.
 
 ### Built-in command names
 
@@ -222,7 +259,7 @@ These are the names `commands.register` and the menu definition use.
 - **Markdown** (Lua): `markdown.bold`, `markdown.italic`, `markdown.strikethrough`, `markdown.inline_code`, `markdown.heading1`, `markdown.heading2`, `markdown.heading3`, `markdown.blockquote`, `markdown.bullet_list`, `markdown.numbered_list`, `markdown.task_list`, `markdown.link`, `markdown.image`, `markdown.table`, `markdown.table_editor`, `markdown.table_row_above`, `markdown.table_row_below`, `markdown.table_row_delete`, `markdown.table_column_left`, `markdown.table_column_right`, `markdown.table_column_delete`, `markdown.table_sort_ascending`, `markdown.table_sort_descending`, `markdown.table_align_left`, `markdown.table_align_center`, `markdown.table_align_right`, `markdown.code_block`, `markdown.footnote`, `markdown.horizontal_rule`, `markdown.alert`
 - **JSON** (Lua): `json.format`, `json.minify`
 - **HTML** (Lua): `html.html`, `html.head`, `html.body`, `html.paragraph`, `html.bold`, `html.italic`, `html.underline`, `html.div`, `html.span`, `html.link`, `html.image`, `html.table`, `html.bullet_list`, `html.numbered_list`, `html.line_break`
-- **Tools:** `tools.command_palette`, `tools.settings`
+- **Tools:** `tools.settings`
 - **Run:** `run.run_file`, `run.debug_file`, `run.continue`, `run.step_over`, `run.step_into`, `run.step_out`, `run.toggle_breakpoint`, `run.clear_breakpoints`
 - **Plugins:** `plugins.reload`, `plugins.customize_menus`
 - **Help:** `help.markdown_reference`, `help.keyboard_shortcuts`, `help.plugin_guide`, `help.about`
@@ -266,7 +303,7 @@ return {
 }
 ```
 
-- Moving or renaming an item doesn't change its keyboard shortcut. Leaving a command out of the menus doesn't remove its shortcut or its Command Palette entry either.
+- Moving or renaming an item doesn't change its keyboard shortcut. Leaving a command out of the menus doesn't remove its shortcut.
 - `{codepage}` in a label is replaced with the system's ANSI code page number.
 - Separators at the start or end of a menu, or next to another separator, are left out, so a list that turns out to be empty leaves no gap.
 - Plugins place `/Menu/...` commands by menu name, so renaming a menu changes where those commands go.
@@ -296,7 +333,7 @@ Plugins run in Lua 5.4, built into `markedit.exe`. No separate Lua installation 
 | Limit | Value |
 |---|---|
 | Size of a plugin file | 1 MiB |
-| Commands, in total | 256, shared by plugins (`menu.add`, `menu.separator` and `commands.register`), functions in the menu definition, and MarkEdit's own 53 formatting and text commands |
+| Commands, in total | 256, shared by plugins (`menu.add`, `menu.checkbox`, `menu.separator` and `commands.register`), functions in the menu definition, and MarkEdit's own 53 formatting and text commands |
 | Event handlers, in total | 100 |
 | Time a call may run | 5 seconds (not counting dialogs) |
 | Parts in a menu label | 8 |
@@ -370,17 +407,15 @@ events.on("save", function()
 end)
 ```
 
-### Keep a setting while MarkEdit runs
+### Keep a setting
 
-Plugin variables last until MarkEdit closes or plugins are reloaded. There's no way to store anything permanently, since plugins can't write files.
+Use `config` for values that should survive plugin reloads and MarkEdit restarts.
 
 ```lua
-local wrapWidth = 80
-
 menu.add("Text/Set Wrap Width...", function()
-  local answer = ui.prompt("Wrap width:", tostring(wrapWidth))
+  local answer = ui.prompt("Wrap width:", tostring(config.get("wrap_width", 80)))
   local value = answer and tonumber(answer)
-  if value and value >= 10 then wrapWidth = math.floor(value) end
+  if value and value >= 10 then config.set("wrap_width", math.floor(value)) end
 end)
 ```
 

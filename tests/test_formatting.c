@@ -1,4 +1,4 @@
-/* src/formatting.lua: the Markdown, HTML and JSON formatting commands. Most
+/* src/lua/formatting_*.lua: the Markdown, HTML and JSON formatting commands. Most
    of their behaviour was checked against the C versions they replaced; this
    keeps the JSON checks those had, and that every command is registered. */
 #include <stdio.h>
@@ -11,6 +11,29 @@
 
 static int s_ok = 1;
 static char s_lastMessage[256];
+
+static char *read_formatting_source(void) {
+    static const WCHAR *const paths[] = {
+        L"src\\lua\\formatting_base.lua", L"src\\lua\\formatting_json.lua",
+        L"src\\lua\\formatting_tables.lua", L"src\\lua\\formatting_text.lua",
+    };
+    char *joined = NULL;
+    size_t used = 0;
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        char *part = read_utf8_text_file(paths[i], 1024 * 1024);
+        if (!part) { free(joined); return NULL; }
+        size_t length = strlen(part);
+        char *grown = (char *)realloc(joined, used + length + 2);
+        if (!grown) { free(part); free(joined); return NULL; }
+        joined = grown;
+        memcpy(joined + used, part, length);
+        used += length;
+        joined[used++] = '\n';
+        joined[used] = 0;
+        free(part);
+    }
+    return joined;
+}
 
 static void expect(int condition, const char *what) {
     if (!condition) {
@@ -277,10 +300,10 @@ int main(void) {
         fake_prompt, NULL, NULL, NULL, record_message, NULL, NULL
     };
     plugin_host_set_callbacks(&callbacks);
-    char *code = read_utf8_text_file(L"src\\formatting.lua", 1024 * 1024);
+    char *code = read_formatting_source();
     char *error = code ? plugin_host_load_builtin("formatting.lua", code, strlen(code)) : NULL;
     if (error) fprintf(stderr, "%s\n", error);
-    expect(code && !error, "src/formatting.lua loads");
+    expect(code && !error, "built-in formatting Lua files load together");
     free(error);
     free(code);
 

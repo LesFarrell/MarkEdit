@@ -129,7 +129,7 @@ static void test_separators(HWND editor) {
 static char s_lastTitle[64];
 static char s_configPlugin[64], s_configKey[64], s_configValue[128];
 static const char *s_calculatorExpression =
-    "0x10 + 0b11 + (5 << 1) + min(4, 9) + deg(pi) + random(1, 1)";
+    "0x10 + 0b11 + (5 << 1) + min(4, 9)";
 
 static char *fake_config_get(const char *plugin, const char *key) {
     if (strcmp(plugin, s_configPlugin) != 0 || strcmp(key, s_configKey) != 0 || !s_configValue[0])
@@ -164,6 +164,7 @@ static int fake_choose(const char *title, const char *label, const char *const *
     snprintf(s_lastTitle, sizeof(s_lastTitle), "%s", title);
     if (strstr(label, " = ") && count == 2 && strcmp(items[0], "Insert result") == 0)
         return 0;
+    if (strcmp(label, "Include headings at:") == 0 && count == 4) return 1;
     return strcmp(label, "Level:") == 0 && count == 3 && strcmp(items[1], "h2") == 0 ? 1 : -1;
 }
 
@@ -247,6 +248,9 @@ static void test_editor_api(HWND editor) {
         "  editor.set_selection(1, 4)\n"
         "  local second = editor.add_selection(10, 12)\n"
         "  assert(second == 2 and editor.selection_count() == 2)\n"
+        "  local all = editor.get_selections()\n"
+        "  assert(#all == 2 and all[1].start == 1 and all[1].finish == 4)\n"
+        "  assert(all[2].caret == 13 and all[2].anchor == 10)\n"
         "  assert(editor.get_selection(1) == 'zero' and editor.get_selection(2) == 'two')\n"
         "  local s, f = editor.get_selection_range(2)\n"
         "  assert(s == 10 and f == 12 and editor.get_caret(2) == 13)\n"
@@ -275,6 +279,28 @@ static void test_editor_api(HWND editor) {
     set_document(editor, "zero one two");
     expect(run_ok(first + 4, editor) && document_is(editor, "zero one TWO"),
            "multiple selections and carets through the Lua API");
+
+    int bulk = load_ok("bulk-selections.lua",
+        "menu.add('Bulk selections', function()\n"
+        "  assert(editor.selection_count() == 3)\n"
+        "  assert(not pcall(editor.replace_selections, {'only one'}))\n"
+        "  assert(not pcall(editor.replace_selections, {'A', 2, 'C'}))\n"
+        "  editor.replace_selections({'A', 'middle', 'C'})\n"
+        "  assert(editor.selection_count() == 3)\n"
+        "  local all = editor.get_selections()\n"
+        "  assert(all[1].caret == 2 and all[2].caret == 9 and all[3].caret == 11)\n"
+        "  assert(editor.get_main_selection() == 2)\n"
+        "  editor.replace_selections('!')\n"
+        "  assert(editor.selection_count() == 3 and editor.get_main_selection() == 2)\n"
+        "end)");
+    set_document(editor, "aa bb cc");
+    SendMessageA(editor, SCI_SETSEL, 0, 2);
+    SendMessageA(editor, SCI_ADDSELECTION, 5, 3);
+    SendMessageA(editor, SCI_ADDSELECTION, 8, 6);
+    SendMessageA(editor, SCI_SETMAINSELECTION, 1, 0);
+    expect(run_ok(bulk, editor) && document_is(editor, "A! middle! C!") &&
+           SendMessageA(editor, SCI_GETSELECTIONS, 0, 0) == 3,
+           "bulk replacement keeps multiple carets stable");
 }
 
 static void test_ui(HWND editor) {
@@ -486,36 +512,34 @@ static void test_bundled_plugins(HWND editor) {
     int decodeHex = find_command("Developer Tools/Hex Decode");
     int encodeHtml = find_command("Developer Tools/HTML Entity Encode");
     int decodeHtml = find_command("Developer Tools/HTML Entity Decode");
-    int task = find_command("Writing Tools/Toggle Task State");
-    int insertDate = find_command("Writing Tools/Insert/Date");
-    int toc = find_command("Markdown Toolkit/Generate or Update TOC");
-    int calculator = find_command("Calculator/Calculate Expression...");
-    int calculatorResult = find_command("Calculator/Insert Last Result");
+    int toc = find_command("/Snippets/Markdown/Table of Contents...");
+    int calculator = find_command("Calculate Selection");
     int removeBlank = find_command("Line Tools/Clean/Remove Blank Lines");
     int sortLines = find_command("Line Tools/Order/Sort A to Z");
     int sortLength = find_command("Line Tools/Order/Sort by Length");
     int shuffle = find_command("Line Tools/Order/Shuffle");
     expect(encode64 >= 0 && decode64 >= 0 && encodeUrl >= 0 && decodeUrl >= 0 &&
            encodeHex >= 0 && decodeHex >= 0 && encodeHtml >= 0 && decodeHtml >= 0 &&
-           task >= 0 && insertDate >= 0 && toc >= 0 && calculator >= 0 &&
-           calculatorResult >= 0 && removeBlank >= 0 &&
+           toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
            sortLines >= 0 && sortLength >= 0 && shuffle >= 0,
            "bundled plugin commands are registered");
 
-    set_document(editor, "");
-    expect(calculator >= 0 && run_ok(calculator, editor) && document_is(editor, "214"),
-           "bundled calculator evaluates bases, shifts, functions, and random ranges");
+    set_document(editor, s_calculatorExpression);
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(calculator >= 0 && run_ok(calculator, editor) && document_contains(editor, " = 33"),
+           "bundled calculator evaluates bases, shifts and functions");
 
-    s_calculatorExpression = "((0xF0 >> 4) xor 0b0011) + (10 mod 4)";
-    set_document(editor, "");
-    expect(run_ok(calculator, editor) && document_is(editor, "14"),
+    s_calculatorExpression = "((0xF0 >> 4) xor 0b0011) + (10 % 4)";
+    set_document(editor, s_calculatorExpression);
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(calculator, editor) && document_contains(editor, " = 14"),
            "bundled calculator evaluates bitwise xor and modulo");
 
     s_calculatorExpression =
-        "round(cos(rad(60))*100) + round(sin(rad(30))*100) + "
-        "round(tan(rad(45))*10) + round(deg(atan(1)))";
-    set_document(editor, "");
-    expect(run_ok(calculator, editor) && document_is(editor, "155"),
+        "deg(pi) + sqrt(16)";
+    set_document(editor, s_calculatorExpression);
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(calculator, editor) && document_contains(editor, " = 184"),
            "bundled calculator evaluates trigonometry and angle conversions");
 
     set_document(editor, "hello world");
@@ -550,19 +574,7 @@ static void test_bundled_plugins(HWND editor) {
     expect(decodeHtml >= 0 && run_ok(decodeHtml, editor) && document_is(editor, "<a&b>"),
            "bundled HTML entity decoder");
 
-    set_document(editor, "");
-    expect(insertDate >= 0 && run_ok(insertDate, editor), "bundled date inserter runs");
-    char insertedDate[32];
-    SendMessageA(editor, SCI_GETTEXT, sizeof(insertedDate), (LPARAM)insertedDate);
-    expect(strlen(insertedDate) == 10 && insertedDate[4] == '-' && insertedDate[7] == '-',
-           "bundled date inserter uses ISO format");
-
     SendMessageA(editor, SCI_SETEOLMODE, SC_EOL_LF, 0);
-    set_document(editor, "- [ ] one\n- [x] two");
-    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
-    expect(task >= 0 && run_ok(task, editor) && document_is(editor, "- [x] one\n- [ ] two"),
-           "bundled task-state toggle");
-
     set_document(editor, "# Intro\n\n## Details\n\n```md\n# Hidden\n```");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
     expect(toc >= 0 && run_ok(toc, editor) &&

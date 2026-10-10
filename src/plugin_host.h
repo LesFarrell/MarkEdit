@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <windows.h>
 
-/* Shared with the built-in formatting.lua, which registers about 50, and
+/* Shared with the built-in formatting Lua chunk, which registers about 50, and
    with functions in the menu definition. */
 #define PLUGIN_MAX_COMMANDS 256
 #define PLUGIN_MAX_HANDLERS 100
@@ -26,7 +26,7 @@ typedef struct {
     const char *(*language)(void);
     /* Shows a message; kind is "info", "warning" or "error". */
     void (*message)(const char *title, const char *text, const char *kind);
-    /* Reads/writes a value in this plugin's private markedit.ini section.
+    /* Reads/writes a value in this plugin's private persistent settings.
        config_get returns a heap string, or NULL when absent. config_set
        receives NULL to delete a value and returns nonzero on success. */
     char *(*config_get)(const char *plugin, const char *key);
@@ -106,8 +106,8 @@ const char *plugin_host_command_label(int index);
    be placed again by its label. */
 int plugin_host_command_is_placed(int index);
 /* Whether the entry is a menu.separator(path) rather than a command: its
-   label is the menu path, it has nothing to run, and it belongs in no
-   palette. Separators share the command list so they keep their order
+   label is the menu path and it has nothing to run. Separators share the
+   command list so they keep their order
    among the commands placed around them. */
 int plugin_host_command_is_separator(int index);
 /* Whether a command was registered with menu.checkbox, and its persisted

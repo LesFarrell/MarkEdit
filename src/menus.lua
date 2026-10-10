@@ -170,8 +170,6 @@ return {
   } },
 
   { "&Tools", {
-    { "Command &Palette...", "tools.command_palette" },
-    "-",
     { "&JSON", {
       { "&Format JSON", "json.format" },
       { "&Minify JSON", "json.minify" },

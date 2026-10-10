@@ -14,4 +14,6 @@ src/toolbar_icons.c
 src/themed_scrollbar.c
 src/recovery.c
 src/plugin_host.c
+src/plugin_settings.c
+src/lua_editor_api.c
 src/menu_commands.c

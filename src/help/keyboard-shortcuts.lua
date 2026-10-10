@@ -75,11 +75,9 @@ local function collect(items, path, rows)
   return rows
 end
 
-local palette = shortcuts["tools.command_palette"]
 line("# MarkEdit Keyboard Shortcuts")
 line()
-line("Every command is also in the menus"
-  .. (palette and " and the Command Palette (" .. palette .. ")" or "") .. ".")
+line("Every command is also in the menus.")
 line("This page is built from MarkEdit's current menus each time it opens. It's an")
 line("unsaved document, so editing it changes nothing.")
 line()

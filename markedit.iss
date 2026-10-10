@@ -174,6 +174,6 @@ Type: filesandordirs; Name: "{localappdata}\MarkEdit\WebView2"
 ; get_settings_path() (settings.c) writes here, under %APPDATA%, not {app} -
 ; the app is never installed with write access to Program Files, so settings
 ; were never going to end up next to the exe.
-Type: files; Name: "{userappdata}\markedit\markedit.ini"
+Type: files; Name: "{userappdata}\markedit\settings.json"
 ; %LOCALAPPDATA%\MarkEdit\Recovery (unsaved-document snapshots) is left in
 ; place deliberately: it can hold work that was never saved anywhere else.

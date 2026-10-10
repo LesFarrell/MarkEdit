@@ -11,6 +11,7 @@
 #include <wchar.h>
 
 #include "file_io.h"
+#include "lua_editor_api.h"
 #include "path_utils.h"
 #include "text_codec.h"
 #include "../third_party/scintilla/include/Scintilla.h"
@@ -55,8 +56,6 @@ static int s_loadingBuiltIn = 0;
 /* Set while any plugin code runs, so nothing re-enters the Lua state from
    a message loop (a plugin dialog, say) mid-call. */
 static int s_busy = 0;
-/* Set only while a command runs; the editor API refuses to work without it. */
-static HWND s_edit = NULL;
 static const char *s_runningLabel = NULL;
 static const char *s_runningOwner = NULL;
 /* Built-in commands are trusted not to hang, and may legitimately take
@@ -68,6 +67,7 @@ static ULONGLONG s_callStarted = 0;
 void plugin_host_set_callbacks(const PluginHostCallbacks *callbacks) {
     if (callbacks) s_callbacks = *callbacks;
     else memset(&s_callbacks, 0, sizeof(s_callbacks));
+    lua_editor_api_set_callbacks(callbacks);
 }
 
 static char *dup_string(const char *value) {
@@ -164,10 +164,6 @@ static void discard_handlers_from(int first) {
    editor.get_text():sub(s, f) is its text, and s, s - 1 is the empty range
    just before s. */
 
-static HWND checked_editor(lua_State *L) {
-    if (!s_edit) luaL_error(L, "the editor is only available while a plugin command or event handler runs");
-    return s_edit;
-}
 
 static const char *current_title(void) {
     return s_runningLabel ? s_runningLabel : "MarkEdit Plugin";
@@ -178,300 +174,6 @@ static void restart_time_limit(void) {
     s_callStarted = GetTickCount64();
 }
 
-static Sci_Position document_length(HWND hEdit) {
-    return (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
-}
-
-static Sci_Position checked_position(lua_State *L, HWND hEdit, int arg) {
-    lua_Integer position = luaL_checkinteger(L, arg);
-    luaL_argcheck(L, position >= 1 && position <= (lua_Integer)document_length(hEdit) + 1, arg,
-                  "position is outside the document");
-    return (Sci_Position)(position - 1);
-}
-
-/* Reads the range in arguments arg and arg + 1 as Scintilla's [from, to). */
-static void checked_range(lua_State *L, HWND hEdit, int arg, Sci_Position *from, Sci_Position *to) {
-    lua_Integer length = (lua_Integer)document_length(hEdit);
-    lua_Integer start = luaL_checkinteger(L, arg);
-    lua_Integer finish = luaL_checkinteger(L, arg + 1);
-    luaL_argcheck(L, start >= 1 && start <= length + 1, arg, "start is outside the document");
-    luaL_argcheck(L, finish >= start - 1 && finish <= length, arg + 1,
-                  "finish is outside the document or before start");
-    *from = (Sci_Position)(start - 1);
-    *to = (Sci_Position)finish;
-}
-
-static Sci_Position checked_line(lua_State *L, HWND hEdit, int arg) {
-    lua_Integer line = luaL_checkinteger(L, arg);
-    luaL_argcheck(L, line >= 1 && line <= (lua_Integer)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0),
-                  arg, "no such line");
-    return (Sci_Position)(line - 1);
-}
-
-static void push_range(lua_State *L, Sci_Position from, Sci_Position to) {
-    lua_pushinteger(L, (lua_Integer)from + 1);
-    lua_pushinteger(L, (lua_Integer)to);
-}
-
-static void push_text_range(lua_State *L, HWND hEdit, Sci_Position from, Sci_Position to) {
-    size_t length = (size_t)(to - from);
-    luaL_Buffer buffer;
-    char *text = luaL_buffinitsize(L, &buffer, length + 1);
-    struct Sci_TextRangeFull range = { { from, to }, text };
-    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&range);
-    luaL_pushresultsize(&buffer, length);
-}
-
-/* Length-counted, so text containing NUL bytes is written whole. */
-static void replace_text_range(HWND hEdit, Sci_Position from, Sci_Position to,
-                               const char *text, size_t length) {
-    SendMessageA(hEdit, SCI_SETTARGETRANGE, (WPARAM)from, (LPARAM)to);
-    SendMessageA(hEdit, SCI_REPLACETARGET, (WPARAM)length, (LPARAM)text);
-}
-
-static int editor_get_text(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    push_text_range(L, hEdit, 0, document_length(hEdit));
-    return 1;
-}
-
-static int editor_set_text(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    size_t length;
-    const char *text = luaL_checklstring(L, 1, &length);
-    replace_text_range(hEdit, 0, document_length(hEdit), text, length);
-    return 0;
-}
-
-/* Selection numbers exposed to Lua are 1-based. Omitting one keeps the
-   original API behaviour: read the main selection, or replace all selections
-   with a single one when changing it. */
-static int checked_selection(lua_State *L, HWND hEdit, int arg) {
-    if (lua_isnoneornil(L, arg))
-        return (int)SendMessageA(hEdit, SCI_GETMAINSELECTION, 0, 0);
-    lua_Integer selection = luaL_checkinteger(L, arg);
-    lua_Integer count = (lua_Integer)SendMessageA(hEdit, SCI_GETSELECTIONS, 0, 0);
-    luaL_argcheck(L, selection >= 1 && selection <= count, arg, "no such selection");
-    return (int)(selection - 1);
-}
-
-static Sci_Position selection_start(HWND hEdit, int selection) {
-    return (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONNSTART, (WPARAM)selection, 0);
-}
-
-static Sci_Position selection_end(HWND hEdit, int selection) {
-    return (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONNEND, (WPARAM)selection, 0);
-}
-
-static int editor_get_selection(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    int selection = checked_selection(L, hEdit, 1);
-    push_text_range(L, hEdit, selection_start(hEdit, selection), selection_end(hEdit, selection));
-    return 1;
-}
-
-static int editor_replace_selection(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    size_t length;
-    const char *text = luaL_checklstring(L, 1, &length);
-    int selection = checked_selection(L, hEdit, 2);
-    Sci_Position from = selection_start(hEdit, selection);
-    replace_text_range(hEdit, from, selection_end(hEdit, selection), text, length);
-    /* Caret after the new text, as typing over a selection leaves it. */
-    Sci_Position caret = from + (Sci_Position)length;
-    if (lua_isnoneornil(L, 2)) {
-        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)caret);
-    } else {
-        SendMessageA(hEdit, SCI_SETSELECTIONNANCHOR, (WPARAM)selection, (LPARAM)caret);
-        SendMessageA(hEdit, SCI_SETSELECTIONNCARET, (WPARAM)selection, (LPARAM)caret);
-    }
-    SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
-    return 0;
-}
-
-static int editor_get_selection_range(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    int selection = checked_selection(L, hEdit, 1);
-    push_range(L, selection_start(hEdit, selection), selection_end(hEdit, selection));
-    return 2;
-}
-
-static int editor_set_selection(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position from, to;
-    checked_range(L, hEdit, 1, &from, &to);
-    if (lua_isnoneornil(L, 3)) {
-        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)from, (LPARAM)to);
-    } else {
-        int selection = checked_selection(L, hEdit, 3);
-        SendMessageA(hEdit, SCI_SETSELECTIONNANCHOR, (WPARAM)selection, (LPARAM)from);
-        SendMessageA(hEdit, SCI_SETSELECTIONNCARET, (WPARAM)selection, (LPARAM)to);
-    }
-    SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
-    return 0;
-}
-
-static int editor_selection_count(lua_State *L) {
-    lua_pushinteger(L, (lua_Integer)SendMessageA(checked_editor(L), SCI_GETSELECTIONS, 0, 0));
-    return 1;
-}
-
-static int editor_add_selection(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position from, to;
-    checked_range(L, hEdit, 1, &from, &to);
-    SendMessageA(hEdit, SCI_ADDSELECTION, (WPARAM)to, (LPARAM)from);
-    lua_pushinteger(L, (lua_Integer)SendMessageA(hEdit, SCI_GETSELECTIONS, 0, 0));
-    return 1;
-}
-
-static int editor_drop_selection(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    int selection = checked_selection(L, hEdit, 1);
-    luaL_argcheck(L, SendMessageA(hEdit, SCI_GETSELECTIONS, 0, 0) > 1, 1,
-                  "cannot drop the only selection");
-    SendMessageA(hEdit, SCI_DROPSELECTIONN, (WPARAM)selection, 0);
-    return 0;
-}
-
-static int editor_get_main_selection(lua_State *L) {
-    lua_pushinteger(L, (lua_Integer)SendMessageA(checked_editor(L), SCI_GETMAINSELECTION, 0, 0) + 1);
-    return 1;
-}
-
-static int editor_set_main_selection(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    int selection = checked_selection(L, hEdit, 1);
-    SendMessageA(hEdit, SCI_SETMAINSELECTION, (WPARAM)selection, 0);
-    return 0;
-}
-
-static int editor_get_caret(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    int selection = checked_selection(L, hEdit, 1);
-    lua_pushinteger(L, (lua_Integer)SendMessageA(hEdit, SCI_GETSELECTIONNCARET,
-                                                (WPARAM)selection, 0) + 1);
-    return 1;
-}
-
-static int editor_set_caret(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position position = checked_position(L, hEdit, 1);
-    if (lua_isnoneornil(L, 2)) {
-        SendMessageA(hEdit, SCI_GOTOPOS, (WPARAM)position, 0);
-    } else {
-        int selection = checked_selection(L, hEdit, 2);
-        SendMessageA(hEdit, SCI_SETSELECTIONNANCHOR, (WPARAM)selection, (LPARAM)position);
-        SendMessageA(hEdit, SCI_SETSELECTIONNCARET, (WPARAM)selection, (LPARAM)position);
-        SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
-    }
-    return 0;
-}
-
-static int editor_replace_range(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position from, to;
-    checked_range(L, hEdit, 1, &from, &to);
-    size_t length;
-    const char *text = luaL_checklstring(L, 3, &length);
-    replace_text_range(hEdit, from, to, text, length);
-    return 0;
-}
-
-static int editor_insert(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    size_t length;
-    const char *text = luaL_checklstring(L, 1, &length);
-    Sci_Position position = lua_isnoneornil(L, 2)
-        ? (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0)
-        : checked_position(L, hEdit, 2);
-    replace_text_range(hEdit, position, position, text, length);
-    return 0;
-}
-
-static int editor_line_count(lua_State *L) {
-    lua_pushinteger(L, (lua_Integer)SendMessageA(checked_editor(L), SCI_GETLINECOUNT, 0, 0));
-    return 1;
-}
-
-static int editor_current_line(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position caret = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
-    lua_pushinteger(L, (lua_Integer)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0) + 1);
-    return 1;
-}
-
-/* A line's range excludes its line ending. */
-static void line_bounds(HWND hEdit, Sci_Position line, Sci_Position *from, Sci_Position *to) {
-    *from = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
-    *to = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)line, 0);
-}
-
-static int editor_get_line(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position from, to;
-    line_bounds(hEdit, checked_line(L, hEdit, 1), &from, &to);
-    push_text_range(L, hEdit, from, to);
-    return 1;
-}
-
-static int editor_line_range(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position from, to;
-    line_bounds(hEdit, checked_line(L, hEdit, 1), &from, &to);
-    push_range(L, from, to);
-    return 2;
-}
-
-static int editor_length(lua_State *L) {
-    lua_pushinteger(L, (lua_Integer)document_length(checked_editor(L)));
-    return 1;
-}
-
-static int editor_get_range(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position from, to;
-    checked_range(L, hEdit, 1, &from, &to);
-    push_text_range(L, hEdit, from, to);
-    return 1;
-}
-
-/* The number of the line holding position (the last line for the position
-   just past the end). */
-static int editor_line_at(lua_State *L) {
-    HWND hEdit = checked_editor(L);
-    Sci_Position position = checked_position(L, hEdit, 1);
-    lua_pushinteger(L, (lua_Integer)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1);
-    return 1;
-}
-
-static int editor_eol(lua_State *L) {
-    switch ((int)SendMessageA(checked_editor(L), SCI_GETEOLMODE, 0, 0)) {
-        case SC_EOL_CR: lua_pushliteral(L, "\r"); break;
-        case SC_EOL_LF: lua_pushliteral(L, "\n"); break;
-        default: lua_pushliteral(L, "\r\n"); break;
-    }
-    return 1;
-}
-
-static int editor_file_path(lua_State *L) {
-    checked_editor(L);
-    if (!s_callbacks.file_path) return luaL_error(L, "editor.file_path is not available here");
-    char *path = s_callbacks.file_path();
-    if (path) lua_pushstring(L, path);
-    else lua_pushnil(L);
-    free(path);
-    return 1;
-}
-
-static int editor_language(lua_State *L) {
-    checked_editor(L);
-    if (!s_callbacks.language) return luaL_error(L, "editor.language is not available here");
-    lua_pushstring(L, s_callbacks.language());
-    return 1;
-}
-
-/* ui.message(text [, title [, kind]]); kind is "info", "warning" or "error". */
 static int ui_message(lua_State *L) {
     const char *text = checked_cstring(L, 1, "message text");
     const char *title = optional_cstring(L, 2, current_title(), "message title");
@@ -484,7 +186,7 @@ static int ui_message(lua_State *L) {
 }
 
 static int ui_prompt(lua_State *L) {
-    checked_editor(L);
+    lua_editor_api_require_editor(L);
     const char *label = checked_cstring(L, 1, "prompt label");
     const char *initial = optional_cstring(L, 2, "", "prompt default");
     const char *title = optional_cstring(L, 3, current_title(), "prompt title");
@@ -498,7 +200,7 @@ static int ui_prompt(lua_State *L) {
 }
 
 static int ui_choose(lua_State *L) {
-    checked_editor(L);
+    lua_editor_api_require_editor(L);
     luaL_checktype(L, 1, LUA_TTABLE);
     const char *label = optional_cstring(L, 2, "Choose an item:", "choice label");
     const char *title = optional_cstring(L, 3, current_title(), "choice title");
@@ -603,7 +305,7 @@ static int menu_separator(lua_State *L) {
 }
 
 /* commands.register(name, fn [, title]): fn runs in place of the built-in
-   command called name, wherever it is invoked from (menu, toolbar, palette
+   command called name, wherever it is invoked from (menu, toolbar
    or shortcut). The last registration for a name wins. title names it in
    dialogs. Whether name is a real command is up to the application. */
 static int commands_register(lua_State *L) {
@@ -748,34 +450,6 @@ static int app_date_time(lua_State *L) {
     return 1;
 }
 
-static const luaL_Reg editor_functions[] = {
-    {"get_text", editor_get_text},
-    {"set_text", editor_set_text},
-    {"get_selection", editor_get_selection},
-    {"replace_selection", editor_replace_selection},
-    {"get_selection_range", editor_get_selection_range},
-    {"set_selection", editor_set_selection},
-    {"selection_count", editor_selection_count},
-    {"add_selection", editor_add_selection},
-    {"drop_selection", editor_drop_selection},
-    {"get_main_selection", editor_get_main_selection},
-    {"set_main_selection", editor_set_main_selection},
-    {"get_caret", editor_get_caret},
-    {"set_caret", editor_set_caret},
-    {"replace_range", editor_replace_range},
-    {"insert", editor_insert},
-    {"line_count", editor_line_count},
-    {"current_line", editor_current_line},
-    {"get_line", editor_get_line},
-    {"line_range", editor_line_range},
-    {"line_at", editor_line_at},
-    {"length", editor_length},
-    {"get_range", editor_get_range},
-    {"eol", editor_eol},
-    {"file_path", editor_file_path},
-    {"language", editor_language},
-    {NULL, NULL}
-};
 static const luaL_Reg ui_functions[] = {
     {"message", ui_message},
     {"prompt", ui_prompt},
@@ -975,7 +649,7 @@ static int open_environment(lua_State *L) {
         return lua_error(L);
     lua_call(L, 0, 0);
 
-    luaL_newlib(L, editor_functions);
+    lua_editor_api_push(L);
     lua_setglobal(L, "editor");
     luaL_newlib(L, ui_functions);
     lua_setglobal(L, "ui");
@@ -1287,7 +961,7 @@ static char *call_registered(int ref, const char *label, const char *owner,
                              const char *argument, int booleanArgument,
                              HWND hEdit, int timeLimited) {
     s_busy = 1;
-    s_edit = hEdit;
+    lua_editor_api_set_editor(hEdit);
     s_runningLabel = label;
     s_runningOwner = owner;
     s_timeLimited = timeLimited;
@@ -1303,7 +977,7 @@ static char *call_registered(int ref, const char *label, const char *owner,
     SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     if (error && (intptr_t)SendMessageA(hEdit, SCI_GETUNDOCURRENT, 0, 0) != undoBefore)
         SendMessageA(hEdit, SCI_UNDO, 0, 0);
-    s_edit = NULL;
+    lua_editor_api_set_editor(NULL);
     s_runningLabel = NULL;
     s_runningOwner = NULL;
     s_timeLimited = 1;

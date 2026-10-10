@@ -67,18 +67,16 @@ menu.add("Text/Wrap Selection...", function()
   editor.replace_selection(marker .. editor.get_selection() .. closing)
 end)
 
--- An event handler, switched on and off by a command. Off by default, so
--- installing this example never changes anyone's files unasked.
-local trim_on_save = false
-
-menu.add("Text/Toggle Trim Whitespace on Save", function()
-  trim_on_save = not trim_on_save
-  ui.message("Trailing spaces and tabs will " .. (trim_on_save and "now" or "no longer")
+-- A persistent checkable command. MarkEdit stores its state and passes the
+-- new value to the function after each click. Off by default, so installing
+-- this example never changes anyone's files unasked.
+menu.checkbox("Text/Trim Whitespace on Save", "trim_on_save", false, function(checked)
+  ui.message("Trailing spaces and tabs will " .. (checked and "now" or "no longer")
     .. " be removed when a document is saved.")
 end)
 
 events.on("save", function()
-  if not trim_on_save then return end
+  if not config.get("trim_on_save", false) then return end
   -- Line by line from the bottom, so the caret and earlier positions stay put.
   for line = editor.line_count(), 1, -1 do
     local text = editor.get_line(line)
