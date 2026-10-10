@@ -61,6 +61,9 @@
 #define IDM_PLUGIN_RELOAD          396
 #define IDM_PLUGIN_CUSTOMIZE_MENUS 397
 #define IDM_HELP_PLUGIN_GUIDE      398
+#define IDM_PLUGIN_OPEN_FOLDER     399
+#define IDM_PLUGIN_NEW             400
+#define IDM_PLUGIN_MANAGE          401
 #define IDM_PLUGIN_COMMAND_0      2000 /* IDM_PLUGIN_COMMAND_0 .. IDM_PLUGIN_COMMAND_0+PLUGIN_MAX_COMMANDS-1 */
 
 /* ---- menu command IDs: Markdown formatting toolbar/menu ---- */

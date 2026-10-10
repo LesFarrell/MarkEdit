@@ -1,5 +1,5 @@
--- Example MarkEdit plugin. Every *.lua file in this folder is loaded at
--- startup and again by Plugins > Reload Plugins.
+-- Example bundled MarkEdit plugin. Top-level *.lua files and folders with
+-- init.lua load at startup and again through Plugins > Reload Plugins.
 --
 -- It shows each kind of thing a plugin can do:
 --   menu.add            commands on the Plugins menu, in submenus (Lines,

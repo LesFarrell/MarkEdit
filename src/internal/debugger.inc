@@ -18,8 +18,8 @@ static int is_debuggable_source(DebugSourceKind kind) {
 
 static int collect_breakpoint_lines(int **outLines);
 
-/* INI keys cannot safely contain arbitrary Windows paths, so each absolute,
-   case-folded path gets a stable 64-bit FNV-1a key. The value is simply a
+/* Each absolute, case-folded path gets a compact stable 64-bit FNV-1a settings
+   key. The value is simply a
    comma-separated list of 1-based line numbers; deleting every breakpoint
    deletes the key as well. */
 static int breakpoint_profile_key(const WCHAR *path, WCHAR *key, size_t capacity) {

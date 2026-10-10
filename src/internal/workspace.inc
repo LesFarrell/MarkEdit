@@ -701,6 +701,14 @@ static char *relative_markdown_target(const WCHAR *sourcePath, const WCHAR *targ
 /* Rewrites the links in `text` (the Markdown file at sourcePath) that point
    at oldPath so they point at newPath. For a renamed folder, links to files
    inside it are rewritten too. */
+static char *rewrite_markdown_targets(const char *text, const char *oldTarget,
+                                      const char *newTarget, int isDirectory,
+                                      int *changes) {
+    return isDirectory
+        ? markdown_rewrite_link_directory(text, oldTarget, newTarget, changes)
+        : markdown_rewrite_link_targets(text, oldTarget, newTarget, changes);
+}
+
 static char *rewrite_links_for_source(const char *text, const WCHAR *sourcePath,
                                       const WCHAR *oldPath, const WCHAR *newPath,
                                       int isDirectory, int *changes) {
@@ -712,9 +720,8 @@ static char *rewrite_links_for_source(const char *text, const WCHAR *sourcePath,
         *changes = -1;
         return NULL;
     }
-    char *(*rewrite)(const char *, const char *, const char *, int *) =
-        isDirectory ? markdown_rewrite_link_directory : markdown_rewrite_link_targets;
-    char *rewritten = rewrite(text, oldTarget, newTarget, changes);
+    char *rewritten = rewrite_markdown_targets(
+        text, oldTarget, newTarget, isDirectory, changes);
     size_t oldLength = strlen(oldTarget), newLength = strlen(newTarget);
     if (oldTarget[0] != '.' && newTarget[0] != '.' &&
         oldLength <= SIZE_MAX - 3 && newLength <= SIZE_MAX - 3) {
@@ -724,7 +731,8 @@ static char *rewrite_links_for_source(const char *text, const WCHAR *sourcePath,
             snprintf(dotOld, oldLength + 3, "./%s", oldTarget);
             snprintf(dotNew, newLength + 3, "./%s", newTarget);
             int dotChanges = 0;
-            char *withDots = rewrite(rewritten ? rewritten : text, dotOld, dotNew, &dotChanges);
+            char *withDots = rewrite_markdown_targets(
+                rewritten ? rewritten : text, dotOld, dotNew, isDirectory, &dotChanges);
             if (withDots) { free(rewritten); rewritten = withDots; }
             *changes += dotChanges;
         }

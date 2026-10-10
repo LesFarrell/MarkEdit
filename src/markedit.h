@@ -30,6 +30,7 @@
 #define IDT_STATUS_UPDATE 9
 #define IDT_EXPLORER_REFRESH 10
 #define IDT_HTML_EXPORT 11
+#define IDT_PLUGIN_STATUS 12
 
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)

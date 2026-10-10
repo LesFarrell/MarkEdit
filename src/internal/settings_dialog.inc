@@ -57,7 +57,7 @@ static int is_flag_edit_whitespace(WCHAR ch) {
    the same as set_tab_width() is for the Editor category's - trims
    surrounding whitespace, persists via save_compiler_settings(), and is a
    no-op when the trimmed text hasn't actually changed so tabbing through a
-   field without editing it doesn't touch the ini file. For the flags box,
+   field without editing it doesn't rewrite settings.json. For the flags box,
    quote_extra_compiler_flags() (see launch_native_file()/launch_msvc_file())
    re-splits the saved text into individual flags at build time. */
 static void set_compiler_string_setting(WCHAR **slot, const WCHAR *text) {

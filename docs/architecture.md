@@ -104,7 +104,7 @@ Native dispatch remains grouped by responsibility in `handle_file_command`, `han
 
 ## Lua
 
-`plugin_host.c` owns the Lua state, sandbox, commands, events, configuration and menu definitions. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
+`plugin_host.c` owns the Lua state, sandbox, commands, events, configuration, menu definitions, extension discovery, and the folder-local module loader. Bundled extensions load first and personal extensions from `%APPDATA%\markedit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
 
 The built-in formatter is stored as four focused files:
 

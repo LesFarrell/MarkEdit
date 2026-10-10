@@ -31,6 +31,9 @@ typedef struct {
        receives NULL to delete a value and returns nonzero on success. */
     char *(*config_get)(const char *plugin, const char *key);
     int (*config_set)(const char *plugin, const char *key, const char *value);
+    /* Whether a discovered extension should load. scope is supplied by the
+       application (for example "bundled" or "user"). */
+    int (*plugin_enabled)(const char *scope, const char *name);
 } PluginHostCallbacks;
 
 /* Copied; call before running commands. */
@@ -82,11 +85,10 @@ typedef struct {
 char *plugin_host_render_page(const char *name, const char *code, size_t length,
                               const PluginShortcut *shortcuts, int shortcutCount, char **page);
 
-/* Runs every *.lua file in directory in name order, adding to whatever is
-   loaded (call plugin_host_shutdown() first to start afresh). A missing
-   directory is not an error. Files that fail to load are reported and
-   skipped; the rest stay loaded. */
-char *plugin_host_load_directory(const WCHAR *directory);
+/* Runs every top-level *.lua file and folder containing init.lua in name
+   order, adding to what is loaded. scope identifies the source to the
+   enable-state callback. A missing directory is not an error. */
+char *plugin_host_load_directory(const WCHAR *directory, const char *scope);
 /* Runs one plugin script's top-level code, starting the Lua state if needed. */
 char *plugin_host_load_chunk(const char *name, const char *code, size_t length);
 /* The same, for a script built into MarkEdit: its commands have no time limit. */
@@ -102,6 +104,10 @@ int plugin_host_command_count(void);
 /* UTF-8 menu label of a registered command. For one from the menu
    definition it is the item's path, e.g. "/File/Insert Date". */
 const char *plugin_host_command_label(int index);
+/* Optional shortcut registered by menu.add/menu.checkbox, e.g. "Ctrl+Alt+J". */
+const char *plugin_host_command_shortcut(int index);
+/* Parsed accelerator for that shortcut. Returns zero when it has none. */
+int plugin_host_command_accelerator(int index, BYTE *flags, WORD *key);
 /* Whether the menu definition already placed the command, so it shouldn't
    be placed again by its label. */
 int plugin_host_command_is_placed(int index);
@@ -116,6 +122,16 @@ int plugin_host_command_is_checkable(int index);
 int plugin_host_command_is_checked(int index);
 /* The built-in command a command was registered to run for, or NULL. */
 const char *plugin_host_command_overrides(int index);
+
+/* Extensions discovered by the directory loaders, including disabled ones. */
+int plugin_host_extension_count(void);
+const char *plugin_host_extension_name(int index);
+const char *plugin_host_extension_scope(int index);
+int plugin_host_extension_is_enabled(int index);
+
+/* First script which failed during the current load, for actionable UI. */
+const WCHAR *plugin_host_error_path(void);
+int plugin_host_error_line(void);
 /* The command registered (last) to run for the built-in command called
    name, or -1 when there is none. */
 int plugin_host_find_override(const char *name);

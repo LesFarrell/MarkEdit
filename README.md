@@ -47,7 +47,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - The table editor resizes an existing GFM table while preserving its cells, or creates a new table with a chosen number of rows and columns.
 - A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, and Refresh actions. Open the `..` entry, choose “Open Parent Folder”, or press Backspace while the tree is focused to move the workspace up one directory. Moving up from a filesystem root shows available drives and mapped network shares. Renaming a file or folder updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
 - Quick Open searches file names in the active workspace, while Find in Folder searches supported text files and opens results at the matching line. If no workspace is open, either command first asks for a folder. Generated/dependency folders are skipped.
-- Lua plugins: every `.lua` file in the `plugins` folder beside `markedit.exe` is loaded at startup and can add commands to the Plugins menu (in submenus), to new top-level menus, or to the built-in menus, and run code when a document is saved, opened, or switched to. Plugins → Reload Plugins picks up changes without restarting. The plugin guide, `plugins/README.md` (also Help → Plugin Guide), documents the whole API, and `plugins/example.lua` shows each of these in use.
+- Lua plugins: bundled extensions load from `plugins` beside `markedit.exe`, followed by personal extensions in `%APPDATA%\markedit\plugins`. **Plugins → New Plugin**, **Open Plugins Folder**, **Manage Plugins**, and **Reload Plugins** cover the full edit/test/enable workflow without administrator rights. A plugin may be one `.lua` file or a folder containing `init.lua` and private modules. Commands can have keyboard shortcuts, check marks and persistent settings. The plugin guide, `plugins/README.md` (also Help → Plugin Guide), documents the API, and `plugins/example.lua` is a working example.
 - The whole menu bar is defined in Lua. Plugins → Customize Menus copies the default definition to `%APPDATA%\markedit\menus.lua` and opens it; items there can be reordered, renamed, removed, or point at Lua functions, and Reload Plugins applies the changes. A definition with a mistake is reported and the default menus are used instead.
 - The Markdown, HTML, and JSON formatting commands (Snippets → Markdown and HTML, Tools → JSON, and the formatting toolbar), and the Edit menu's Toggle Comment, Trim Trailing Whitespace, Title Case, Sort Lines, and Remove Duplicate Lines, are written in focused Lua files under `src/lua/`, built into `markedit.exe`. A plugin can replace any of them, or any other built-in command, with `commands.register`, and the replacement runs wherever the command is used from: menu, toolbar, or shortcut.
 - Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.
@@ -164,7 +164,7 @@ Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https
 
 - `markedit.exe` (Lexilla is linked straight into it, not shipped separately), the two required runtime DLLs (`Scintilla.dll` and `WebView2Loader.dll`), and the standalone bundled GDB 17.1 executable;
 - the preview shell, Mermaid, Highlight.js, GitHub Markdown CSS, and the complete `katex/` asset tree needed for offline rendering;
-- the `plugins/` folder with the plugin guide and the example Lua plugin (Lua itself is linked into `markedit.exe`); and
+- the `plugins/` folder with bundled extensions, the plugin guide, examples, and Lua Language Server definitions (Lua itself is linked into `markedit.exe`); and
 - `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`. The packaged GDB folder contains only `gdb.exe` and its small licence/provenance files; corresponding source remains in the MarkEdit source repository rather than the binary distribution.
 
 Do not package `settings.json`, debug symbols, import libraries, compiler objects, or temporary archives. Application preferences and Lua plugin settings share `%APPDATA%\markedit\settings.json`; the WebView2 browser profile and recovery snapshots live under `%LOCALAPPDATA%\MarkEdit`. The Inno Setup and GitHub Actions manifests mirror this runtime-and-licences layout.
@@ -190,7 +190,7 @@ src/                     application sources, including:
   plugin_host.c / .h       Lua runtime, plugin loading, commands, events and menus
   lua_editor_api.c / .h    Scintilla-facing Lua editor API and multi-selection operations
   theme.h                  shared native light/dark palette and paint helpers
-plugins/                 Lua plugins loaded at startup: the plugin guide (README.md) and example.lua
+plugins/                 bundled Lua extensions, plugin guide, examples, and language-server types
 docs/lua.md              developer guide to MarkEdit's Lua files: what each is, load order, how commands reach Lua
 docs/architecture.md     native/Lua boundaries and subsystem ownership
 cmark-gfm-sources.rsp    vendored renderer source list and compile flags
@@ -236,10 +236,11 @@ relative links resolve from the Markdown document's directory.
 
 Plugins are code, and run with full access to the open document. They're
 limited to Lua's string, table, math, UTF-8, and coroutine libraries, so they
-can't read or write files, start programs, or use the network, and a plugin
+can't access arbitrary files, start programs, or use the network, and a plugin
 that runs for more than five seconds is stopped. Only install plugins you
-trust. In an installed copy the `plugins` folder is under Program Files, so
-adding one there needs administrator rights.
+trust. Personal extensions live in `%APPDATA%\markedit\plugins`; folder
+extensions can read only their own Lua modules through MarkEdit's restricted
+`require` loader.
 
 ## Licence
 

@@ -297,7 +297,7 @@ int main(void) {
     if (!editor) { FreeLibrary(scintilla); return 1; }
 
     static const PluginHostCallbacks callbacks = {
-        fake_prompt, NULL, NULL, NULL, record_message, NULL, NULL
+        fake_prompt, NULL, NULL, NULL, record_message, NULL, NULL, NULL
     };
     plugin_host_set_callbacks(&callbacks);
     char *code = read_formatting_source();

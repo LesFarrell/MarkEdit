@@ -196,7 +196,12 @@ static void place_plugin_command(HMENU menu, WCHAR **parts, int first, int partC
         menu = plugin_submenu(menu, parts[part], part == first ? entry : NULL);
     if (!menu) return;
     if (entry && menu == entry->menu) separate_plugin_items(entry);
-    AppendMenuW(menu, MF_STRING, IDM_PLUGIN_COMMAND_0 + command, parts[partCount - 1]);
+    char *label = to_utf8(parts[partCount - 1]);
+    WCHAR *text = label ? menu_item_text(label, plugin_host_command_shortcut(command)) : NULL;
+    AppendMenuW(menu, MF_STRING, IDM_PLUGIN_COMMAND_0 + command,
+                text ? text : parts[partCount - 1]);
+    free(text);
+    free(label);
 }
 
 /* Puts a plugin separator (menu.separator) at the end of the submenu path
@@ -248,7 +253,7 @@ static void append_definition_items(HMENU menu, const PluginMenuItem *items, int
                 break;
             }
             case PLUGIN_MENU_FUNCTION: {
-                WCHAR *text = menu_item_text(item->label, NULL);
+                WCHAR *text = menu_item_text(item->label, plugin_host_command_shortcut(item->command));
                 if (text) AppendMenuW(menu, MF_STRING, IDM_PLUGIN_COMMAND_0 + (UINT)item->command, text);
                 free(text);
                 break;
@@ -465,6 +470,9 @@ static HMENU build_menu(void) {
             pluginsListed = 1;
             append_separator(menu);
             AppendMenuA(menu, MF_STRING, IDM_PLUGIN_RELOAD, "&Reload Plugins");
+            AppendMenuA(menu, MF_STRING, IDM_PLUGIN_NEW, "&New Plugin...");
+            AppendMenuA(menu, MF_STRING, IDM_PLUGIN_OPEN_FOLDER, "Open Plugins &Folder");
+            AppendMenuA(menu, MF_STRING, IDM_PLUGIN_MANAGE, "&Manage Plugins...");
             AppendMenuA(menu, MF_STRING, IDM_PLUGIN_CUSTOMIZE_MENUS, "&Customize Menus...");
             if (!add_menu_bar_menu(menuBar, entries, &entryCount, L"&Plugins", menu, 0)) DestroyMenu(menu);
         }
@@ -946,8 +954,8 @@ static void layout(HWND hwnd) {
     int w = rc.right, h = rc.bottom;
     g_splitterRect = (RECT){0, 0, 0, 0}; /* only the "both visible" branch below sets this */
 
-    int statusHeight = 22;
     if (g_hStatus) {
+        int statusHeight = 22;
         MoveWindow(g_hStatus, 0, h - statusHeight, w, statusHeight, TRUE);
         int parts[4] = { MulDiv(150, w > 0 ? GetDpiForWindow(hwnd) : 96, 96),
                          MulDiv(345, w > 0 ? GetDpiForWindow(hwnd) : 96, 96),
@@ -1325,6 +1333,8 @@ static BOOL CALLBACK find_autocomplete_popup_proc(HWND hwnd, LPARAM lParam) {
 static void theme_autocomplete_popup(void) {
     HWND popup = NULL;
     EnumWindows(find_autocomplete_popup_proc, (LPARAM)&popup);
+    /* EnumWindows writes popup through the callback's lParam. */
+    /* cppcheck-suppress knownConditionTrueFalse */
     if (!popup) return;
     apply_popup_titlebar_theme(popup, g_editorDarkMode);
     HWND list = GetWindow(popup, GW_CHILD);

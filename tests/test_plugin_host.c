@@ -366,7 +366,7 @@ static void test_events(HWND editor) {
     expect(plugin_host_fire("open", NULL, editor) == NULL, "a failed script's handlers are dropped");
 
     static const PluginHostCallbacks reentrant = {
-        reentrant_prompt, NULL, NULL, NULL, NULL, fake_config_get, fake_config_set
+        reentrant_prompt, NULL, NULL, NULL, NULL, fake_config_get, fake_config_set, NULL
     };
     plugin_host_set_callbacks(&reentrant);
     s_reentryEditor = editor;
@@ -378,6 +378,12 @@ static void test_load_failures(void) {
     int before = plugin_host_command_count();
     char *error = plugin_host_load_chunk("syntax.lua", "menu.add(", 9);
     expect(error && strstr(error, "syntax.lua"), "syntax error names the script");
+    free(error);
+
+    const char *badShortcut = "menu.add('Bad', function() end, 'Shift+Q')";
+    error = plugin_host_load_chunk("shortcut.lua", badShortcut, strlen(badShortcut));
+    expect(error && strstr(error, "shortcut needs Ctrl or Alt"),
+           "plugin shortcuts require a safe modifier and supported key");
     free(error);
     const char *partial = "menu.add('Lost', function() end)\nerror('late failure')\n";
     error = plugin_host_load_chunk("partial.lua", partial, strlen(partial));
@@ -420,7 +426,8 @@ static void test_environment(void) {
         "assert(dofile == nil and loadfile == nil)\n"
         "assert(load('return 1')() == 1)\n"
         "assert(load('return string.upper(\"a\")')() == 'A', 'load keeps the globals without an env')\n"
-        "assert(load(string.dump(function() end)) == nil, 'binary chunks refused')\n");
+        "assert(load(string.dump(function() end)) == nil, 'binary chunks refused')\n"
+        "assert(not pcall(require, 'outside'), 'single-file plugins cannot require files')\n");
 
     load_ok("clock.lua",
         "assert(app.date():match('^%d%d%d%d%-%d%d%-%d%d$'))\n"
@@ -448,6 +455,10 @@ static void write_script_bytes(const WCHAR *directory, const WCHAR *name,
     free(path);
 }
 
+static int test_plugin_enabled(const char *scope, const char *name) {
+    return strcmp(scope, "test") != 0 || _stricmp(name, "b.lua") != 0;
+}
+
 static void test_directory(void) {
     WCHAR temp[MAX_PATH], directory[MAX_PATH];
     GetTempPathW(MAX_PATH, temp);
@@ -460,16 +471,47 @@ static void test_directory(void) {
     static const char nulCode[] =
         "menu.add('Before NUL', function() end)\0menu.add('After NUL', function() end)";
     write_script_bytes(directory, L"nul.lua", nulCode, sizeof(nulCode) - 1);
+    WCHAR *folder = path_join(directory, L"folder");
+    CreateDirectoryW(folder, NULL);
+    WCHAR *nested = path_join(folder, L"nested");
+    CreateDirectoryW(nested, NULL);
+    write_script(folder, L"helper.lua", "return { label = 'From Folder' }");
+    write_script(nested, L"value.lua", "return 42");
+    write_script(folder, L"init.lua",
+        "local helper = require('helper')\n"
+        "assert(require('helper') == helper)\n"
+        "assert(require('nested.value') == 42)\n"
+        "menu.add(helper.label, function() end, 'Ctrl+Alt+M')");
 
     plugin_host_shutdown();
-    char *report = plugin_host_load_directory(directory);
+    char *report = plugin_host_load_directory(directory, "test");
     expect(report && strstr(report, "broken.lua") && strstr(report, "nul.lua"),
            "load errors are reported by file, including source after a NUL byte");
-    expect(plugin_host_command_count() == 2, "only the good .lua scripts load");
+    expect(plugin_host_command_count() == 3, "only the good scripts and folder extensions load");
+    expect(plugin_host_command_count() == 3 &&
+           strcmp(plugin_host_command_label(0), "From A") == 0 &&
+           strcmp(plugin_host_command_label(1), "From B") == 0 &&
+           strcmp(plugin_host_command_label(2), "From Folder") == 0,
+           "scripts and folder extensions load in name order");
+    expect(strcmp(plugin_host_command_shortcut(2), "Ctrl+Alt+M") == 0,
+           "plugin commands retain shortcuts");
+    expect(plugin_host_extension_count() == 5 && plugin_host_error_path() != NULL,
+           "discovered extensions and the first failing path are available to the UI");
+    free(report);
+
+    static const PluginHostCallbacks filtered = {
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, test_plugin_enabled
+    };
+    plugin_host_shutdown();
+    plugin_host_set_callbacks(&filtered);
+    report = plugin_host_load_directory(directory, "test");
     expect(plugin_host_command_count() == 2 &&
            strcmp(plugin_host_command_label(0), "From A") == 0 &&
-           strcmp(plugin_host_command_label(1), "From B") == 0, "scripts load in name order");
+           strcmp(plugin_host_command_label(1), "From Folder") == 0 &&
+           plugin_host_extension_count() == 5,
+           "disabled extensions are discovered but not executed");
     free(report);
+    plugin_host_set_callbacks(NULL);
 
     const WCHAR *names[] = { L"a.lua", L"b.lua", L"broken.lua", L"ignored.luac", L"nul.lua" };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -477,10 +519,16 @@ static void test_directory(void) {
         if (path) DeleteFileW(path);
         free(path);
     }
+    WCHAR *helper = path_join(folder, L"helper.lua");
+    WCHAR *init = path_join(folder, L"init.lua");
+    WCHAR *nestedValue = path_join(nested, L"value.lua");
+    DeleteFileW(helper); DeleteFileW(init); DeleteFileW(nestedValue);
+    RemoveDirectoryW(nested); RemoveDirectoryW(folder);
+    free(nestedValue); free(nested); free(helper); free(init); free(folder);
     RemoveDirectoryW(directory);
 
     plugin_host_shutdown();
-    expect(plugin_host_load_directory(directory) == NULL && plugin_host_command_count() == 0,
+    expect(plugin_host_load_directory(directory, "test") == NULL && plugin_host_command_count() == 0,
            "a missing folder loads nothing, silently");
 }
 
@@ -495,11 +543,11 @@ static int find_command(const char *label) {
 static void test_bundled_plugins(HWND editor) {
     static const PluginHostCallbacks fakes = {
         fake_prompt, fake_choose, fake_file_path, fake_language, NULL,
-        fake_config_get, fake_config_set
+        fake_config_get, fake_config_set, NULL
     };
     plugin_host_set_callbacks(&fakes);
     plugin_host_shutdown();
-    char *report = plugin_host_load_directory(L"plugins");
+    char *report = plugin_host_load_directory(L"plugins", "bundled");
     if (report) fprintf(stderr, "%s\n", report);
     expect(report == NULL, "bundled plugins load without errors");
     free(report);
@@ -624,7 +672,7 @@ int main(void) {
 
     static const PluginHostCallbacks fakes = {
         fake_prompt, fake_choose, fake_file_path, fake_language, NULL,
-        fake_config_get, fake_config_set
+        fake_config_get, fake_config_set, NULL
     };
     plugin_host_set_callbacks(&fakes);
     test_commands(editor);

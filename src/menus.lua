@@ -182,6 +182,9 @@ return {
     { list = "plugins" },
     "-",
     { "&Reload Plugins", "plugins.reload" },
+    { "&New Plugin...", "plugins.new" },
+    { "Open Plugins &Folder", "plugins.open_folder" },
+    { "&Manage Plugins...", "plugins.manage" },
     { "&Customize Menus...", "plugins.customize_menus" },
   } },
 

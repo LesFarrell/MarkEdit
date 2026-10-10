@@ -209,10 +209,9 @@ static int editor_replace_selections(lua_State *L) {
     int mainSelection = (int)SendMessageA(hEdit, SCI_GETMAINSELECTION, 0, 0);
     int oneText = lua_type(L, 1) == LUA_TSTRING;
     luaL_argcheck(L, oneText || lua_istable(L, 1), 1, "expected a string or table of strings");
-    if (!oneText)
+    if (!oneText) {
         luaL_argcheck(L, (lua_Integer)lua_rawlen(L, 1) == count, 1,
                       "table length must match selection count");
-    if (!oneText) {
         for (int i = 0; i < count; i++) {
             lua_rawgeti(L, 1, i + 1);
             luaL_argcheck(L, lua_type(L, -1) == LUA_TSTRING, 1,

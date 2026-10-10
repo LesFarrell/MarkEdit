@@ -1,0 +1,4 @@
+{
+  "workspace.library": ["types"],
+  "diagnostics.globals": ["editor", "ui", "menu", "commands", "events", "config", "app"]
+}

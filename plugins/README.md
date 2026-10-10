@@ -1,19 +1,19 @@
 # Writing MarkEdit plugins
 
-A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't read or write files, start programs, or reach the network.
+A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
 
-This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The other plugins here, `brainfuck.lua`, `calculator.lua`, `encoding.lua`, `text-tools.lua` and `markdown-tools.lua`, are ready-to-use commands (encodings, checksums, case conversion, line tools, a calculator, a Brainfuck interpreter, a table of contents, CSV to table) and more examples to copy from.
+This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The bundled `brainfuck.lua`, `calculator.lua`, `developer-tools.lua`, `line-tools.lua`, `markdown-tools.lua`, and `text-tools.lua` files provide ready-to-use commands and more examples to copy from.
 
 **Contents:** [Quick start](#quick-start) · [How plugins are loaded](#how-plugins-are-loaded) · [Positions, ranges, and lines](#positions-ranges-and-lines) · [API reference](#api-reference) · [Where commands appear](#where-commands-appear) · [Replacing built-in commands](#replacing-built-in-commands) · [Customizing the menu bar](#customizing-the-menu-bar) · [How commands run](#how-commands-run) · [The Lua environment](#the-lua-environment) · [Limits](#limits) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting)
 
 ## Quick start
 
-1. Create a file ending in `.lua` in this `plugins` folder (the one beside `markedit.exe`), for example `hello.lua`:
+1. Choose **Plugins → New Plugin**, enter `hello.lua`, and edit the file MarkEdit creates in `%APPDATA%\markedit\plugins`:
 
    ```lua
    menu.add("Say Hello", function()
      ui.message("Hello from " .. (editor.file_path() or "an unsaved document"))
-   end)
+   end, "Ctrl+Alt+H")
 
    menu.add("Text/Shout", function()
      editor.replace_selection(editor.get_selection():upper() .. "!")
@@ -24,16 +24,18 @@ This guide covers everything a plugin can do. [`example.lua`](example.lua), in t
 
 3. **Plugins → Say Hello** and **Plugins → Text → Shout** are now in the menu.
 
-For an installed copy of MarkEdit this folder is usually `C:\Program Files\MarkEdit\plugins`, and adding files there needs administrator rights.
+Use **Plugins → Open Plugins Folder** whenever you need the folder in Explorer. Lua Language Server metadata is created there automatically, so compatible editors provide completion and API documentation.
 
 ## How plugins are loaded
 
-- MarkEdit loads every file ending in `.lua` in the `plugins` folder when it starts, in alphabetical order of file name (ignoring case). Other files, including this one, are ignored.
+- MarkEdit loads bundled extensions from `plugins` beside `markedit.exe`, then personal extensions from `%APPDATA%\markedit\plugins`. Within each location, entries load alphabetically (ignoring case), so a personal extension can replace a bundled command.
+- An extension is either a single `.lua` file or a folder containing `init.lua`. A folder extension can split code into private modules and load them from `init.lua` with `require("module")`; dots address subfolders, as in `require("text.wrap")`. Paths outside that extension folder are rejected.
+- **Plugins → Manage Plugins** enables or disables discovered extensions. The state is stored in `settings.json`; disabled extensions remain visible in the manager and do not run.
 - Loading a plugin runs its top-level code once. That code normally registers commands and event handlers; the functions it registers run later, when they're used.
 - **Plugins → Reload Plugins** throws away everything loaded (commands, handlers, and all Lua variables) and loads every plugin again. It also reloads the menu definition, so changes to plugins and menus take effect without restarting.
-- If a plugin's top-level code fails, MarkEdit lists the error, with its file name and line, in a message after loading. A plugin that fails part-way adds none of its commands or handlers. The other plugins still load.
+- If a plugin's top-level code fails, MarkEdit lists the error with its file name and line and offers to open the first failing source. A plugin that fails part-way adds none of its commands or handlers. The other plugins still load.
 - Plugin files must be UTF-8 text (with or without a byte-order mark) and at most 1 MiB.
-- All plugins share one Lua environment, together with the menu definition and MarkEdit's own formatting commands, which load first. A global variable in one plugin is visible to the others, so declare everything `local` unless you mean to share it. To share code between plugins, put it in a global table in a file whose name sorts first (for example `0-shared.lua`).
+- All plugins share one Lua environment, together with the menu definition and MarkEdit's own formatting commands, which load first. A global variable in one plugin is visible to the others, so declare everything `local` unless you intentionally share it. Use a folder extension and private modules for code that belongs to one extension.
 
 ## Positions, ranges, and lines
 
@@ -54,13 +56,13 @@ Names, labels, menu paths, and dialog text must be valid UTF-8 and cannot contai
 
 ### menu
 
-#### `menu.add(label, fn)`
+#### `menu.add(label, fn [, shortcut])`
 
-Adds a command. Choosing it runs `fn()`. `label` decides where it appears; see [Where commands appear](#where-commands-appear). The same label can be added more than once. Each becomes its own item.
+Adds a command. Choosing it runs `fn()`. `label` decides where it appears; see [Where commands appear](#where-commands-appear). The same label can be added more than once. Each becomes its own item. `shortcut` may combine Ctrl and/or Alt, optional Shift, and a letter, digit, F1–F24, Tab, Space, Insert, or Delete, for example `"Ctrl+Alt+M"`. Built-in shortcuts win if two commands use the same keys.
 
-#### `menu.checkbox(label, key, default, fn)`
+#### `menu.checkbox(label, key, default, fn [, shortcut])`
 
-Adds a command with a check mark. `key` identifies its saved state inside this plugin, `default` is a boolean used until a state has been saved, and choosing the item toggles it before running `fn(checked)` with the new boolean value. If the function fails, MarkEdit restores the previous state.
+Adds a command with a check mark. `key` identifies its saved state inside this plugin, `default` is a boolean used until a state has been saved, and choosing the item toggles it before running `fn(checked)` with the new boolean value. If the function fails, MarkEdit restores the previous state. The optional shortcut uses the same format as `menu.add`.
 
 ```lua
 menu.checkbox("Text/Trim Whitespace on Save", "trim_on_save", false, function(checked)
@@ -261,7 +263,7 @@ These are the names `commands.register` and the menu definition use.
 - **HTML** (Lua): `html.html`, `html.head`, `html.body`, `html.paragraph`, `html.bold`, `html.italic`, `html.underline`, `html.div`, `html.span`, `html.link`, `html.image`, `html.table`, `html.bullet_list`, `html.numbered_list`, `html.line_break`
 - **Tools:** `tools.settings`
 - **Run:** `run.run_file`, `run.debug_file`, `run.continue`, `run.step_over`, `run.step_into`, `run.step_out`, `run.toggle_breakpoint`, `run.clear_breakpoints`
-- **Plugins:** `plugins.reload`, `plugins.customize_menus`
+- **Plugins:** `plugins.reload`, `plugins.new`, `plugins.open_folder`, `plugins.manage`, `plugins.customize_menus`
 - **Help:** `help.markdown_reference`, `help.keyboard_shortcuts`, `help.plugin_guide`, `help.about`
 
 ## Customizing the menu bar
@@ -298,6 +300,9 @@ return {
     { list = "plugins" },
     "-",
     { "&Reload Plugins", "plugins.reload" },
+    { "&New Plugin...", "plugins.new" },
+    { "Open Plugins &Folder", "plugins.open_folder" },
+    { "&Manage Plugins...", "plugins.manage" },
     { "&Customize Menus...", "plugins.customize_menus" },
   } },
 }
@@ -307,7 +312,7 @@ return {
 - `{codepage}` in a label is replaced with the system's ANSI code page number.
 - Separators at the start or end of a menu, or next to another separator, are left out, so a list that turns out to be empty leaves no gap.
 - Plugins place `/Menu/...` commands by menu name, so renaming a menu changes where those commands go.
-- Keep **Reload Plugins** and **Customize Menus** somewhere, or you'll need to restart MarkEdit to apply changes, and find the file yourself to edit it.
+- Keep the plugin management commands somewhere convenient, especially **Reload Plugins** and **Customize Menus**.
 - If the file has a mistake (Lua that doesn't run, or a table in the wrong shape) MarkEdit says what and where, and uses the default menus instead. An unknown command name is reported and just that item is left out.
 
 ## How commands run
@@ -323,7 +328,8 @@ return {
 Plugins run in Lua 5.4, built into `markedit.exe`. No separate Lua installation is needed.
 
 - **Available:** the basic functions (`pairs`, `ipairs`, `tostring`, `tonumber`, `pcall`, `error`, `assert`, `select`, `type`, `setmetatable`, and so on) and the `string`, `table`, `math`, `utf8`, and `coroutine` libraries.
-- **Not available:** `io`, `os`, `package` and `require`, `debug`, `dofile`, and `loadfile`. Plugins can't touch files, run programs, or read the clock (there is no `os.date` or `os.time`).
+- **Not available:** `io`, `os`, `package`, `debug`, `dofile`, and `loadfile`. Plugins can't touch arbitrary files or run programs.
+- **Folder extension modules:** `require` is available while a folder extension's `init.lua` loads. It reads Lua source only from that extension folder and caches each module. Single-file extensions cannot load other files.
 - **`load`** accepts Lua source text only, not precompiled chunks.
 - **`print`** writes nowhere visible. To see a value while developing a plugin, use `ui.message(tostring(value))`.
 - **Strings are bytes.** `string.upper`, `string.lower`, and character classes such as `%a` only understand ASCII letters, and `#text` counts bytes. Use `utf8.len`, `utf8.codes`, and `utf8.offset` for characters.
@@ -333,7 +339,7 @@ Plugins run in Lua 5.4, built into `markedit.exe`. No separate Lua installation 
 | Limit | Value |
 |---|---|
 | Size of a plugin file | 1 MiB |
-| Commands, in total | 256, shared by plugins (`menu.add`, `menu.checkbox`, `menu.separator` and `commands.register`), functions in the menu definition, and MarkEdit's own 53 formatting and text commands |
+| Commands, in total | 256, shared by plugins (`menu.add`, `menu.checkbox`, `menu.separator` and `commands.register`), functions in the menu definition, and MarkEdit's built-in Lua commands |
 | Event handlers, in total | 100 |
 | Time a call may run | 5 seconds (not counting dialogs) |
 | Parts in a menu label | 8 |
@@ -423,10 +429,11 @@ end)
 
 | Problem | What to check |
 |---|---|
-| The plugin's commands don't appear. | Is the file in the `plugins` folder beside `markedit.exe`, and does its name end in `.lua`? Did you reload plugins? Was a load error reported? |
+| The plugin's commands don't appear. | Is it a `.lua` file in `%APPDATA%\markedit\plugins`, or a folder there with `init.lua`? Is it enabled in **Manage Plugins**? Did you reload plugins? Was a load error reported? |
 | "the editor is only available while a plugin command runs" | `editor` functions were called from a plugin's top-level code. Move that code into the function passed to `menu.add` or `events.on`. |
 | "stopped after 5 seconds without finishing" | A loop that never ends, or work that's too slow on a large document. Read only the lines or range you need rather than the whole text. |
 | A command does nothing visible. | Check for an `if ... then return end` that always returns. `ui.message` is the quickest way to see what a command is doing. |
 | Two plugins interfere. | They probably share a global variable or function name. Make everything `local`. |
 | A `commands.register` replacement doesn't take effect. | The name must match a [built-in command name](#built-in-command-names) exactly. If two plugins replace the same command, the one whose file name sorts later wins. |
-| Plugins can't be added to the installed copy. | `C:\Program Files\MarkEdit\plugins` needs administrator rights to change. |
+| A shortcut does nothing. | Use Ctrl or Alt, optionally Shift, with a supported key. Built-in shortcuts take priority when keys conflict. |
+| A module cannot be loaded. | `require` works while a folder extension's `init.lua` loads and searches only inside that folder. Use dots for subfolders and omit `.lua`. |

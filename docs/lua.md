@@ -12,7 +12,9 @@ This guide is for people working on MarkEdit's source. It covers each Lua file i
 | `%APPDATA%\markedit\menus.lua` | A user's own menu bar, which replaces the default. | On disk. **Plugins > Customize Menus** creates it as a copy of the default. | Users |
 | `src/lua/formatting_*.lua` | The Markdown, HTML and JSON formatting commands, and some Edit menu text commands. | Built into `markedit.exe` as four resources and compiled together as one Lua chunk. | MarkEdit developers |
 | [src/help/keyboard-shortcuts.lua](../src/help/keyboard-shortcuts.lua) | Builds the **Help > Keyboard Shortcuts** page. | Built into `markedit.exe` (resource `IDR_HELP_SHORTCUTS`). | MarkEdit developers |
-| [plugins/*.lua](../plugins/) | Plugins. The repository ships [example.lua](../plugins/example.lua). | The `plugins` folder beside `markedit.exe` (copied to `dist/` by the build). | Users |
+| [plugins/*.lua](../plugins/) | Bundled plugins and examples. | The `plugins` folder beside `markedit.exe` (copied to `dist/` by the build). | MarkEdit developers |
+| `%APPDATA%\markedit\plugins` | Personal `.lua` plugins or folders containing `init.lua`. | Created by **Plugins > New Plugin/Open Plugins Folder**. | Users |
+| [plugins/types/markedit.lua](../plugins/types/markedit.lua) | Lua Language Server declarations for the plugin API. | Copied into the personal plugin folder with `.luarc.json`. | MarkEdit developers |
 | [third_party/lua/](../third_party/lua/) | The Lua 5.4 interpreter itself, as unmodified C sources. | Linked statically into `markedit.exe` (listed in [lua-sources.rsp](../lua-sources.rsp)). | Nobody. It's vendored. |
 
 The built-in scripts are added to the exe as `RCDATA` resources by [markedit.rc](../markedit.rc), along with [src/help/markdown-reference.md](../src/help/markdown-reference.md), the **Help > Markdown Reference** page. They're read from the exe, not from `src/`, so **editing them has no effect until you rebuild**.
@@ -34,15 +36,18 @@ load_menu_definition()
         │
 formatting_*.lua (built in)         joined into one chunk; plugin_host_load_builtin(): no time limit
         │
-plugins\*.lua                       plugin_host_load_directory(): alphabetical,
-                                    ignoring case; a failing file is skipped
+bundled plugins                     plugin_host_load_directory(..., "bundled")
         │
-show one message listing every error, then the caller rebuilds the menu bar
+personal plugins                    plugin_host_load_directory(..., "user")
+                                    each location is alphabetical; entries are
+                                    .lua files or folders containing init.lua
+        │
+report every error and offer to open the first failing source
 ```
 
 What this order means:
 
-- **Plugins load last**, so a plugin's `commands.register("markdown.bold", ...)` replaces the built-in implementation. When two plugins register the same name, the one whose file name sorts later wins.
+- **Personal plugins load last**, so they can replace bundled or built-in commands. Within one location, the later alphabetical entry wins.
 - **A broken user `menus.lua` never leaves the user without menus.** The built-in definition is loaded instead, and the error is reported.
 - **Each script loads all or nothing.** If a script's top-level code fails, the commands and handlers it had registered so far are discarded (`run_script()` in [src/plugin_host.c](../src/plugin_host.c)).
 
@@ -51,11 +56,11 @@ What this order means:
 Every script above runs in a single `lua_State`, created in `ensure_state()` / `open_environment()` in [src/plugin_host.c](../src/plugin_host.c). The consequences:
 
 - **Globals are shared.** That's why the built-in formatting chunk and `example.lua` declare everything `local`.
-- **It's sandboxed.** Only the base, `string`, `table`, `math`, `utf8` and `coroutine` libraries are opened. `dofile` and `loadfile` are removed, and `load` accepts source text only, since precompiled bytecode can corrupt memory.
-- **The API is seven global tables:** `editor`, `ui`, `menu`, `commands`, `events`, `config` and `app`, each a `luaL_Reg` array in `plugin_host.c`. The `editor` functions only work while a command or event handler runs (`s_edit` is set). Called from a script's top-level code, they raise an error.
+- **It's sandboxed.** Only the base, `string`, `table`, `math`, `utf8` and `coroutine` libraries are opened. `dofile` and `loadfile` are removed, and `load` accepts source text only. The custom `require` reads source modules only beneath the folder extension currently loading.
+- **The API is seven global tables:** `editor`, `ui`, `menu`, `commands`, `events`, `config` and `app`, each a `luaL_Reg` array in `plugin_host.c`. The `editor` functions only work while a command or event handler has an active editor. Called from a script's top-level code, they raise an error.
 - **There's a time limit.** A count hook (`time_limit_hook`) stops any call that runs longer than `PLUGIN_TIME_LIMIT_MS` (5 s, not counting time in dialogs). Commands registered by a built-in script (`plugin_host_load_builtin`) are exempt, because formatting a large document can legitimately take longer.
 - **Each command is one undo step.** `plugin_host_run()` wraps the call in a Scintilla undo action, and if the command raises an error, it undoes what the command had changed.
-- **Reload starts from nothing.** Plugin state lasts only until the next reload.
+- **Reload recreates the Lua state.** Lua variables last until the next reload; values saved with `config.set` remain in `settings.json`.
 
 ## How a command name runs
 
@@ -97,7 +102,7 @@ The full format is in [plugins/README.md, "Customizing the menu bar"](../plugins
 
 The four `src/lua/formatting_*.lua` files are embedded separately and joined before Lua compiles them. They therefore share one lexical scope: helpers declared `local` in `formatting_base.lua` remain private but are available to the later parts.
 
-Fifty-three commands, written against the same API plugins use. Running it as an ordinary script keeps it replaceable by plugins, and it doubles as a large worked example of the API. The file is laid out in sections, each marked `-- ---- name ----`:
+These commands use the same API as plugins. Running them as an ordinary script keeps them replaceable, and the files double as a large worked example of the API. Each section is marked `-- ---- name ----`:
 
 | Section | Commands | Key functions |
 |---|---|---|
@@ -121,13 +126,13 @@ Conventions used throughout (also stated at the top of the file):
 1. Write the function in the appropriate `src/lua/formatting_*.lua` file, and add it to the registration table in `formatting_text.lua`, for example `markdown.underline = ...`.
 2. Give it an ID in [src/command_ids.h](../src/command_ids.h), and add `{"markdown.underline", IDM_..., NULL}` to `COMMANDS` in [src/menu_commands.c](../src/menu_commands.c). Without this, menus can't refer to it and nothing can invoke it.
 3. Add an item for it to [src/menus.lua](../src/menus.lua), and add a toolbar button only when appropriate.
-4. Add the name to the list of built-in command names in [plugins/README.md](../plugins/README.md#built-in-command-names), and update the "53 formatting and text commands" count in its Limits table.
+4. Add the name to the list of built-in command names in [plugins/README.md](../plugins/README.md#built-in-command-names).
 5. Add a case to [tests/test_formatting.c](../tests/test_formatting.c). `test_registration` already fails if a `markdown.`/`html.`/`json.` name in `menu_commands.c` has no Lua function. A new `edit.*` Lua command also needs adding to its `textCommands` list.
 6. Rebuild.
 
 ## src/help/keyboard-shortcuts.lua
 
-**Help > Keyboard Shortcuts** is generated each time the page opens, so it can't drift from the real shortcuts, and it reflects a user's own `menus.lua`. `generate_shortcuts_page()` in `markedit.c` passes the shortcut text from `menu_commands.c` to `plugin_host_render_page()`, which does the following:
+**Help > Keyboard Shortcuts** is generated each time the page opens, so it reflects the current `menus.lua` and loaded plugin shortcuts. `generate_shortcuts_page()` in `markedit.c` gathers built-in shortcuts from `menu_commands.c` and plugin shortcuts from `plugin_host.c`, then passes them to `plugin_host_render_page()`, which does the following:
 
 - runs the script in **a separate Lua state**, not the one plugins share, with only the base, `string`, `table` and `utf8` libraries, so no plugin can change the page;
 - calls it with one table: `menus` (the loaded menu definition, as `{ kind = "command" | "submenu" | ... }` items) and `shortcuts` (command name to shortcut text);
@@ -141,7 +146,7 @@ The script lists each menu's commands that have shortcuts under that menu's name
 
 - [README.md](../plugins/README.md) is the plugin guide. It's shipped in `dist/plugins/`, and **Help > Plugin Guide** opens it, so it's written for users, not for MarkEdit developers.
 - [example.lua](../plugins/example.lua) is a working plugin that shows each part of the API: `menu.add` with submenus and with `/Menu/...` paths, a persistent `menu.checkbox`, `ui.message`/`prompt`/`choose`, and an `events.on("save")` handler.
-- MarkEdit loads every `*.lua` file in the folder, in name order. Other files, including `README.md`, are ignored.
+- MarkEdit loads each top-level `*.lua` file and each folder containing `init.lua`, in name order. `types/`, `.luarc.json`, and other files are ignored. Personal extensions use the same rules and load afterward.
 
 ## The C side
 
@@ -156,7 +161,7 @@ The script lists each menu's commands that have shortcuts under that menu's name
 ## Changing and testing
 
 - **`src/lua/formatting_*.lua` or `src/menus.lua`:** rebuild (`build.bat`), then restart MarkEdit or use **Reload Plugins**.
-- **To iterate without rebuilding:** put a replacement in a file in `plugins/` (for example `commands.register("markdown.bold", ...)` with your new version), or edit `%APPDATA%\markedit\menus.lua`. Then use **Reload Plugins** after each change. Copy the result back into `src/` when you're done, and delete the temporary copies.
+- **To iterate without rebuilding:** put a replacement in `%APPDATA%\markedit\plugins` (for example `commands.register("markdown.bold", ...)`), or edit `%APPDATA%\markedit\menus.lua`. Then use **Reload Plugins** after each change. Copy a finished bundled extension back into the repository when appropriate.
 - **Tests** (`test.bat` runs them all; run them from the repository root):
   - [tests/test_plugin_host.c](../tests/test_plugin_host.c): the API, the sandbox, load failures, events and the time limit.
   - [tests/test_menus.c](../tests/test_menus.c): reads `src/menus.lua` from disk, and checks that it loads and that every name in it is known. It also renders `src/help/keyboard-shortcuts.lua` and checks that the page lists every shortcut.

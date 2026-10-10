@@ -1,6 +1,6 @@
-/* Lua plugin host: loads scripts that register menu commands, and runs those
-   commands against a supplied Scintilla view. Holds no application state
-   beyond the Lua state and the command list. */
+/* Lua extension host: owns the sandboxed state, registrations, extension
+   discovery and folder-local module loading. Application services arrive
+   through callbacks; editor operations are delegated to lua_editor_api.c. */
 #include "plugin_host.h"
 
 #include <limits.h>
@@ -33,7 +33,16 @@ typedef struct {
     char *owner;       /* script name, used to namespace config values */
     char *configKey;   /* menu.checkbox's persisted key, or NULL */
     int checkDefault;
+    char *shortcut;
+    BYTE shortcutFlags;
+    WORD shortcutKey;
 } PluginCommand;
+
+typedef struct {
+    char *name;
+    char *scope;
+    int enabled;
+} PluginExtension;
 
 typedef struct {
     const char *event; /* one of EVENT_NAMES */
@@ -49,10 +58,15 @@ static PluginCommand s_commands[PLUGIN_MAX_COMMANDS];
 static int s_commandCount = 0;
 static PluginHandler s_handlers[PLUGIN_MAX_HANDLERS];
 static int s_handlerCount = 0;
+static PluginExtension s_extensions[256];
+static int s_extensionCount = 0;
+static WCHAR *s_firstErrorPath = NULL;
+static int s_firstErrorLine = 0;
 /* The script whose top-level code is running, while it loads, and whether
    it is one built into MarkEdit. */
 static const char *s_loadingName = NULL;
 static int s_loadingBuiltIn = 0;
+static const WCHAR *s_loadingModuleRoot = NULL;
 /* Set while any plugin code runs, so nothing re-enters the Lua state from
    a message loop (a plugin dialog, say) mid-call. */
 static int s_busy = 0;
@@ -143,6 +157,7 @@ static void discard_commands_from(int first) {
         free(s_commands[i].overrides);
         free(s_commands[i].owner);
         free(s_commands[i].configKey);
+        free(s_commands[i].shortcut);
         memset(&s_commands[i], 0, sizeof(s_commands[i]));
     }
     if (first < s_commandCount) s_commandCount = first;
@@ -230,9 +245,54 @@ static int ui_choose(lua_State *L) {
 
 /* Adds an entry the application places by its label: a menu.add command
    (fn at stack index 2), or a menu.separator. */
-static int add_labelled_command(lua_State *L, const char *label, int functionIndex, int separator) {
+static int parse_shortcut(const char *value, BYTE *flags, WORD *key) {
+    char copy[64];
+    strcpy(copy, value);
+    *flags = FVIRTKEY;
+    *key = 0;
+    int ctrlOrAlt = 0;
+    char *context = NULL;
+    for (char *part = strtok_s(copy, "+", &context); part;
+         part = strtok_s(NULL, "+", &context)) {
+        if (_stricmp(part, "Ctrl") == 0) { *flags |= FCONTROL; ctrlOrAlt = 1; }
+        else if (_stricmp(part, "Alt") == 0) { *flags |= FALT; ctrlOrAlt = 1; }
+        else if (_stricmp(part, "Shift") == 0) *flags |= FSHIFT;
+        else if (!*key && strlen(part) == 1 && isalnum((unsigned char)part[0]))
+            *key = (WORD)toupper((unsigned char)part[0]);
+        else if (!*key && (part[0] == 'F' || part[0] == 'f')) {
+            char *end = NULL;
+            long number = strtol(part + 1, &end, 10);
+            if (!end || *end || number < 1 || number > 24) return 0;
+            *key = (WORD)(VK_F1 + number - 1);
+        } else if (!*key && _stricmp(part, "Tab") == 0) *key = VK_TAB;
+        else if (!*key && _stricmp(part, "Space") == 0) *key = VK_SPACE;
+        else if (!*key && _stricmp(part, "Insert") == 0) *key = VK_INSERT;
+        else if (!*key && _stricmp(part, "Delete") == 0) *key = VK_DELETE;
+        else return 0;
+    }
+    return ctrlOrAlt && *key;
+}
+
+static char *checked_shortcut(lua_State *L, int index, BYTE *flags, WORD *key) {
+    if (lua_isnoneornil(L, index)) return NULL;
+    const char *value = checked_cstring(L, index, "shortcut");
+    size_t length = strlen(value);
+    if (!length || length > 48) luaL_argerror(L, index, "shortcut must be 1 to 48 characters");
+    if (!parse_shortcut(value, flags, key))
+        luaL_argerror(L, index, "shortcut needs Ctrl or Alt, optional Shift, and one supported key");
+    char *copy = dup_string(value);
+    if (!copy) luaL_error(L, "out of memory");
+    return copy;
+}
+
+static int add_labelled_command(lua_State *L, const char *label, int functionIndex,
+                                int separator, int shortcutIndex) {
     if (s_commandCount >= PLUGIN_MAX_COMMANDS)
         return luaL_error(L, "too many plugin commands (the limit is %d)", PLUGIN_MAX_COMMANDS);
+    BYTE shortcutFlags = 0;
+    WORD shortcutKey = 0;
+    char *shortcut = shortcutIndex
+        ? checked_shortcut(L, shortcutIndex, &shortcutFlags, &shortcutKey) : NULL;
     int ref = LUA_NOREF;
     if (!separator) {
         lua_pushvalue(L, functionIndex);
@@ -243,6 +303,7 @@ static int add_labelled_command(lua_State *L, const char *label, int functionInd
     if (!copy || !owner) {
         free(copy);
         free(owner);
+        free(shortcut);
         luaL_unref(L, LUA_REGISTRYINDEX, ref);
         return luaL_error(L, "out of memory");
     }
@@ -255,6 +316,9 @@ static int add_labelled_command(lua_State *L, const char *label, int functionInd
     s_commands[s_commandCount].owner = owner;
     s_commands[s_commandCount].configKey = NULL;
     s_commands[s_commandCount].checkDefault = 0;
+    s_commands[s_commandCount].shortcut = shortcut;
+    s_commands[s_commandCount].shortcutFlags = shortcutFlags;
+    s_commands[s_commandCount].shortcutKey = shortcutKey;
     s_commandCount++;
     return 0;
 }
@@ -262,7 +326,7 @@ static int add_labelled_command(lua_State *L, const char *label, int functionInd
 static int menu_add(lua_State *L) {
     const char *label = checked_cstring(L, 1, "menu label");
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    return add_labelled_command(L, label, 2, 0);
+    return add_labelled_command(L, label, 2, 0, 3);
 }
 
 static const char *checked_config_key(lua_State *L, int index) {
@@ -284,7 +348,7 @@ static int menu_checkbox(lua_State *L) {
     luaL_checktype(L, 3, LUA_TBOOLEAN);
     luaL_checktype(L, 4, LUA_TFUNCTION);
     int index = s_commandCount;
-    add_labelled_command(L, label, 4, 0);
+    add_labelled_command(L, label, 4, 0, 5);
     char *copy = dup_string(key);
     if (!copy) {
         discard_commands_from(index);
@@ -301,7 +365,7 @@ static int menu_checkbox(lua_State *L) {
    submenu of a menu-bar menu. */
 static int menu_separator(lua_State *L) {
     const char *path = optional_cstring(L, 1, "", "menu path");
-    return add_labelled_command(L, path, 0, 1);
+    return add_labelled_command(L, path, 0, 1, 0);
 }
 
 /* commands.register(name, fn [, title]): fn runs in place of the built-in
@@ -332,6 +396,9 @@ static int commands_register(lua_State *L) {
     command->owner = dup_string(s_loadingName ? s_loadingName : "plugin");
     command->configKey = NULL;
     command->checkDefault = 0;
+    command->shortcut = NULL;
+    command->shortcutFlags = 0;
+    command->shortcutKey = 0;
     if (!command->owner) {
         discard_commands_from(s_commandCount - 1);
         return luaL_error(L, "out of memory");
@@ -447,6 +514,74 @@ static int app_date_time(lua_State *L) {
              (unsigned)now.wYear, (unsigned)now.wMonth, (unsigned)now.wDay,
              (unsigned)now.wHour, (unsigned)now.wMinute, (unsigned)now.wSecond);
     lua_pushstring(L, text);
+    return 1;
+}
+
+static int valid_module_name(const char *module) {
+    size_t length = strlen(module);
+    if (!length || length > 128 || module[0] == '.' || module[length - 1] == '.') return 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)module[i];
+        if (!(isalnum(c) || c == '_' || c == '.') ||
+            (c == '.' && i && module[i - 1] == '.')) return 0;
+    }
+    return 1;
+}
+
+/* Leaves the module cache table on the stack, and a cached value above it
+   when one exists. */
+static int push_module_cache(lua_State *L, const char *cacheKey) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "markedit.modules");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "markedit.modules");
+    }
+    lua_getfield(L, -1, cacheKey);
+    if (!lua_isnil(L, -1)) return 1;
+    lua_pop(L, 1);
+    return 0;
+}
+
+static WCHAR *module_source_path(const char *module, char relative[260]) {
+    snprintf(relative, 260, "%s.lua", module);
+    for (char *p = relative; *p; p++) if (*p == '.') *p = '/';
+    /* Restore the extension dot replaced by the loop above. */
+    memcpy(relative + strlen(relative) - 4, ".lua", 5);
+    WCHAR *wide = to_wide(relative);
+    WCHAR *path = wide ? path_join(s_loadingModuleRoot, wide) : NULL;
+    free(wide);
+    return path;
+}
+
+/* A small replacement for Lua's package loader. It reads source modules only
+   below the folder extension whose init.lua is currently loading. */
+static int plugin_require(lua_State *L) {
+    const char *module = checked_cstring(L, 1, "module name");
+    if (!s_loadingModuleRoot)
+        return luaL_error(L, "require is available only from a folder extension's init.lua");
+    if (!valid_module_name(module))
+        return luaL_error(L, "module names may contain letters, digits, '_' and single dots");
+    char cacheKey[520];
+    snprintf(cacheKey, sizeof(cacheKey), "%s\n%s", s_loadingName ? s_loadingName : "plugin", module);
+    if (push_module_cache(L, cacheKey)) return 1;
+
+    char relative[260];
+    WCHAR *path = module_source_path(module, relative);
+    size_t codeLength = 0;
+    char *code = path ? read_utf8_text_file_length(path, PLUGIN_MAX_SCRIPT_BYTES, &codeLength) : NULL;
+    free(path);
+    if (!code) return luaL_error(L, "module '%s' was not found or is not valid UTF-8", module);
+    char chunkName[300];
+    snprintf(chunkName, sizeof(chunkName), "=%s/%s", s_loadingName ? s_loadingName : "plugin", relative);
+    int status = luaL_loadbufferx(L, code, codeLength, chunkName, "t");
+    free(code);
+    if (status != LUA_OK) return lua_error(L);
+    lua_call(L, 0, 1);
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -3, cacheKey);
     return 1;
 }
 
@@ -663,6 +798,8 @@ static int open_environment(lua_State *L) {
     lua_setglobal(L, "config");
     luaL_newlib(L, app_functions);
     lua_setglobal(L, "app");
+    lua_pushcfunction(L, plugin_require);
+    lua_setglobal(L, "require");
     lua_sethook(L, time_limit_hook, LUA_MASKCOUNT, 10000);
     return 0;
 }
@@ -682,7 +819,8 @@ static char *ensure_state(void) {
 
 /* Runs a script's top-level code, or with runner given, calls runner with
    the compiled script instead. */
-static char *run_script(const char *name, const char *code, size_t length, lua_CFunction runner) {
+static char *run_script(const char *name, const char *code, size_t length,
+                        lua_CFunction runner, const WCHAR *moduleRoot) {
     if (s_busy) return dup_string("Plugins can't be loaded while a plugin is running.");
     char *error = ensure_state();
     if (error) return error;
@@ -696,7 +834,9 @@ static char *run_script(const char *name, const char *code, size_t length, lua_C
     } else {
         s_busy = 1;
         s_loadingName = name;
+        s_loadingModuleRoot = moduleRoot;
         error = protected_call(runner ? 1 : 0);
+        s_loadingModuleRoot = NULL;
         s_loadingName = NULL;
         s_busy = 0;
     }
@@ -709,12 +849,12 @@ static char *run_script(const char *name, const char *code, size_t length, lua_C
 }
 
 char *plugin_host_load_chunk(const char *name, const char *code, size_t length) {
-    return run_script(name, code, length, NULL);
+    return run_script(name, code, length, NULL, NULL);
 }
 
 char *plugin_host_load_builtin(const char *name, const char *code, size_t length) {
     s_loadingBuiltIn = 1;
-    char *error = run_script(name, code, length, NULL);
+    char *error = run_script(name, code, length, NULL, NULL);
     s_loadingBuiltIn = 0;
     return error;
 }
@@ -724,7 +864,7 @@ char *plugin_host_load_menu(const char *name, const char *code, size_t length) {
        had already been thrown away. */
     if (s_busy) return dup_string("Plugins can't be loaded while a plugin is running.");
     free_menu();
-    char *error = run_script(name, code, length, run_menu_definition);
+    char *error = run_script(name, code, length, run_menu_definition, NULL);
     if (error) free_menu();
     return error;
 }
@@ -831,8 +971,14 @@ char *plugin_host_render_page(const char *name, const char *code, size_t length,
     return error;
 }
 
-static int compare_names(const void *a, const void *b) {
-    return _wcsicmp(*(const WCHAR *const *)a, *(const WCHAR *const *)b);
+typedef struct {
+    WCHAR *name;
+    int folder;
+} ExtensionCandidate;
+
+static int compare_candidates(const void *a, const void *b) {
+    return _wcsicmp(((const ExtensionCandidate *)a)->name,
+                    ((const ExtensionCandidate *)b)->name);
 }
 
 /* FindFirstFileW's "*.lua" also matches longer extensions such as ".luac"
@@ -843,56 +989,135 @@ static int is_lua_script(const WIN32_FIND_DATAW *found) {
     return dot && _wcsicmp(dot, L".lua") == 0;
 }
 
-static char *load_script_file(const WCHAR *directory, const WCHAR *fileName) {
-    char *name = to_utf8(fileName);
-    WCHAR *path = path_join(directory, fileName);
+static int is_folder_extension(const WCHAR *directory, const WCHAR *name) {
+    WCHAR *folder = path_join(directory, name);
+    WCHAR *entry = folder ? path_join(folder, L"init.lua") : NULL;
+    DWORD attributes = entry ? GetFileAttributesW(entry) : INVALID_FILE_ATTRIBUTES;
+    free(entry);
+    free(folder);
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static void remember_load_error(const WCHAR *path, const WCHAR *moduleRoot,
+                                const char *error, const char *shownName) {
+    if (s_firstErrorPath || !path || !error) return;
+    const char *at = shownName ? strstr(error, shownName) : NULL;
+    if (at) {
+        at += strlen(shownName);
+        if (*at == '/' && moduleRoot) {
+            const char *colon = strchr(at + 1, ':');
+            if (colon && colon > at + 1 && (size_t)(colon - at) < 260) {
+                char relative[260];
+                memcpy(relative, at + 1, (size_t)(colon - at - 1));
+                relative[colon - at - 1] = 0;
+                WCHAR *wide = to_wide(relative);
+                if (wide) {
+                    for (WCHAR *p = wide; *p; p++) if (*p == L'/') *p = L'\\';
+                    s_firstErrorPath = path_join(moduleRoot, wide);
+                }
+                free(wide);
+                at = colon;
+            }
+        }
+        if (*at == ':') {
+            char *end = NULL;
+            long line = strtol(at + 1, &end, 10);
+            if (end != at + 1 && line > 0 && line <= INT_MAX) s_firstErrorLine = (int)line;
+        }
+    }
+    if (!s_firstErrorPath) s_firstErrorPath = wcsdup_heap(path);
+}
+
+static char *scoped_owner(const char *scope, const char *name) {
+    if (!scope || !*scope || _stricmp(scope, "bundled") == 0) return dup_string(name);
+    size_t size = strlen(scope) + strlen(name) + 2;
+    char *owner = (char *)malloc(size);
+    if (owner) snprintf(owner, size, "%s/%s", scope, name);
+    return owner;
+}
+
+static char *load_script_file(const WCHAR *directory, const WCHAR *fileName,
+                              const char *scope, int folder) {
+    char *plainName = to_utf8(fileName);
+    char *name = plainName ? scoped_owner(scope, plainName) : NULL;
+    WCHAR *root = folder ? path_join(directory, fileName) : NULL;
+    WCHAR *path = folder ? path_join(root, L"init.lua") : path_join(directory, fileName);
     size_t codeLength = 0;
     char *code = path ? read_utf8_text_file_length(path, PLUGIN_MAX_SCRIPT_BYTES, &codeLength) : NULL;
     char *error;
     if (code) {
-        error = plugin_host_load_chunk(name ? name : "plugin", code, codeLength);
+        error = run_script(name ? name : "plugin", code, codeLength, NULL, root);
     } else {
         const char *shown = name ? name : "A plugin";
         error = (char *)malloc(strlen(shown) + 64);
         if (error) sprintf(error, "%s: could not be read as UTF-8 text (1 MiB at most)", shown);
     }
+    remember_load_error(path, root, error, name);
     free(code);
     free(path);
+    free(root);
     free(name);
+    free(plainName);
     return error;
 }
 
-char *plugin_host_load_directory(const WCHAR *directory) {
-    WCHAR *pattern = path_join(directory, L"*.lua");
+static int remember_extension(const char *scope, const char *name, int enabled) {
+    if (s_extensionCount >= (int)(sizeof(s_extensions) / sizeof(s_extensions[0]))) return 0;
+    PluginExtension *extension = &s_extensions[s_extensionCount];
+    extension->name = dup_string(name);
+    extension->scope = dup_string(scope ? scope : "");
+    if (!extension->name || !extension->scope) {
+        free(extension->name);
+        free(extension->scope);
+        memset(extension, 0, sizeof(*extension));
+        return 0;
+    }
+    extension->enabled = enabled;
+    s_extensionCount++;
+    return 1;
+}
+
+char *plugin_host_load_directory(const WCHAR *directory, const char *scope) {
+    WCHAR *pattern = path_join(directory, L"*");
     if (!pattern) return dup_string("out of memory");
     WIN32_FIND_DATAW found;
     HANDLE find = FindFirstFileW(pattern, &found);
     free(pattern);
     if (find == INVALID_HANDLE_VALUE) return NULL;
 
-    WCHAR **names = NULL;
+    ExtensionCandidate *candidates = NULL;
     size_t count = 0, capacity = 0;
     char *report = NULL;
     do {
-        if (!is_lua_script(&found)) continue;
+        int folder = (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (folder && (wcscmp(found.cFileName, L".") == 0 || wcscmp(found.cFileName, L"..") == 0)) continue;
+        if (folder ? !is_folder_extension(directory, found.cFileName) : !is_lua_script(&found)) continue;
         if (count == capacity) {
             size_t grown = capacity ? capacity * 2 : 16;
-            WCHAR **larger = (WCHAR **)realloc(names, grown * sizeof(*names));
+            ExtensionCandidate *larger = (ExtensionCandidate *)realloc(
+                candidates, grown * sizeof(*candidates));
             if (!larger) { report = dup_string("out of memory listing plugins"); break; }
-            names = larger;
+            candidates = larger;
             capacity = grown;
         }
-        if ((names[count] = wcsdup_heap(found.cFileName)) != NULL) count++;
+        WCHAR *name = wcsdup_heap(found.cFileName);
+        if (name) candidates[count++] = (ExtensionCandidate){ name, folder };
     } while (FindNextFileW(find, &found));
     FindClose(find);
 
     /* Name order, so scripts load (and their menu items appear) predictably. */
-    if (count) qsort(names, count, sizeof(*names), compare_names);
+    if (count) qsort(candidates, count, sizeof(*candidates), compare_candidates);
     for (size_t i = 0; i < count; i++) {
-        report = append_line(report, load_script_file(directory, names[i]));
-        free(names[i]);
+        char *name = to_utf8(candidates[i].name);
+        int enabled = !s_callbacks.plugin_enabled ||
+            s_callbacks.plugin_enabled(scope ? scope : "", name ? name : "plugin");
+        remember_extension(scope, name ? name : "plugin", enabled);
+        if (enabled) report = append_line(report,
+            load_script_file(directory, candidates[i].name, scope, candidates[i].folder));
+        free(name);
+        free(candidates[i].name);
     }
-    free(names);
+    free(candidates);
     return report;
 }
 
@@ -901,6 +1126,14 @@ void plugin_host_shutdown(void) {
     free_menu();
     discard_commands_from(0);
     discard_handlers_from(0);
+    for (int i = 0; i < s_extensionCount; i++) {
+        free(s_extensions[i].name);
+        free(s_extensions[i].scope);
+    }
+    s_extensionCount = 0;
+    free(s_firstErrorPath);
+    s_firstErrorPath = NULL;
+    s_firstErrorLine = 0;
     if (s_lua) {
         lua_close(s_lua);
         s_lua = NULL;
@@ -918,6 +1151,30 @@ int plugin_host_command_count(void) {
 const char *plugin_host_command_label(int index) {
     return index >= 0 && index < s_commandCount ? s_commands[index].label : NULL;
 }
+
+const char *plugin_host_command_shortcut(int index) {
+    return index >= 0 && index < s_commandCount ? s_commands[index].shortcut : NULL;
+}
+
+int plugin_host_command_accelerator(int index, BYTE *flags, WORD *key) {
+    if (index < 0 || index >= s_commandCount || !s_commands[index].shortcut) return 0;
+    if (flags) *flags = s_commands[index].shortcutFlags;
+    if (key) *key = s_commands[index].shortcutKey;
+    return 1;
+}
+
+int plugin_host_extension_count(void) { return s_extensionCount; }
+const char *plugin_host_extension_name(int index) {
+    return index >= 0 && index < s_extensionCount ? s_extensions[index].name : NULL;
+}
+const char *plugin_host_extension_scope(int index) {
+    return index >= 0 && index < s_extensionCount ? s_extensions[index].scope : NULL;
+}
+int plugin_host_extension_is_enabled(int index) {
+    return index >= 0 && index < s_extensionCount && s_extensions[index].enabled;
+}
+const WCHAR *plugin_host_error_path(void) { return s_firstErrorPath; }
+int plugin_host_error_line(void) { return s_firstErrorLine; }
 
 int plugin_host_command_is_placed(int index) {
     return index >= 0 && index < s_commandCount && s_commands[index].placed;
