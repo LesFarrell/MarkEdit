@@ -215,6 +215,18 @@ local index, choice = ui.choose({ "Note", "Tip", "Warning" }, "Alert type:")
 if not index then return end
 ```
 
+#### `ui.save_binary(default_name, data [, title])`
+
+Shows a Save As dialog initialized with `default_name` and writes the Lua string
+`data` byte-for-byte. It returns `true` after saving and `false` if the user
+cancels. Embedded NUL bytes and all other byte values are preserved. Output is
+limited to 64 MiB; the plugin still cannot choose a destination without the
+user-controlled dialog.
+
+```lua
+ui.save_binary("output.bin", string.char(0, 1, 255), "Export binary")
+```
+
 ## Where commands appear
 
 A command's label is a path separated by `/`. Each part before the last names a submenu; the last part is the item. An `&` before a letter marks it as the item's access key (`&&` shows a literal `&`).

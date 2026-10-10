@@ -42,8 +42,10 @@ workspace "MarkEdit"
         buildoptions {
             "-ffunction-sections",
             "-fdata-sections",
-            "-fno-asynchronous-unwind-tables",
-            "-fno-unwind-tables",
+            -- Lua errors use longjmp; x64 Windows requires valid unwind tables
+            -- while that jump crosses plugin-host frames.
+            "-funwind-tables",
+            "-fasynchronous-unwind-tables",
             "-fno-ident",
             "-fmerge-all-constants",
         }

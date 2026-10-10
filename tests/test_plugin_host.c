@@ -126,8 +126,10 @@ static void test_separators(HWND editor) {
 }
 
 /* ---- stand-ins for the application's dialogs and document details ---- */
-static char s_lastTitle[64];
+static char s_lastTitle[64], s_lastMessage[256];
 static char s_configPlugin[64], s_configKey[64], s_configValue[128];
+static char s_binaryName[64], s_binaryData[64];
+static size_t s_binaryLength;
 static const char *s_calculatorExpression =
     "0x10 + 0b11 + (5 << 1) + min(4, 9)";
 
@@ -166,6 +168,22 @@ static int fake_choose(const char *title, const char *label, const char *const *
         return 0;
     if (strcmp(label, "Include headings at:") == 0 && count == 4) return 1;
     return strcmp(label, "Level:") == 0 && count == 3 && strcmp(items[1], "h2") == 0 ? 1 : -1;
+}
+
+static int fake_save_binary(const char *title, const char *defaultName,
+                            const char *data, size_t length) {
+    snprintf(s_lastTitle, sizeof(s_lastTitle), "%s", title);
+    if (strcmp(defaultName, "cancel.tap") == 0) return 0;
+    snprintf(s_binaryName, sizeof(s_binaryName), "%s", defaultName);
+    s_binaryLength = length < sizeof(s_binaryData) ? length : sizeof(s_binaryData);
+    memcpy(s_binaryData, data, s_binaryLength);
+    return 1;
+}
+
+static void fake_message(const char *title, const char *text, const char *kind) {
+    (void)kind;
+    snprintf(s_lastTitle, sizeof(s_lastTitle), "%s", title);
+    snprintf(s_lastMessage, sizeof(s_lastMessage), "%s", text);
 }
 
 static char *fake_file_path(void) {
@@ -314,12 +332,21 @@ static void test_ui(HWND editor) {
         "  assert(not pcall(ui.choose, {}), 'no items')\n"
         "  assert(not pcall(ui.choose, {'a', 5}), 'non-string item')\n"
         "end)\n"
-        "menu.add('Prompt', function() ui.prompt('Width:') end)\n");
+        "menu.add('Prompt', function() ui.prompt('Width:') end)\n"
+        "menu.add('Binary', function()\n"
+        "  assert(ui.save_binary('output.tap', string.char(0, 1, 255)))\n"
+        "  assert(ui.save_binary('cancel.tap', 'x') == false)\n"
+        "end)\n");
     expect(run_ok(first, editor), "ui.prompt and ui.choose");
     expect(strcmp(s_lastTitle, "Ask") == 0, "dialogs are titled with the command label");
+    expect(run_ok(first + 2, editor) && strcmp(s_binaryName, "output.tap") == 0 &&
+           s_binaryLength == 3 && (unsigned char)s_binaryData[0] == 0 &&
+           (unsigned char)s_binaryData[1] == 1 && (unsigned char)s_binaryData[2] == 255,
+           "ui.save_binary preserves every byte and reports cancellation");
 
     plugin_host_set_callbacks(NULL);
     expect(run_fails(first + 1, editor, "not available"), "missing callbacks raise errors");
+    expect(run_fails(first + 2, editor, "not available"), "missing binary callback raises an error");
 }
 
 static HWND s_reentryEditor;
@@ -366,7 +393,7 @@ static void test_events(HWND editor) {
     expect(plugin_host_fire("open", NULL, editor) == NULL, "a failed script's handlers are dropped");
 
     static const PluginHostCallbacks reentrant = {
-        reentrant_prompt, NULL, NULL, NULL, NULL, fake_config_get, fake_config_set, NULL
+        reentrant_prompt, NULL, NULL, NULL, NULL, fake_config_get, fake_config_set, NULL, NULL
     };
     plugin_host_set_callbacks(&reentrant);
     s_reentryEditor = editor;
@@ -500,7 +527,7 @@ static void test_directory(void) {
     free(report);
 
     static const PluginHostCallbacks filtered = {
-        NULL, NULL, NULL, NULL, NULL, NULL, NULL, test_plugin_enabled
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, test_plugin_enabled, NULL
     };
     plugin_host_shutdown();
     plugin_host_set_callbacks(&filtered);
@@ -542,8 +569,8 @@ static int find_command(const char *label) {
 
 static void test_bundled_plugins(HWND editor) {
     static const PluginHostCallbacks fakes = {
-        fake_prompt, fake_choose, fake_file_path, fake_language, NULL,
-        fake_config_get, fake_config_set, NULL
+        fake_prompt, fake_choose, fake_file_path, fake_language, fake_message,
+        fake_config_get, fake_config_set, NULL, fake_save_binary
     };
     plugin_host_set_callbacks(&fakes);
     plugin_host_shutdown();
@@ -566,11 +593,53 @@ static void test_bundled_plugins(HWND editor) {
     int sortLines = find_command("Line Tools/Order/Sort A to Z");
     int sortLength = find_command("Line Tools/Order/Sort by Length");
     int shuffle = find_command("Line Tools/Order/Shuffle");
+    int buildTap = find_command("Z80/Build TAP");
     expect(encode64 >= 0 && decode64 >= 0 && encodeUrl >= 0 && decodeUrl >= 0 &&
            encodeHex >= 0 && decodeHex >= 0 && encodeHtml >= 0 && decodeHtml >= 0 &&
            toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
-           sortLines >= 0 && sortLength >= 0 && shuffle >= 0,
+           sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0,
            "bundled plugin commands are registered");
+
+    set_document(editor, "ORG $8000\nstart: LD A,42\nLD ($9000),A\nJR start\n");
+    s_binaryLength = 0;
+    expect(buildTap >= 0 && run_ok(buildTap, editor) &&
+           strcmp(s_binaryName, "C:\\docs\\note.tap") == 0 && s_binaryLength == 32 &&
+           (unsigned char)s_binaryData[0] == 19 && (unsigned char)s_binaryData[2] == 0 &&
+           (unsigned char)s_binaryData[14] == 7 && (unsigned char)s_binaryData[16] == 0 &&
+           (unsigned char)s_binaryData[17] == 0x80 && (unsigned char)s_binaryData[23] == 0xff &&
+           (unsigned char)s_binaryData[24] == 0x3e && (unsigned char)s_binaryData[25] == 42 &&
+           (unsigned char)s_binaryData[26] == 0x32 && (unsigned char)s_binaryData[27] == 0 &&
+           (unsigned char)s_binaryData[28] == 0x90 && (unsigned char)s_binaryData[29] == 0x18 &&
+           (unsigned char)s_binaryData[30] == 0xf9,
+           "bundled Z80 assembler creates a byte-exact Spectrum TAP");
+
+    set_document(editor,
+        "ORG $8000\nCOUNT EQU 5\nLD BC,$1234\nLD IX,$9000\nLD (IX-2),A\n"
+        "LD B,(IY+3)\nINC (IX+1)\nADD A,(IY-1)\nADC HL,SP\nBIT 7,(IX-8)\n"
+        "JP NZ,done\nJR C,done\nCALL Z,done\nPUSH IX\nEX AF,AF'\nEX (SP),IY\nIN A,($FE)\n"
+        "IN B,(C)\nOUT (C),D\nIM 1\nLDIR\ndone: RET\nDB \"OK\",0\nDW done\nDS COUNT,$FF\n");
+    s_binaryLength = 0;
+    expect(run_ok(buildTap, editor) && s_binaryLength > 40,
+           "bundled Z80 assembler handles directives and indexed/extended instructions");
+
+    set_document(editor, "org 3000\nld a,255\nloop: dec a\njp nz loop:\nret\n");
+    s_binaryLength = 0;
+    expect(run_ok(buildTap, editor) && s_binaryLength == 32 &&
+           (unsigned char)s_binaryData[16] == 0xb8 && (unsigned char)s_binaryData[17] == 0x0b &&
+           (unsigned char)s_binaryData[24] == 0x3e && (unsigned char)s_binaryData[25] == 0xff &&
+           (unsigned char)s_binaryData[26] == 0x3d && (unsigned char)s_binaryData[27] == 0xc2 &&
+           (unsigned char)s_binaryData[28] == 0xba && (unsigned char)s_binaryData[29] == 0x0b &&
+           (unsigned char)s_binaryData[30] == 0xc9,
+           "Z80 assembler accepts whitespace-separated conditions and colon references");
+
+    set_document(editor, "        org 8000\n        ld z,255\nloop:   dec a\n"
+                         "        jp nz, loop:\n        ret\n");
+    s_lastMessage[0] = 0;
+    expect(run_ok(buildTap, editor) && strstr(s_lastMessage, "Line 2:") &&
+           strstr(s_lastMessage, "unsupported LD operands") &&
+           SendMessageA(editor, SCI_GETSELECTIONSTART, 0, 0) == 17 &&
+           SendMessageA(editor, SCI_GETSELECTIONEND, 0, 0) == 33,
+           "bundled Z80 assembler highlights and reports the source line for an error");
 
     set_document(editor, s_calculatorExpression);
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
@@ -671,8 +740,8 @@ int main(void) {
     if (!editor) { FreeLibrary(scintilla); return 1; }
 
     static const PluginHostCallbacks fakes = {
-        fake_prompt, fake_choose, fake_file_path, fake_language, NULL,
-        fake_config_get, fake_config_set, NULL
+        fake_prompt, fake_choose, fake_file_path, fake_language, fake_message,
+        fake_config_get, fake_config_set, NULL, fake_save_binary
     };
     plugin_host_set_callbacks(&fakes);
     test_commands(editor);

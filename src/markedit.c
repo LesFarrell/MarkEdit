@@ -1893,6 +1893,36 @@ static void plugin_message(const char *title, const char *text, const char *kind
     free(wideTitle);
 }
 
+static int plugin_save_binary(const char *title, const char *defaultName,
+                              const char *data, size_t length) {
+    const DWORD capacity = 32768;
+    WCHAR *path = (WCHAR *)calloc(capacity, sizeof(WCHAR));
+    WCHAR *wideDefault = to_wide(defaultName);
+    WCHAR *wideTitle = to_wide(title);
+    if (!path || !wideDefault || !wideTitle) {
+        free(path); free(wideDefault); free(wideTitle);
+        return -1;
+    }
+    wcsncpy(path, wideDefault, capacity - 1);
+    const WCHAR *extension = PathFindExtensionW(wideDefault);
+    const WCHAR *defaultExtension = extension && extension[0] == L'.' ? extension + 1 : NULL;
+    OPENFILENAMEW dialog = {0};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = g_hMainWnd;
+    dialog.lpstrFilter = L"Binary Files (*.*)\0*.*\0All Files (*.*)\0*.*\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = capacity;
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    dialog.lpstrDefExt = defaultExtension;
+    dialog.lpstrTitle = wideTitle;
+    int result = 0;
+    if (GetSaveFileNameW(&dialog)) result = write_bytes_file(path, data, length) ? 1 : -1;
+    free(wideTitle);
+    free(wideDefault);
+    free(path);
+    return result;
+}
+
 static char *plugin_file_path(void) {
     return g_currentFile ? to_utf8(g_currentFile) : NULL;
 }
@@ -2135,7 +2165,7 @@ static void show_plugin_load_errors(const char *report) {
 static void load_menus_and_plugins(void) {
     static const PluginHostCallbacks callbacks = {
         plugin_prompt, plugin_choose, plugin_file_path, plugin_language, plugin_message,
-        plugin_config_get, plugin_config_set, plugin_is_enabled,
+        plugin_config_get, plugin_config_set, plugin_is_enabled, plugin_save_binary,
     };
     plugin_host_set_callbacks(&callbacks);
     plugin_host_shutdown();

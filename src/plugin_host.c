@@ -22,6 +22,7 @@
 
 #define PLUGIN_MAX_SCRIPT_BYTES (1024 * 1024)
 #define PLUGIN_MAX_CHOICES 10000
+#define PLUGIN_MAX_BINARY_BYTES (64 * 1024 * 1024)
 
 typedef struct {
     char *label;
@@ -241,6 +242,25 @@ static int ui_choose(lua_State *L) {
     lua_pushinteger(L, chosen + 1);
     lua_geti(L, 1, chosen + 1);
     return 2;
+}
+
+static int ui_save_binary(lua_State *L) {
+    lua_editor_api_require_editor(L);
+    const char *defaultName = checked_cstring(L, 1, "default file name");
+    size_t length = 0;
+    const char *data = luaL_checklstring(L, 2, &length);
+    const char *title = optional_cstring(L, 3, current_title(), "dialog title");
+    if (!defaultName[0]) return luaL_argerror(L, 1, "default file name must not be empty");
+    if (length > PLUGIN_MAX_BINARY_BYTES)
+        return luaL_error(L, "binary output exceeds the %d MiB limit",
+                          PLUGIN_MAX_BINARY_BYTES / (1024 * 1024));
+    if (!s_callbacks.save_binary)
+        return luaL_error(L, "ui.save_binary is not available here");
+    int result = s_callbacks.save_binary(title, defaultName, data, length);
+    restart_time_limit();
+    if (result < 0) return luaL_error(L, "the binary file could not be written");
+    lua_pushboolean(L, result > 0);
+    return 1;
 }
 
 /* Adds an entry the application places by its label: a menu.add command
@@ -589,6 +609,7 @@ static const luaL_Reg ui_functions[] = {
     {"message", ui_message},
     {"prompt", ui_prompt},
     {"choose", ui_choose},
+    {"save_binary", ui_save_binary},
     {NULL, NULL}
 };
 static const luaL_Reg menu_functions[] = {

@@ -7,7 +7,10 @@ pushd "%PROJECT_DIR%" || (echo Could not enter the project directory. & exit /b 
 
 where zig >nul 2>nul || (echo zig was not found on PATH. & exit /b 1)
 
-set "COMMON_FLAGS=-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-ident -fmerge-all-constants"
+rem Lua reports script errors with longjmp. On 64-bit Windows that unwind must
+rem cross valid function tables; stripping them makes any plugin error fail-fast
+rem in ntdll with STATUS_BAD_FUNCTION_TABLE before MarkEdit can show it.
+set "COMMON_FLAGS=-Os -ffunction-sections -fdata-sections -funwind-tables -fasynchronous-unwind-tables -fno-ident -fmerge-all-constants"
 set "LINK_FLAGS=-Wl,--gc-sections -Wl,--strip-all -Wl,--build-id=none"
 rem Intermediate files go here rather than the project root. build\ is shared
 rem with the premake5-generated build, which uses build\obj.

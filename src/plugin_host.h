@@ -34,6 +34,10 @@ typedef struct {
     /* Whether a discovered extension should load. scope is supplied by the
        application (for example "bundled" or "user"). */
     int (*plugin_enabled)(const char *scope, const char *name);
+    /* Shows a Save As dialog initialized with defaultName, then writes data
+       byte-for-byte. Returns 1 when saved, 0 when cancelled, or -1 on error. */
+    int (*save_binary)(const char *title, const char *defaultName,
+                       const char *data, size_t length);
 } PluginHostCallbacks;
 
 /* Copied; call before running commands. */
