@@ -1607,7 +1607,9 @@ static void load_workspace_settings(void) {
     WCHAR *path = get_settings_path();
     if (!path) return;
     WCHAR *value = read_profile_string(L"Workspace", L"CurrentFolder", path);
-    if (value) replace_wstring(&g_currentWorkspaceFolder, value);
+    /* Give the file explorer a useful root on a fresh install without
+       interrupting its first open with a folder-picker dialog. */
+    replace_wstring(&g_currentWorkspaceFolder, value && value[0] ? value : L"C:\\");
     free(value);
     free(path);
 }

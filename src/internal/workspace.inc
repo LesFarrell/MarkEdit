@@ -235,20 +235,16 @@ static void do_open_recent_workspace(int index) {
 }
 
 /* Mirrors toggle_outline()/toggle_preview(): flip the visibility flag, then
-   menu/layout/repaint/persist. Turning the panel on for the first time (no
-   workspace chosen yet) reuses the same folder-picker Quick Open already
-   falls back to, so there's no separate "no folder open" empty state to
-   design for. */
+   menu/layout/repaint/persist. load_workspace_settings() supplies C:\ as the
+   initial root, while Open Workspace remains available for choosing another
+   folder. */
 static void toggle_explorer_panel(HWND hwnd) {
     g_explorerVisible = !g_explorerVisible;
     if (g_explorerVisible) {
         if (g_currentWorkspaceFolder) {
             explorer_set_root(g_currentWorkspaceFolder);
         } else {
-            WCHAR *root = choose_workspace_folder();
-            if (!root) { g_explorerVisible = 0; update_view_menu(hwnd); return; }
-            adopt_workspace_folder(hwnd, root); /* g_explorerVisible is already true, so this also sets the root */
-            free(root);
+            adopt_workspace_folder(hwnd, L"C:\\"); /* also sets the explorer root */
         }
     } else {
         explorer_stop_watch();
