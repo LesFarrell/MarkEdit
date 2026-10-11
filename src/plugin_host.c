@@ -5,6 +5,8 @@
 
 #include <limits.h>
 #include <ctype.h>
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,7 @@
 #define PLUGIN_MAX_SCRIPT_BYTES (1024 * 1024)
 #define PLUGIN_MAX_CHOICES 10000
 #define PLUGIN_MAX_BINARY_BYTES (64 * 1024 * 1024)
+#define PLUGIN_MAX_DEFERRED 64
 
 typedef struct {
     char *label;
@@ -50,17 +53,38 @@ typedef struct {
     char *label;       /* "script.lua: event", for dialog titles */
     int ref;
     char *owner;
+    int id;
 } PluginHandler;
 
-static const char *const EVENT_NAMES[] = { "save", "open", "tab_changed" };
+typedef struct {
+    int token;
+    int ref;
+    char *owner;
+    char *label;
+} PluginDeferred;
+
+typedef struct {
+    char *owner;
+    WCHAR *moduleRoot;
+} PluginContext;
+
+static const char *const EVENT_NAMES[] = {
+    "before_save", "save", "after_save", "open", "close", "tab_changed",
+    "text_changed", "selection_changed", "workspace_changed", "theme_changed", "shutdown"
+};
 
 static lua_State *s_lua = NULL;
 static PluginCommand s_commands[PLUGIN_MAX_COMMANDS];
 static int s_commandCount = 0;
 static PluginHandler s_handlers[PLUGIN_MAX_HANDLERS];
 static int s_handlerCount = 0;
+static int s_nextHandlerId = 1;
+static PluginDeferred s_deferred[PLUGIN_MAX_DEFERRED];
+static int s_nextDeferredToken = 1;
 static PluginExtension s_extensions[256];
 static int s_extensionCount = 0;
+static PluginContext s_contexts[256];
+static int s_contextCount = 0;
 static WCHAR *s_firstErrorPath = NULL;
 static int s_firstErrorLine = 0;
 /* The script whose top-level code is running, while it loads, and whether
@@ -79,6 +103,28 @@ static int s_timeLimited = 1;
 static PluginHostCallbacks s_callbacks;
 static ULONGLONG s_callStarted = 0;
 
+typedef struct { size_t used; size_t limit; } LuaMemory;
+static LuaMemory s_memory = { 0, PLUGIN_MEMORY_LIMIT_BYTES };
+static const char *current_owner(lua_State *L);
+
+static void *limited_alloc(void *ud, void *pointer, size_t oldSize, size_t newSize) {
+    LuaMemory *memory = (LuaMemory *)ud;
+    /* Lua passes an object-type tag rather than a byte count in oldSize for
+       a fresh allocation. */
+    if (!pointer) oldSize = 0;
+    if (!newSize) {
+        free(pointer);
+        memory->used = oldSize <= memory->used ? memory->used - oldSize : 0;
+        return NULL;
+    }
+    if (newSize > oldSize && newSize - oldSize > memory->limit - memory->used) return NULL;
+    void *resized = realloc(pointer, newSize);
+    if (!resized) return NULL;
+    if (newSize >= oldSize) memory->used += newSize - oldSize;
+    else memory->used -= oldSize - newSize;
+    return resized;
+}
+
 void plugin_host_set_callbacks(const PluginHostCallbacks *callbacks) {
     if (callbacks) s_callbacks = *callbacks;
     else memset(&s_callbacks, 0, sizeof(s_callbacks));
@@ -91,6 +137,87 @@ static char *dup_string(const char *value) {
     char *copy = (char *)malloc(bytes);
     if (copy) memcpy(copy, value, bytes);
     return copy;
+}
+
+static PluginContext *find_context(const char *owner) {
+    if (!owner) return NULL;
+    for (int i = 0; i < s_contextCount; i++)
+        if (strcmp(s_contexts[i].owner, owner) == 0) return &s_contexts[i];
+    return NULL;
+}
+
+static int remember_context(const char *owner, const WCHAR *moduleRoot) {
+    PluginContext *context = find_context(owner);
+    if (context) {
+        if (moduleRoot && !context->moduleRoot) context->moduleRoot = wcsdup_heap(moduleRoot);
+        return !moduleRoot || context->moduleRoot != NULL;
+    }
+    if (s_contextCount >= (int)(sizeof(s_contexts) / sizeof(s_contexts[0]))) return 0;
+    context = &s_contexts[s_contextCount];
+    context->owner = dup_string(owner);
+    context->moduleRoot = moduleRoot ? wcsdup_heap(moduleRoot) : NULL;
+    if (!context->owner || (moduleRoot && !context->moduleRoot)) {
+        free(context->owner); free(context->moduleRoot);
+        memset(context, 0, sizeof(*context));
+        return 0;
+    }
+    s_contextCount++;
+    return 1;
+}
+
+static void push_shallow_table_copy(lua_State *L, int sourceIndex) {
+    sourceIndex = lua_absindex(L, sourceIndex);
+    lua_newtable(L);
+    int copyIndex = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, sourceIndex)) {
+        lua_pushvalue(L, -2);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, copyIndex);
+        lua_pop(L, 1);
+    }
+}
+
+/* Pushes a private global environment for owner. Standard-library and API
+   tables are shallow-copied so a plugin cannot modify another plugin's
+   string/table/editor/etc tables. Functions themselves remain shared. */
+static void push_plugin_environment(lua_State *L, const char *owner) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "markedit.environments");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "markedit.environments");
+    }
+    lua_getfield(L, -1, owner);
+    if (!lua_isnil(L, -1)) {
+        lua_remove(L, -2);
+        return;
+    }
+    lua_pop(L, 1);
+    lua_newtable(L);                       /* environments, env */
+    int environmentIndex = lua_gettop(L);
+    lua_pushglobaltable(L);                /* environments, env, globals */
+    lua_pushnil(L);
+    while (lua_next(L, -2)) {
+        lua_pushvalue(L, -2);              /* copied key */
+        if (lua_istable(L, -2)) push_shallow_table_copy(L, -2);
+        else lua_pushvalue(L, -2);
+        lua_rawset(L, environmentIndex);   /* env[copied key] = copied value */
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);                         /* environments, env */
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "_G");
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -3, owner);
+    lua_remove(L, -2);
+}
+
+static void set_chunk_environment(lua_State *L, int functionIndex, const char *owner) {
+    functionIndex = lua_absindex(L, functionIndex);
+    push_plugin_environment(L, owner);
+    if (!lua_setupvalue(L, functionIndex, 1)) lua_pop(L, 1);
 }
 
 /* Lua strings are length-counted, while labels, callback arguments and
@@ -263,6 +390,46 @@ static int ui_save_binary(lua_State *L) {
     return 1;
 }
 
+static int ui_confirm(lua_State *L) {
+    lua_editor_api_require_editor(L);
+    const char *text = checked_cstring(L, 1, "confirmation text");
+    const char *title = optional_cstring(L, 2, current_title(), "confirmation title");
+    if (!s_callbacks.confirm) return luaL_error(L, "ui.confirm is not available here");
+    int answer = s_callbacks.confirm(title, text);
+    restart_time_limit();
+    lua_pushboolean(L, answer);
+    return 1;
+}
+
+static int ui_status(lua_State *L) {
+    const char *value = checked_cstring(L, 1, "status text");
+    if (!s_callbacks.status) return luaL_error(L, "ui.status is not available here");
+    s_callbacks.status(value);
+    return 0;
+}
+
+static int ui_log(lua_State *L) {
+    const char *value = checked_cstring(L, 1, "log text");
+    if (s_callbacks.log) s_callbacks.log(current_owner(L), value);
+    else OutputDebugStringA(value);
+    return 0;
+}
+
+static int ui_pick_path(lua_State *L, int folder) {
+    lua_editor_api_require_editor(L);
+    const char *title = optional_cstring(L, 1,
+        folder ? "Choose Folder" : "Open File", "dialog title");
+    if (!s_callbacks.pick_path) return luaL_error(L, "path picker is not available here");
+    char *path = s_callbacks.pick_path(title, folder);
+    restart_time_limit();
+    if (path) lua_pushstring(L, path); else lua_pushnil(L);
+    free(path);
+    return 1;
+}
+
+static int ui_pick_file(lua_State *L) { return ui_pick_path(L, 0); }
+static int ui_pick_folder(lua_State *L) { return ui_pick_path(L, 1); }
+
 /* Adds an entry the application places by its label: a menu.add command
    (fn at stack index 2), or a menu.separator. */
 static int parse_shortcut(const char *value, BYTE *flags, WORD *key) {
@@ -433,11 +600,11 @@ static int events_on(lua_State *L) {
     const char *event = NULL;
     for (size_t i = 0; i < sizeof(EVENT_NAMES) / sizeof(EVENT_NAMES[0]); i++)
         if (strcmp(name, EVENT_NAMES[i]) == 0) event = EVENT_NAMES[i];
-    if (!event)
-        return luaL_error(L, "unknown event '%s' (expected save, open or tab_changed)", name);
+    if (!event) return luaL_error(L, "unknown event '%s'", name);
     if (s_handlerCount >= PLUGIN_MAX_HANDLERS)
         return luaL_error(L, "too many event handlers (the limit is %d)", PLUGIN_MAX_HANDLERS);
-    const char *owner = s_loadingName ? s_loadingName : current_title();
+    const char *owner = s_loadingName ? s_loadingName
+                                      : s_runningOwner ? s_runningOwner : current_title();
     char *label = (char *)malloc(strlen(owner) + strlen(event) + 3);
     if (!label) return luaL_error(L, "out of memory");
     sprintf(label, "%s: %s", owner, event);
@@ -445,20 +612,193 @@ static int events_on(lua_State *L) {
     s_handlers[s_handlerCount].event = event;
     s_handlers[s_handlerCount].label = label;
     s_handlers[s_handlerCount].ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    s_handlers[s_handlerCount].owner = dup_string(s_loadingName ? s_loadingName : "plugin");
+    s_handlers[s_handlerCount].owner = dup_string(owner);
     if (!s_handlers[s_handlerCount].owner) {
         luaL_unref(L, LUA_REGISTRYINDEX, s_handlers[s_handlerCount].ref);
         free(s_handlers[s_handlerCount].label);
         return luaL_error(L, "out of memory");
     }
+    s_handlers[s_handlerCount].id = s_nextHandlerId;
+    s_nextHandlerId = s_nextHandlerId == INT_MAX ? 1 : s_nextHandlerId + 1;
+    lua_pushinteger(L, s_handlers[s_handlerCount].id);
     s_handlerCount++;
-    return 0;
+    return 1;
+}
+
+static int events_off(lua_State *L) {
+    int id = (int)luaL_checkinteger(L, 1);
+    const char *owner = current_owner(L);
+    for (int i = 0; i < s_handlerCount; i++) {
+        if (s_handlers[i].id != id || strcmp(s_handlers[i].owner, owner) != 0) continue;
+        luaL_unref(L, LUA_REGISTRYINDEX, s_handlers[i].ref);
+        free(s_handlers[i].label);
+        free(s_handlers[i].owner);
+        memmove(&s_handlers[i], &s_handlers[i + 1],
+                (size_t)(s_handlerCount - i - 1) * sizeof(s_handlers[0]));
+        s_handlerCount--;
+        memset(&s_handlers[s_handlerCount], 0, sizeof(s_handlers[0]));
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushboolean(L, 0);
+    return 1;
 }
 
 static const char *current_owner(lua_State *L) {
     const char *owner = s_loadingName ? s_loadingName : s_runningOwner;
     if (!owner) luaL_error(L, "config is only available while loading or running a plugin");
     return owner;
+}
+
+#define CONFIG_TABLE_PREFIX "@ME1:"
+#define CONFIG_MAX_DEPTH 32
+
+static void encode_config_value(lua_State *L, int index, luaL_Buffer *buffer, int depth) {
+    if (depth > CONFIG_MAX_DEPTH) luaL_error(L, "config table is nested too deeply");
+    index = lua_absindex(L, index);
+    switch (lua_type(L, index)) {
+        case LUA_TNIL: luaL_addchar(buffer, 'N'); return;
+        case LUA_TBOOLEAN:
+            luaL_addstring(buffer, lua_toboolean(L, index) ? "B1" : "B0"); return;
+        case LUA_TNUMBER: {
+            char number[64];
+            if (lua_isinteger(L, index))
+                snprintf(number, sizeof(number), "I%lld;", (long long)lua_tointeger(L, index));
+            else {
+                double value = (double)lua_tonumber(L, index);
+                if (!isfinite(value)) luaL_error(L, "config numbers must be finite");
+                snprintf(number, sizeof(number), "D%.17g;", value);
+            }
+            luaL_addstring(buffer, number); return;
+        }
+        case LUA_TSTRING: {
+            static const char HEX[] = "0123456789abcdef";
+            size_t length;
+            const unsigned char *value = (const unsigned char *)lua_tolstring(L, index, &length);
+            char size[32]; snprintf(size, sizeof(size), "S%zu:", length);
+            luaL_addstring(buffer, size);
+            for (size_t i = 0; i < length; i++) {
+                luaL_addchar(buffer, HEX[value[i] >> 4]);
+                luaL_addchar(buffer, HEX[value[i] & 15]);
+            }
+            return;
+        }
+        case LUA_TTABLE: {
+            size_t arrayLength = lua_rawlen(L, index), count = 0;
+            int array = 1;
+            lua_pushnil(L);
+            while (lua_next(L, index)) {
+                count++;
+                if (!lua_isinteger(L, -2)) array = 0;
+                else {
+                    lua_Integer key = lua_tointeger(L, -2);
+                    if (key < 1 || (size_t)key > arrayLength) array = 0;
+                }
+                lua_pop(L, 1);
+                if (count > 10000) luaL_error(L, "config table has too many entries");
+            }
+            if (array && count == arrayLength) {
+                char header[32]; snprintf(header, sizeof(header), "A%zu;", arrayLength);
+                luaL_addstring(buffer, header);
+                for (size_t i = 1; i <= arrayLength; i++) {
+                    lua_rawgeti(L, index, (lua_Integer)i);
+                    encode_config_value(L, -1, buffer, depth + 1);
+                    lua_pop(L, 1);
+                }
+            } else {
+                char header[32]; snprintf(header, sizeof(header), "O%zu;", count);
+                luaL_addstring(buffer, header);
+                lua_pushnil(L);
+                while (lua_next(L, index)) {
+                    if (lua_type(L, -2) != LUA_TSTRING)
+                        luaL_error(L, "config object keys must be strings");
+                    encode_config_value(L, -2, buffer, depth + 1);
+                    encode_config_value(L, -1, buffer, depth + 1);
+                    lua_pop(L, 1);
+                }
+            }
+            return;
+        }
+        default: luaL_error(L, "config values cannot contain %s", luaL_typename(L, index));
+    }
+}
+
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int decode_size(const char **cursor, const char *end, char delimiter, size_t *value) {
+    size_t result = 0;
+    const char *p = *cursor;
+    if (p >= end || !isdigit((unsigned char)*p)) return 0;
+    while (p < end && isdigit((unsigned char)*p)) {
+        size_t digit = (size_t)(*p++ - '0');
+        if (result > (SIZE_MAX - digit) / 10) return 0;
+        result = result * 10 + digit;
+    }
+    if (p >= end || *p++ != delimiter) return 0;
+    *cursor = p; *value = result; return 1;
+}
+
+static int decode_config_value(lua_State *L, const char **cursor, const char *end, int depth) {
+    if (depth > CONFIG_MAX_DEPTH || *cursor >= end) return 0;
+    char type = *(*cursor)++;
+    if (type == 'N') { lua_pushnil(L); return 1; }
+    if (type == 'B' && *cursor < end && (**cursor == '0' || **cursor == '1')) {
+        lua_pushboolean(L, *(*cursor)++ == '1'); return 1;
+    }
+    if (type == 'I' || type == 'D') {
+        const char *finish = memchr(*cursor, ';', (size_t)(end - *cursor));
+        if (!finish || finish == *cursor || (size_t)(finish - *cursor) >= 64) return 0;
+        char number[64]; memcpy(number, *cursor, (size_t)(finish - *cursor));
+        number[finish - *cursor] = 0;
+        char *parsedEnd = NULL;
+        if (type == 'I') {
+            long long value = strtoll(number, &parsedEnd, 10);
+            if (!parsedEnd || *parsedEnd) return 0;
+            lua_pushinteger(L, (lua_Integer)value);
+        } else {
+            double value = strtod(number, &parsedEnd);
+            if (!parsedEnd || *parsedEnd || !isfinite(value)) return 0;
+            lua_pushnumber(L, (lua_Number)value);
+        }
+        *cursor = finish + 1; return 1;
+    }
+    if (type == 'S') {
+        size_t length;
+        if (!decode_size(cursor, end, ':', &length) || length > (size_t)(end - *cursor) / 2) return 0;
+        luaL_Buffer buffer;
+        char *target = luaL_buffinitsize(L, &buffer, length);
+        for (size_t i = 0; i < length; i++) {
+            int high = hex_value((*cursor)[i * 2]), low = hex_value((*cursor)[i * 2 + 1]);
+            if (high < 0 || low < 0) return 0;
+            target[i] = (char)((high << 4) | low);
+        }
+        *cursor += length * 2;
+        luaL_pushresultsize(&buffer, length);
+        return 1;
+    }
+    if (type == 'A' || type == 'O') {
+        size_t count;
+        if (!decode_size(cursor, end, ';', &count) || count > 10000) return 0;
+        lua_createtable(L, type == 'A' ? (int)count : 0, type == 'O' ? (int)count : 0);
+        for (size_t i = 0; i < count; i++) {
+            if (type == 'A') {
+                if (!decode_config_value(L, cursor, end, depth + 1)) return 0;
+                lua_rawseti(L, -2, (lua_Integer)i + 1);
+            } else {
+                if (!decode_config_value(L, cursor, end, depth + 1) ||
+                    lua_type(L, -1) != LUA_TSTRING ||
+                    !decode_config_value(L, cursor, end, depth + 1)) return 0;
+                lua_rawset(L, -3);
+            }
+        }
+        return 1;
+    }
+    return 0;
 }
 
 static int config_get(lua_State *L) {
@@ -469,7 +809,15 @@ static int config_get(lua_State *L) {
         else lua_pushnil(L);
         return 1;
     }
-    if (lua_type(L, 2) == LUA_TBOOLEAN) {
+    if (lua_istable(L, 2)) {
+        size_t prefix = sizeof(CONFIG_TABLE_PREFIX) - 1, length = strlen(value);
+        const char *cursor = value + prefix, *end = value + length;
+        if (length < prefix || memcmp(value, CONFIG_TABLE_PREFIX, prefix) != 0 ||
+            !decode_config_value(L, &cursor, end, 0) || cursor != end) {
+            lua_settop(L, 2);
+            lua_pushvalue(L, 2);
+        }
+    } else if (lua_type(L, 2) == LUA_TBOOLEAN) {
         lua_pushboolean(L, strcmp(value, "1") == 0 || _stricmp(value, "true") == 0 ||
                            _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0);
     } else if (lua_type(L, 2) == LUA_TNUMBER) {
@@ -488,6 +836,7 @@ static int config_set(lua_State *L) {
     const char *key = checked_config_key(L, 1);
     const char *value = NULL;
     char number[64];
+    char *structured = NULL;
     switch (lua_type(L, 2)) {
         case LUA_TNIL: break;
         case LUA_TBOOLEAN: value = lua_toboolean(L, 2) ? "1" : "0"; break;
@@ -496,10 +845,24 @@ static int config_set(lua_State *L) {
             value = number;
             break;
         case LUA_TSTRING: value = checked_cstring(L, 2, "config value"); break;
+        case LUA_TTABLE: {
+            luaL_Buffer buffer; luaL_buffinit(L, &buffer);
+            luaL_addstring(&buffer, CONFIG_TABLE_PREFIX);
+            encode_config_value(L, 2, &buffer, 0);
+            luaL_pushresult(&buffer);
+            structured = dup_string(lua_tostring(L, -1));
+            lua_pop(L, 1);
+            if (!structured) return luaL_error(L, "out of memory");
+            value = structured;
+            break;
+        }
         default: return luaL_argerror(L, 2, "expected string, number, boolean or nil");
     }
-    if (!s_callbacks.config_set || !s_callbacks.config_set(current_owner(L), key, value))
+    if (!s_callbacks.config_set || !s_callbacks.config_set(current_owner(L), key, value)) {
+        free(structured);
         return luaL_error(L, "could not write the plugin setting");
+    }
+    free(structured);
     return 0;
 }
 
@@ -537,6 +900,154 @@ static int app_date_time(lua_State *L) {
     return 1;
 }
 
+static int app_version(lua_State *L) { lua_pushliteral(L, "1.0.0"); return 1; }
+static int app_api_version(lua_State *L) {
+    lua_pushinteger(L, MARKEDIT_PLUGIN_API_VERSION);
+    return 1;
+}
+static int app_platform(lua_State *L) { lua_pushliteral(L, "windows"); return 1; }
+static int app_memory_used(lua_State *L) {
+    lua_pushinteger(L, (lua_Integer)s_memory.used);
+    return 1;
+}
+static int app_workspace_path(lua_State *L) {
+    char *path = s_callbacks.workspace_path ? s_callbacks.workspace_path() : NULL;
+    if (path) lua_pushstring(L, path); else lua_pushnil(L);
+    free(path);
+    return 1;
+}
+static int app_capabilities(lua_State *L) {
+    static const char *const names[] = {
+        "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
+        "documents", "command_execution", "path_picker", "status", "logging", "defer"
+    };
+    lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        lua_pushboolean(L, 1);
+        lua_setfield(L, -2, names[i]);
+    }
+    return 1;
+}
+
+static int app_defer(lua_State *L) {
+    lua_Integer delay = luaL_checkinteger(L, 1);
+    luaL_argcheck(L, delay >= 0 && delay <= 60000, 1, "delay must be from 0 to 60000 ms");
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if (!s_callbacks.schedule_deferred)
+        return luaL_error(L, "app.defer is not available here");
+    int slot = -1;
+    for (int i = 0; i < PLUGIN_MAX_DEFERRED; i++) if (!s_deferred[i].token) { slot = i; break; }
+    if (slot < 0) return luaL_error(L, "too many deferred plugin callbacks");
+    int token = s_nextDeferredToken;
+    s_nextDeferredToken = s_nextDeferredToken == INT_MAX ? 1 : s_nextDeferredToken + 1;
+    const char *owner = current_owner(L);
+    lua_pushvalue(L, 2);
+    s_deferred[slot].ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    s_deferred[slot].token = token;
+    s_deferred[slot].owner = dup_string(owner);
+    s_deferred[slot].label = dup_string(current_title());
+    if (!s_deferred[slot].owner || !s_deferred[slot].label ||
+        !s_callbacks.schedule_deferred(token, (unsigned)delay, 0)) {
+        luaL_unref(L, LUA_REGISTRYINDEX, s_deferred[slot].ref);
+        free(s_deferred[slot].owner); free(s_deferred[slot].label);
+        memset(&s_deferred[slot], 0, sizeof(s_deferred[slot]));
+        return luaL_error(L, "the deferred callback could not be scheduled");
+    }
+    lua_pushinteger(L, token);
+    return 1;
+}
+
+static int app_cancel(lua_State *L) {
+    int token = (int)luaL_checkinteger(L, 1);
+    for (int i = 0; i < PLUGIN_MAX_DEFERRED; i++) {
+        if (s_deferred[i].token != token) continue;
+        if (strcmp(s_deferred[i].owner, current_owner(L)) != 0) break;
+        if (s_callbacks.schedule_deferred) s_callbacks.schedule_deferred(token, 0, 1);
+        luaL_unref(L, LUA_REGISTRYINDEX, s_deferred[i].ref);
+        free(s_deferred[i].owner); free(s_deferred[i].label);
+        memset(&s_deferred[i], 0, sizeof(s_deferred[i]));
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushboolean(L, 0);
+    return 1;
+}
+
+static int commands_execute(lua_State *L) {
+    const char *name = checked_cstring(L, 1, "command name");
+    if (!s_callbacks.invoke_command)
+        return luaL_error(L, "commands.execute is not available here");
+    lua_pushboolean(L, s_callbacks.invoke_command(name));
+    return 1;
+}
+
+static int documents_count(lua_State *L) {
+    lua_pushinteger(L, s_callbacks.document_count ? s_callbacks.document_count() : 1);
+    return 1;
+}
+static int documents_active(lua_State *L) {
+    lua_pushinteger(L, (s_callbacks.document_active ? s_callbacks.document_active() : 0) + 1);
+    return 1;
+}
+static int checked_document_index(lua_State *L, int argument) {
+    int count = s_callbacks.document_count ? s_callbacks.document_count() : 1;
+    lua_Integer index = luaL_checkinteger(L, argument);
+    luaL_argcheck(L, index >= 1 && index <= count, argument, "document index out of range");
+    return (int)index - 1;
+}
+static int documents_activate(lua_State *L) {
+    int index = checked_document_index(L, 1);
+    if (!s_callbacks.document_activate)
+        return luaL_error(L, "documents.activate is not available here");
+    lua_pushboolean(L, s_callbacks.document_activate(index));
+    return 1;
+}
+static int documents_new(lua_State *L) {
+    if (!s_callbacks.document_new) return luaL_error(L, "documents.new is not available here");
+    lua_pushboolean(L, s_callbacks.document_new());
+    return 1;
+}
+static int documents_open(lua_State *L) {
+    const char *path = checked_cstring(L, 1, "file path");
+    if (!s_callbacks.document_open) return luaL_error(L, "documents.open is not available here");
+    lua_pushboolean(L, s_callbacks.document_open(path));
+    return 1;
+}
+static int documents_save(lua_State *L) {
+    if (!s_callbacks.document_save) return luaL_error(L, "documents.save is not available here");
+    lua_pushboolean(L, s_callbacks.document_save(lua_toboolean(L, 1)));
+    return 1;
+}
+static int documents_close(lua_State *L) {
+    int index = lua_isnoneornil(L, 1)
+        ? (s_callbacks.document_active ? s_callbacks.document_active() : 0)
+        : checked_document_index(L, 1);
+    if (!s_callbacks.document_close) return luaL_error(L, "documents.close is not available here");
+    lua_pushboolean(L, s_callbacks.document_close(index));
+    return 1;
+}
+static int documents_path(lua_State *L) {
+    int index = lua_isnoneornil(L, 1)
+        ? (s_callbacks.document_active ? s_callbacks.document_active() : 0)
+        : checked_document_index(L, 1);
+    char *path = s_callbacks.document_path ? s_callbacks.document_path(index) : NULL;
+    if (path) lua_pushstring(L, path); else lua_pushnil(L);
+    free(path);
+    return 1;
+}
+static int documents_modified(lua_State *L) {
+    int index = lua_isnoneornil(L, 1)
+        ? (s_callbacks.document_active ? s_callbacks.document_active() : 0)
+        : checked_document_index(L, 1);
+    lua_pushboolean(L, s_callbacks.document_modified && s_callbacks.document_modified(index));
+    return 1;
+}
+static int documents_encoding(lua_State *L) {
+    const char *encoding = s_callbacks.document_encoding ? s_callbacks.document_encoding() : "utf-8";
+    lua_pushstring(L, encoding ? encoding : "utf-8");
+    return 1;
+}
+
 static int valid_module_name(const char *module) {
     size_t length = strlen(module);
     if (!length || length > 128 || module[0] == '.' || module[length - 1] == '.') return 0;
@@ -547,6 +1058,8 @@ static int valid_module_name(const char *module) {
     }
     return 1;
 }
+
+static char s_moduleLoadingSentinel;
 
 /* Leaves the module cache table on the stack, and a cached value above it
    when one exists. */
@@ -564,13 +1077,13 @@ static int push_module_cache(lua_State *L, const char *cacheKey) {
     return 0;
 }
 
-static WCHAR *module_source_path(const char *module, char relative[260]) {
+static WCHAR *module_source_path(const WCHAR *moduleRoot, const char *module, char relative[260]) {
     snprintf(relative, 260, "%s.lua", module);
     for (char *p = relative; *p; p++) if (*p == '.') *p = '/';
     /* Restore the extension dot replaced by the loop above. */
     memcpy(relative + strlen(relative) - 4, ".lua", 5);
     WCHAR *wide = to_wide(relative);
-    WCHAR *path = wide ? path_join(s_loadingModuleRoot, wide) : NULL;
+    WCHAR *path = wide ? path_join(moduleRoot, wide) : NULL;
     free(wide);
     return path;
 }
@@ -579,26 +1092,45 @@ static WCHAR *module_source_path(const char *module, char relative[260]) {
    below the folder extension whose init.lua is currently loading. */
 static int plugin_require(lua_State *L) {
     const char *module = checked_cstring(L, 1, "module name");
-    if (!s_loadingModuleRoot)
-        return luaL_error(L, "require is available only from a folder extension's init.lua");
+    const char *owner = s_loadingName ? s_loadingName : s_runningOwner;
+    PluginContext *context = find_context(owner);
+    if (!context || !context->moduleRoot)
+        return luaL_error(L, "require is available only from a folder extension");
     if (!valid_module_name(module))
         return luaL_error(L, "module names may contain letters, digits, '_' and single dots");
     char cacheKey[520];
-    snprintf(cacheKey, sizeof(cacheKey), "%s\n%s", s_loadingName ? s_loadingName : "plugin", module);
-    if (push_module_cache(L, cacheKey)) return 1;
+    snprintf(cacheKey, sizeof(cacheKey), "%s\n%s", owner, module);
+    if (push_module_cache(L, cacheKey)) {
+        if (lua_touserdata(L, -1) == &s_moduleLoadingSentinel)
+            return luaL_error(L, "circular require of module '%s'", module);
+        return 1;
+    }
+    lua_pushlightuserdata(L, &s_moduleLoadingSentinel);
+    lua_setfield(L, -2, cacheKey);
 
     char relative[260];
-    WCHAR *path = module_source_path(module, relative);
+    WCHAR *path = module_source_path(context->moduleRoot, module, relative);
     size_t codeLength = 0;
     char *code = path ? read_utf8_text_file_length(path, PLUGIN_MAX_SCRIPT_BYTES, &codeLength) : NULL;
     free(path);
-    if (!code) return luaL_error(L, "module '%s' was not found or is not valid UTF-8", module);
+    if (!code) {
+        lua_pushnil(L); lua_setfield(L, -2, cacheKey);
+        return luaL_error(L, "module '%s' was not found or is not valid UTF-8", module);
+    }
     char chunkName[300];
-    snprintf(chunkName, sizeof(chunkName), "=%s/%s", s_loadingName ? s_loadingName : "plugin", relative);
+    snprintf(chunkName, sizeof(chunkName), "=%s/%s", owner, relative);
     int status = luaL_loadbufferx(L, code, codeLength, chunkName, "t");
     free(code);
-    if (status != LUA_OK) return lua_error(L);
-    lua_call(L, 0, 1);
+    if (status != LUA_OK) {
+        lua_pushnil(L); lua_setfield(L, -3, cacheKey);
+        return lua_error(L);
+    }
+    set_chunk_environment(L, -1, owner);
+    status = lua_pcall(L, 0, 1, 0);
+    if (status != LUA_OK) {
+        lua_pushnil(L); lua_setfield(L, -3, cacheKey);
+        return lua_error(L);
+    }
     if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
     lua_pushvalue(L, -1);
     lua_setfield(L, -3, cacheKey);
@@ -610,16 +1142,33 @@ static const luaL_Reg ui_functions[] = {
     {"prompt", ui_prompt},
     {"choose", ui_choose},
     {"save_binary", ui_save_binary},
+    {"confirm", ui_confirm}, {"status", ui_status}, {"log", ui_log},
+    {"pick_file", ui_pick_file}, {"pick_folder", ui_pick_folder},
     {NULL, NULL}
 };
 static const luaL_Reg menu_functions[] = {
     {"add", menu_add}, {"checkbox", menu_checkbox}, {"separator", menu_separator}, {NULL, NULL}
 };
-static const luaL_Reg events_functions[] = { {"on", events_on}, {NULL, NULL} };
-static const luaL_Reg commands_functions[] = { {"register", commands_register}, {NULL, NULL} };
+static const luaL_Reg events_functions[] = {
+    {"on", events_on}, {"off", events_off}, {NULL, NULL}
+};
+static const luaL_Reg commands_functions[] = {
+    {"register", commands_register}, {"execute", commands_execute}, {NULL, NULL}
+};
 static const luaL_Reg config_functions[] = { {"get", config_get}, {"set", config_set}, {NULL, NULL} };
 static const luaL_Reg app_functions[] = {
-    {"date", app_date}, {"time", app_time}, {"date_time", app_date_time}, {NULL, NULL}
+    {"date", app_date}, {"time", app_time}, {"date_time", app_date_time},
+    {"version", app_version}, {"api_version", app_api_version},
+    {"platform", app_platform}, {"memory_used", app_memory_used},
+    {"workspace_path", app_workspace_path}, {"capabilities", app_capabilities},
+    {"defer", app_defer}, {"cancel", app_cancel},
+    {NULL, NULL}
+};
+static const luaL_Reg documents_functions[] = {
+    {"count", documents_count}, {"active", documents_active},
+    {"activate", documents_activate}, {"new", documents_new}, {"open", documents_open},
+    {"save", documents_save}, {"close", documents_close}, {"path", documents_path},
+    {"modified", documents_modified}, {"encoding", documents_encoding}, {NULL, NULL}
 };
 
 /* ---- menu definitions ---- */
@@ -819,6 +1368,8 @@ static int open_environment(lua_State *L) {
     lua_setglobal(L, "config");
     luaL_newlib(L, app_functions);
     lua_setglobal(L, "app");
+    luaL_newlib(L, documents_functions);
+    lua_setglobal(L, "documents");
     lua_pushcfunction(L, plugin_require);
     lua_setglobal(L, "require");
     lua_sethook(L, time_limit_hook, LUA_MASKCOUNT, 10000);
@@ -827,7 +1378,9 @@ static int open_environment(lua_State *L) {
 
 static char *ensure_state(void) {
     if (s_lua) return NULL;
-    s_lua = luaL_newstate();
+    s_memory.used = 0;
+    s_memory.limit = PLUGIN_MEMORY_LIMIT_BYTES;
+    s_lua = lua_newstate(limited_alloc, &s_memory);
     if (!s_lua) return dup_string("Lua could not start: out of memory");
     lua_pushcfunction(s_lua, open_environment);
     char *error = protected_call(0);
@@ -853,6 +1406,11 @@ static char *run_script(const char *name, const char *code, size_t length,
         error = dup_string(lua_tostring(s_lua, -1));
         lua_pop(s_lua, runner ? 2 : 1);
     } else {
+        if (!remember_context(name, moduleRoot)) {
+            lua_pop(s_lua, runner ? 2 : 1);
+            return dup_string("out of memory recording plugin context");
+        }
+        set_chunk_environment(s_lua, -1, name);
         s_busy = 1;
         s_loadingName = name;
         s_loadingModuleRoot = moduleRoot;
@@ -1144,6 +1702,14 @@ char *plugin_host_load_directory(const WCHAR *directory, const char *scope) {
 
 void plugin_host_shutdown(void) {
     if (s_busy) return;
+    for (int i = 0; i < PLUGIN_MAX_DEFERRED; i++) {
+        if (!s_deferred[i].token) continue;
+        if (s_callbacks.schedule_deferred)
+            s_callbacks.schedule_deferred(s_deferred[i].token, 0, 1);
+        if (s_lua) luaL_unref(s_lua, LUA_REGISTRYINDEX, s_deferred[i].ref);
+        free(s_deferred[i].owner); free(s_deferred[i].label);
+        memset(&s_deferred[i], 0, sizeof(s_deferred[i]));
+    }
     free_menu();
     discard_commands_from(0);
     discard_handlers_from(0);
@@ -1152,6 +1718,11 @@ void plugin_host_shutdown(void) {
         free(s_extensions[i].scope);
     }
     s_extensionCount = 0;
+    for (int i = 0; i < s_contextCount; i++) {
+        free(s_contexts[i].owner);
+        free(s_contexts[i].moduleRoot);
+    }
+    s_contextCount = 0;
     free(s_firstErrorPath);
     s_firstErrorPath = NULL;
     s_firstErrorLine = 0;
@@ -1159,6 +1730,7 @@ void plugin_host_shutdown(void) {
         lua_close(s_lua);
         s_lua = NULL;
     }
+    s_memory.used = 0;
 }
 
 int plugin_host_is_busy(void) {
@@ -1238,10 +1810,16 @@ int plugin_host_find_override(const char *name) {
 static char *call_registered(int ref, const char *label, const char *owner,
                              const char *argument, int booleanArgument,
                              HWND hEdit, int timeLimited) {
+    char *stableLabel = dup_string(label);
+    char *stableOwner = dup_string(owner);
+    if (!stableLabel || !stableOwner) {
+        free(stableLabel); free(stableOwner);
+        return dup_string("out of memory starting plugin callback");
+    }
     s_busy = 1;
     lua_editor_api_set_editor(hEdit);
-    s_runningLabel = label;
-    s_runningOwner = owner;
+    s_runningLabel = stableLabel;
+    s_runningOwner = stableOwner;
     s_timeLimited = timeLimited;
     /* An empty undo group isn't recorded, so the undo position only moves
        if the function really changed the document. */
@@ -1252,6 +1830,7 @@ static char *call_registered(int ref, const char *label, const char *owner,
     else if (argument) lua_pushstring(s_lua, argument);
     else lua_pushnil(s_lua);
     char *error = protected_call(1);
+    lua_editor_api_finish_undo();
     SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     if (error && (intptr_t)SendMessageA(hEdit, SCI_GETUNDOCURRENT, 0, 0) != undoBefore)
         SendMessageA(hEdit, SCI_UNDO, 0, 0);
@@ -1260,6 +1839,8 @@ static char *call_registered(int ref, const char *label, const char *owner,
     s_runningOwner = NULL;
     s_timeLimited = 1;
     s_busy = 0;
+    free(stableLabel);
+    free(stableOwner);
     return error;
 }
 
@@ -1286,12 +1867,36 @@ char *plugin_host_run(int index, HWND hEdit) {
 char *plugin_host_fire(const char *event, const char *argument, HWND hEdit) {
     if (s_busy || !s_lua) return NULL;
     char *report = NULL;
-    /* Handlers registered while these run wait for the next event. */
-    int count = s_handlerCount;
-    for (int i = 0; i < count; i++) {
-        if (strcmp(s_handlers[i].event, event) != 0) continue;
-        report = append_line(report, call_registered(s_handlers[i].ref, s_handlers[i].label,
-                                                     s_handlers[i].owner, argument, -1, hEdit, 1));
+    /* Snapshot stable IDs. Handlers may remove themselves or each other,
+       which compacts s_handlers; newly registered handlers wait until the
+       next event. */
+    int ids[PLUGIN_MAX_HANDLERS], count = 0;
+    for (int i = 0; i < s_handlerCount; i++)
+        if (strcmp(s_handlers[i].event, event) == 0) ids[count++] = s_handlers[i].id;
+    for (int n = 0; n < count; n++) {
+        int index = -1;
+        for (int i = 0; i < s_handlerCount; i++)
+            if (s_handlers[i].id == ids[n]) { index = i; break; }
+        if (index < 0) continue;
+        report = append_line(report, call_registered(s_handlers[index].ref,
+            s_handlers[index].label, s_handlers[index].owner, argument, -1, hEdit, 1));
     }
     return report;
+}
+
+char *plugin_host_run_deferred(int token, HWND hEdit) {
+    if (s_busy || !s_lua) return NULL;
+    for (int i = 0; i < PLUGIN_MAX_DEFERRED; i++) {
+        PluginDeferred *deferred = &s_deferred[i];
+        if (deferred->token != token) continue;
+        int ref = deferred->ref;
+        char *owner = deferred->owner;
+        char *label = deferred->label;
+        memset(deferred, 0, sizeof(*deferred));
+        char *error = call_registered(ref, label, owner, NULL, -1, hEdit, 1);
+        luaL_unref(s_lua, LUA_REGISTRYINDEX, ref);
+        free(owner); free(label);
+        return error;
+    }
+    return NULL;
 }

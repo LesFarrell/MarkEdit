@@ -4,11 +4,13 @@
 #include <string.h>
 
 #include "plugin_host.h"
+#include "text_codec.h"
 #include "../third_party/scintilla/include/Scintilla.h"
 #include "lauxlib.h"
 
 static HWND s_edit;
 static PluginHostCallbacks s_callbacks;
+static int s_undoDepth;
 
 void lua_editor_api_set_callbacks(const PluginHostCallbacks *callbacks) {
     if (callbacks) s_callbacks = *callbacks;
@@ -17,6 +19,14 @@ void lua_editor_api_set_callbacks(const PluginHostCallbacks *callbacks) {
 
 void lua_editor_api_set_editor(HWND editor) {
     s_edit = editor;
+    s_undoDepth = 0;
+}
+
+void lua_editor_api_finish_undo(void) {
+    while (s_edit && s_undoDepth > 0) {
+        SendMessageA(s_edit, SCI_ENDUNDOACTION, 0, 0);
+        s_undoDepth--;
+    }
 }
 
 static HWND checked_editor(lua_State *L) {
@@ -421,6 +431,199 @@ static int editor_language(lua_State *L) {
     return 1;
 }
 
+static int editor_modified(lua_State *L) {
+    lua_pushboolean(L, SendMessageA(checked_editor(L), SCI_GETMODIFY, 0, 0));
+    return 1;
+}
+
+static int editor_read_only(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    if (!lua_isnone(L, 1)) SendMessageA(hEdit, SCI_SETREADONLY, lua_toboolean(L, 1), 0);
+    lua_pushboolean(L, SendMessageA(hEdit, SCI_GETREADONLY, 0, 0));
+    return 1;
+}
+
+static int editor_visible_range(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    Sci_Position firstVisible = (Sci_Position)SendMessageA(hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    Sci_Position lines = (Sci_Position)SendMessageA(hEdit, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position firstLine = (Sci_Position)SendMessageA(hEdit, SCI_DOCLINEFROMVISIBLE, firstVisible, 0);
+    Sci_Position lastLine = (Sci_Position)SendMessageA(hEdit, SCI_DOCLINEFROMVISIBLE,
+                                                       firstVisible + lines, 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
+    if (firstLine < 0) firstLine = 0;
+    if (lastLine < 0) lastLine = lineCount - 1;
+    if (lastLine < firstLine) lastLine = firstLine;
+    if (lastLine >= lineCount) lastLine = lineCount - 1;
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, firstLine, 0);
+    Sci_Position finish = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, lastLine, 0);
+    push_range(L, start, finish);
+    return 2;
+}
+
+static int editor_scroll_to(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    Sci_Position position = checked_position(L, hEdit, 1);
+    SendMessageA(hEdit, SCI_GOTOPOS, position - 1, 0);
+    SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
+    return 0;
+}
+
+static int editor_find(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    size_t length;
+    const char *text = luaL_checklstring(L, 1, &length);
+    Sci_Position documentLength = document_length(hEdit);
+    Sci_Position start = lua_isnoneornil(L, 2) ? 0 : checked_position(L, hEdit, 2) - 1;
+    int flags = 0;
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "match_case"); if (lua_toboolean(L, -1)) flags |= SCFIND_MATCHCASE; lua_pop(L, 1);
+        lua_getfield(L, 3, "whole_word"); if (lua_toboolean(L, -1)) flags |= SCFIND_WHOLEWORD; lua_pop(L, 1);
+        lua_getfield(L, 3, "word_start"); if (lua_toboolean(L, -1)) flags |= SCFIND_WORDSTART; lua_pop(L, 1);
+        lua_getfield(L, 3, "regex"); if (lua_toboolean(L, -1)) flags |= SCFIND_REGEXP | SCFIND_CXX11REGEX; lua_pop(L, 1);
+    }
+    SendMessageA(hEdit, SCI_SETTARGETSTART, start, 0);
+    SendMessageA(hEdit, SCI_SETTARGETEND, documentLength, 0);
+    SendMessageA(hEdit, SCI_SETSEARCHFLAGS, flags, 0);
+    Sci_Position found = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, length, (LPARAM)text);
+    if (found < 0) { lua_pushnil(L); return 1; }
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETTARGETEND, 0, 0);
+    push_range(L, found, end);
+    return 2;
+}
+
+static int editor_begin_undo(lua_State *L) {
+    SendMessageA(checked_editor(L), SCI_BEGINUNDOACTION, 0, 0);
+    s_undoDepth++;
+    return 0;
+}
+static int editor_end_undo(lua_State *L) {
+    checked_editor(L);
+    if (s_undoDepth <= 0) return luaL_error(L, "editor.end_undo has no matching begin_undo");
+    SendMessageA(checked_editor(L), SCI_ENDUNDOACTION, 0, 0);
+    s_undoDepth--;
+    return 0;
+}
+
+static int editor_annotation(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    Sci_Position line = checked_line(L, hEdit, 1);
+    if (lua_isnoneornil(L, 2)) SendMessageA(hEdit, SCI_ANNOTATIONSETTEXT, line, (LPARAM)"");
+    else {
+        size_t length;
+        const char *text = luaL_checklstring(L, 2, &length);
+        if (memchr(text, 0, length)) return luaL_argerror(L, 2, "annotation must not contain NUL bytes");
+        SendMessageA(hEdit, SCI_ANNOTATIONSETTEXT, line, (LPARAM)text);
+        SendMessageA(hEdit, SCI_ANNOTATIONSETSTYLE, line, (LPARAM)luaL_optinteger(L, 3, 0));
+        SendMessageA(hEdit, SCI_ANNOTATIONSETVISIBLE, ANNOTATION_BOXED, 0);
+    }
+    return 0;
+}
+
+static int editor_clear_annotations(lua_State *L) {
+    SendMessageA(checked_editor(L), SCI_ANNOTATIONCLEARALL, 0, 0);
+    return 0;
+}
+
+static int editor_marker(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    Sci_Position line = checked_line(L, hEdit, 1);
+    int marker = (int)luaL_optinteger(L, 2, 8);
+    luaL_argcheck(L, marker >= 8 && marker <= 19, 2, "plugin marker must be from 8 to 19");
+    int enabled = lua_isnoneornil(L, 3) || lua_toboolean(L, 3);
+    if (enabled) SendMessageA(hEdit, SCI_MARKERADD, line, marker);
+    else SendMessageA(hEdit, SCI_MARKERDELETE, line, marker);
+    return 0;
+}
+
+static int editor_clear_markers(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    if (lua_isnoneornil(L, 1)) {
+        for (int marker = 8; marker <= 19; marker++)
+            SendMessageA(hEdit, SCI_MARKERDELETEALL, marker, 0);
+        return 0;
+    }
+    int marker = (int)luaL_checkinteger(L, 1);
+    luaL_argcheck(L, marker >= 8 && marker <= 19, 1, "plugin marker must be from 8 to 19");
+    SendMessageA(hEdit, SCI_MARKERDELETEALL, marker, 0);
+    return 0;
+}
+
+static int editor_indicator(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    Sci_Position from, to;
+    checked_range(L, hEdit, 1, &from, &to);
+    int number = (int)luaL_checkinteger(L, 3);
+    luaL_argcheck(L, number >= 8 && number <= 19, 3, "plugin indicator must be from 8 to 19");
+    lua_Integer rgb = luaL_optinteger(L, 4, 0xffc107);
+    int colour = ((int)rgb & 0xff) << 16 | ((int)rgb & 0xff00) | (((int)rgb >> 16) & 0xff);
+    SendMessageA(hEdit, SCI_INDICSETSTYLE, number, INDIC_ROUNDBOX);
+    SendMessageA(hEdit, SCI_INDICSETFORE, number, colour);
+    SendMessageA(hEdit, SCI_SETINDICATORCURRENT, number, 0);
+    SendMessageA(hEdit, SCI_INDICATORFILLRANGE, from, to - from);
+    return 0;
+}
+
+static int editor_clear_indicator(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    int number = (int)luaL_checkinteger(L, 1);
+    luaL_argcheck(L, number >= 8 && number <= 19, 1, "plugin indicator must be from 8 to 19");
+    Sci_Position from = 0, to = document_length(hEdit);
+    if (!lua_isnoneornil(L, 2)) checked_range(L, hEdit, 2, &from, &to);
+    SendMessageA(hEdit, SCI_SETINDICATORCURRENT, number, 0);
+    SendMessageA(hEdit, SCI_INDICATORCLEARRANGE, from, to - from);
+    return 0;
+}
+
+static int editor_fold(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    Sci_Position line = checked_line(L, hEdit, 1);
+    if (lua_isnoneornil(L, 2)) SendMessageA(hEdit, SCI_TOGGLEFOLD, line, 0);
+    else SendMessageA(hEdit, SCI_SETFOLDEXPANDED, line, lua_toboolean(L, 2));
+    lua_pushboolean(L, SendMessageA(hEdit, SCI_GETFOLDEXPANDED, line, 0));
+    return 1;
+}
+
+static int editor_style_at(lua_State *L) {
+    HWND hEdit = checked_editor(L);
+    Sci_Position position = checked_position(L, hEdit, 1);
+    lua_pushinteger(L, SendMessageA(hEdit, SCI_GETSTYLEAT, position, 0));
+    return 1;
+}
+
+static int editor_clipboard(lua_State *L) {
+    checked_editor(L);
+    if (!lua_isnoneornil(L, 1)) {
+        size_t length;
+        const char *text = luaL_checklstring(L, 1, &length);
+        int wideLength = 0;
+        WCHAR *wide = to_wide_n(text, length, &wideLength);
+        if (!wide) return luaL_argerror(L, 1, "clipboard text must be valid UTF-8");
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, ((size_t)wideLength + 1) * sizeof(WCHAR));
+        if (!memory) { free(wide); return luaL_error(L, "out of memory"); }
+        WCHAR *target = (WCHAR *)GlobalLock(memory);
+        if (target) memcpy(target, wide, ((size_t)wideLength + 1) * sizeof(WCHAR));
+        if (target) GlobalUnlock(memory);
+        free(wide);
+        if (!target || !OpenClipboard(NULL)) { GlobalFree(memory); return luaL_error(L, "clipboard is unavailable"); }
+        EmptyClipboard();
+        int stored = SetClipboardData(CF_UNICODETEXT, memory) != NULL;
+        if (!stored) GlobalFree(memory);
+        CloseClipboard();
+        if (!stored) return luaL_error(L, "clipboard could not be updated");
+        return 0;
+    }
+    if (!OpenClipboard(NULL)) { lua_pushnil(L); return 1; }
+    HANDLE memory = GetClipboardData(CF_UNICODETEXT);
+    const WCHAR *wide = memory ? (const WCHAR *)GlobalLock(memory) : NULL;
+    char *text = wide ? to_utf8(wide) : NULL;
+    if (wide) GlobalUnlock(memory);
+    CloseClipboard();
+    if (text) lua_pushstring(L, text); else lua_pushnil(L);
+    free(text);
+    return 1;
+}
+
 /* ui.message(text [, title [, kind]]); kind is "info", "warning" or "error". */
 
 static const luaL_Reg editor_functions[] = {
@@ -451,6 +654,17 @@ static const luaL_Reg editor_functions[] = {
     {"eol", editor_eol},
     {"file_path", editor_file_path},
     {"language", editor_language},
+    {"modified", editor_modified},
+    {"read_only", editor_read_only},
+    {"visible_range", editor_visible_range},
+    {"scroll_to", editor_scroll_to},
+    {"find", editor_find},
+    {"begin_undo", editor_begin_undo}, {"end_undo", editor_end_undo},
+    {"annotation", editor_annotation}, {"clear_annotations", editor_clear_annotations},
+    {"marker", editor_marker}, {"clear_markers", editor_clear_markers},
+    {"indicator", editor_indicator}, {"clear_indicator", editor_clear_indicator},
+    {"fold", editor_fold}, {"style_at", editor_style_at},
+    {"clipboard", editor_clipboard},
     {NULL, NULL}
 };
 

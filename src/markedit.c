@@ -1923,6 +1923,127 @@ static int plugin_save_binary(const char *title, const char *defaultName,
     return result;
 }
 
+static int plugin_confirm(const char *title, const char *text) {
+    WCHAR *wideTitle = to_wide(title), *wideText = to_wide(text);
+    int result = MessageBoxW(g_hMainWnd, wideText ? wideText : L"Confirm?",
+                             wideTitle ? wideTitle : L"MarkEdit", MB_YESNO | MB_ICONQUESTION);
+    free(wideTitle); free(wideText);
+    return result == IDYES;
+}
+
+static void plugin_status(const char *text) {
+    WCHAR *wide = to_wide(text);
+    if (wide) show_plugin_reload_status(wide);
+    free(wide);
+}
+
+static void plugin_log(const char *plugin, const char *text) {
+    OutputDebugStringA("[MarkEdit plugin: ");
+    OutputDebugStringA(plugin ? plugin : "unknown");
+    OutputDebugStringA("] ");
+    OutputDebugStringA(text);
+    OutputDebugStringA("\n");
+}
+
+static char *plugin_pick_path(const char *title, int folder) {
+    if (folder) {
+        WCHAR *path = choose_workspace_folder();
+        char *result = path ? to_utf8(path) : NULL;
+        free(path);
+        return result;
+    }
+    WCHAR path[32768] = L"";
+    WCHAR *wideTitle = to_wide(title);
+    OPENFILENAMEW dialog = {0};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = g_hMainWnd;
+    dialog.lpstrFilter = L"All Files (*.*)\0*.*\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = (DWORD)(sizeof(path) / sizeof(path[0]));
+    dialog.lpstrTitle = wideTitle;
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    char *result = GetOpenFileNameW(&dialog) ? to_utf8(path) : NULL;
+    free(wideTitle);
+    return result;
+}
+
+static int plugin_invoke_command(const char *name) {
+    const MenuCommand *command = menu_command_find(name);
+    if (!command || !g_hMainWnd) return 0;
+    /* Queue it: executing a command while Lua owns the editor's undo group
+       could invalidate that group or recursively enter the plugin host. */
+    return PostMessageW(g_hMainWnd, WM_COMMAND, command->id, 0) != 0;
+}
+
+static int plugin_document_count(void) { return g_documentCount; }
+static int plugin_document_active(void) { return g_activeDocument; }
+
+typedef enum {
+    PLUGIN_DOCUMENT_ACTIVATE, PLUGIN_DOCUMENT_NEW, PLUGIN_DOCUMENT_OPEN,
+    PLUGIN_DOCUMENT_SAVE, PLUGIN_DOCUMENT_SAVE_AS, PLUGIN_DOCUMENT_CLOSE
+} PluginDocumentActionKind;
+typedef struct {
+    PluginDocumentActionKind kind;
+    int index;
+    WCHAR *path;
+} PluginDocumentAction;
+
+static int queue_plugin_document_action(PluginDocumentActionKind kind, int index,
+                                        const char *path) {
+    PluginDocumentAction *action = (PluginDocumentAction *)calloc(1, sizeof(*action));
+    if (!action) return 0;
+    action->kind = kind;
+    action->index = index;
+    action->path = path ? to_wide(path) : NULL;
+    if ((path && !action->path) ||
+        !PostMessageW(g_hMainWnd, WM_APP_PLUGIN_DOCUMENT_ACTION, 0, (LPARAM)action)) {
+        free(action->path); free(action);
+        return 0;
+    }
+    return 1;
+}
+
+static int plugin_document_activate(int index) {
+    if (index < 0 || index >= g_documentCount) return 0;
+    return queue_plugin_document_action(PLUGIN_DOCUMENT_ACTIVATE, index, NULL);
+}
+static int plugin_document_new(void) {
+    return queue_plugin_document_action(PLUGIN_DOCUMENT_NEW, 0, NULL);
+}
+static int plugin_document_open(const char *path) {
+    return queue_plugin_document_action(PLUGIN_DOCUMENT_OPEN, 0, path);
+}
+static int plugin_document_save(int saveAs) {
+    return queue_plugin_document_action(saveAs ? PLUGIN_DOCUMENT_SAVE_AS : PLUGIN_DOCUMENT_SAVE,
+                                        0, NULL);
+}
+static int plugin_document_close(int index) {
+    if (index < 0 || index >= g_documentCount) return 0;
+    return queue_plugin_document_action(PLUGIN_DOCUMENT_CLOSE, index, NULL);
+}
+static char *plugin_document_path(int index) {
+    return index >= 0 && index < g_documentCount && g_documents[index].path
+        ? to_utf8(g_documents[index].path) : NULL;
+}
+static int plugin_document_modified(int index) {
+    return index >= 0 && index < g_documentCount && g_documents[index].dirty;
+}
+static const char *plugin_document_encoding(void) {
+    static const char *const names[] = { "utf-8", "utf-16le", "utf-16be", "ansi" };
+    return g_encoding >= TEXT_ENCODING_UTF8 && g_encoding <= TEXT_ENCODING_ANSI
+        ? names[g_encoding] : "utf-8";
+}
+static char *plugin_workspace_path(void) {
+    return g_currentWorkspaceFolder ? to_utf8(g_currentWorkspaceFolder) : NULL;
+}
+
+static int plugin_schedule_deferred(int token, unsigned delayMs, int cancel) {
+    if (!g_hMainWnd || token <= 0) return 0;
+    UINT_PTR timer = (UINT_PTR)(IDT_PLUGIN_DEFER_BASE + token);
+    if (cancel) { KillTimer(g_hMainWnd, timer); return 1; }
+    return SetTimer(g_hMainWnd, timer, delayMs ? delayMs : 1, NULL) != 0;
+}
+
 static char *plugin_file_path(void) {
     return g_currentFile ? to_utf8(g_currentFile) : NULL;
 }
@@ -2164,8 +2285,19 @@ static void show_plugin_load_errors(const char *report) {
    extensions and personal extensions in that order. */
 static void load_menus_and_plugins(void) {
     static const PluginHostCallbacks callbacks = {
-        plugin_prompt, plugin_choose, plugin_file_path, plugin_language, plugin_message,
-        plugin_config_get, plugin_config_set, plugin_is_enabled, plugin_save_binary,
+        .prompt = plugin_prompt, .choose = plugin_choose, .file_path = plugin_file_path,
+        .language = plugin_language, .message = plugin_message,
+        .config_get = plugin_config_get, .config_set = plugin_config_set,
+        .plugin_enabled = plugin_is_enabled, .save_binary = plugin_save_binary,
+        .confirm = plugin_confirm, .status = plugin_status, .log = plugin_log,
+        .pick_path = plugin_pick_path, .invoke_command = plugin_invoke_command,
+        .document_count = plugin_document_count, .document_active = plugin_document_active,
+        .document_activate = plugin_document_activate, .document_new = plugin_document_new,
+        .document_open = plugin_document_open, .document_save = plugin_document_save,
+        .document_close = plugin_document_close, .document_path = plugin_document_path,
+        .document_modified = plugin_document_modified,
+        .document_encoding = plugin_document_encoding, .workspace_path = plugin_workspace_path,
+        .schedule_deferred = plugin_schedule_deferred,
     };
     plugin_host_set_callbacks(&callbacks);
     plugin_host_shutdown();
@@ -2717,6 +2849,7 @@ static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotif
     update_brace_highlight(editor);
     update_status_position();
     update_minimap_viewport();
+    if (scn->updated & SC_UPDATE_SELECTION) SetTimer(hwnd, IDT_PLUGIN_SELECTION, 100, NULL);
 }
 
 static void handle_editor_margin_click(const struct SCNotification *scn) {
@@ -2797,6 +2930,7 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
 }
 
 static void destroy_main_window(HWND hwnd) {
+    fire_plugin_event("shutdown", g_currentFile);
     save_all_document_breakpoints();
     save_layout_settings();
     KillTimer(hwnd, IDT_PREVIEW_UPDATE);
@@ -2810,6 +2944,7 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_HTML_EXPORT);
     KillTimer(hwnd, IDT_EXPLORER_REFRESH);
     KillTimer(hwnd, IDT_PLUGIN_STATUS);
+    KillTimer(hwnd, IDT_PLUGIN_SELECTION);
     explorer_shutdown();
     plugin_host_shutdown();
     stop_debug_location_tracking();
@@ -2904,6 +3039,19 @@ static LRESULT paint_main_background(HWND hwnd, HDC hdc) {
 }
 
 static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
+    if (timerId >= IDT_PLUGIN_DEFER_BASE) {
+        if (plugin_host_is_busy()) {
+            SetTimer(hwnd, timerId, 50, NULL);
+            return 1;
+        }
+        KillTimer(hwnd, timerId);
+        int wasDirty = g_dirty;
+        char *error = plugin_host_run_deferred((int)(timerId - IDT_PLUGIN_DEFER_BASE), g_hEdit);
+        sync_dirty_after_plugin(wasDirty);
+        if (error) show_plugin_error(error);
+        free(error);
+        return 1;
+    }
     switch (timerId) {
         case IDT_HTML_EXPORT: ExportDone_Invoke(NULL, E_FAIL, NULL); break;
         case IDT_PREVIEW_UPDATE: update_preview(); break;
@@ -2918,6 +3066,7 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
         case IDT_STATUS_UPDATE:
             KillTimer(hwnd, IDT_STATUS_UPDATE);
             update_status_bar();
+            fire_plugin_event("text_changed", g_currentFile);
             break;
         case IDT_PRINT_PREVIEW: run_pending_print(); break;
         case IDT_DEBUG_LOCATION: poll_debug_location(); break;
@@ -2928,6 +3077,10 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
         case IDT_PLUGIN_STATUS:
             KillTimer(hwnd, IDT_PLUGIN_STATUS);
             update_status_position();
+            break;
+        case IDT_PLUGIN_SELECTION:
+            KillTimer(hwnd, IDT_PLUGIN_SELECTION);
+            fire_plugin_event("selection_changed", g_currentFile);
             break;
         default: return 0;
     }
@@ -3039,6 +3192,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_APPLY_LARGE_FILE_MODE:
             apply_large_file_mode_after_growth((int)wParam);
             return 0;
+        case WM_APP_PLUGIN_DOCUMENT_ACTION: {
+            PluginDocumentAction *action = (PluginDocumentAction *)lParam;
+            if (!action) return 0;
+            switch (action->kind) {
+                case PLUGIN_DOCUMENT_ACTIVATE:
+                    if (action->index >= 0 && action->index < g_documentCount)
+                        switch_document(action->index);
+                    break;
+                case PLUGIN_DOCUMENT_NEW: create_document_tab(); break;
+                case PLUGIN_DOCUMENT_OPEN:
+                    if (action->path) open_file_in_tab(action->path);
+                    break;
+                case PLUGIN_DOCUMENT_SAVE: do_save(); break;
+                case PLUGIN_DOCUMENT_SAVE_AS: do_saveas(); break;
+                case PLUGIN_DOCUMENT_CLOSE:
+                    if (action->index >= 0 && action->index < g_documentCount)
+                        do_close_document_at(action->index);
+                    break;
+            }
+            free(action->path); free(action);
+            return 0;
+        }
         case WM_CREATE:
             initialize_main_window(hwnd);
             return 0;

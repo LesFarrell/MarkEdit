@@ -31,6 +31,8 @@
 #define IDT_EXPLORER_REFRESH 10
 #define IDT_HTML_EXPORT 11
 #define IDT_PLUGIN_STATUS 12
+#define IDT_PLUGIN_SELECTION 13
+#define IDT_PLUGIN_DEFER_BASE 1000
 
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
@@ -38,6 +40,7 @@
 /* WM_APP + 3 is MARKEDIT_WM_EXPLORER_CHANGED (file_explorer.h). */
 #define WM_APP_PLUGIN_TAB_CHECK (WM_APP + 4)
 #define WM_APP_APPLY_LARGE_FILE_MODE (WM_APP + 5)
+#define WM_APP_PLUGIN_DOCUMENT_ACTION (WM_APP + 6)
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
 #define MINIMAP_WIDTH 120

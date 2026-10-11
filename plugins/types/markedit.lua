@@ -28,11 +28,18 @@ commands = {}
 ---@param fn fun()
 ---@param title? string
 function commands.register(name, fn, title) end
+---@param name string
+---@return boolean queued
+function commands.execute(name) end
 
 events = {}
----@param name 'save'|'open'|'tab_changed'
+---@param name 'before_save'|'save'|'after_save'|'open'|'close'|'tab_changed'|'text_changed'|'selection_changed'|'workspace_changed'|'theme_changed'|'shutdown'
 ---@param fn fun(path:string?)
+---@return integer subscription
 function events.on(name, fn) end
+---@param subscription integer
+---@return boolean removed
+function events.off(subscription) end
 
 config = {}
 ---@generic T
@@ -41,7 +48,7 @@ config = {}
 ---@return T?
 function config.get(key, default) end
 ---@param key string
----@param value string|number|boolean|nil
+---@param value string|number|boolean|table|nil
 function config.set(key, value) end
 
 app = {}
@@ -51,6 +58,25 @@ function app.date() end
 function app.time() end
 ---@return string
 function app.date_time() end
+---@return string
+function app.version() end
+---@return integer
+function app.api_version() end
+---@return 'windows'
+function app.platform() end
+---@return integer
+function app.memory_used() end
+---@return string?
+function app.workspace_path() end
+---@return table<string, boolean>
+function app.capabilities() end
+---@param milliseconds integer 0 to 60000.
+---@param fn fun()
+---@return integer token
+function app.defer(milliseconds, fn) end
+---@param token integer
+---@return boolean
+function app.cancel(token) end
 
 ui = {}
 ---@param text string
@@ -73,6 +99,48 @@ function ui.choose(items, label, title) end
 ---@param title? string
 ---@return boolean saved False when the user cancels the Save As dialog.
 function ui.save_binary(default_name, data, title) end
+---@param text string
+---@param title? string
+---@return boolean
+function ui.confirm(text, title) end
+---@param text string
+function ui.status(text) end
+---@param text string
+function ui.log(text) end
+---@param title? string
+---@return string?
+function ui.pick_file(title) end
+---@param title? string
+---@return string?
+function ui.pick_folder(title) end
+
+documents = {}
+---@return integer
+function documents.count() end
+---@return integer
+function documents.active() end
+---@param index integer
+---@return boolean
+function documents.activate(index) end
+---@return boolean
+function documents.new() end
+---@param path string
+---@return boolean
+function documents.open(path) end
+---@param save_as? boolean
+---@return boolean
+function documents.save(save_as) end
+---@param index? integer
+---@return boolean
+function documents.close(index) end
+---@param index? integer
+---@return string?
+function documents.path(index) end
+---@param index? integer
+---@return boolean
+function documents.modified(index) end
+---@return 'utf-8'|'utf-16le'|'utf-16be'|'ansi'
+function documents.encoding() end
 
 editor = {}
 ---@return string
@@ -146,3 +214,49 @@ function editor.line_range(n) end
 function editor.file_path() end
 ---@return string
 function editor.language() end
+---@return boolean
+function editor.modified() end
+---@param value? boolean
+---@return boolean
+function editor.read_only(value) end
+---@return integer start, integer finish
+function editor.visible_range() end
+---@param position integer
+function editor.scroll_to(position) end
+---@param text string
+---@param start? integer
+---@param options? {match_case?:boolean, whole_word?:boolean, word_start?:boolean, regex?:boolean}
+---@return integer? start, integer? finish
+function editor.find(text, start, options) end
+function editor.begin_undo() end
+function editor.end_undo() end
+---@param line integer
+---@param text? string
+---@param style? integer
+function editor.annotation(line, text, style) end
+function editor.clear_annotations() end
+---@param line integer
+---@param marker? integer 8 to 19.
+---@param enabled? boolean
+function editor.marker(line, marker, enabled) end
+---@param marker? integer 8 to 19; omit to clear every plugin marker.
+function editor.clear_markers(marker) end
+---@param start integer
+---@param finish integer
+---@param number integer 8 to 19.
+---@param colour? integer RGB value, for example 0xffc107.
+function editor.indicator(start, finish, number, colour) end
+---@param number integer
+---@param start? integer
+---@param finish? integer
+function editor.clear_indicator(number, start, finish) end
+---@param line integer
+---@param expanded? boolean
+---@return boolean
+function editor.fold(line, expanded) end
+---@param position integer
+---@return integer
+function editor.style_at(position) end
+---@param text? string When supplied, replaces the clipboard text.
+---@return string?
+function editor.clipboard(text) end

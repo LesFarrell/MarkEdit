@@ -1111,9 +1111,12 @@ static int save_to_path(const WCHAR *requestedPath) {
         MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
         return 0;
     }
-    /* First, so whatever the handlers change is what gets saved. */
+    /* First, so whatever the handlers change is what gets saved. `save` is
+       retained as the compatibility alias for before_save. */
+    fire_plugin_event("before_save", path);
     fire_plugin_event("save", path);
     int ok = write_active_document(path);
+    if (ok) fire_plugin_event("after_save", path);
     free(path);
     return ok;
 }
@@ -1344,6 +1347,7 @@ static void push_closed_document(Document removed, int index) {
 static void do_close_document_at(int index) {
     if (index < 0 || index >= g_documentCount) return;
     if (index != g_activeDocument) switch_document(index);
+    fire_plugin_event("close", g_currentFile);
     if (!confirm_discard_if_dirty()) return;
     save_active_document_view();
     /* Still dirty here means the user chose not to save, so its markers

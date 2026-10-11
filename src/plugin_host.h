@@ -10,6 +10,11 @@
 #define PLUGIN_MAX_HANDLERS 100
 /* A plugin call (or a script's top-level code) is stopped after this long. */
 #define PLUGIN_TIME_LIMIT_MS 5000
+/* Total heap available to the sandboxed Lua state. This includes all loaded
+   plugins and modules, and prevents a script from exhausting the process. */
+#define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
+
+#define MARKEDIT_PLUGIN_API_VERSION 2
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -38,6 +43,26 @@ typedef struct {
        byte-for-byte. Returns 1 when saved, 0 when cancelled, or -1 on error. */
     int (*save_binary)(const char *title, const char *defaultName,
                        const char *data, size_t length);
+    /* Optional richer host services. Strings returned by a callback are heap
+       allocated and are freed by the plugin host. */
+    int (*confirm)(const char *title, const char *text);
+    void (*status)(const char *text);
+    void (*log)(const char *plugin, const char *text);
+    char *(*pick_path)(const char *title, int folder);
+    int (*invoke_command)(const char *name);
+    int (*document_count)(void);
+    int (*document_active)(void); /* zero based */
+    int (*document_activate)(int index);
+    int (*document_new)(void);
+    int (*document_open)(const char *path);
+    int (*document_save)(int saveAs);
+    int (*document_close)(int index);
+    char *(*document_path)(int index);
+    int (*document_modified)(int index);
+    const char *(*document_encoding)(void);
+    char *(*workspace_path)(void);
+    /* Schedules or cancels a one-shot callback on the UI thread. */
+    int (*schedule_deferred)(int token, unsigned delayMs, int cancel);
 } PluginHostCallbacks;
 
 /* Copied; call before running commands. */
@@ -147,5 +172,7 @@ char *plugin_host_run(int index, HWND hEdit);
    NULL). Does nothing while plugin code is already running, since events
    can arrive from a message loop a plugin dialog is running. */
 char *plugin_host_fire(const char *event, const char *argument, HWND hEdit);
+/* Runs a one-shot callback scheduled by app.defer(). */
+char *plugin_host_run_deferred(int token, HWND hEdit);
 
 #endif

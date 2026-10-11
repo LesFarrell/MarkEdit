@@ -203,6 +203,7 @@ static void adopt_workspace_folder(HWND hwnd, const WCHAR *root) {
     save_workspace_settings();
     refresh_menu(hwnd);
     if (g_explorerVisible) explorer_set_root(g_currentWorkspaceFolder);
+    fire_plugin_event("workspace_changed", g_currentWorkspaceFolder);
 }
 
 /* Opens a workspace folder and immediately lets the user fuzzy-pick a file
@@ -891,6 +892,7 @@ static void select_theme(HWND hwnd, int darkMode) {
     if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);
     if (g_hStatus) InvalidateRect(g_hStatus, NULL, TRUE);
     select_preview_theme(hwnd, darkMode);
+    fire_plugin_event("theme_changed", g_currentFile);
 }
 
 static int g_highContrastActive = 0;

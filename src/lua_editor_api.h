@@ -7,6 +7,7 @@
 
 void lua_editor_api_set_callbacks(const PluginHostCallbacks *callbacks);
 void lua_editor_api_set_editor(HWND editor);
+void lua_editor_api_finish_undo(void);
 void lua_editor_api_require_editor(lua_State *L);
 void lua_editor_api_push(lua_State *L);
 

@@ -127,9 +127,10 @@ static void test_separators(HWND editor) {
 
 /* ---- stand-ins for the application's dialogs and document details ---- */
 static char s_lastTitle[64], s_lastMessage[256];
-static char s_configPlugin[64], s_configKey[64], s_configValue[128];
+static char s_configPlugin[64], s_configKey[64], s_configValue[4096];
 static char s_binaryName[64], s_binaryData[256];
 static size_t s_binaryLength;
+static int s_deferredToken;
 static const char *s_calculatorExpression =
     "0x10 + 0b11 + (5 << 1) + min(4, 9)";
 
@@ -180,6 +181,13 @@ static int fake_save_binary(const char *title, const char *defaultName,
     return 1;
 }
 
+static int fake_schedule_deferred(int token, unsigned delayMs, int cancel) {
+    (void)delayMs;
+    if (cancel) { if (s_deferredToken == token) s_deferredToken = 0; return 1; }
+    s_deferredToken = token;
+    return 1;
+}
+
 static void fake_message(const char *title, const char *text, const char *kind) {
     (void)kind;
     snprintf(s_lastTitle, sizeof(s_lastTitle), "%s", title);
@@ -214,6 +222,9 @@ static void test_checkboxes_and_config(HWND editor) {
         "menu.add('Options/Save Value', function()\n"
         "  config.set('answer', 42)\n"
         "  assert(config.get('answer', 0) == 42)\n"
+        "  config.set('options', {enabled=true, names={'one','two'}, nested={count=3}})\n"
+        "  local value = config.get('options', {})\n"
+        "  assert(value.enabled and value.names[2] == 'two' and value.nested.count == 3)\n"
         "end)\n");
     expect(plugin_host_command_is_checkable(first), "checkbox command is checkable");
     expect(!plugin_host_command_is_checked(first), "checkbox uses its default state");
@@ -221,8 +232,9 @@ static void test_checkboxes_and_config(HWND editor) {
     expect(plugin_host_command_is_checked(first) && strcmp(s_configPlugin, "checkbox.lua") == 0 &&
            strcmp(s_configKey, "enabled") == 0 && strcmp(s_configValue, "1") == 0,
            "checkbox state is persisted in its plugin namespace");
-    expect(run_ok(first + 1, editor) && strcmp(s_configKey, "answer") == 0 &&
-           strcmp(s_configValue, "42") == 0, "config.set persists typed values");
+    expect(run_ok(first + 1, editor) && strcmp(s_configKey, "options") == 0 &&
+           strncmp(s_configValue, "@ME1:", 5) == 0,
+           "config.set persists primitive and structured values");
 
     int failing = load_ok("bad_checkbox.lua",
         "menu.checkbox('Broken', 'enabled', true, function() error('nope') end)");
@@ -261,6 +273,7 @@ static void test_editor_api(HWND editor) {
         "  assert(editor.file_path() == 'C:\\\\docs\\\\note.md')\n"
         "  assert(editor.language() == 'markdown')\n"
         "end)\n"
+        "menu.add('Undo balance', function() editor.begin_undo(); editor.insert('nested ') end)\n"
         "menu.add('Multiple selections', function()\n"
         "  assert(editor.selection_count() == 1)\n"
         "  editor.set_selection(1, 4)\n"
@@ -294,8 +307,13 @@ static void test_editor_api(HWND editor) {
     expect(run_ok(first + 2, editor) && SendMessageA(editor, SCI_GETLENGTH, 0, 0) == 3,
            "text containing NUL is written whole");
     expect(run_ok(first + 3, editor), "file_path and language");
+    set_document(editor, "plain");
+    expect(run_ok(first + 4, editor) && document_is(editor, "nested plain"),
+           "unmatched explicit undo groups are closed after a callback");
+    SendMessageA(editor, SCI_UNDO, 0, 0);
+    expect(document_is(editor, "plain"), "explicit undo nesting remains one command undo step");
     set_document(editor, "zero one two");
-    expect(run_ok(first + 4, editor) && document_is(editor, "zero one TWO"),
+    expect(run_ok(first + 5, editor) && document_is(editor, "zero one TWO"),
            "multiple selections and carets through the Lua API");
 
     int bulk = load_ok("bulk-selections.lua",
@@ -349,6 +367,23 @@ static void test_ui(HWND editor) {
     expect(run_fails(first + 2, editor, "not available"), "missing binary callback raises an error");
 }
 
+static void test_deferred(HWND editor) {
+    static const PluginHostCallbacks callbacks = { .schedule_deferred = fake_schedule_deferred };
+    plugin_host_set_callbacks(&callbacks);
+    s_deferredToken = 0;
+    int first = load_ok("defer.lua",
+        "menu.add('Defer', function()\n"
+        "  app.defer(10, function() editor.insert('later') end)\n"
+        "end)\n");
+    set_document(editor, "now ");
+    SendMessageA(editor, SCI_GOTOPOS, 4, 0);
+    expect(run_ok(first, editor) && s_deferredToken > 0, "app.defer schedules a callback");
+    char *error = plugin_host_run_deferred(s_deferredToken, editor);
+    expect(!error && document_is(editor, "now later"), "a deferred callback runs on the editor");
+    free(error);
+    s_deferredToken = 0;
+}
+
 static HWND s_reentryEditor;
 static int s_reentryBlocked;
 
@@ -372,7 +407,13 @@ static void test_events(HWND editor) {
         "events.on('save', function() editor.insert('lost'); error('second handler fails') end)\n"
         "events.on('open', function(path) assert(path == nil) end)\n"
         "menu.add('Saves', function() assert(#saves == 1 and saves[1] == 'C:\\\\a.md') end)\n"
-        "menu.add('Reenter', function() ui.prompt('x') end)\n");
+        "menu.add('Reenter', function() ui.prompt('x') end)\n"
+        "local removed = events.on('open', function() error('removed handler ran') end)\n"
+        "assert(events.off(removed))\n"
+        "local self, calls = nil, 0\n"
+        "self = events.on('open', function() calls = calls + 1; events.off(self) end)\n"
+        "events.on('open', function() calls = calls + 1 end)\n"
+        "menu.add('Event removal', function() assert(calls == 3) end)\n");
 
     set_document(editor, "x");
     char *report = plugin_host_fire("save", "C:\\a.md", editor);
@@ -381,9 +422,11 @@ static void test_events(HWND editor) {
     free(report);
     expect(run_ok(first, editor), "handlers receive the path");
     expect(plugin_host_fire("open", NULL, editor) == NULL, "nil path for an unsaved document");
+    expect(plugin_host_fire("open", NULL, editor) == NULL, "self-removing handlers do not corrupt dispatch");
+    expect(run_ok(first + 2, editor), "event removal preserves later handlers");
     expect(plugin_host_fire("tab_changed", NULL, editor) == NULL, "no handlers, no report");
 
-    const char *unknown = "events.on('close', function() end)";
+    const char *unknown = "events.on('not_an_event', function() end)";
     char *error = plugin_host_load_chunk("unknown.lua", unknown, strlen(unknown));
     expect(error && strstr(error, "unknown event"), "unknown event names are rejected");
     free(error);
@@ -393,7 +436,7 @@ static void test_events(HWND editor) {
     expect(plugin_host_fire("open", NULL, editor) == NULL, "a failed script's handlers are dropped");
 
     static const PluginHostCallbacks reentrant = {
-        reentrant_prompt, NULL, NULL, NULL, NULL, fake_config_get, fake_config_set, NULL, NULL
+        .prompt = reentrant_prompt, .config_get = fake_config_get, .config_set = fake_config_set
     };
     plugin_host_set_callbacks(&reentrant);
     s_reentryEditor = editor;
@@ -460,12 +503,34 @@ static void test_environment(void) {
         "assert(app.date():match('^%d%d%d%d%-%d%d%-%d%d$'))\n"
         "assert(app.time():match('^%d%d:%d%d:%d%d$'))\n"
         "assert(app.date_time():match('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$'))\n");
+    load_ok("metadata.lua",
+        "assert(app.api_version() >= 2 and app.platform() == 'windows')\n"
+        "assert(type(app.version()) == 'string' and app.memory_used() > 0)\n"
+        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require)\n");
+}
+
+static void test_isolation(HWND editor) {
+    plugin_host_shutdown();
+    int first = load_ok("isolated-a.lua",
+        "private_value = 'a'; string.plugin_change = true\n"
+        "menu.add('Isolated A', function() assert(private_value == 'a' and string.plugin_change) end)");
+    int second = load_ok("isolated-b.lua",
+        "assert(private_value == nil and string.plugin_change == nil)\n"
+        "private_value = 'b'\n"
+        "menu.add('Isolated B', function() assert(private_value == 'b') end)");
+    expect(run_ok(first, editor) && run_ok(second, editor),
+           "plugins have isolated globals and library tables");
 }
 
 static void test_time_limit(void) {
     const char *loop = "while true do end";
     char *error = plugin_host_load_chunk("loop.lua", loop, strlen(loop));
     expect(error && strstr(error, "stopped after"), "runaway script is stopped");
+    free(error);
+    const char *allocation = "return string.rep('x', 70 * 1024 * 1024)";
+    error = plugin_host_load_chunk("memory.lua", allocation, strlen(allocation));
+    expect(error && (strstr(error, "memory") || strstr(error, "allocate")),
+           "plugin heap exhaustion is reported instead of exhausting the process");
     free(error);
 }
 
@@ -486,7 +551,7 @@ static int test_plugin_enabled(const char *scope, const char *name) {
     return strcmp(scope, "test") != 0 || _stricmp(name, "b.lua") != 0;
 }
 
-static void test_directory(void) {
+static void test_directory(HWND editor) {
     WCHAR temp[MAX_PATH], directory[MAX_PATH];
     GetTempPathW(MAX_PATH, temp);
     swprintf(directory, MAX_PATH, L"%lsmarkedit_plugins_%lu", temp, GetCurrentProcessId());
@@ -503,23 +568,26 @@ static void test_directory(void) {
     WCHAR *nested = path_join(folder, L"nested");
     CreateDirectoryW(nested, NULL);
     write_script(folder, L"helper.lua", "return { label = 'From Folder' }");
+    write_script(folder, L"late.lua", "return { value = 99 }");
     write_script(nested, L"value.lua", "return 42");
     write_script(folder, L"init.lua",
         "local helper = require('helper')\n"
         "assert(require('helper') == helper)\n"
         "assert(require('nested.value') == 42)\n"
-        "menu.add(helper.label, function() end, 'Ctrl+Alt+M')");
+        "menu.add(helper.label, function() end, 'Ctrl+Alt+M')\n"
+        "menu.add('Lazy Module', function() assert(require('late').value == 99) end)");
 
     plugin_host_shutdown();
     char *report = plugin_host_load_directory(directory, "test");
     expect(report && strstr(report, "broken.lua") && strstr(report, "nul.lua"),
            "load errors are reported by file, including source after a NUL byte");
-    expect(plugin_host_command_count() == 3, "only the good scripts and folder extensions load");
-    expect(plugin_host_command_count() == 3 &&
+    expect(plugin_host_command_count() == 4, "only the good scripts and folder extensions load");
+    expect(plugin_host_command_count() == 4 &&
            strcmp(plugin_host_command_label(0), "From A") == 0 &&
            strcmp(plugin_host_command_label(1), "From B") == 0 &&
            strcmp(plugin_host_command_label(2), "From Folder") == 0,
            "scripts and folder extensions load in name order");
+    expect(run_ok(3, editor), "folder modules can be required lazily from a command");
     expect(strcmp(plugin_host_command_shortcut(2), "Ctrl+Alt+M") == 0,
            "plugin commands retain shortcuts");
     expect(plugin_host_extension_count() == 5 && plugin_host_error_path() != NULL,
@@ -527,12 +595,12 @@ static void test_directory(void) {
     free(report);
 
     static const PluginHostCallbacks filtered = {
-        NULL, NULL, NULL, NULL, NULL, NULL, NULL, test_plugin_enabled, NULL
+        .plugin_enabled = test_plugin_enabled
     };
     plugin_host_shutdown();
     plugin_host_set_callbacks(&filtered);
     report = plugin_host_load_directory(directory, "test");
-    expect(plugin_host_command_count() == 2 &&
+    expect(plugin_host_command_count() == 3 &&
            strcmp(plugin_host_command_label(0), "From A") == 0 &&
            strcmp(plugin_host_command_label(1), "From Folder") == 0 &&
            plugin_host_extension_count() == 5,
@@ -547,11 +615,12 @@ static void test_directory(void) {
         free(path);
     }
     WCHAR *helper = path_join(folder, L"helper.lua");
+    WCHAR *late = path_join(folder, L"late.lua");
     WCHAR *init = path_join(folder, L"init.lua");
     WCHAR *nestedValue = path_join(nested, L"value.lua");
-    DeleteFileW(helper); DeleteFileW(init); DeleteFileW(nestedValue);
+    DeleteFileW(helper); DeleteFileW(late); DeleteFileW(init); DeleteFileW(nestedValue);
     RemoveDirectoryW(nested); RemoveDirectoryW(folder);
-    free(nestedValue); free(nested); free(helper); free(init); free(folder);
+    free(nestedValue); free(nested); free(helper); free(late); free(init); free(folder);
     RemoveDirectoryW(directory);
 
     plugin_host_shutdown();
@@ -569,8 +638,10 @@ static int find_command(const char *label) {
 
 static void test_bundled_plugins(HWND editor) {
     static const PluginHostCallbacks fakes = {
-        fake_prompt, fake_choose, fake_file_path, fake_language, fake_message,
-        fake_config_get, fake_config_set, NULL, fake_save_binary
+        .prompt = fake_prompt, .choose = fake_choose, .file_path = fake_file_path,
+        .language = fake_language, .message = fake_message, .config_get = fake_config_get,
+        .config_set = fake_config_set, .save_binary = fake_save_binary,
+        .schedule_deferred = fake_schedule_deferred
     };
     plugin_host_set_callbacks(&fakes);
     plugin_host_shutdown();
@@ -750,8 +821,10 @@ int main(void) {
     if (!editor) { FreeLibrary(scintilla); return 1; }
 
     static const PluginHostCallbacks fakes = {
-        fake_prompt, fake_choose, fake_file_path, fake_language, fake_message,
-        fake_config_get, fake_config_set, NULL, fake_save_binary
+        .prompt = fake_prompt, .choose = fake_choose, .file_path = fake_file_path,
+        .language = fake_language, .message = fake_message, .config_get = fake_config_get,
+        .config_set = fake_config_set, .save_binary = fake_save_binary,
+        .schedule_deferred = fake_schedule_deferred
     };
     plugin_host_set_callbacks(&fakes);
     test_commands(editor);
@@ -759,11 +832,13 @@ int main(void) {
     test_editor_api(editor);
     test_checkboxes_and_config(editor);
     test_ui(editor);
+    test_deferred(editor);
     test_events(editor);
     test_load_failures();
     test_environment();
+    test_isolation(editor);
     test_time_limit();
-    test_directory();
+    test_directory(editor);
     test_bundled_plugins(editor);
     plugin_host_shutdown();
 
