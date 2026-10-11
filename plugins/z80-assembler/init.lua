@@ -33,7 +33,7 @@ local function assemble_source()
     return nil
   end
   if #bytes == 0 then
-    ui.message("The source produced no machine code.", "Z80 assembly failed", "warning")
+    ui.message("Failed to assemble the source: no machine code produced.", "Z80 assembly failed", "warning")
     return nil
   end
   return {bytes=bytes, origin=origin, symbols=symbols, info=info, path=path}
