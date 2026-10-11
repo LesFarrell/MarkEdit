@@ -24,6 +24,10 @@ zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_plugin_host.exe
 if %errorlevel% neq 0 exit /b 1
 %TEST_BIN_DIR%\test_plugin_host.exe
 if %errorlevel% neq 0 exit /b 1
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_z80_assembler.exe tests\test_z80_assembler.c @lua-sources.rsp
+if %errorlevel% neq 0 exit /b 1
+%TEST_BIN_DIR%\test_z80_assembler.exe
+if %errorlevel% neq 0 exit /b 1
 zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_menus.exe tests\test_menus.c src\menu_commands.c src\plugin_host.c src\lua_editor_api.c src\file_io.c src\text_codec.c src\path_utils.c @lua-sources.rsp -luser32
 if %errorlevel% neq 0 exit /b 1
 %TEST_BIN_DIR%\test_menus.exe

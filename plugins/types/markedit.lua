@@ -68,6 +68,12 @@ function ui.prompt(label, default, title) end
 ---@return integer?, string?
 function ui.choose(items, label, title) end
 
+---@param default_name string
+---@param data string Binary data; embedded NUL bytes are preserved.
+---@param title? string
+---@return boolean saved False when the user cancels the Save As dialog.
+function ui.save_binary(default_name, data, title) end
+
 editor = {}
 ---@return string
 function editor.get_text() end

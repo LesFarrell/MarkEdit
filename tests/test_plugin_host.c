@@ -128,7 +128,7 @@ static void test_separators(HWND editor) {
 /* ---- stand-ins for the application's dialogs and document details ---- */
 static char s_lastTitle[64], s_lastMessage[256];
 static char s_configPlugin[64], s_configKey[64], s_configValue[128];
-static char s_binaryName[64], s_binaryData[64];
+static char s_binaryName[64], s_binaryData[256];
 static size_t s_binaryLength;
 static const char *s_calculatorExpression =
     "0x10 + 0b11 + (5 << 1) + min(4, 9)";
@@ -593,7 +593,7 @@ static void test_bundled_plugins(HWND editor) {
     int sortLines = find_command("Line Tools/Order/Sort A to Z");
     int sortLength = find_command("Line Tools/Order/Sort by Length");
     int shuffle = find_command("Line Tools/Order/Shuffle");
-    int buildTap = find_command("Z80/Build TAP");
+    int buildTap = find_command("Z80 Assembler/Compile");
     expect(encode64 >= 0 && decode64 >= 0 && encodeUrl >= 0 && decodeUrl >= 0 &&
            encodeHex >= 0 && decodeHex >= 0 && encodeHtml >= 0 && decodeHtml >= 0 &&
            toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
@@ -603,15 +603,23 @@ static void test_bundled_plugins(HWND editor) {
     set_document(editor, "ORG $8000\nstart: LD A,42\nLD ($9000),A\nJR start\n");
     s_binaryLength = 0;
     expect(buildTap >= 0 && run_ok(buildTap, editor) &&
-           strcmp(s_binaryName, "C:\\docs\\note.tap") == 0 && s_binaryLength == 32 &&
-           (unsigned char)s_binaryData[0] == 19 && (unsigned char)s_binaryData[2] == 0 &&
-           (unsigned char)s_binaryData[14] == 7 && (unsigned char)s_binaryData[16] == 0 &&
-           (unsigned char)s_binaryData[17] == 0x80 && (unsigned char)s_binaryData[23] == 0xff &&
-           (unsigned char)s_binaryData[24] == 0x3e && (unsigned char)s_binaryData[25] == 42 &&
-           (unsigned char)s_binaryData[26] == 0x32 && (unsigned char)s_binaryData[27] == 0 &&
-           (unsigned char)s_binaryData[28] == 0x90 && (unsigned char)s_binaryData[29] == 0x18 &&
-           (unsigned char)s_binaryData[30] == 0xf9,
-           "bundled Z80 assembler creates a byte-exact Spectrum TAP");
+           strcmp(s_binaryName, "C:\\docs\\note.tap") == 0 && s_binaryLength == 93 &&
+           (unsigned char)s_binaryData[0] == 19 && (unsigned char)s_binaryData[3] == 0 &&
+           (unsigned char)s_binaryData[14] == 36 && (unsigned char)s_binaryData[16] == 10 &&
+           (unsigned char)s_binaryData[18] == 36 && (unsigned char)s_binaryData[23] == 0xff &&
+           (unsigned char)s_binaryData[24] == 0 && (unsigned char)s_binaryData[25] == 10 &&
+           (unsigned char)s_binaryData[28] == 0xfd && memcmp(s_binaryData + 29, "32767", 5) == 0 &&
+           (unsigned char)s_binaryData[34] == 0x0e && (unsigned char)s_binaryData[37] == 0xff &&
+           (unsigned char)s_binaryData[38] == 0x7f && (unsigned char)s_binaryData[41] == 0xef &&
+           (unsigned char)s_binaryData[44] == 0xaf && (unsigned char)s_binaryData[46] == 0xf9 &&
+           (unsigned char)s_binaryData[47] == 0xc0 && memcmp(s_binaryData + 48, "32768", 5) == 0 &&
+           (unsigned char)s_binaryData[64] == 3 && (unsigned char)s_binaryData[75] == 7 &&
+           (unsigned char)s_binaryData[77] == 0 && (unsigned char)s_binaryData[78] == 0x80 &&
+           (unsigned char)s_binaryData[84] == 0xff && (unsigned char)s_binaryData[85] == 0x3e &&
+           (unsigned char)s_binaryData[86] == 42 && (unsigned char)s_binaryData[87] == 0x32 &&
+           (unsigned char)s_binaryData[88] == 0 && (unsigned char)s_binaryData[89] == 0x90 &&
+           (unsigned char)s_binaryData[90] == 0x18 && (unsigned char)s_binaryData[91] == 0xf9,
+           "bundled Z80 assembler creates an auto-running Spectrum TAP");
 
     set_document(editor,
         "ORG $8000\nCOUNT EQU 5\nLD BC,$1234\nLD IX,$9000\nLD (IX-2),A\n"
@@ -624,12 +632,14 @@ static void test_bundled_plugins(HWND editor) {
 
     set_document(editor, "org 3000\nld a,255\nloop: dec a\njp nz loop:\nret\n");
     s_binaryLength = 0;
-    expect(run_ok(buildTap, editor) && s_binaryLength == 32 &&
-           (unsigned char)s_binaryData[16] == 0xb8 && (unsigned char)s_binaryData[17] == 0x0b &&
-           (unsigned char)s_binaryData[24] == 0x3e && (unsigned char)s_binaryData[25] == 0xff &&
-           (unsigned char)s_binaryData[26] == 0x3d && (unsigned char)s_binaryData[27] == 0xc2 &&
-           (unsigned char)s_binaryData[28] == 0xba && (unsigned char)s_binaryData[29] == 0x0b &&
-           (unsigned char)s_binaryData[30] == 0xc9,
+    expect(run_ok(buildTap, editor) && s_binaryLength == 79 &&
+           (unsigned char)s_binaryData[39] == 0x0e && (unsigned char)s_binaryData[42] == 0xb8 &&
+           (unsigned char)s_binaryData[43] == 0x0b &&
+           (unsigned char)s_binaryData[63] == 0xb8 && (unsigned char)s_binaryData[64] == 0x0b &&
+           (unsigned char)s_binaryData[71] == 0x3e && (unsigned char)s_binaryData[72] == 0xff &&
+           (unsigned char)s_binaryData[73] == 0x3d && (unsigned char)s_binaryData[74] == 0xc2 &&
+           (unsigned char)s_binaryData[75] == 0xba && (unsigned char)s_binaryData[76] == 0x0b &&
+           (unsigned char)s_binaryData[77] == 0xc9,
            "Z80 assembler accepts whitespace-separated conditions and colon references");
 
     set_document(editor, "        org 8000\n        ld z,255\nloop:   dec a\n"
