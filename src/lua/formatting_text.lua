@@ -1,56 +1,5 @@
 -- ---- Edit menu text commands ----
 
--- Edit > Convert > Title Case: capitalises the first letter of each word in
--- the selection and lowercases the rest.
---
--- Only ASCII letters count as letters, so any other byte (punctuation, a
--- digit, part of an accented letter) starts a new word. The exception is an
--- apostrophe (' or ’) straight after a letter, which keeps the word going:
--- "it's" becomes "It's", not "It'S".
-local function title_case()
-  local start, finish = selection()
-  if is_empty(start, finish) then return end
-
-  local selected = editor.get_selection()
-  local text = selected:gsub("()(%a)(%a*)", function(position, firstLetter, rest)
-    -- Up to 4 bytes before the word: room for a letter and a 3-byte ’.
-    local before = selected:sub(math.max(position - 4, 1), position - 1)
-    local continuesWord = before:find("%a'$") or before:find("%a\u{2019}$")
-    return (continuesWord and firstLetter:lower() or firstLetter:upper()) .. rest:lower()
-  end)
-  editor.replace_selection(text)
-  editor.set_selection(start, start + #text - 1)
-end
-
--- Sort Lines Ascending/Descending (mode "ascending" or "descending", byte
--- order) and Remove Duplicate Lines (mode "unique", keeping the first of
--- each). Works on at least two selected lines, and rejoins them with the
--- document's line ending.
-local function transform_lines(mode)
-  local first, last = selected_lines()
-  if last <= first then return end
-
-  local lines = {}
-  for n = first, last do lines[#lines + 1] = editor.get_line(n) end
-
-  if mode == "unique" then
-    local seen, kept = {}, {}
-    for _, line in ipairs(lines) do
-      if not seen[line] then
-        seen[line] = true
-        kept[#kept + 1] = line
-      end
-    end
-    lines = kept
-  elseif mode == "descending" then
-    table.sort(lines, function(a, b) return a > b end)
-  else
-    table.sort(lines)
-  end
-
-  replace_lines(first, last, table.concat(lines, editor.eol()))
-end
-
 -- Edit > Trim Trailing Whitespace: removes spaces and tabs from the end of
 -- every line. The caret stays on the same text, or moves to the end of its
 -- line if it was in the whitespace removed.
@@ -170,21 +119,12 @@ local html = {
   numbered_list = function() insert_html_list(true) end,
 }
 
-local json = {
-  format = function() format_json(true) end,
-  minify = function() format_json(false) end,
-}
-
 local edit = {
-  title_case = title_case,
-  sort_ascending = function() transform_lines("ascending") end,
-  sort_descending = function() transform_lines("descending") end,
-  remove_duplicate_lines = function() transform_lines("unique") end,
   trim_whitespace = trim_trailing_whitespace,
   toggle_comment = toggle_comment,
 }
 
-for group, functions in pairs({ markdown = markdown, html = html, json = json, edit = edit }) do
+for group, functions in pairs({ markdown = markdown, html = html, edit = edit }) do
   for name, fn in pairs(functions) do
     commands.register(group .. "." .. name, fn)
   end

@@ -93,6 +93,9 @@ HWND g_hMainWnd;
    host's message loop. Set once in WinMain. */
 static HACCEL g_hAccel = NULL;
 static int g_lastPluginLoadSucceeded = 1;
+/* Set when plugin code changes save metadata without modifying Scintilla's
+   text buffer, so dirty-state reconciliation preserves that change. */
+static int g_pluginChangedSaveEncoding = 0;
 static HACCEL create_main_accelerators(void);
 static void rebuild_main_accelerators(void);
 /* Font face/weight/point-size: see settings.h for MAX_FONT_FACE_NAME's
@@ -2030,8 +2033,21 @@ static int plugin_document_modified(int index) {
 }
 static const char *plugin_document_encoding(void) {
     static const char *const names[] = { "utf-8", "utf-16le", "utf-16be", "ansi" };
+    if (g_encoding == TEXT_ENCODING_UTF8 && g_hasBom) return "utf-8-bom";
     return g_encoding >= TEXT_ENCODING_UTF8 && g_encoding <= TEXT_ENCODING_ANSI
         ? names[g_encoding] : "utf-8";
+}
+static int plugin_document_set_encoding(const char *encoding) {
+    int oldEncoding = g_encoding;
+    int oldBom = g_hasBom;
+    if (strcmp(encoding, "utf-8") == 0) set_document_encoding(TEXT_ENCODING_UTF8, 0);
+    else if (strcmp(encoding, "utf-8-bom") == 0) set_document_encoding(TEXT_ENCODING_UTF8, 1);
+    else if (strcmp(encoding, "utf-16le") == 0) set_document_encoding(TEXT_ENCODING_UTF16LE, 1);
+    else if (strcmp(encoding, "utf-16be") == 0) set_document_encoding(TEXT_ENCODING_UTF16BE, 1);
+    else if (strcmp(encoding, "ansi") == 0) set_document_encoding(TEXT_ENCODING_ANSI, 0);
+    else return 0;
+    if (oldEncoding != g_encoding || oldBom != g_hasBom) g_pluginChangedSaveEncoding = 1;
+    return 1;
 }
 static char *plugin_workspace_path(void) {
     return g_currentWorkspaceFolder ? to_utf8(g_currentWorkspaceFolder) : NULL;
@@ -2236,8 +2252,8 @@ static char *load_menu_definition(void) {
 
 static char *load_builtin_formatting(char *report) {
     static const int formattingParts[] = {
-        IDR_BUILTIN_FORMATTING_BASE, IDR_BUILTIN_FORMATTING_JSON,
-        IDR_BUILTIN_FORMATTING_TABLES, IDR_BUILTIN_FORMATTING_TEXT,
+        IDR_BUILTIN_FORMATTING_BASE, IDR_BUILTIN_FORMATTING_TABLES,
+        IDR_BUILTIN_FORMATTING_TEXT,
     };
     size_t length;
     char *formatting = builtin_script_parts(formattingParts,
@@ -2296,7 +2312,9 @@ static void load_menus_and_plugins(void) {
         .document_open = plugin_document_open, .document_save = plugin_document_save,
         .document_close = plugin_document_close, .document_path = plugin_document_path,
         .document_modified = plugin_document_modified,
-        .document_encoding = plugin_document_encoding, .workspace_path = plugin_workspace_path,
+        .document_encoding = plugin_document_encoding,
+        .document_set_encoding = plugin_document_set_encoding,
+        .workspace_path = plugin_workspace_path,
         .schedule_deferred = plugin_schedule_deferred,
     };
     plugin_host_set_callbacks(&callbacks);
@@ -2450,6 +2468,7 @@ static void manage_plugins(void) {
    has the focus, otherwise the main one. */
 static void run_plugin_command(int index) {
     int wasDirty = g_dirty;
+    g_pluginChangedSaveEncoding = 0;
     char *error = plugin_host_run(index, active_edit_view());
     sync_dirty_after_plugin(wasDirty);
     if (error) show_plugin_error(error);
@@ -2468,8 +2487,8 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         return;
     }
     /* A built-in command registered in Lua (commands.register) runs there,
-       from the menu, toolbar or a shortcut alike. The formatting Lua
-       is how the Markdown, HTML and JSON formatting commands exist at all. */
+       from the menu, toolbar or a shortcut alike. Built-in formatting Lua
+       supplies the Markdown and HTML implementations through this route. */
     const MenuCommand *builtIn = menu_command_for_id(cmd);
     int override = builtIn ? plugin_host_find_override(builtIn->name) : -1;
     if (override >= 0) {
@@ -3046,6 +3065,7 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
         }
         KillTimer(hwnd, timerId);
         int wasDirty = g_dirty;
+        g_pluginChangedSaveEncoding = 0;
         char *error = plugin_host_run_deferred((int)(timerId - IDT_PLUGIN_DEFER_BASE), g_hEdit);
         sync_dirty_after_plugin(wasDirty);
         if (error) show_plugin_error(error);

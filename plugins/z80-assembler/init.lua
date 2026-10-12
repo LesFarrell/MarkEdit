@@ -39,7 +39,7 @@ local function assemble_source()
   return {bytes=bytes, origin=origin, symbols=symbols, info=info, path=path}
 end
 
-menu.add("Z80 Assembler/Compile", function()
+menu.add("/Tools/Z80 Assembler/Compile", function()
   local result = assemble_source()
   if not result then return end
   local tap_ok, image = pcall(tap.code, spectrum_name(result.path), result.bytes,

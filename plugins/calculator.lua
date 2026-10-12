@@ -101,7 +101,7 @@ end
 -- written as words. Numbers can be written in hex (0xFF), octal (0o17) or
 -- binary (0b101), and hex(), oct() and bin() show the answer in that base.
 -- Trigonometry is in radians: rad() converts degrees, deg() converts back.
-menu.add("Calculate Selection", function()
+menu.add("/Tools/Calculate Selection", function()
   local start = editor.get_selection_range()
   local selected = editor.get_selection()
   if not selected:find("%S") then

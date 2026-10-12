@@ -287,7 +287,7 @@ project "markedit"
         "src/plugin_settings.c", "src/plugin_settings.h",
         "src/lua_editor_api.c", "src/lua_editor_api.h",
         "src/menu_commands.c", "src/menu_commands.h", "src/command_ids.h",
-        "src/menus.lua", "src/lua/formatting_base.lua", "src/lua/formatting_json.lua",
+        "src/menus.lua", "src/lua/formatting_base.lua",
         "src/lua/formatting_tables.lua", "src/lua/formatting_text.lua",
         "src/help/markdown-reference.md", "src/help/keyboard-shortcuts.lua",
         "src/theme.h",

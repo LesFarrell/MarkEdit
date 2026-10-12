@@ -1,13 +1,14 @@
 -- Text commands. On Edit > Convert:
 --   snake_case, camelCase, PascalCase, kebab-case, CONSTANT_CASE
 -- On the Plugins menu:
---   Lines      Remove Blank Lines, Keep/Remove Lines Containing, Shuffle,
---               Sort Naturally (so "file2" comes before "file10")
+--   Lines      Keep/Remove Lines Containing and Sort Naturally (so "file2"
+--              comes before "file10")
 --   Text        Count Occurrences
 --   Insert      UUID, Lorem Ipsum
 --
--- Built-in Edit menu commands already sort lines, remove duplicate lines,
--- and change to upper, lower and title case, so those aren't repeated here.
+-- edit-convert.lua and line-tools.lua already provide the standard case,
+-- sorting, deduplication, blank-line, and shuffle commands, so those aren't
+-- repeated here.
 --
 -- Uses only the plugin API documented in README.md in this folder.
 
@@ -102,16 +103,6 @@ menu.add("/Edit/Convert/CONSTANT_CASE", function() change_case("constant") end)
 -- These work on the selected lines, or on the whole document when nothing
 -- is selected.
 
-menu.add("Lines/Remove Blank Lines", function()
-  transform_lines(function(lines)
-    local kept = {}
-    for _, line in ipairs(lines) do
-      if line:find("%S") then kept[#kept + 1] = line end
-    end
-    return kept
-  end)
-end)
-
 -- Keeps (keep = true) or removes the lines that contain some text, matched
 -- exactly as typed, not as a Lua pattern.
 local function filter_lines(keep)
@@ -128,17 +119,6 @@ end
 
 menu.add("Lines/Keep Lines Containing...", function() filter_lines(true) end)
 menu.add("Lines/Remove Lines Containing...", function() filter_lines(false) end)
-
-menu.add("Lines/Shuffle Lines", function()
-  transform_lines(function(lines)
-    -- Fisher-Yates.
-    for i = #lines, 2, -1 do
-      local j = math.random(i)
-      lines[i], lines[j] = lines[j], lines[i]
-    end
-    return lines
-  end)
-end)
 
 -- Compares runs of digits by their value, so "item 9" sorts before
 -- "item 10". Letters compare ignoring case, and ties keep byte order.

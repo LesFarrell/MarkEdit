@@ -54,7 +54,11 @@ local function base64_decode(text)
 
     if not a or not b or (third ~= "=" and not c) or (fourth ~= "=" and not d)
       or (third == "=" and fourth ~= "=")
-      or ((third == "=" or fourth == "=") and not final_block) then
+      or ((third == "=" or fourth == "=") and not final_block)
+      -- Padding discards low-order bits. Requiring those bits to be zero
+      -- rejects non-canonical encodings instead of silently changing them.
+      or (third == "=" and b % 16 ~= 0)
+      or (fourth == "=" and third ~= "=" and c % 4 ~= 0) then
       return nil, "The selection is not valid Base64."
     end
 

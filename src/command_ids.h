@@ -53,11 +53,6 @@
 #define IDM_FILE_REOPEN_UTF16LE 388
 #define IDM_FILE_REOPEN_UTF16BE 389
 #define IDM_FILE_REOPEN_ANSI    390
-#define IDM_EDIT_ENCODING_UTF8     391
-#define IDM_EDIT_ENCODING_UTF8_BOM 392
-#define IDM_EDIT_ENCODING_UTF16LE  393
-#define IDM_EDIT_ENCODING_UTF16BE  394
-#define IDM_EDIT_ENCODING_ANSI     395
 #define IDM_PLUGIN_RELOAD          396
 #define IDM_PLUGIN_CUSTOMIZE_MENUS 397
 #define IDM_HELP_PLUGIN_GUIDE      398
@@ -86,18 +81,7 @@
 #define IDM_FMT_FOOTNOTE      275
 #define IDM_FMT_HRULE         276
 #define IDM_FMT_ALERT         277
-#define IDM_FMT_JSON_PRETTY   278
-#define IDM_FMT_JSON_MINIFY   279
-
 /* ---- menu command IDs: developer/editing commands, Run and Debug ---- */
-#define IDM_EDIT_UPPERCASE       280
-#define IDM_EDIT_LOWERCASE       281
-#define IDM_EDIT_TITLECASE       282
-#define IDM_EDIT_SORT_ASC        283
-#define IDM_EDIT_SORT_DESC       284
-#define IDM_EDIT_SORT_DEDUPE     285
-#define IDM_EDIT_TABS_TO_SPACES  286
-#define IDM_EDIT_SPACES_TO_TABS  287
 #define IDM_EDIT_BOOKMARK_TOGGLE 288
 #define IDM_EDIT_BOOKMARK_NEXT   289
 #define IDM_EDIT_BOOKMARK_PREV   290
@@ -129,9 +113,6 @@
 #define IDM_VIEW_ZOOM_RESET      317
 #define IDM_FILE_SHOW_EXPLORER   318
 #define IDM_EDIT_SELECT_ALL_OCCURRENCES 319
-#define IDM_EDIT_EOL_CRLF        320
-#define IDM_EDIT_EOL_LF          321
-#define IDM_EDIT_EOL_CR          322
 #define IDM_FILE_GO_BACK         323
 #define IDM_DEBUG_STEP_OUT       324
 #define IDM_VIEW_MINIMAP         325

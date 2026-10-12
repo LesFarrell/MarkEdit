@@ -131,6 +131,7 @@ static char s_configPlugin[64], s_configKey[64], s_configValue[4096];
 static char s_binaryName[64], s_binaryData[256];
 static size_t s_binaryLength;
 static int s_deferredToken;
+static char s_documentEncoding[16] = "utf-8";
 static const char *s_calculatorExpression =
     "0x10 + 0b11 + (5 << 1) + min(4, 9)";
 
@@ -194,6 +195,10 @@ static void fake_message(const char *title, const char *text, const char *kind) 
     snprintf(s_lastMessage, sizeof(s_lastMessage), "%s", text);
 }
 
+static void fake_status(const char *text) {
+    snprintf(s_lastMessage, sizeof(s_lastMessage), "%s", text);
+}
+
 static char *fake_file_path(void) {
     const char *path = "C:\\docs\\note.md";
     char *copy = (char *)malloc(strlen(path) + 1);
@@ -203,6 +208,15 @@ static char *fake_file_path(void) {
 
 static const char *fake_language(void) {
     return "markdown";
+}
+
+static const char *fake_document_encoding(void) {
+    return s_documentEncoding;
+}
+
+static int fake_document_set_encoding(const char *encoding) {
+    snprintf(s_documentEncoding, sizeof(s_documentEncoding), "%s", encoding);
+    return 1;
 }
 
 static int run_ok(int index, HWND editor) {
@@ -246,6 +260,7 @@ static void test_editor_api(HWND editor) {
     int first = load_ok("api.lua",
         "menu.add('Lines', function()\n"
         "  assert(editor.line_count() == 3 and editor.get_line(2) == 'two')\n"
+        "  assert(editor.tab_width() > 0)\n"
         "  local s, f = editor.line_range(2)\n"
         "  assert(s == 5 and f == 7 and editor.get_text():sub(s, f) == 'two')\n"
         "  editor.set_selection(s, f)\n"
@@ -504,9 +519,10 @@ static void test_environment(void) {
         "assert(app.time():match('^%d%d:%d%d:%d%d$'))\n"
         "assert(app.date_time():match('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$'))\n");
     load_ok("metadata.lua",
-        "assert(app.api_version() >= 2 and app.platform() == 'windows')\n"
+        "assert(app.api_version() >= 3 and app.platform() == 'windows')\n"
         "assert(type(app.version()) == 'string' and app.memory_used() > 0)\n"
-        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require)\n");
+        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require)\n"
+        "assert(c.eol_conversion and c.save_encoding and c.tab_width)\n");
 }
 
 static void test_isolation(HWND editor) {
@@ -641,6 +657,9 @@ static void test_bundled_plugins(HWND editor) {
         .prompt = fake_prompt, .choose = fake_choose, .file_path = fake_file_path,
         .language = fake_language, .message = fake_message, .config_get = fake_config_get,
         .config_set = fake_config_set, .save_binary = fake_save_binary,
+        .status = fake_status,
+        .document_encoding = fake_document_encoding,
+        .document_set_encoding = fake_document_set_encoding,
         .schedule_deferred = fake_schedule_deferred
     };
     plugin_host_set_callbacks(&fakes);
@@ -658,18 +677,220 @@ static void test_bundled_plugins(HWND editor) {
     int decodeHex = find_command("Developer Tools/Hex Decode");
     int encodeHtml = find_command("Developer Tools/HTML Entity Encode");
     int decodeHtml = find_command("Developer Tools/HTML Entity Decode");
+    int csvInspect = find_command("/Tools/CSV/Inspect and Validate");
+    int csvFormat = find_command("/Tools/CSV/Format Columns");
+    int csvToComma = find_command("/Tools/CSV/Convert/To Comma-Separated");
+    int csvToTab = find_command("/Tools/CSV/Convert/To Tab-Separated");
+    int csvToJson = find_command("/Tools/CSV/Convert/To JSON Objects");
+    int csvDedupe = find_command("/Tools/CSV/Rows/Remove Duplicate Rows");
+    int csvTranspose = find_command("/Tools/CSV/Columns/Transpose Rows and Columns");
+    int jsonPretty = find_command("/Tools/JSON/Format JSON");
+    int jsonMinify = find_command("/Tools/JSON/Minify JSON");
+    int jsonValidate = find_command("/Tools/JSON/Validate");
+    int jsonSort = find_command("/Tools/JSON/Sort Object Keys");
+    int jsonToYaml = find_command("/Tools/JSON/Convert JSON to YAML");
+    int yamlToJson = find_command("/Tools/JSON/Convert YAML to JSON");
+    int jsonEscape = find_command("/Tools/JSON/Escape Selection as JSON String");
+    int jsonUnescape = find_command("/Tools/JSON/Unescape JSON String");
+    int editUpper = find_command("/Edit/Convert/&UPPERCASE");
+    int editLower = find_command("/Edit/Convert/&lowercase");
+    int editTitle = find_command("/Edit/Convert/&Title Case");
+    int editSort = find_command("/Edit/Convert/Sort Lines &Ascending");
+    int editSortDescending = find_command("/Edit/Convert/Sort Lines Descend&ing");
+    int editDedupe = find_command("/Edit/Convert/Remove &Duplicate Lines");
+    int editTabs = find_command("/Edit/Convert/Tabs to &Spaces");
+    int editSpaces = find_command("/Edit/Convert/Spaces to Ta&bs");
+    int editCrlf = find_command("/Edit/Convert/Line &Endings/&CRLF (Windows)");
+    int editLf = find_command("/Edit/Convert/Line &Endings/&LF (Unix/macOS)");
+    int editCr = find_command("/Edit/Convert/Line &Endings/C&R (Classic Mac)");
+    int editUtf8 = find_command("/Edit/Convert/En&coding/UTF-&8");
+    int editUtf8Bom = find_command("/Edit/Convert/En&coding/UTF-8 with &BOM");
+    int editUtf16Le = find_command("/Edit/Convert/En&coding/UTF-16 &LE");
+    int editUtf16Be = find_command("/Edit/Convert/En&coding/UTF-16 B&E");
+    int editAnsi = find_command("/Edit/Convert/En&coding/&ANSI (system code page)");
+    int naturalSort = find_command("/Edit/Convert/Natural Sort Lines Ascending");
+    int numberHex = find_command("/Tools/Number Converter/To Hexadecimal");
+    int numberDecimal = find_command("/Tools/Number Converter/To Decimal");
+    int numberRoman = find_command("/Tools/Number Converter/To Roman Numerals");
+    int sqlFormat = find_command("/Tools/SQL/Format SQL");
+    int sqlMinify = find_command("/Tools/SQL/Minify SQL");
+    int jsonLinesToArray = find_command("/Tools/Data Converter/JSON Lines to JSON Array");
+    int jsonArrayToLines = find_command("/Tools/Data Converter/JSON Array to JSON Lines");
+    int queryToJson = find_command("/Tools/Data Converter/Query String to JSON");
+    int clefFormat = find_command("/Tools/Logs/CLEF/Format Events");
+    int clefWarnings = find_command("/Tools/Logs/CLEF/Keep Warnings and Above");
+    int grammarCheck = find_command("/Tools/Grammar Checker/Check");
+    int grammarHighlight = find_command("/Tools/Grammar Checker/Highlight Issues");
+    int grammarFix = find_command("/Tools/Grammar Checker/Fix Safe Issues");
+    int rot13 = find_command("Secret Message Lab/ROT13");
+    int atbash = find_command("Secret Message Lab/Atbash");
+    int encodeMorse = find_command("Secret Message Lab/Morse Code/Encode");
+    int decodeMorse = find_command("Secret Message Lab/Morse Code/Decode");
+    int encodeNato = find_command("Secret Message Lab/NATO Phonetics/Encode");
+    int decodeNato = find_command("Secret Message Lab/NATO Phonetics/Decode");
+    int encodeBinary = find_command("Secret Message Lab/Binary/Encode UTF-8");
+    int decodeBinary = find_command("Secret Message Lab/Binary/Decode UTF-8");
+    int pigLatin = find_command("Secret Message Lab/Pig Latin");
+    int personality = find_command("Document Personality/Analyse");
+    int clearPersonality = find_command("Document Personality/Clear Highlights");
+    int checkConstraints = find_command("Constraint Writer/Check Constraints");
+    int highlightConstraints = find_command("Constraint Writer/Highlight Issues");
+    int clearConstraints = find_command("Constraint Writer/Clear Highlights");
     int toc = find_command("/Snippets/Markdown/Table of Contents...");
     int calculator = find_command("Calculate Selection");
+    if (calculator < 0) calculator = find_command("/Tools/Calculate Selection");
     int removeBlank = find_command("Line Tools/Clean/Remove Blank Lines");
     int sortLines = find_command("Line Tools/Order/Sort A to Z");
     int sortLength = find_command("Line Tools/Order/Sort by Length");
     int shuffle = find_command("Line Tools/Order/Shuffle");
     int buildTap = find_command("Z80 Assembler/Compile");
+    if (buildTap < 0) buildTap = find_command("/Tools/Z80 Assembler/Compile");
     expect(encode64 >= 0 && decode64 >= 0 && encodeUrl >= 0 && decodeUrl >= 0 &&
            encodeHex >= 0 && decodeHex >= 0 && encodeHtml >= 0 && decodeHtml >= 0 &&
+           csvInspect >= 0 && csvFormat >= 0 && csvToComma >= 0 && csvToTab >= 0 && csvToJson >= 0 &&
+           csvDedupe >= 0 && csvTranspose >= 0 &&
+           jsonPretty >= 0 && jsonMinify >= 0 && jsonValidate >= 0 && jsonSort >= 0 &&
+           jsonToYaml >= 0 && yamlToJson >= 0 && jsonEscape >= 0 && jsonUnescape >= 0 &&
+           editUpper >= 0 && editLower >= 0 && editTitle >= 0 && editSort >= 0 &&
+           editSortDescending >= 0 && editDedupe >= 0 && editTabs >= 0 && editSpaces >= 0 &&
+           editCrlf >= 0 && editLf >= 0 && editCr >= 0 && editUtf8 >= 0 &&
+           editUtf8Bom >= 0 && editUtf16Le >= 0 && editUtf16Be >= 0 && editAnsi >= 0 &&
+           naturalSort >= 0 && numberHex >= 0 && numberDecimal >= 0 && numberRoman >= 0 &&
+           sqlFormat >= 0 && sqlMinify >= 0 && jsonLinesToArray >= 0 &&
+           jsonArrayToLines >= 0 && queryToJson >= 0 && clefFormat >= 0 &&
+           clefWarnings >= 0 && grammarCheck >= 0 && grammarHighlight >= 0 && grammarFix >= 0 &&
+           rot13 >= 0 && atbash >= 0 && encodeMorse >= 0 && decodeMorse >= 0 &&
+           encodeNato >= 0 && decodeNato >= 0 && encodeBinary >= 0 &&
+           decodeBinary >= 0 && pigLatin >= 0 &&
+           personality >= 0 && clearPersonality >= 0 &&
+           checkConstraints >= 0 && highlightConstraints >= 0 && clearConstraints >= 0 &&
            toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
            sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0,
            "bundled plugin commands are registered");
+
+    set_document(editor, "one two three");
+    SendMessageA(editor, SCI_SETSEL, 4, 7);
+    expect(run_ok(editUpper, editor) && document_is(editor, "one TWO three") &&
+           SendMessageA(editor, SCI_GETSELECTIONSTART, 0, 0) == 4 &&
+           SendMessageA(editor, SCI_GETSELECTIONEND, 0, 0) == 7,
+           "Edit Convert case command preserves its selection");
+    expect(run_ok(editLower, editor) && document_is(editor, "one two three"),
+           "Edit Convert lowercases a selection");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(editTitle, editor) && document_is(editor, "One Two Three"),
+           "Edit Convert title-cases a selection");
+    set_document(editor, "it's DON'T o'clock won\xE2\x80\x99t");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(editTitle, editor) && document_is(editor, "It's Don't O'clock Won\xE2\x80\x99t"),
+           "Edit Convert title case keeps apostrophes inside words");
+
+    SendMessageA(editor, SCI_SETEOLMODE, SC_EOL_CRLF, 0);
+    set_document(editor, "b\r\na\r\nb\r\n");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(editSort, editor) && document_is(editor, "a\r\nb\r\nb\r\n"),
+           "Edit Convert sorts selected lines");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(editSortDescending, editor) && document_is(editor, "b\r\nb\r\na\r\n"),
+           "Edit Convert sorts selected lines descending");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(editDedupe, editor) && document_is(editor, "b\r\na\r\n"),
+           "Edit Convert removes duplicate selected lines");
+
+    SendMessageA(editor, SCI_SETTABWIDTH, 4, 0);
+    set_document(editor, "\tx\n  \ty\ninside\ttext");
+    expect(run_ok(editTabs, editor) && document_is(editor, "    x\n    y\ninside\ttext"),
+           "Edit Convert changes only leading indentation");
+    expect(run_ok(editSpaces, editor) && document_is(editor, "\tx\n\ty\ninside\ttext"),
+           "Edit Convert converts leading spaces back to tabs");
+    expect(run_ok(editLf, editor) && document_is(editor, "\tx\n\ty\ninside\ttext") &&
+           SendMessageA(editor, SCI_GETEOLMODE, 0, 0) == SC_EOL_LF,
+           "Edit Convert changes existing and future line endings");
+    expect(run_ok(editCr, editor) && document_is(editor, "\tx\r\ty\rinside\ttext") &&
+           SendMessageA(editor, SCI_GETEOLMODE, 0, 0) == SC_EOL_CR,
+           "Edit Convert changes line endings to CR");
+    expect(run_ok(editCrlf, editor) && document_is(editor, "\tx\r\n\ty\r\ninside\ttext") &&
+           SendMessageA(editor, SCI_GETEOLMODE, 0, 0) == SC_EOL_CRLF,
+           "Edit Convert changes line endings to CRLF");
+    expect(run_ok(editLf, editor) && SendMessageA(editor, SCI_GETEOLMODE, 0, 0) == SC_EOL_LF,
+           "Edit Convert can return the document to LF endings");
+    strcpy(s_documentEncoding, "ansi");
+    expect(run_ok(editUtf8, editor) && strcmp(s_documentEncoding, "utf-8") == 0 &&
+           run_ok(editUtf8Bom, editor) && strcmp(s_documentEncoding, "utf-8-bom") == 0 &&
+           run_ok(editUtf16Le, editor) && strcmp(s_documentEncoding, "utf-16le") == 0 &&
+           run_ok(editUtf16Be, editor) && strcmp(s_documentEncoding, "utf-16be") == 0 &&
+           run_ok(editAnsi, editor) && strcmp(s_documentEncoding, "ansi") == 0,
+           "Edit Convert exposes every save encoding through the plugin API");
+
+    set_document(editor, "file10\nfile2\nfile01\nfile1");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(naturalSort, editor) && document_is(editor, "file1\nfile01\nfile2\nfile10"),
+           "natural sort compares embedded digit runs numerically");
+
+    set_document(editor, "255");
+    SendMessageA(editor, SCI_SETSEL, 0, 3);
+    expect(run_ok(numberHex, editor) && document_is(editor, "0xFF"),
+           "number converter converts decimal to hexadecimal");
+    SendMessageA(editor, SCI_SETSEL, 0, 4);
+    expect(run_ok(numberDecimal, editor) && document_is(editor, "255"),
+           "number converter reads prefixed hexadecimal");
+    SendMessageA(editor, SCI_SETSEL, 0, 3);
+    expect(run_ok(numberRoman, editor) && document_is(editor, "CCLV"),
+           "number converter creates canonical Roman numerals");
+
+    set_document(editor, "select a,b from users where id=1 and active=true;");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(sqlFormat, editor) &&
+           document_is(editor, "SELECT a, b\nFROM users\nWHERE id = 1 AND active = TRUE;"),
+           "SQL plugin formats clauses without changing identifiers");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(sqlMinify, editor) &&
+           document_is(editor, "SELECT a, b FROM users WHERE id = 1 AND active = TRUE;"),
+           "SQL plugin minifies formatted SQL");
+    set_document(editor, "select count(*) from users;");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(sqlFormat, editor) && document_is(editor, "SELECT count(*)\nFROM users;"),
+           "SQL plugin keeps function parentheses on the same line");
+
+    set_document(editor, "{\"a\":1}\n{\"a\":2}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(jsonLinesToArray, editor) &&
+           document_is(editor, "[\n  {\"a\":1},\n  {\"a\":2}\n]"),
+           "data converter turns JSON Lines into an array");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(jsonArrayToLines, editor) && document_is(editor, "{\"a\":1}\n{\"a\":2}"),
+           "data converter turns a JSON array back into JSON Lines");
+    set_document(editor, "name=Ada+Lovelace&lang=Lua");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(queryToJson, editor) &&
+           document_is(editor, "{\n  \"name\": \"Ada Lovelace\",\n  \"lang\": \"Lua\"\n}"),
+           "data converter decodes URL query strings");
+
+    set_document(editor,
+        "{\"@t\":\"2026-01-01T00:00:00Z\",\"@mt\":\"Hello {Name}\","
+        "\"@l\":\"Warning\",\"Name\":\"Ada\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefFormat, editor) &&
+           document_is(editor, "2026-01-01T00:00:00Z [WRN] Hello Ada"),
+           "log plugin renders CLEF message templates");
+    set_document(editor,
+        "{\"@t\":\"1\",\"@m\":\"ok\",\"@l\":\"Information\"}\n"
+        "{\"@t\":\"2\",\"@m\":\"bad\",\"@l\":\"Error\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefWarnings, editor) &&
+           document_is(editor, "{\"@t\":\"2\",\"@m\":\"bad\",\"@l\":\"Error\"}"),
+           "log plugin filters CLEF by severity");
+
+    set_document(editor, "this is is a error.");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(grammarCheck, editor) && strstr(s_lastMessage, "possible issues") &&
+           strstr(s_lastMessage, "Line 1, column 1") && strstr(s_lastMessage, "this is is a error.") &&
+           run_ok(grammarHighlight, editor) && SendMessageA(editor, SCI_INDICATORVALUEAT, 12, 0),
+           "grammar checker reports source lines and highlights heuristic issues");
+    set_document(editor, "This is is badly ,spaced!");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(grammarFix, editor) && document_is(editor, "This is badly, spaced!"),
+           "grammar checker fixes safe spacing and repeated-word issues");
 
     set_document(editor, "ORG $8000\nstart: LD A,42\nLD ($9000),A\nJR start\n");
     s_binaryLength = 0;
@@ -748,6 +969,13 @@ static void test_bundled_plugins(HWND editor) {
     expect(decode64 >= 0 && run_ok(decode64, editor) && document_is(editor, "hello world"),
            "bundled Base64 decoder");
 
+    set_document(editor, "AB==");
+    SendMessageA(editor, SCI_SETSEL, 0, 4);
+    s_lastMessage[0] = 0;
+    expect(run_ok(decode64, editor) && document_is(editor, "AB==") &&
+           strstr(s_lastMessage, "not valid Base64"),
+           "bundled Base64 decoder rejects non-canonical padding bits");
+
     set_document(editor, "a b+c");
     SendMessageA(editor, SCI_SETSEL, 0, 5);
     expect(encodeUrl >= 0 && run_ok(encodeUrl, editor) && document_is(editor, "a%20b%2Bc"),
@@ -771,6 +999,201 @@ static void test_bundled_plugins(HWND editor) {
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     expect(decodeHtml >= 0 && run_ok(decodeHtml, editor) && document_is(editor, "<a&b>"),
            "bundled HTML entity decoder");
+
+    set_document(editor, "name;note\nAda;\"hello; world\"\n");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvToTab, editor) && document_is(editor, "name\tnote\nAda\thello; world\n"),
+           "bundled CSV plugin parses quoted semicolon data and converts it to TSV");
+
+    set_document(editor, "name\tage\nAda\t36\nBob\t40");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvToComma, editor) && document_is(editor, "name,age\nAda,36\nBob,40"),
+           "bundled CSV plugin converts TSV to CSV");
+
+    set_document(editor, "before\nname;age\nAda;36\nafter");
+    SendMessageA(editor, SCI_SETSEL, 7, 22);
+    expect(run_ok(csvToComma, editor) &&
+           document_is(editor, "before\nname,age\nAda,36\nafter") &&
+           SendMessageA(editor, SCI_GETSELECTIONSTART, 0, 0) == 7 &&
+           SendMessageA(editor, SCI_GETSELECTIONEND, 0, 0) == 22,
+           "bundled CSV plugin transforms only the selected data range");
+
+    set_document(editor, "name age\nAda 36\nBob 40");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvToComma, editor) && document_is(editor, "name,age\nAda,36\nBob,40"),
+           "bundled CSV plugin processes whitespace-separated data");
+
+    set_document(editor, "name;age\nAda;36\nBob;40");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvToJson, editor) &&
+           document_is(editor, "[\n  {\n    \"name\": \"Ada\",\n    \"age\": \"36\"\n  },\n  {\n    \"name\": \"Bob\",\n    \"age\": \"40\"\n  }\n]"),
+           "bundled CSV plugin converts delimited rows to JSON objects");
+
+    set_document(editor, "name,age\nAda,36\nAda,36\nBob,40");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvDedupe, editor) && document_is(editor, "name,age\nAda,36\nBob,40"),
+           "bundled CSV plugin removes duplicate data rows");
+
+    set_document(editor, "name,age\nAda,36\nBob,40");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvTranspose, editor) && document_is(editor, "name,Ada,Bob\nage,36,40"),
+           "bundled CSV plugin transposes rows and columns");
+
+    set_document(editor, "name,age\nAda,36\nBob,40");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(csvInspect, editor) && strstr(s_lastMessage, "Separator: comma") &&
+           strstr(s_lastMessage, "Rows: 3") && strstr(s_lastMessage, "Columns: 2"),
+           "bundled CSV plugin inspects delimited data");
+
+    set_document(editor, "name,note\nAda,un\"quoted");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(csvInspect, editor) && document_is(editor, "name,note\nAda,un\"quoted") &&
+           strstr(s_lastMessage, "line 2, column 7") &&
+           strstr(s_lastMessage, "quoted field must begin"),
+           "bundled CSV plugin rejects quotes inside unquoted fields");
+
+    set_document(editor, "name,age\nAlexandra,9\nBo,12");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvFormat, editor) &&
+           document_is(editor, "\"name\"     ,\"age\"\n\"Alexandra\",\"9\"  \n\"Bo\"       ,\"12\" "),
+           "bundled CSV plugin aligns columns without changing field values");
+
+    set_document(editor, "{\"z\":0,\"a\":[1,true,null]}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(jsonPretty, editor) &&
+           document_is(editor, "{\n  \"z\": 0,\n  \"a\": [\n    1,\n    true,\n    null\n  ]\n}"),
+           "bundled JSON plugin pretty-prints the whole document");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(jsonMinify, editor) && document_is(editor, "{\"z\":0,\"a\":[1,true,null]}"),
+           "bundled JSON plugin minifies a selection");
+
+    set_document(editor, "{\"z\":0,\"a\":{\"z\":1,\"a\":2}}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(jsonSort, editor) &&
+           document_is(editor, "{\n  \"a\": {\n    \"a\": 2,\n    \"z\": 1\n  },\n  \"z\": 0\n}"),
+           "bundled JSON plugin recursively sorts object keys");
+
+    set_document(editor, "{\"name\":\"MarkEdit\",\"enabled\":true,\"items\":[1,{\"value\":null}]}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(jsonToYaml, editor) &&
+           document_is(editor, "\"name\": \"MarkEdit\"\n\"enabled\": true\n\"items\":\n  - 1\n  -\n    \"value\": null"),
+           "bundled JSON plugin converts JSON to YAML");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(yamlToJson, editor) &&
+           document_is(editor, "{\n  \"name\": \"MarkEdit\",\n  \"enabled\": true,\n  \"items\": [\n    1,\n    {\n      \"value\": null\n    }\n  ]\n}"),
+           "bundled JSON plugin converts its YAML output back to JSON");
+
+    set_document(editor, "name: Example # comment\nnote: 'it''s # data'\nports:\n  - 80\n  - 443\nowner:\n  first: Ada\n  active: TRUE");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(yamlToJson, editor) &&
+           document_is(editor, "{\n  \"name\": \"Example\",\n  \"note\": \"it's # data\",\n  \"ports\": [\n    80,\n    443\n  ],\n  \"owner\": {\n    \"first\": \"Ada\",\n    \"active\": true\n  }\n}"),
+           "bundled JSON plugin reads common YAML mappings, sequences, comments and scalars");
+
+    set_document(editor, "[1,]");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(jsonValidate, editor) && document_is(editor, "[1,]") &&
+           strstr(s_lastMessage, "line 1, column 4") && strstr(s_lastMessage, "Trailing commas"),
+           "bundled JSON plugin reports the precise validation error without changing text");
+    expect(SendMessageA(editor, SCI_INDICATORVALUEAT, 17, 3) != 0,
+           "bundled JSON plugin highlights the invalid token");
+
+    const char *invalidJson[] = { "[1 2]", "{\"a\" 1}", "{\"a\":}", "[truefalse]",
+        "[01]", "[1.]", "[1e+]", "[+1]", "[NaN]", "[undefined]", "[,1]",
+        "{1:2}", "{\"a\":1 \"b\":2}", "[\"\\q\"]", "[\"\\u12xz\"]",
+        "[\"a\nb\"]", "{}{}", "[1}", "true false", "[\"unterminated]" };
+    int invalidJsonCount = (int)(sizeof(invalidJson) / sizeof(invalidJson[0]));
+    int invalidJsonRejected = 1;
+    for (int i = 0; i < invalidJsonCount; i++) {
+        set_document(editor, invalidJson[i]);
+        SendMessageA(editor, SCI_SETSEL, 0, 0);
+        s_lastMessage[0] = 0;
+        invalidJsonRejected = invalidJsonRejected && run_ok(jsonValidate, editor) &&
+            strstr(s_lastMessage, "Invalid JSON") != NULL && document_is(editor, invalidJson[i]);
+    }
+    expect(invalidJsonRejected, "bundled JSON plugin rejects malformed JSON forms");
+
+    set_document(editor, "before\n```json\n{\"a\":1}\n```\nafter");
+    SendMessageA(editor, SCI_SETSEL, 18, 18);
+    expect(run_ok(jsonPretty, editor) &&
+           document_is(editor, "before\n```json\n{\n  \"a\": 1\n}\n```\nafter"),
+           "bundled JSON plugin formats the fenced block at the caret");
+
+    set_document(editor, "line 1\n\"line 2\"");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(jsonEscape, editor) && document_is(editor, "\"line 1\\n\\\"line 2\\\"\""),
+           "bundled JSON plugin escapes a selection");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(jsonUnescape, editor) && document_is(editor, "line 1\n\"line 2\""),
+           "bundled JSON plugin unescapes a JSON string");
+
+    set_document(editor, "Hello, World!");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(rot13, editor) && document_is(editor, "Uryyb, Jbeyq!"),
+           "bundled ROT13 transform");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(rot13, editor) && document_is(editor, "Hello, World!"),
+           "bundled ROT13 transform is reversible");
+
+    set_document(editor, "Abc-Z");
+    SendMessageA(editor, SCI_SETSEL, 0, 5);
+    expect(run_ok(atbash, editor) && document_is(editor, "Zyx-A"),
+           "bundled Atbash transform preserves case and punctuation");
+
+    set_document(editor, "SOS 2");
+    SendMessageA(editor, SCI_SETSEL, 0, 5);
+    expect(run_ok(encodeMorse, editor) && document_is(editor, "... --- ... / ..---"),
+           "bundled Morse encoder");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(decodeMorse, editor) && document_is(editor, "SOS 2"),
+           "bundled Morse decoder");
+
+    set_document(editor, "Hi 5");
+    SendMessageA(editor, SCI_SETSEL, 0, 4);
+    expect(run_ok(encodeNato, editor) && document_is(editor, "Hotel India / Five"),
+           "bundled NATO phonetics encoder");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(decodeNato, editor) && document_is(editor, "HI 5"),
+           "bundled NATO phonetics decoder");
+
+    set_document(editor, "Hi!");
+    SendMessageA(editor, SCI_SETSEL, 0, 3);
+    expect(run_ok(encodeBinary, editor) &&
+           document_is(editor, "01001000 01101001 00100001"), "bundled binary encoder");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(decodeBinary, editor) && document_is(editor, "Hi!"),
+           "bundled binary decoder");
+
+    set_document(editor, "Hello, apple and rhythm!");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(pigLatin, editor) && document_is(editor, "Ellohay, appleway andway rhythmay!"),
+           "bundled Pig Latin transform");
+
+    set_document(editor, "Bright sparks dance! Bright ideas sing! Bright colours shine!");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(personality, editor) && strstr(s_lastMessage, "Document mood: Enthusiastic") &&
+           strstr(s_lastMessage, "Favourite word: bright (3 times)"),
+           "bundled document personality reports mood and favourite word");
+    expect(run_ok(clearPersonality, editor), "bundled document personality clears highlights");
+
+    set_document(editor, "Short sentences work. Clear prose helps.");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(checkConstraints, editor) &&
+           strstr(s_lastMessage, "All active constraints are satisfied."),
+           "bundled constraint writer checks its default sentence limit");
+    set_document(editor,
+        "one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
+        "fifteen sixteen seventeen eighteen nineteen twenty twentyone.");
+    s_lastMessage[0] = 0;
+    expect(run_ok(checkConstraints, editor) &&
+           strstr(s_lastMessage, "Sentence limit (20 words): 1 too long"),
+           "bundled constraint writer reports a long sentence");
+    expect(run_ok(highlightConstraints, editor) && run_ok(clearConstraints, editor),
+           "bundled constraint writer manages issue highlights");
 
     SendMessageA(editor, SCI_SETEOLMODE, SC_EOL_LF, 0);
     set_document(editor, "# Intro\n\n## Details\n\n```md\n# Hidden\n```");

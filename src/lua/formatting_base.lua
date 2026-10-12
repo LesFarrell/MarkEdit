@@ -1,13 +1,11 @@
--- MarkEdit's built-in formatting and text commands, written in Lua.
+-- MarkEdit's built-in Markdown and HTML formatting commands, written in Lua.
 --
 -- What's here (each section below is one of these):
 --   Inline wrapping     Bold, Italic, Strikethrough, Inline Code, HTML tags
 --   Line prefixes       Headings, Blockquote, Bullet/Numbered/Task lists
 --   Snippets            Link, Image, Table, Code Block, Footnote, Alert, ...
---   JSON                Tools > JSON > Format / Minify
 --   Markdown tables     Table Editor and Snippets > Markdown > Table Row/Column
---   Edit menu           Toggle Comment, Trim Trailing Whitespace, Title Case,
---                       Sort Lines, Remove Duplicate Lines
+--   Edit menu           Toggle Comment, Trim Trailing Whitespace
 --   Registration        the command names, at the bottom of the file
 --
 -- How it's loaded: markedit.rc builds this file into markedit.exe, and

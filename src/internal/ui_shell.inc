@@ -1417,14 +1417,6 @@ static void update_word_completions(HWND hEdit) {
     for (int w = 0; w < wordCount; w++) free(words[w]);
 }
 
-/* Rewrites every line ending to eolMode (SC_EOL_CRLF/CR/LF) and switches the
-   document's own EOL mode to match, so newly typed newlines follow suit. */
-static void convert_line_endings(HWND hEdit, int eolMode) {
-    SendMessageA(hEdit, SCI_CONVERTEOLS, (WPARAM)eolMode, 0);
-    SendMessageA(hEdit, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
-    update_status_position();
-}
-
 /* Sublime/VSCode-style Ctrl+Shift+L: every occurrence of the word under the
    caret (or of the current selection) becomes its own selection at once. */
 static void select_all_occurrences(HWND hEdit) {

@@ -919,7 +919,8 @@ static int app_workspace_path(lua_State *L) {
 static int app_capabilities(lua_State *L) {
     static const char *const names[] = {
         "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
-        "documents", "command_execution", "path_picker", "status", "logging", "defer"
+        "documents", "command_execution", "path_picker", "status", "logging", "defer",
+        "eol_conversion", "save_encoding", "tab_width"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -1043,6 +1044,19 @@ static int documents_modified(lua_State *L) {
     return 1;
 }
 static int documents_encoding(lua_State *L) {
+    if (!lua_isnoneornil(L, 1)) {
+        lua_editor_api_require_editor(L);
+        const char *encoding = checked_cstring(L, 1, "encoding");
+        int valid = strcmp(encoding, "utf-8") == 0 || strcmp(encoding, "utf-8-bom") == 0 ||
+                    strcmp(encoding, "utf-16le") == 0 || strcmp(encoding, "utf-16be") == 0 ||
+                    strcmp(encoding, "ansi") == 0;
+        luaL_argcheck(L, valid, 1,
+                      "expected utf-8, utf-8-bom, utf-16le, utf-16be or ansi");
+        if (!s_callbacks.document_set_encoding)
+            return luaL_error(L, "documents.encoding cannot be changed here");
+        lua_pushboolean(L, s_callbacks.document_set_encoding(encoding));
+        return 1;
+    }
     const char *encoding = s_callbacks.document_encoding ? s_callbacks.document_encoding() : "utf-8";
     lua_pushstring(L, encoding ? encoding : "utf-8");
     return 1;

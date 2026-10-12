@@ -51,18 +51,21 @@ flowchart TB
 
     subgraph lua["Lua document-transformation layer"]
         base["formatting_base.lua"]
-        json["formatting_json.lua"]
         tables["formatting_tables.lua"]
         text["formatting_text.lua"]
-        extensions["User plugins"]
+        convert["plugins/edit-convert.lua"]
+        json["plugins/json-tools.lua"]
+        extensions["Other bundled and user plugins"]
     end
 
     plugins --> base
-    base --> json
     base --> tables
     base --> text
+    plugins --> json
+    plugins --> convert
     plugins --> extensions
     json --> editorApi
+    convert --> editorApi
     tables --> editorApi
     text --> editorApi
     extensions --> editorApi
@@ -72,7 +75,7 @@ flowchart TB
     classDef luaNode fill:#f3e8ff,stroke:#9333ea,color:#581c87
     class entry,shell,state,wndproc,registry,plugins,editorApi,nativeServices,scintilla native
     class ui,documents,preview,input,outline,dialogs,workspace,settings,debugger,dispatch component
-    class base,json,tables,text,extensions luaNode
+    class base,convert,json,tables,text,extensions luaNode
 ```
 
 The solid arrows show runtime delegation. The dotted state connection highlights
@@ -106,14 +109,15 @@ Native dispatch remains grouped by responsibility in `handle_file_command`, `han
 
 `plugin_host.c` owns the Lua state, sandbox, commands, events, configuration, menu definitions, extension discovery, and the folder-local module loader. Bundled extensions load first and personal extensions from `%APPDATA%\markedit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
 
-The built-in formatter is stored as four focused files:
+The built-in formatter is stored as three focused files:
 
 - `formatting_base.lua`: shared range helpers, inline formatting, line prefixes and snippets.
-- `formatting_json.lua`: JSON validation and formatting.
 - `formatting_tables.lua`: Markdown table parsing and operations.
-- `formatting_text.lua`: Edit-menu transformations and command registration.
+- `formatting_text.lua`: Markdown-aware Edit commands and formatting registration.
 
 They are separate executable resources but are joined and compiled as one Lua chunk. This preserves private `local` helpers across the parts and makes loading atomic.
+
+General Edit conversions live in `plugins/edit-convert.lua`, which creates the complete Edit → Convert submenu. Native code exposes only the small EOL-mode, tab-width, and save-encoding capabilities that text transformations cannot reproduce faithfully. JSON validation and transformations live entirely in `plugins/json-tools.lua`, which creates the Tools → JSON submenu and every item in it. The plugin supplies formatting, minification, validation, error highlighting, recursive key sorting, string escaping, JSON/YAML conversion, and optional live validation; the core contains no JSON tool commands. Delimited-text operations live in `plugins/csv-tools.lua`; its shared parser replaces the older CSV-to-Markdown implementation that was formerly duplicated in `markdown-tools.lua`. SQL, CLEF logs, data interchange, natural sorting, number conversion, and heuristic grammar checks are likewise ordinary bundled plugins and require no dedicated native commands.
 
 Lua is preferred for commands whose main input and output are editor text. C remains preferred for filesystem and encoding work, recovery, windows and controls, COM, subprocesses, debugging, large-file streaming and per-keystroke behaviour. Moving one of those areas to Lua is useful only when the Lua API can expose a small capability rather than mirroring a native subsystem wholesale.
 

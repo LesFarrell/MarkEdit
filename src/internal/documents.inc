@@ -517,8 +517,8 @@ static void reopen_with_encoding(TextEncoding encoding) {
     free(path);
 }
 
-/* Edit > Convert > Encoding: the text stays as it is; this only changes how
-   the next save stores it, so it marks the document modified. */
+/* Changes how the next save stores the active document. The plugin API uses
+   this primitive; conversion commands themselves live in plugins/. */
 static void set_document_encoding(TextEncoding encoding, int hasBom) {
     if (g_encoding == (int)encoding && g_hasBom == hasBom) return;
     g_encoding = encoding;

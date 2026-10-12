@@ -115,6 +115,7 @@ function ui.pick_file(title) end
 function ui.pick_folder(title) end
 
 documents = {}
+---@alias MarkEditEncoding 'utf-8'|'utf-8-bom'|'utf-16le'|'utf-16be'|'ansi'
 ---@return integer
 function documents.count() end
 ---@return integer
@@ -139,8 +140,10 @@ function documents.path(index) end
 ---@param index? integer
 ---@return boolean
 function documents.modified(index) end
----@return 'utf-8'|'utf-16le'|'utf-16be'|'ansi'
-function documents.encoding() end
+---@overload fun(): MarkEditEncoding
+---@param value MarkEditEncoding
+---@return boolean success
+function documents.encoding(value) end
 
 editor = {}
 ---@return string
@@ -157,8 +160,13 @@ function editor.get_selection(n) end
 function editor.get_line(n) end
 ---@return integer
 function editor.length() end
----@return string
-function editor.eol() end
+---@alias MarkEditLineEnding '\r\n'|'\n'|'\r'
+---@overload fun(): MarkEditLineEnding
+---@param value MarkEditLineEnding
+---@return MarkEditLineEnding
+function editor.eol(value) end
+---@return integer
+function editor.tab_width() end
 ---@param text string
 ---@param n? integer
 function editor.replace_selection(text, n) end

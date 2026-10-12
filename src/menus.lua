@@ -92,31 +92,6 @@ return {
       "-",
       { "&Clear All Bookmarks", "edit.bookmark_clear" },
     } },
-    { "Con&vert", {
-      { "&UPPERCASE", "edit.uppercase" },
-      { "&lowercase", "edit.lowercase" },
-      { "&Title Case", "edit.title_case" },
-      "-",
-      { "Sort Lines &Ascending", "edit.sort_ascending" },
-      { "Sort Lines Descend&ing", "edit.sort_descending" },
-      { "Remove &Duplicate Lines", "edit.remove_duplicate_lines" },
-      "-",
-      { "Tabs to &Spaces", "edit.tabs_to_spaces" },
-      { "Spaces to Ta&bs", "edit.spaces_to_tabs" },
-      "-",
-      { "Line &Endings", {
-        { "&CRLF (Windows)", "edit.eol_crlf" },
-        { "&LF (Unix/macOS)", "edit.eol_lf" },
-        { "C&R (Classic Mac)", "edit.eol_cr" },
-      } },
-      { "En&coding", {
-        { "UTF-&8", "edit.encoding_utf8" },
-        { "UTF-8 with &BOM", "edit.encoding_utf8_bom" },
-        { "UTF-16 &LE", "edit.encoding_utf16le" },
-        { "UTF-16 B&E", "edit.encoding_utf16be" },
-        { "&ANSI (code page {codepage})", "edit.encoding_ansi" },
-      } },
-    } },
     "-",
     { "&Find...", "edit.find" },
     { "Find &Next", "edit.find_next" },
@@ -171,11 +146,6 @@ return {
   } },
 
   { "&Tools", {
-    { "&JSON", {
-      { "&Format JSON", "json.format" },
-      { "&Minify JSON", "json.minify" },
-    } },
-    "-",
     { "Settin&gs...", "tools.settings" },
   } },
 

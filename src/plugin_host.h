@@ -14,7 +14,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 2
+#define MARKEDIT_PLUGIN_API_VERSION 3
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -60,6 +60,9 @@ typedef struct {
     char *(*document_path)(int index);
     int (*document_modified)(int index);
     const char *(*document_encoding)(void);
+    /* Changes the active document's save encoding. The value is one of
+       "utf-8", "utf-8-bom", "utf-16le", "utf-16be" or "ansi". */
+    int (*document_set_encoding)(const char *encoding);
     char *(*workspace_path)(void);
     /* Schedules or cancels a one-shot callback on the UI thread. */
     int (*schedule_deferred)(int token, unsigned delayMs, int cancel);

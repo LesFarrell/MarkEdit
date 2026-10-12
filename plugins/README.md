@@ -2,7 +2,7 @@
 
 A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
 
-This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The bundled `brainfuck.lua`, `calculator.lua`, `developer-tools.lua`, `line-tools.lua`, `markdown-tools.lua`, and `text-tools.lua` files provide ready-to-use commands and more examples to copy from.
+This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, Markdown, text, calculator, assembler, and developer-oriented extensions.
 
 **Contents:** [Quick start](#quick-start) · [How plugins are loaded](#how-plugins-are-loaded) · [Positions, ranges, and lines](#positions-ranges-and-lines) · [API reference](#api-reference) · [Where commands appear](#where-commands-appear) · [Replacing built-in commands](#replacing-built-in-commands) · [Customizing the menu bar](#customizing-the-menu-bar) · [How commands run](#how-commands-run) · [The Lua environment](#the-lua-environment) · [Limits](#limits) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting)
 
@@ -130,11 +130,11 @@ Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.
 
 ### app
 
-`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, `app.workspace_path()`, and `app.capabilities()` expose safe runtime metadata and feature detection. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
+`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, and `tab_width`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
 
 ### documents
 
-`documents.count()` and `documents.active()` describe the tabs. `documents.activate(index)`, `new()`, `open(path)`, `save([save_as])`, and `close([index])` manage them. `documents.path([index])`, `modified([index])`, and `encoding()` return document metadata. Indices are 1-based. File pickers remain user-controlled through `ui.pick_file()` and `ui.pick_folder()`.
+`documents.count()` and `documents.active()` describe the tabs. `documents.activate(index)`, `new()`, `open(path)`, `save([save_as])`, and `close([index])` manage them. `documents.path([index])`, `modified([index])`, and `encoding()` return document metadata. Passing `"utf-8"`, `"utf-8-bom"`, `"utf-16le"`, `"utf-16be"`, or `"ansi"` to `documents.encoding(value)` changes how the active document will be saved and marks it modified. Save-encoding changes are document metadata and are not reverted by text Undo. Indices are 1-based. File pickers remain user-controlled through `ui.pick_file()` and `ui.pick_folder()`.
 
 ### editor
 
@@ -149,7 +149,8 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.get_selection([n])` | The text of selection `n`, or `""` when it is a caret. Defaults to the main selection. |
 | `editor.get_line(n)` | The text of line `n`, without its line ending. |
 | `editor.length()` | The document's length in bytes. |
-| `editor.eol()` | The document's line ending: `"\r\n"`, `"\n"`, or `"\r"`. |
+| `editor.eol([value])` | The document's line ending: `"\r\n"`, `"\n"`, or `"\r"`. Passing one of those values converts existing endings and changes newly inserted endings. |
+| `editor.tab_width()` | The configured number of columns in a tab stop. |
 
 #### Changing text
 
@@ -280,18 +281,17 @@ commands.register("markdown.bold", function()
 end)
 ```
 
-MarkEdit's own Markdown, HTML, and JSON formatting commands, and the Edit menu's Toggle Comment, Trim Trailing Whitespace, Title Case, and line sorting commands (the ones marked (Lua) below), are written this way in the `src/lua/formatting_*.lua` files built into MarkEdit. They load before any plugin, so a plugin that registers one of their names replaces them. To go back to MarkEdit's own version, remove the plugin and reload.
+MarkEdit's Markdown and HTML formatting commands, plus Toggle Comment and Trim Trailing Whitespace (the ones marked (Lua) below), are written this way in the `src/lua/formatting_*.lua` files built into MarkEdit. General Edit conversions and JSON support are standalone bundled plugins in `plugins/edit-convert.lua` and `plugins/json-tools.lua`; those plugins create their own menu entries rather than overriding built-in command names.
 
 ### Built-in command names
 
 These are the names `commands.register` and the menu definition use.
 
 - **File:** `file.new`, `file.open`, `file.reopen_utf8`, `file.reopen_utf16le`, `file.reopen_utf16be`, `file.reopen_ansi`, `file.quick_open`, `file.find_in_folder`, `file.replace_in_folder`, `file.open_workspace`, `file.insert_file`, `file.save`, `file.save_as`, `file.save_all`, `file.export_html`, `file.export_pdf`, `file.print`, `file.open_terminal`, `file.show_in_explorer`, `file.close_tab`, `file.reopen_closed_tab`, `file.go_back`, `file.exit`
-- **Edit** (Lua): `edit.toggle_comment`, `edit.trim_whitespace`, `edit.title_case`, `edit.sort_ascending`, `edit.sort_descending`, `edit.remove_duplicate_lines`
-- **Edit:** `edit.undo`, `edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, `edit.delete`, `edit.select_all`, `edit.duplicate_line`, `edit.move_line_up`, `edit.move_line_down`, `edit.delete_line`, `edit.join_lines`, `edit.select_next`, `edit.select_all_occurrences`, `edit.match_brace`, `edit.bookmark_toggle`, `edit.bookmark_next`, `edit.bookmark_previous`, `edit.bookmark_clear`, `edit.uppercase`, `edit.lowercase`, `edit.tabs_to_spaces`, `edit.spaces_to_tabs`, `edit.eol_crlf`, `edit.eol_lf`, `edit.eol_cr`, `edit.encoding_utf8`, `edit.encoding_utf8_bom`, `edit.encoding_utf16le`, `edit.encoding_utf16be`, `edit.encoding_ansi`, `edit.find`, `edit.find_next`, `edit.replace`, `edit.go_to_line`
+- **Edit** (Lua): `edit.toggle_comment`, `edit.trim_whitespace`
+- **Edit:** `edit.undo`, `edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, `edit.delete`, `edit.select_all`, `edit.duplicate_line`, `edit.move_line_up`, `edit.move_line_down`, `edit.delete_line`, `edit.join_lines`, `edit.select_next`, `edit.select_all_occurrences`, `edit.match_brace`, `edit.bookmark_toggle`, `edit.bookmark_next`, `edit.bookmark_previous`, `edit.bookmark_clear`, `edit.find`, `edit.find_next`, `edit.replace`, `edit.go_to_line`
 - **View:** `view.preview`, `view.editor`, `view.next_tab`, `view.previous_tab`, `view.cycle_panes`, `view.theme_light`, `view.theme_dark`, `view.preview_theme_light`, `view.preview_theme_dark`, `view.custom_css`, `view.clear_custom_css`, `view.font`, `view.preview_on_left`, `view.focus_mode`, `view.word_wrap`, `view.spell_check`, `view.spell_check_language`, `view.outline`, `view.file_explorer`, `view.minimap`, `view.split_editor`, `view.reset_split_editor`, `view.show_whitespace`, `view.indent_guides`, `view.use_spaces`, `view.toggle_fold`, `view.fold_all`, `view.unfold_all`, `view.zoom_in`, `view.zoom_out`, `view.zoom_reset`
 - **Markdown** (Lua): `markdown.bold`, `markdown.italic`, `markdown.strikethrough`, `markdown.inline_code`, `markdown.heading1`, `markdown.heading2`, `markdown.heading3`, `markdown.blockquote`, `markdown.bullet_list`, `markdown.numbered_list`, `markdown.task_list`, `markdown.link`, `markdown.image`, `markdown.table`, `markdown.table_editor`, `markdown.table_row_above`, `markdown.table_row_below`, `markdown.table_row_delete`, `markdown.table_column_left`, `markdown.table_column_right`, `markdown.table_column_delete`, `markdown.table_sort_ascending`, `markdown.table_sort_descending`, `markdown.table_align_left`, `markdown.table_align_center`, `markdown.table_align_right`, `markdown.code_block`, `markdown.footnote`, `markdown.horizontal_rule`, `markdown.alert`
-- **JSON** (Lua): `json.format`, `json.minify`
 - **HTML** (Lua): `html.html`, `html.head`, `html.body`, `html.paragraph`, `html.bold`, `html.italic`, `html.underline`, `html.div`, `html.span`, `html.link`, `html.image`, `html.table`, `html.bullet_list`, `html.numbered_list`, `html.line_break`
 - **Tools:** `tools.settings`
 - **Run:** `run.run_file`, `run.debug_file`, `run.continue`, `run.step_over`, `run.step_into`, `run.step_out`, `run.toggle_breakpoint`, `run.clear_breakpoints`

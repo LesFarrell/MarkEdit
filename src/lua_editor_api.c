@@ -406,11 +406,28 @@ static int editor_line_at(lua_State *L) {
 }
 
 static int editor_eol(lua_State *L) {
-    switch ((int)SendMessageA(checked_editor(L), SCI_GETEOLMODE, 0, 0)) {
+    HWND hEdit = checked_editor(L);
+    if (!lua_isnoneornil(L, 1)) {
+        size_t length;
+        const char *ending = luaL_checklstring(L, 1, &length);
+        int mode = -1;
+        if (length == 2 && memcmp(ending, "\r\n", 2) == 0) mode = SC_EOL_CRLF;
+        else if (length == 1 && ending[0] == '\n') mode = SC_EOL_LF;
+        else if (length == 1 && ending[0] == '\r') mode = SC_EOL_CR;
+        luaL_argcheck(L, mode >= 0, 1, "expected \\r\\n, \\n or \\r");
+        SendMessageA(hEdit, SCI_CONVERTEOLS, (WPARAM)mode, 0);
+        SendMessageA(hEdit, SCI_SETEOLMODE, (WPARAM)mode, 0);
+    }
+    switch ((int)SendMessageA(hEdit, SCI_GETEOLMODE, 0, 0)) {
         case SC_EOL_CR: lua_pushliteral(L, "\r"); break;
         case SC_EOL_LF: lua_pushliteral(L, "\n"); break;
         default: lua_pushliteral(L, "\r\n"); break;
     }
+    return 1;
+}
+
+static int editor_tab_width(lua_State *L) {
+    lua_pushinteger(L, SendMessageA(checked_editor(L), SCI_GETTABWIDTH, 0, 0));
     return 1;
 }
 
@@ -652,6 +669,7 @@ static const luaL_Reg editor_functions[] = {
     {"length", editor_length},
     {"get_range", editor_get_range},
     {"eol", editor_eol},
+    {"tab_width", editor_tab_width},
     {"file_path", editor_file_path},
     {"language", editor_language},
     {"modified", editor_modified},

@@ -136,36 +136,6 @@ static int handle_edit_command(WORD cmd) {
         case IDM_EDIT_BOOKMARK_CLEAR:
             clear_all_bookmarks();
             break;
-        case IDM_EDIT_UPPERCASE:
-            SendMessageA(active_edit_view(), SCI_UPPERCASE, 0, 0);
-            break;
-        case IDM_EDIT_LOWERCASE:
-            SendMessageA(active_edit_view(), SCI_LOWERCASE, 0, 0);
-            break;
-        case IDM_EDIT_TABS_TO_SPACES:
-            convert_indentation(active_edit_view(), 1);
-            break;
-        case IDM_EDIT_SPACES_TO_TABS:
-            convert_indentation(active_edit_view(), 0);
-            break;
-        case IDM_EDIT_EOL_CRLF:
-            convert_line_endings(active_edit_view(), SC_EOL_CRLF);
-            break;
-        case IDM_EDIT_ENCODING_UTF8:
-            set_document_encoding(TEXT_ENCODING_UTF8, 0);
-            break;
-        case IDM_EDIT_ENCODING_UTF8_BOM:
-            set_document_encoding(TEXT_ENCODING_UTF8, 1);
-            break;
-        case IDM_EDIT_ENCODING_UTF16LE:
-            set_document_encoding(TEXT_ENCODING_UTF16LE, 1);
-            break;
-        case IDM_EDIT_ENCODING_UTF16BE:
-            set_document_encoding(TEXT_ENCODING_UTF16BE, 1);
-            break;
-        case IDM_EDIT_ENCODING_ANSI:
-            set_document_encoding(TEXT_ENCODING_ANSI, 0);
-            break;
         case IDM_FILE_REOPEN_UTF8:
             reopen_with_encoding(TEXT_ENCODING_UTF8);
             break;
@@ -177,12 +147,6 @@ static int handle_edit_command(WORD cmd) {
             break;
         case IDM_FILE_REOPEN_ANSI:
             reopen_with_encoding(TEXT_ENCODING_ANSI);
-            break;
-        case IDM_EDIT_EOL_LF:
-            convert_line_endings(active_edit_view(), SC_EOL_LF);
-            break;
-        case IDM_EDIT_EOL_CR:
-            convert_line_endings(active_edit_view(), SC_EOL_CR);
             break;
         case IDM_EDIT_FIND:
             show_find_dialog(0);
@@ -388,9 +352,8 @@ static void show_plugin_error(const char *report) {
    explicitly after every plugin call. This also covers a successful handler
    that edits a freshly loaded/saved document. */
 static void sync_dirty_after_plugin(int wasDirty) {
-    /* Encoding/BOM changes can make a document dirty without moving
-       Scintilla's text save point, so an existing dirty state is sticky. */
-    int modified = wasDirty || SendMessageA(g_hEdit, SCI_GETMODIFY, 0, 0) != 0;
+    int modified = wasDirty || g_pluginChangedSaveEncoding ||
+                   SendMessageA(g_hEdit, SCI_GETMODIFY, 0, 0) != 0;
     if (modified != (g_dirty != 0)) set_dirty(modified);
 }
 
@@ -398,6 +361,7 @@ static void sync_dirty_after_plugin(int wasDirty) {
    reported but doesn't stop what raised the event (a save still happens). */
 static void fire_plugin_event(const char *event, const WCHAR *path) {
     int wasDirty = g_dirty;
+    g_pluginChangedSaveEncoding = 0;
     char *argument = path ? to_utf8(path) : NULL;
     char *report = plugin_host_fire(event, argument, g_hEdit);
     free(argument);
