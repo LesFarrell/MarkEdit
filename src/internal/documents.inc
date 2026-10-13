@@ -19,8 +19,8 @@ static void format_document_label(const Document *doc, WCHAR *label, size_t capa
 }
 
 static void update_tab_label(int index) {
-    if (!g_hTabs || index < 0 || index >= g_documentCount) return;
-    Document *doc = &g_documents[index];
+    if (!g_hTabs || index < 0 || index >= g_documentStore.count) return;
+    Document *doc = &g_documentStore.documents[index];
     WCHAR label[MAX_PATH + 32];
     format_document_label(doc, label, sizeof(label) / sizeof(label[0]));
     TCITEMW item = {0};
@@ -31,8 +31,8 @@ static void update_tab_label(int index) {
 }
 
 static void save_active_document_view(void) {
-    if (!g_hEdit || g_documentCount <= 0) return;
-    Document *doc = &g_documents[g_activeDocument];
+    if (!g_hEdit || g_documentStore.count <= 0) return;
+    Document *doc = &g_documentStore.documents[g_documentStore.active];
     doc->caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
     doc->anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
     doc->firstVisibleLine = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
@@ -47,8 +47,8 @@ static void restore_document_view(HWND hEdit, const Document *doc) {
 }
 
 static void record_document_file_time(int index) {
-    if (index < 0 || index >= g_documentCount) return;
-    Document *doc = &g_documents[index];
+    if (index < 0 || index >= g_documentStore.count) return;
+    Document *doc = &g_documentStore.documents[index];
     doc->hasFileTime = 0;
     if (!doc->path) return;
     WCHAR *ioPath = extended_path(doc->path);
@@ -76,25 +76,25 @@ static void set_active_editor_document(sptr_t doc) {
 }
 
 static void switch_document(int index) {
-    if (!g_hEdit || index < 0 || index >= g_documentCount || index == g_activeDocument) return;
+    if (!g_hEdit || index < 0 || index >= g_documentStore.count || index == g_documentStore.active) return;
     save_active_document_view();
-    g_switchingDocument = 1;
-    g_activeDocument = index;
-    set_active_editor_document(g_documents[index].sciDocument);
+    g_documentStore.switching = 1;
+    g_documentStore.active = index;
+    set_active_editor_document(g_documentStore.documents[index].sciDocument);
     apply_editor_font();
-    apply_document_language(g_documents[index].path);
-    restore_document_view(g_hEdit, &g_documents[index]);
+    apply_document_language(g_documentStore.documents[index].path);
+    restore_document_view(g_hEdit, &g_documentStore.documents[index]);
     update_linenumber_margin_width(g_hEdit);
     if (g_hSplitEdit) {
         if (g_splitEditorVisible) {
             /* Starts wherever the main pane starts; the user can then scroll
                it independently - the split pane doesn't persist its own
                per-document view state (see set_active_editor_document()). */
-            restore_document_view(g_hSplitEdit, &g_documents[index]);
+            restore_document_view(g_hSplitEdit, &g_documentStore.documents[index]);
             update_linenumber_margin_width(g_hSplitEdit);
         }
     }
-    g_switchingDocument = 0;
+    g_documentStore.switching = 0;
     if (g_hTabs) TabCtrl_SetCurSel(g_hTabs, index);
     update_document_mapping();
     update_preview();
@@ -106,25 +106,25 @@ static void switch_document(int index) {
 }
 
 static int create_document_tab(void) {
-    if (g_documentCount >= MAX_DOCUMENTS) {
+    if (g_documentStore.count >= MAX_DOCUMENTS) {
         MessageBoxW(g_hMainWnd, L"MarkEdit can keep up to 32 documents open at once.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
-    if (g_documentCount > 0) save_active_document_view();
+    if (g_documentStore.count > 0) save_active_document_view();
     sptr_t sciDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
     if (!sciDoc) return 0;
-    int index = g_documentCount++;
-    memset(&g_documents[index], 0, sizeof(g_documents[index]));
-    g_documents[index].sciDocument = sciDoc;
-    g_documents[index].untitledNumber = g_nextUntitledNumber++;
-    g_activeDocument = index;
-    g_switchingDocument = 1;
+    int index = g_documentStore.count++;
+    memset(&g_documentStore.documents[index], 0, sizeof(g_documentStore.documents[index]));
+    g_documentStore.documents[index].sciDocument = sciDoc;
+    g_documentStore.documents[index].untitledNumber = g_documentStore.nextUntitledNumber++;
+    g_documentStore.active = index;
+    g_documentStore.switching = 1;
     set_active_editor_document(sciDoc);
     configure_scintilla(g_hEdit);
     apply_editor_font();
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-    g_switchingDocument = 0;
+    g_documentStore.switching = 0;
     TCITEMW item = {0};
     item.mask = TCIF_TEXT;
     item.pszText = L"";
@@ -146,7 +146,7 @@ static int g_pluginTabCheckPosted = 0;
    reaches plugins as no change at all. */
 static void queue_plugin_tab_check(void) {
     if (g_hMainWnd && !g_pluginTabCheckPosted &&
-        g_documents[g_activeDocument].sciDocument != g_pluginActiveDocument) {
+        g_documentStore.documents[g_documentStore.active].sciDocument != g_pluginActiveDocument) {
         g_pluginTabCheckPosted = 1;
         PostMessageW(g_hMainWnd, WM_APP_PLUGIN_TAB_CHECK, 0, 0);
     }
@@ -156,7 +156,7 @@ static void update_title(void) {
     /* Every change of active document (switching, a new tab, closing one)
        ends up here. */
     queue_plugin_tab_check();
-    const Document *active = &g_documents[g_activeDocument];
+    const Document *active = &g_documentStore.documents[g_documentStore.active];
     const WCHAR *name = g_currentFile ? g_currentFile
         : active->isReference ? reference_title(active->isReference)
         : (active->untitledNumber == 0 ? L"Untitled.txt" : L"Untitled");
@@ -171,7 +171,7 @@ static void update_title(void) {
 static void set_dirty(int dirty) {
     g_dirty = dirty;
     g_recoverySnapshotStale = 1;
-    update_tab_label(g_activeDocument);
+    update_tab_label(g_documentStore.active);
     update_title();
     update_status_position();
 }
@@ -183,16 +183,16 @@ static void set_dirty(int dirty) {
    load, since the loader always builds a new document. Configured the same
    way create_document_tab() sets up a new tab's document. */
 static void replace_active_scintilla_document(sptr_t sciDoc, int largeFile) {
-    sptr_t old = g_documents[g_activeDocument].sciDocument;
-    int oldSwitching = g_switchingDocument;
-    g_switchingDocument = 1;
-    g_documents[g_activeDocument].sciDocument = sciDoc;
+    sptr_t old = g_documentStore.documents[g_documentStore.active].sciDocument;
+    int oldSwitching = g_documentStore.switching;
+    g_documentStore.switching = 1;
+    g_documentStore.documents[g_documentStore.active].sciDocument = sciDoc;
     g_largeFile = largeFile;
     set_active_editor_document(sciDoc);
     configure_scintilla(g_hEdit);
     apply_editor_font();
     SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)old);
-    g_switchingDocument = oldSwitching;
+    g_documentStore.switching = oldSwitching;
 }
 
 /* A preview-only layout cannot show a large document because its rendered
@@ -358,23 +358,23 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
         large_operation_progress_end(&progress);
         SetCursor(oldCursor);
         if (!sciDoc) {
-            const Document *doc = &g_documents[g_activeDocument];
-            g_switchingDocument = 1;
+            const Document *doc = &g_documentStore.documents[g_documentStore.active];
+            g_documentStore.switching = 1;
             set_active_editor_document(doc->sciDocument);
             restore_document_view(g_hEdit, doc);
-            g_switchingDocument = 0;
+            g_documentStore.switching = 0;
         } else {
-            g_switchingDocument = 1;
+            g_documentStore.switching = 1;
             replace_active_scintilla_document(sciDoc, 1);
             apply_detected_eol_mode(g_hEdit);
             /* A loader-built document starts with undo collection off. */
             SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, TRUE, 0);
             SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
             SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-            g_switchingDocument = 0;
+            g_documentStore.switching = 0;
             g_hasBom = hasBom;
             g_encoding = encoding;
-            g_documents[g_activeDocument].encodingForced = forcedEncoding >= 0;
+            g_documentStore.documents[g_documentStore.active].encodingForced = forcedEncoding >= 0;
             /* Swapping in a loader-built document raises no SCN_MODIFIED,
                which is what refreshes these after an ordinary load. */
             update_linenumber_margin_width(g_hEdit);
@@ -428,19 +428,19 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
             g_largeFile = decodedLargeMode;
             g_hasBom = bom > 0;
             g_encoding = encoding;
-            g_documents[g_activeDocument].encodingForced = forcedEncoding >= 0;
-            g_switchingDocument = 1;
+            g_documentStore.documents[g_documentStore.active].encodingForced = forcedEncoding >= 0;
+            g_documentStore.switching = 1;
             set_edit_text(g_hEdit, content, (Sci_Position)contentLength);
             /* Matches toggle_indent_use_spaces(): when the setting is on, a
                file opened (or dropped) with tab-indentation should come in
                already converted rather than leaving a mix of tabs and spaces.
-               Done inside the g_switchingDocument window and before
+               Done inside the g_documentStore.switching window and before
                SCI_EMPTYUNDOBUFFER so it's folded into the loaded state - no
                spurious dirty flag and nothing to undo back into tabs. */
             if (g_indentUseSpaces && !g_largeFile) convert_indentation(g_hEdit, 1);
             SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
             SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-            g_switchingDocument = 0;
+            g_documentStore.switching = 0;
             loaded = 1;
         }
     }
@@ -452,7 +452,7 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
         /* An ordinary load's SCN_MODIFIED schedules this; a large-file
            load raises none, so clear the outline the old text built. */
         if (g_largeFile) update_outline();
-        record_document_file_time(g_activeDocument);
+        record_document_file_time(g_documentStore.active);
         update_document_mapping();
         update_preview();
         set_dirty(0);
@@ -486,8 +486,8 @@ static int load_file(const WCHAR *path) {
    Reconfiguring lexers/views after control returns avoids replacing view
    state re-entrantly while preserving the ordinary document's undo history. */
 static void apply_large_file_mode_after_growth(int documentIndex) {
-    if (documentIndex < 0 || documentIndex >= g_documentCount ||
-        documentIndex != g_activeDocument || !g_largeFile) return;
+    if (documentIndex < 0 || documentIndex >= g_documentStore.count ||
+        documentIndex != g_documentStore.active || !g_largeFile) return;
     KillTimer(g_hMainWnd, IDT_PREVIEW_UPDATE);
     KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
     KillTimer(g_hMainWnd, IDT_OUTLINE_UPDATE);
@@ -534,8 +534,8 @@ static int active_document_is_reusable(void) {
 static int open_file_in_tab(const WCHAR *path) {
     WCHAR *full = absolute_path(path);
     if (full) {
-        for (int i = 0; i < g_documentCount; i++) {
-            if (g_documents[i].path && _wcsicmp(g_documents[i].path, full) == 0) {
+        for (int i = 0; i < g_documentStore.count; i++) {
+            if (g_documentStore.documents[i].path && _wcsicmp(g_documentStore.documents[i].path, full) == 0) {
                 switch_document(i);
                 free(full);
                 return 1;
@@ -549,17 +549,17 @@ static int open_file_in_tab(const WCHAR *path) {
         created = 1;
     }
     if (load_file(path)) return 1;
-    if (created && g_documentCount > 1) {
-        sptr_t failedDoc = g_documents[g_activeDocument].sciDocument;
-        int removeIndex = g_activeDocument;
+    if (created && g_documentStore.count > 1) {
+        sptr_t failedDoc = g_documentStore.documents[g_documentStore.active].sciDocument;
+        int removeIndex = g_documentStore.active;
         int target = removeIndex > 0 ? removeIndex - 1 : 0;
         TabCtrl_DeleteItem(g_hTabs, removeIndex);
-        g_documentCount--;
-        g_activeDocument = target;
-        set_active_editor_document(g_documents[target].sciDocument);
+        g_documentStore.count--;
+        g_documentStore.active = target;
+        set_active_editor_document(g_documentStore.documents[target].sciDocument);
         apply_editor_font();
         apply_document_language(g_currentFile);
-        restore_document_view(g_hEdit, &g_documents[target]);
+        restore_document_view(g_hEdit, &g_documentStore.documents[target]);
         SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)failedDoc);
         TabCtrl_SetCurSel(g_hTabs, target);
         update_document_mapping();
@@ -574,11 +574,11 @@ static void save_session_documents(void) {
     WCHAR *settings = get_settings_path();
     if (!settings) return;
     int savedCount = 0;
-    for (int i = 0; i < g_documentCount; i++) {
-        if (!g_documents[i].path) continue;
+    for (int i = 0; i < g_documentStore.count; i++) {
+        if (!g_documentStore.documents[i].path) continue;
         WCHAR key[24];
         swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", savedCount++);
-        write_setting_string(L"Session", key, g_documents[i].path, settings);
+        write_setting_string(L"Session", key, g_documentStore.documents[i].path, settings);
     }
     for (int i = savedCount; i < MAX_DOCUMENTS; i++) {
         WCHAR key[24];
@@ -608,8 +608,8 @@ static void restore_session_documents(void) {
         free(file);
     }
     if (activeFile) {
-        for (int i = 0; i < g_documentCount; i++) {
-            if (g_documents[i].path && _wcsicmp(g_documents[i].path, activeFile) == 0) {
+        for (int i = 0; i < g_documentStore.count; i++) {
+            if (g_documentStore.documents[i].path && _wcsicmp(g_documentStore.documents[i].path, activeFile) == 0) {
                 switch_document(i);
                 break;
             }
@@ -1020,7 +1020,7 @@ static int write_active_document(const WCHAR *path) {
     if (g_largeFile)
         large_operation_progress_begin(&progress, L"Saving large file", L"Checking text encoding...");
     int lossless = text_encoding_is_lossless_progress(text, (size_t)len, encoding,
-        progress.dialog ? large_operation_progress_callback : NULL, &progress);
+        large_operation_progress_callback, &progress);
     if (lossless == -2) {
         large_operation_progress_end(&progress);
         return 0;
@@ -1068,7 +1068,7 @@ static int write_active_document(const WCHAR *path) {
     WCHAR *ioPath = extended_path(path);
     const WCHAR *target = ioPath ? ioPath : path;
     int ok = write_file_atomic_progress(target, text, (size_t)len, encoding, hasBom,
-        progress.dialog ? large_operation_progress_callback : NULL, &progress);
+        large_operation_progress_callback, &progress);
     int cancelled = progress.cancelled;
     large_operation_progress_end(&progress);
     if (!ok) {
@@ -1089,7 +1089,7 @@ static int write_active_document(const WCHAR *path) {
        write the current markers immediately instead of waiting for exit. */
     save_breakpoints_for_active_document(g_currentFile);
     free(ioPath);
-    record_document_file_time(g_activeDocument);
+    record_document_file_time(g_documentStore.active);
     update_document_mapping();
     /* HTML's preview (see show_html_file_preview()) is a real navigation to
        the saved file, not a re-render of the live buffer like Markdown's -
@@ -1158,14 +1158,14 @@ static int do_save(void) {
    Save As fallback, same as saving it individually would. Stop on the first
    cancellation or failure, and return to the originally selected tab. */
 static int do_save_all(void) {
-    int original = g_activeDocument;
+    int original = g_documentStore.active;
     int ok = 1;
-    for (int i = 0; i < g_documentCount; i++) {
-        if (!g_documents[i].dirty) continue;
+    for (int i = 0; i < g_documentStore.count; i++) {
+        if (!g_documentStore.documents[i].dirty) continue;
         switch_document(i);
         if (!do_save()) { ok = 0; break; }
     }
-    if (original < g_documentCount) switch_document(original);
+    if (original < g_documentStore.count) switch_document(original);
     return ok;
 }
 
@@ -1206,7 +1206,7 @@ static void do_export_html(void) {
     free(directorySlash);
     free(directory);
 
-    const WCHAR *titleWide = document_short_name(&g_documents[g_activeDocument]);
+    const WCHAR *titleWide = document_short_name(&g_documentStore.documents[g_documentStore.active]);
     if (!titleWide) titleWide = L"Untitled";
     char *baseUtf8 = to_utf8(url);
     char *titleUtf8 = to_utf8(titleWide);
@@ -1345,26 +1345,26 @@ static void push_closed_document(Document removed, int index) {
 }
 
 static void do_close_document_at(int index) {
-    if (index < 0 || index >= g_documentCount) return;
-    if (index != g_activeDocument) switch_document(index);
+    if (index < 0 || index >= g_documentStore.count) return;
+    if (index != g_documentStore.active) switch_document(index);
     fire_plugin_event("close", g_currentFile);
     if (!confirm_discard_if_dirty()) return;
     save_active_document_view();
     /* Still dirty here means the user chose not to save, so its markers
        follow discarded edits and the persisted copy is left as it was. */
     if (!g_dirty) save_breakpoints_for_active_document(g_currentFile);
-    int removeIndex = g_activeDocument;
-    Document removed = g_documents[removeIndex];
+    int removeIndex = g_documentStore.active;
+    Document removed = g_documentStore.documents[removeIndex];
 
-    if (g_documentCount <= 1) {
+    if (g_documentStore.count <= 1) {
         sptr_t newDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
         if (!newDoc) return;
-        memset(&g_documents[0], 0, sizeof(g_documents[0]));
-        g_documents[0].sciDocument = newDoc;
+        memset(&g_documentStore.documents[0], 0, sizeof(g_documentStore.documents[0]));
+        g_documentStore.documents[0].sciDocument = newDoc;
         /* Closing the final tab leaves one canonical, reusable blank document.
            Numbered names are reserved for additional unsaved tabs. */
-        g_documents[0].untitledNumber = 0;
-        g_switchingDocument = 1;
+        g_documentStore.documents[0].untitledNumber = 0;
+        g_documentStore.switching = 1;
         set_active_editor_document(newDoc);
         configure_scintilla(g_hEdit);
         apply_editor_font();
@@ -1372,7 +1372,7 @@ static void do_close_document_at(int index) {
         SendMessageA(g_hEdit, SCI_CLEARALL, 0, 0);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
         SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-        g_switchingDocument = 0;
+        g_documentStore.switching = 0;
         push_closed_document(removed, 0);
         g_recoverySnapshotStale = 1;
         write_recovery_snapshot();
@@ -1386,20 +1386,20 @@ static void do_close_document_at(int index) {
     }
 
     TabCtrl_DeleteItem(g_hTabs, removeIndex);
-    for (int i = removeIndex; i + 1 < g_documentCount; i++) g_documents[i] = g_documents[i + 1];
-    memset(&g_documents[g_documentCount - 1], 0, sizeof(g_documents[0]));
-    g_documentCount--;
-    g_activeDocument = removeIndex < g_documentCount ? removeIndex : g_documentCount - 1;
-    g_switchingDocument = 1;
-    set_active_editor_document(g_documents[g_activeDocument].sciDocument);
+    for (int i = removeIndex; i + 1 < g_documentStore.count; i++) g_documentStore.documents[i] = g_documentStore.documents[i + 1];
+    memset(&g_documentStore.documents[g_documentStore.count - 1], 0, sizeof(g_documentStore.documents[0]));
+    g_documentStore.count--;
+    g_documentStore.active = removeIndex < g_documentStore.count ? removeIndex : g_documentStore.count - 1;
+    g_documentStore.switching = 1;
+    set_active_editor_document(g_documentStore.documents[g_documentStore.active].sciDocument);
     apply_editor_font();
     apply_document_language(g_currentFile);
-    restore_document_view(g_hEdit, &g_documents[g_activeDocument]);
-    g_switchingDocument = 0;
+    restore_document_view(g_hEdit, &g_documentStore.documents[g_documentStore.active]);
+    g_documentStore.switching = 0;
     push_closed_document(removed, removeIndex);
     g_recoverySnapshotStale = 1;
     write_recovery_snapshot();
-    TabCtrl_SetCurSel(g_hTabs, g_activeDocument);
+    TabCtrl_SetCurSel(g_hTabs, g_documentStore.active);
     update_linenumber_margin_width(g_hEdit);
     update_document_mapping();
     update_preview();
@@ -1423,32 +1423,32 @@ static void do_reopen_closed_tab(void) {
     }
     save_active_document_view();
 
-    int replaceBlank = g_documentCount == 1 && active_document_is_reusable();
+    int replaceBlank = g_documentStore.count == 1 && active_document_is_reusable();
     int index = restored.closedIndex;
     if (index < 0) index = 0;
-    if (index > g_documentCount) index = g_documentCount;
+    if (index > g_documentStore.count) index = g_documentStore.count;
     if (replaceBlank) {
-        Document blank = g_documents[0];
-        g_documents[0] = restored;
+        Document blank = g_documentStore.documents[0];
+        g_documentStore.documents[0] = restored;
         index = 0;
-        g_activeDocument = 0;
-        g_switchingDocument = 1;
+        g_documentStore.active = 0;
+        g_documentStore.switching = 1;
         set_active_editor_document(restored.sciDocument);
-        g_switchingDocument = 0;
+        g_documentStore.switching = 0;
         release_document_reference(&blank);
     } else {
-        if (g_documentCount >= MAX_DOCUMENTS) {
+        if (g_documentStore.count >= MAX_DOCUMENTS) {
             g_closedDocuments[g_closedDocumentCount++] = restored;
             MessageBoxW(g_hMainWnd, L"Close a tab before reopening this document.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
             return;
         }
-        for (int i = g_documentCount; i > index; i--) g_documents[i] = g_documents[i - 1];
-        g_documents[index] = restored;
-        g_documentCount++;
-        g_activeDocument = index;
-        g_switchingDocument = 1;
+        for (int i = g_documentStore.count; i > index; i--) g_documentStore.documents[i] = g_documentStore.documents[i - 1];
+        g_documentStore.documents[index] = restored;
+        g_documentStore.count++;
+        g_documentStore.active = index;
+        g_documentStore.switching = 1;
         set_active_editor_document(restored.sciDocument);
-        g_switchingDocument = 0;
+        g_documentStore.switching = 0;
         TCITEMW item = {0};
         item.mask = TCIF_TEXT;
         item.pszText = L"";
@@ -1471,8 +1471,8 @@ static void do_reopen_closed_tab(void) {
 }
 
 static void prompt_reload_active_external_change(void) {
-    if (g_documentCount <= 0 || !g_currentFile || !g_documents[g_activeDocument].externalChanged) return;
-    Document *doc = &g_documents[g_activeDocument];
+    if (g_documentStore.count <= 0 || !g_currentFile || !g_documentStore.documents[g_documentStore.active].externalChanged) return;
+    Document *doc = &g_documentStore.documents[g_documentStore.active];
     doc->externalChanged = 0;
     InvalidateRect(g_hTabs, NULL, FALSE);
     if (doc->externalDeleted) {
@@ -1495,8 +1495,8 @@ static void prompt_reload_active_external_change(void) {
 
 static void check_external_file_change(void) {
     int changedVisual = 0;
-    for (int i = 0; i < g_documentCount; i++) {
-        Document *doc = &g_documents[i];
+    for (int i = 0; i < g_documentStore.count; i++) {
+        Document *doc = &g_documentStore.documents[i];
         if (!doc->path) continue;
         WCHAR *ioPath = extended_path(doc->path);
         if (!ioPath) continue;
@@ -1536,23 +1536,23 @@ static void check_external_file_change(void) {
 }
 
 static void do_exit(void) {
-    int original = g_activeDocument;
-    for (int i = 0; i < g_documentCount; i++) {
-        if (!g_documents[i].dirty) continue;
+    int original = g_documentStore.active;
+    for (int i = 0; i < g_documentStore.count; i++) {
+        if (!g_documentStore.documents[i].dirty) continue;
         switch_document(i);
         if (!confirm_discard_if_dirty()) {
-            if (original < g_documentCount) switch_document(original);
+            if (original < g_documentStore.count) switch_document(original);
             return;
         }
     }
-    if (original < g_documentCount) switch_document(original);
+    if (original < g_documentStore.count) switch_document(original);
     save_all_document_breakpoints();
     save_layout_settings();
     save_session_documents();
     clear_recovery_snapshot();
-    for (int i = 0; i < g_documentCount; i++) {
-        SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)g_documents[i].sciDocument);
-        g_documents[i].sciDocument = 0;
+    for (int i = 0; i < g_documentStore.count; i++) {
+        SendMessageA(g_hEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)g_documentStore.documents[i].sciDocument);
+        g_documentStore.documents[i].sciDocument = 0;
     }
     for (int i = 0; i < g_closedDocumentCount; i++)
         release_document_reference(&g_closedDocuments[i]);

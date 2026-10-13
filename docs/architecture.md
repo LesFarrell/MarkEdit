@@ -12,16 +12,19 @@ flowchart TB
 
     subgraph internal["Internal components · one native translation unit"]
         direction TB
-        ui["ui_shell.inc<br/>menus · toolbar · layout · themes"]
+        ui["ui_shell.inc<br/>menus · toolbar · layout · view toggles"]
         documents["documents.inc<br/>tabs · files · encoding · export · sessions"]
         preview["preview.inc<br/>WebView2 · rendering · scroll sync"]
         input["editor_input.inc<br/>smart editing · spelling · gestures"]
-        outline["outline_minimap.inc<br/>document navigation"]
+        outline["outline_host.inc<br/>editor outline host"]
         dialogs["dialogs.inc<br/>find · replace · choices · help"]
         workspace["workspace.inc<br/>workspace search and replace"]
         settings["settings_dialog.inc<br/>settings UI and persistence"]
         debugger["debugger.inc<br/>run · compile · debug · breakpoints"]
         dispatch["command_dispatch.inc<br/>command-family routing"]
+        helphost["help_and_menu.inc<br/>help pages · menu owner-draw"]
+        bridge["plugin_bridge.inc<br/>plugin service callbacks"]
+        controls["control_theme.inc<br/>owner-drawn tab and list theming"]
     end
 
     wndproc --> ui
@@ -38,15 +41,25 @@ flowchart TB
 
     subgraph compiled["Focused compiled modules"]
         registry["menu_commands.c<br/>authoritative command registry"]
-        plugins["plugin_host.c<br/>Lua runtime · sandbox · plugins · events"]
+        plugins["plugin_host.c<br/>host entry points · menu definition"]
+        runtime["plugin_lua_runtime.c<br/>sandboxed state · limits · pcall"]
+        pluginreg["plugin_registry.c<br/>plugin API · command/event registries"]
+        discovery["plugin_discovery.c<br/>extension discovery · module loader"]
         editorApi["lua_editor_api.c<br/>Scintilla-facing editor API"]
-        nativeServices["Native services<br/>recovery · codecs · explorer · menus"]
+        scintillaCfg["scintilla_config.c<br/>Scintilla view setup"]
+        outlineMod["outline_minimap.c<br/>outline and minimap subsystem"]
+        progress["progress_dialog.c<br/>IProgressDialog wrapper"]
+        nativeServices["Native services<br/>recovery · codecs · explorer · layout · menus"]
     end
 
     registry --> dispatch
     dispatch --> plugins
     dispatch --> nativeServices
-    plugins --> editorApi
+    dispatch --> outlineMod
+    plugins --> runtime
+    plugins --> pluginreg
+    plugins --> discovery
+    pluginreg --> editorApi
     editorApi --> scintilla["Scintilla documents and selections"]
 
     subgraph lua["Lua document-transformation layer"]
@@ -74,7 +87,7 @@ flowchart TB
     classDef component fill:#ecfeff,stroke:#0891b2,color:#164e63
     classDef luaNode fill:#f3e8ff,stroke:#9333ea,color:#581c87
     class entry,shell,state,wndproc,registry,plugins,editorApi,nativeServices,scintilla native
-    class ui,documents,preview,input,outline,dialogs,workspace,settings,debugger,dispatch component
+    class ui,documents,preview,input,outline,dialogs,workspace,settings,debugger,dispatch,helphost,bridge,controls component
     class base,convert,json,tables,text,extensions luaNode
 ```
 
@@ -92,12 +105,66 @@ they are included into the `markedit.c` translation unit.
 - `ui_shell.inc`: menus, toolbar, layout, view toggles and editor presentation.
 - `debugger.inc`: source launching, compiler discovery, GDB/Python debugger control and breakpoint persistence.
 - `editor_input.inc`: smart Tab/Enter, paired characters, spelling context actions and editor navigation gestures.
-- `outline_minimap.inc`, `workspace.inc` and `settings_dialog.inc`: their named UI subsystems.
+- `outline_host.inc`, `workspace.inc` and `settings_dialog.inc`: their named UI subsystems.
 - `command_dispatch.inc`: native command-family handlers.
+- `help_and_menu.inc`: help windows, the generated shortcuts page and menu-bar owner-draw.
+- `plugin_bridge.inc`: the service callbacks the plugin host reaches the application through (prompts, message boxes, document actions).
+- `control_theme.inc`: owner-drawn tab and list-item theming.
 
-These components deliberately remain in the main translation unit for now. Their Win32 callbacks use substantial private application state; textual extraction improves navigation without replacing that dependency with a large public global interface. New code should not add dependencies across these boundaries. Once a component can be expressed through a small context structure, it can become a separate `.c` file.
+These components deliberately remain in the main translation unit for now. Their Win32 callbacks use substantial private application state; textual extraction improves navigation without replacing that dependency with a large public global interface. New code should not add dependencies across these boundaries. Once a component can be expressed through a small context structure, it can become a separate `.c` file. `outline_minimap.c`, `progress_dialog.c` and `scintilla_config.c` have already crossed that line.
 
-`AppWindows` and `DocumentStore` in `markedit.c` group window handles and document ownership respectively. New state should be added to the appropriate structure rather than introduced as another unrelated global.
+The spell-check code in `markedit.c` has not. It shares a live `ISpellChecker` with the editor's right-click context menu and leans on several shell helpers (`get_edit_text`, `save_layout_settings`, `refresh_menu`, `show_choice_dialog`) plus `g_activeLanguage` and `g_largeFile`, so it presently needs more than a small context to stand alone.
+
+`AppWindows` and `DocumentStore` in `markedit.c` group window handles and document ownership respectively. New state should be added to the appropriate structure rather than introduced as another unrelated global. `DocumentStore` is the single owner of the open-document array; the old `g_documents`/`g_documentCount`/`g_activeDocument` macros that shadowed its fields are gone, so edits go through `g_documentStore.<field>` directly.
+
+## Module map and layering
+
+Each compiled module has one header and a short, one-directional list of
+dependencies. Lower rows may only depend on higher rows; the `settings_*.h`
+split and `layout_metrics` exist so the persistence code is not forced to
+depend on a UI module.
+
+| Module | Header | Responsibility | Depends on |
+| --- | --- | --- | --- |
+| `settings_values.h` | — | Persisted preference values, metrics (`SPLITTER_WIDTH`), `CompilerBackendPreference` | windows.h |
+| `find_state.h` | — | Transient Find/Replace dialog state | windows.h, commdlg.h |
+| `settings_io.h` | — | Load/save entry points over the values above | `settings_values.h` |
+| `layout_metrics.{h,c}` | `layout_metrics.h` | Explorer geometry values and `explorer_content_x()` | `settings_values.h` |
+| `settings.h` | — | Umbrella over the three headers above, for the app shell only | `settings_values.h`, `settings_io.h`, `find_state.h` |
+| `path_utils.c` | `path_utils.h` | Path manipulation | shlwapi |
+| `text_codec.c` | `text_codec.h` | UTF-8/16 and BOM handling | — |
+| `file_io.c` | `file_io.h` | Atomic file read/write helpers | `path_utils.h` |
+| `workspace_text.c` | `workspace_text.h` | Workspace text helpers | — |
+| `markdown.c` | `markdown.h` | Markdown rendering via cmark-gfm | cmark-gfm |
+| `settings.c` | `settings_io.h` | Persistence | `settings_values.h`, `settings_io.h`, `find_state.h`, `layout_metrics.h`, `path_utils.h`, `plugin_settings.h`, `text_codec.h` |
+| `recent_list.c` | `recent_list.h` | Recent-files list | `settings_io.h` |
+| `file_explorer.c` | `file_explorer.h` | Explorer panel and tree | `layout_metrics.h`, `settings_values.h`, `theme.h` |
+| `recovery.c` | `recovery.h` | Crash-recovery snapshots | `file_io.h` |
+| `toolbar_icons.c` / `themed_scrollbar.c` | matching | Owner-drawn UI helpers | windows.h, uxtheme |
+| `outline_minimap.c` | `outline_minimap.h` | Outline panel and minimap, driven through a host struct | `editor_commands.h`, `editor_language.h`, `settings_io.h`, `settings_values.h`, `text_codec.h`, Scintilla |
+| `scintilla_config.c` | `scintilla_config.h` | Scintilla view setup: margins, markers, wrap/whitespace/indent, gutter sizing | `editor_commands.h`, `settings_values.h`, `themed_scrollbar.h`, Scintilla |
+| `progress_dialog.c` | `progress_dialog.h` | Marquee progress dialog wrapper (IProgressDialog) | windows.h, shlobj, ole32 |
+| `plugin_host.c` | `plugin_host.h` | Plugin host entry points, menu definition, help page rendering | `plugin_host_internal.h`, `lua_editor_api.h` |
+| `plugin_lua_runtime.c` | (internal) | Sandboxed `lua_State`, memory/time limits, protected calls | `plugin_host_internal.h` |
+| `plugin_registry.c` | (internal) | `ui`/`menu`/`events`/`commands`/`config`/`app` API and registries | `plugin_host_internal.h` |
+| `plugin_discovery.c` | (internal) | Extension discovery and the folder-local `require` loader | `plugin_host_internal.h`, `file_io.h`, `path_utils.h` |
+| `lua_editor_api.c` | `lua_editor_api.h` | Scintilla-facing `editor.*` API | Scintilla |
+| `menu_commands.c` | `menu_commands.h` | Command registry | `command_ids.h` |
+| `markedit.c` + `src/internal/*.inc` | `markedit.h` | Application shell and subsystems | everything above |
+
+Two dependency rules fall out of the table:
+
+- **Persistence does not depend on UI.** `settings.c` includes `layout_metrics.h`
+  for the explorer's geometry values, not `file_explorer.h`; loading or saving
+  preferences never needs the tree control.
+- **Headers are included at the narrowest scope that works.** A module that only
+  reads persisted values includes `settings_values.h`; only `markedit.c` pulls in
+  the umbrella `settings.h`.
+
+Compiled sources are listed once, in the repo-root `*.rsp` response files that
+`build.bat` already passes to the compiler. `premake5.lua` reads those same files
+via `sources_from_rsp()`, so adding a new `.c` file is a one-line change to its
+`.rsp` rather than an edit in two build systems.
 
 ## Commands
 
@@ -107,7 +174,7 @@ Native dispatch remains grouped by responsibility in `handle_file_command`, `han
 
 ## Lua
 
-`plugin_host.c` owns the Lua state, sandbox, commands, events, configuration, menu definitions, extension discovery, and the folder-local module loader. Bundled extensions load first and personal extensions from `%APPDATA%\markedit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
+The plugin host is split across four files. `plugin_lua_runtime.c` owns the sandboxed Lua state, memory/time limits and protected calls; `plugin_registry.c` owns the API plugins see (`ui`, `menu`, `events`, `commands`, `config`, `app`), the command and event registries and running a registered command; `plugin_discovery.c` owns extension discovery and the folder-local module loader; and `plugin_host.c` keeps the entry points, the menu definition and help page rendering. Bundled extensions load first and personal extensions from `%APPDATA%\markedit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
 
 The built-in formatter is stored as three focused files:
 

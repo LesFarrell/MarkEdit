@@ -61,7 +61,7 @@ Every script above runs in a single `lua_State`, created in `ensure_state()` / `
 
 - **Globals are shared.** That's why the built-in formatting chunk and `example.lua` declare everything `local`.
 - **It's sandboxed.** Only the base, `string`, `table`, `math`, `utf8` and `coroutine` libraries are opened. `dofile` and `loadfile` are removed, and `load` accepts source text only. The custom `require` reads source modules only beneath the folder extension currently loading.
-- **The API is seven global tables:** `editor`, `ui`, `menu`, `commands`, `events`, `config` and `app`, each a `luaL_Reg` array in `plugin_host.c`. The `editor` functions only work while a command or event handler has an active editor. Called from a script's top-level code, they raise an error.
+- **The API is seven global tables:** `editor`, `ui`, `menu`, `commands`, `events`, `config` and `app`, each a `luaL_Reg` array in `plugin_registry.c`. The `editor` functions only work while a command or event handler has an active editor. Called from a script's top-level code, they raise an error.
 - **There's a time limit.** A count hook (`time_limit_hook`) stops any call that runs longer than `PLUGIN_TIME_LIMIT_MS` (5 s, not counting time in dialogs). Commands registered by a built-in script (`plugin_host_load_builtin`) are exempt, because formatting a large document can legitimately take longer.
 - **Each command is one undo step.** `plugin_host_run()` wraps the call in a Scintilla undo action, and if the command raises an error, it undoes what the command had changed.
 - **Reload recreates the Lua state.** Lua variables last until the next reload; values saved with `config.set` remain in `settings.json`.
@@ -156,7 +156,7 @@ The script lists each menu's commands that have shortcuts under that menu's name
 
 | File | Role |
 |---|---|
-| [src/plugin_host.c](../src/plugin_host.c) / [.h](../src/plugin_host.h) | Owns the `lua_State`, sandbox, registrations, loading, calls and time limit. It knows nothing about the application: it reaches it only through `PluginHostCallbacks`. |
+| [src/plugin_host.c](../src/plugin_host.c) / [.h](../src/plugin_host.h) | The plugin host entry points, the menu definition, help page rendering and shutdown. It knows nothing about the application: it reaches it only through `PluginHostCallbacks`. The host is split across siblings: [plugin_lua_runtime.c](../src/plugin_lua_runtime.c) owns the `lua_State`, sandbox, memory/time limits and calls; [plugin_registry.c](../src/plugin_registry.c) owns the API tables, command/event registries and running a registered command; [plugin_discovery.c](../src/plugin_discovery.c) owns extension discovery and the folder-local `require` loader. |
 | `src/lua_editor_api.c` / `.h` | Implements the Scintilla-facing `editor.*` API, including indexed and bulk multi-selection operations. |
 | [src/menu_commands.c](../src/menu_commands.c) / [.h](../src/menu_commands.h) | The table of built-in command names, their `IDM_*` IDs and shortcut text, and validation of a loaded menu definition. |
 | [src/markedit.c](../src/markedit.c) | Loads everything (`load_menus_and_plugins`), builds the menu bar from the definition, routes commands to Lua overrides (`handle_main_command`) and fires the `save`, `open` and `tab_changed` events. |

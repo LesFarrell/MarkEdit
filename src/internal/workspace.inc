@@ -367,8 +367,8 @@ static void do_find_in_folder(void) {
 /* Finds the open tab (if any) showing `path`, the same case-insensitive
    comparison open_file_in_tab() uses to detect an already-open document. */
 static int find_open_document_for_path(const WCHAR *path) {
-    for (int i = 0; i < g_documentCount; i++) {
-        if (g_documents[i].path && _wcsicmp(g_documents[i].path, path) == 0) return i;
+    for (int i = 0; i < g_documentStore.count; i++) {
+        if (g_documentStore.documents[i].path && _wcsicmp(g_documentStore.documents[i].path, path) == 0) return i;
     }
     return -1;
 }
@@ -394,8 +394,8 @@ static int load_workspace_text(const WCHAR *path, WorkspaceText *out) {
         Sci_Position length = 0;
         out->text = get_document_text(out->openIndex, &length);
         out->length = (size_t)length;
-        out->encoding = g_documents[out->openIndex].encoding;
-        out->hasBom = g_documents[out->openIndex].hasBom;
+        out->encoding = g_documentStore.documents[out->openIndex].encoding;
+        out->hasBom = g_documentStore.documents[out->openIndex].hasBom;
     } else {
         int length = 0;
         out->text = read_text_file(path, &length, &out->encoding, &out->hasBom);
@@ -429,20 +429,20 @@ static int save_workspace_text(const WCHAR *path, const char *text, size_t lengt
    pointer the same transient way get_document_text() does, so this works
    for a background tab without visibly switching to it. */
 static void reload_document_buffer(int index, const char *content) {
-    if (!g_hEdit || index < 0 || index >= g_documentCount) return;
+    if (!g_hEdit || index < 0 || index >= g_documentStore.count) return;
     BackgroundDocumentAccess access;
     begin_background_document_access(&access);
-    if (access.document != g_documents[index].sciDocument)
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    if (access.document != g_documentStore.documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[index].sciDocument);
     set_edit_text(g_hEdit, content, (Sci_Position)strlen(content));
     SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
     end_background_document_access(&access);
-    g_documents[index].dirty = 0;
+    g_documentStore.documents[index].dirty = 0;
     record_document_file_time(index);
     update_tab_label(index);
     update_document_mapping();
-    if (index == g_activeDocument) {
+    if (index == g_documentStore.active) {
         update_preview();
         update_title();
         update_outline();
@@ -740,17 +740,17 @@ static char *rewrite_links_for_source(const char *text, const WCHAR *sourcePath,
 }
 
 static void replace_open_document_text(int index, const char *text) {
-    if (index < 0 || index >= g_documentCount || !text) return;
+    if (index < 0 || index >= g_documentStore.count || !text) return;
     BackgroundDocumentAccess access;
     begin_background_document_access(&access);
-    if (access.document != g_documents[index].sciDocument)
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    if (access.document != g_documentStore.documents[index].sciDocument)
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[index].sciDocument);
     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
     SendMessageA(g_hEdit, SCI_TARGETWHOLEDOCUMENT, 0, 0);
     SendMessageA(g_hEdit, SCI_REPLACETARGET, (WPARAM)-1, (LPARAM)text);
     SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
     end_background_document_access(&access);
-    g_documents[index].dirty = 1;
+    g_documentStore.documents[index].dirty = 1;
     g_recoverySnapshotStale = 1;
     update_tab_label(index);
 }
@@ -804,17 +804,17 @@ static void update_workspace_links_after_rename(const WCHAR *oldPath, const WCHA
 
 static void explorer_path_renamed(const WCHAR *oldPath, const WCHAR *newPath, int isDirectory) {
     if (!oldPath || !newPath) return;
-    for (int i = 0; i < g_documentCount; i++) {
-        if (!g_documents[i].path ||
-            !(isDirectory ? path_at_or_below(g_documents[i].path, oldPath)
-                           : _wcsicmp(g_documents[i].path, oldPath) == 0)) continue;
-        const WCHAR *suffix = isDirectory ? g_documents[i].path + wcslen(oldPath) : L"";
+    for (int i = 0; i < g_documentStore.count; i++) {
+        if (!g_documentStore.documents[i].path ||
+            !(isDirectory ? path_at_or_below(g_documentStore.documents[i].path, oldPath)
+                           : _wcsicmp(g_documentStore.documents[i].path, oldPath) == 0)) continue;
+        const WCHAR *suffix = isDirectory ? g_documentStore.documents[i].path + wcslen(oldPath) : L"";
         WCHAR *retargeted = (WCHAR *)malloc((wcslen(newPath) + wcslen(suffix) + 1) * sizeof(WCHAR));
         if (!retargeted) continue;
         wcscpy(retargeted, newPath);
         wcscat(retargeted, suffix);
-        recent_list_remove(&g_recentFileList, g_documents[i].path);
-        replace_wstring(&g_documents[i].path, retargeted);
+        recent_list_remove(&g_recentFileList, g_documentStore.documents[i].path);
+        replace_wstring(&g_documentStore.documents[i].path, retargeted);
         recent_list_add(&g_recentFileList, retargeted);
         record_document_file_time(i);
         update_tab_label(i);

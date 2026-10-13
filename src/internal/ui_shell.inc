@@ -1462,9 +1462,3 @@ static void goto_bookmark(HWND hEdit, int forward) {
 static void clear_all_bookmarks(void) {
     SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BOOKMARK, 0);
 }
-
-typedef enum DebugSourceKind {
-    DEBUG_SOURCE_NONE = 0, DEBUG_SOURCE_PYTHON, DEBUG_SOURCE_C, DEBUG_SOURCE_CPP, DEBUG_SOURCE_LUA
-} DebugSourceKind;
-
-#include "debugger.inc"

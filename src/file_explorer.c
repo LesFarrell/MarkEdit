@@ -28,14 +28,13 @@
 #include <winnetwk.h>
 
 #include "path_utils.h"
-#include "settings.h"
+#include "settings_values.h"
 #include "theme.h"
 #include "themed_scrollbar.h"
 
 HWND g_hExplorerTree = NULL;
-int g_explorerVisible = 0;
-int g_explorerWidth = -1;
-int g_explorerWidthRatio = 220;
+/* g_explorerVisible, g_explorerWidth and g_explorerWidthRatio are defined in
+   layout_metrics.c (declared in layout_metrics.h). */
 
 typedef struct ExplorerItemData
 {
@@ -1369,12 +1368,7 @@ void explorer_set_root(const WCHAR *rootPath)
     start_watcher(s_root);
 }
 
-int explorer_content_x(int focusModeActive)
-{
-    if (!g_hExplorerTree || !g_explorerVisible || focusModeActive)
-        return 0;
-    return (g_explorerWidth >= 0 ? g_explorerWidth : 0) + SPLITTER_WIDTH;
-}
+/* explorer_content_x() now lives in layout_metrics.c. */
 
 void explorer_shutdown(void)
 {

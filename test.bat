@@ -1,6 +1,10 @@
 @echo off
 setlocal
 where zig >nul 2>nul || (echo zig was not found on PATH. & exit /b 1)
+set "PS=pwsh"
+where pwsh >nul 2>nul || set "PS=powershell"
+%PS% -NoProfile -ExecutionPolicy Bypass -File check_structure.ps1
+if %errorlevel% neq 0 exit /b 1
 set "TEST_BIN_DIR=build\tests"
 if not exist "%TEST_BIN_DIR%\" mkdir "%TEST_BIN_DIR%" || exit /b 1
 copy /y Scintilla.dll build\Scintilla.dll >nul || exit /b 1
@@ -20,7 +24,7 @@ zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_recovery.exe te
 if %errorlevel% neq 0 exit /b 1
 %TEST_BIN_DIR%\test_recovery.exe
 if %errorlevel% neq 0 exit /b 1
-zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_plugin_host.exe tests\test_plugin_host.c src\plugin_host.c src\lua_editor_api.c src\file_io.c src\text_codec.c src\path_utils.c @lua-sources.rsp -luser32
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_plugin_host.exe tests\test_plugin_host.c @plugin-sources.rsp @lua-sources.rsp -luser32
 if %errorlevel% neq 0 exit /b 1
 %TEST_BIN_DIR%\test_plugin_host.exe
 if %errorlevel% neq 0 exit /b 1
@@ -28,11 +32,11 @@ zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_z80_assembler.e
 if %errorlevel% neq 0 exit /b 1
 %TEST_BIN_DIR%\test_z80_assembler.exe
 if %errorlevel% neq 0 exit /b 1
-zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_menus.exe tests\test_menus.c src\menu_commands.c src\plugin_host.c src\lua_editor_api.c src\file_io.c src\text_codec.c src\path_utils.c @lua-sources.rsp -luser32
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_menus.exe tests\test_menus.c src\menu_commands.c @plugin-sources.rsp @lua-sources.rsp -luser32
 if %errorlevel% neq 0 exit /b 1
 %TEST_BIN_DIR%\test_menus.exe
 if %errorlevel% neq 0 exit /b 1
-zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_formatting.exe tests\test_formatting.c src\menu_commands.c src\plugin_host.c src\lua_editor_api.c src\file_io.c src\text_codec.c src\path_utils.c @lua-sources.rsp -luser32
+zig cc -std=c11 -O2 -Wall -Wextra -Werror -o %TEST_BIN_DIR%\test_formatting.exe tests\test_formatting.c src\menu_commands.c @plugin-sources.rsp @lua-sources.rsp -luser32
 if %errorlevel% neq 0 exit /b 1
 %TEST_BIN_DIR%\test_formatting.exe
 if %errorlevel% neq 0 exit /b 1

@@ -1,10 +1,12 @@
-#include "settings.h"
+#include "settings_values.h"
+#include "settings_io.h"
+#include "find_state.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <wchar.h>
 
-#include "file_explorer.h"
+#include "layout_metrics.h" /* explorer geometry values + explorer_content_x() */
 #include "path_utils.h"
 #include "plugin_settings.h"
 #include "text_codec.h"

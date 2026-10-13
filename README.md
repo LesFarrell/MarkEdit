@@ -181,7 +181,8 @@ src/                     application sources, including:
   menus.lua                default menu bar definition, built into markedit.exe
   lua/formatting_*.lua     Markdown, HTML and Markdown-aware Edit commands built into markedit.exe
   menu_commands.c / .h     built-in command names used by menus.lua, with their shortcut text
-  settings.c / .h          settings.json persistence
+  settings.c / settings*.h  settings.json persistence; settings_values.h holds the persisted
+                            values, settings_io.h the load/save surface, settings.h the umbrella
   help/                    Help pages built into markedit.exe: markdown-reference.md, and keyboard-shortcuts.lua,
                            which generates the Keyboard Shortcuts page from the menus and shortcut table
   file_explorer.c / .h     workspace file explorer panel
@@ -189,8 +190,14 @@ src/                     application sources, including:
   path_utils.c / .h        Windows path and heap-string utilities
   text_codec.c / .h        UTF conversion, text-file encoding detection and conversion, JSON string encoding
   markdown.c / .h          cmark-gfm rendering adapter
-  plugin_host.c / .h       Lua runtime, plugin loading, commands, events and menus
+  plugin_host.c / .h       plugin host entry points, menu definition and help page rendering
+  plugin_lua_runtime.c     sandboxed Lua state, memory and time limits, protected calls
+  plugin_registry.c        plugin API tables and the command/event registries
+  plugin_discovery.c       extension discovery and the folder-local require loader
   lua_editor_api.c / .h    Scintilla-facing Lua editor API and multi-selection operations
+  outline_minimap.c / .h   outline panel and minimap subsystem
+  scintilla_config.c / .h  Scintilla view setup: margins, markers, wrap/whitespace/indent
+  progress_dialog.c / .h   cancellable IProgressDialog wrapper for large opens and saves
   theme.h                  shared native light/dark palette and paint helpers
 plugins/                 bundled Lua extensions, plugin guide, examples, and language-server types
 docs/lua.md              developer guide to MarkEdit's Lua files: what each is, load order, how commands reach Lua

@@ -596,25 +596,25 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 }
 
 static void move_document_tab(int from, int to) {
-    if (from < 0 || to < 0 || from >= g_documentCount || to >= g_documentCount || from == to) return;
+    if (from < 0 || to < 0 || from >= g_documentStore.count || to >= g_documentStore.count || from == to) return;
     save_active_document_view();
-    Document moving = g_documents[from];
+    Document moving = g_documentStore.documents[from];
     if (from < to) {
-        for (int i = from; i < to; i++) g_documents[i] = g_documents[i + 1];
+        for (int i = from; i < to; i++) g_documentStore.documents[i] = g_documentStore.documents[i + 1];
     } else {
-        for (int i = from; i > to; i--) g_documents[i] = g_documents[i - 1];
+        for (int i = from; i > to; i--) g_documentStore.documents[i] = g_documentStore.documents[i - 1];
     }
-    g_documents[to] = moving;
-    if (g_activeDocument == from) g_activeDocument = to;
-    else if (from < g_activeDocument && to >= g_activeDocument) g_activeDocument--;
-    else if (from > g_activeDocument && to <= g_activeDocument) g_activeDocument++;
+    g_documentStore.documents[to] = moving;
+    if (g_documentStore.active == from) g_documentStore.active = to;
+    else if (from < g_documentStore.active && to >= g_documentStore.active) g_documentStore.active--;
+    else if (from > g_documentStore.active && to <= g_documentStore.active) g_documentStore.active++;
 
     TabCtrl_DeleteItem(g_hTabs, from);
     TCITEMW item = {0};
     item.mask = TCIF_TEXT; item.pszText = L"";
     SendMessageW(g_hTabs, TCM_INSERTITEMW, (WPARAM)to, (LPARAM)&item);
-    for (int i = 0; i < g_documentCount; i++) update_tab_label(i);
-    TabCtrl_SetCurSel(g_hTabs, g_activeDocument);
+    for (int i = 0; i < g_documentStore.count; i++) update_tab_label(i);
+    TabCtrl_SetCurSel(g_hTabs, g_documentStore.active);
     update_title();
 }
 
@@ -640,7 +640,7 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         fill_rect_color(buffer, &client, g_editorDarkMode ? THEME_DARK_BG : RGB(0xF6, 0xF8, 0xFA));
 
         int selected = TabCtrl_GetCurSel(hwnd);
-        for (int i = 0; i < g_documentCount; i++) {
+        for (int i = 0; i < g_documentStore.count; i++) {
             RECT itemRect;
             if (!TabCtrl_GetItemRect(hwnd, i, &itemRect)) continue;
             DRAWITEMSTRUCT dis = {0};

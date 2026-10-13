@@ -45,7 +45,10 @@
 #include "recovery.h"
 #include "markdown.h"
 #include "menu_commands.h"
+#include "outline_minimap.h"
 #include "path_utils.h"
+#include "progress_dialog.h"
+#include "scintilla_config.h"
 #include "plugin_host.h"
 #include "plugin_settings.h"
 #include "settings.h"
@@ -201,11 +204,6 @@ typedef struct DocumentStore {
     int switching;
 } DocumentStore;
 static DocumentStore g_documentStore = { .nextUntitledNumber = 1 };
-#define g_documents g_documentStore.documents
-#define g_documentCount g_documentStore.count
-#define g_activeDocument g_documentStore.active
-#define g_nextUntitledNumber g_documentStore.nextUntitledNumber
-#define g_switchingDocument g_documentStore.switching
 static char g_tabTooltipAnsi[32768];
 /* Set on every edit and every dirty-state change; cleared once
    write_recovery_snapshot() has brought the on-disk snapshot back in sync.
@@ -228,11 +226,11 @@ static int g_wikiBackCount = 0;
 
 /* Most editor operations naturally target the selected tab. These aliases
    keep that code direct while the storage itself remains per-document. */
-#define g_currentFile (g_documents[g_activeDocument].path)
-#define g_dirty       (g_documents[g_activeDocument].dirty)
-#define g_hasBom      (g_documents[g_activeDocument].hasBom)
-#define g_encoding    (g_documents[g_activeDocument].encoding)
-#define g_largeFile   (g_documents[g_activeDocument].largeFile)
+#define g_currentFile (g_documentStore.documents[g_documentStore.active].path)
+#define g_dirty       (g_documentStore.documents[g_documentStore.active].dirty)
+#define g_hasBom      (g_documentStore.documents[g_documentStore.active].hasBom)
+#define g_encoding    (g_documentStore.documents[g_documentStore.active].encoding)
+#define g_largeFile   (g_documentStore.documents[g_documentStore.active].largeFile)
 /* LARGE_FILE_FEATURES: a file of at least this many MiB opens in large-file
    mode - streamed straight into a style-less, 64-bit-position Scintilla
    document (see read_large_file_document()). A smaller ordinary document
@@ -288,68 +286,26 @@ static int g_minimapViewTop = 0; /* client-relative y (minimap coords) of the vi
 static int g_minimapViewHeight = 0;
 int g_editorZoom = 0; /* Scintilla SCI_SETZOOM units: +1/-1 per level, 0 is 100%. */
 WCHAR g_spellLanguage[LOCALE_NAME_MAX_LENGTH] = L"";
-static Sci_Position g_outlineLines[1024];
+static Sci_Position g_outlineLines[OUTLINE_MAX_HEADINGS];
 static int g_outlineCount = 0;
 static int g_tabDragIndex = -1;
 static int g_tabDragged = 0;
 static int g_activeLanguage = 0; /* Language of the active document; 0 is LANG_MARKDOWN. */
 static ISpellChecker *g_spellChecker = NULL;
 
-/* The Shell progress dialog owns its own responsive UI while the caller
-   performs synchronous streaming work. This keeps Scintilla access on its
-   UI thread while still giving multi-gigabyte opens/saves progress and a
-   working Cancel button. */
-typedef struct LargeOperationProgress {
-    IProgressDialog *dialog;
-    int cancelled;
-} LargeOperationProgress;
+/* Long file operations report through progress_dialog.c, which wraps the
+   shell's IProgressDialog. Its host table is filled in once the main window
+   exists (see progress_dialog_init in WinMain). */
+static ProgressDialogHost g_progressDialogHost;
 
-static void large_operation_progress_begin(LargeOperationProgress *progress,
-                                           const WCHAR *title, const WCHAR *line) {
-    memset(progress, 0, sizeof(*progress));
-    if (!g_comInitialized || FAILED(CoCreateInstance(&CLSID_ProgressDialog, NULL,
-            CLSCTX_INPROC_SERVER, &IID_IProgressDialog, (void **)&progress->dialog)) ||
-            !progress->dialog) return;
-    progress->dialog->lpVtbl->SetTitle(progress->dialog, title);
-    progress->dialog->lpVtbl->SetLine(progress->dialog, 1, line, FALSE, NULL);
-    progress->dialog->lpVtbl->SetCancelMsg(progress->dialog,
-        L"Cancelling after the current block...", NULL);
-    if (FAILED(progress->dialog->lpVtbl->StartProgressDialog(progress->dialog,
-            g_hMainWnd, NULL, PROGDLG_MODAL | PROGDLG_AUTOTIME | PROGDLG_NOMINIMIZE, NULL))) {
-        IUnknown_Release((IUnknown *)progress->dialog);
-        progress->dialog = NULL;
-    }
-}
-
-static void large_operation_progress_set_line(LargeOperationProgress *progress,
-                                              const WCHAR *line) {
-    if (!progress->dialog) return;
-    progress->dialog->lpVtbl->SetLine(progress->dialog, 1, line, FALSE, NULL);
-    progress->dialog->lpVtbl->SetProgress64(progress->dialog, 0, 1);
-}
-
-static int large_operation_progress_update(LargeOperationProgress *progress,
-                                           size_t completed, size_t total) {
-    if (!progress || !progress->dialog) return 1;
-    progress->dialog->lpVtbl->SetProgress64(progress->dialog,
-        (ULONGLONG)completed, (ULONGLONG)(total ? total : 1));
-    if (progress->dialog->lpVtbl->HasUserCancelled(progress->dialog)) {
-        progress->cancelled = 1;
-        return 0;
-    }
-    return 1;
-}
-
-static int large_operation_progress_callback(size_t completed, size_t total, void *context) {
-    return large_operation_progress_update((LargeOperationProgress *)context, completed, total);
-}
-
-static void large_operation_progress_end(LargeOperationProgress *progress) {
-    if (!progress || !progress->dialog) return;
-    progress->dialog->lpVtbl->StopProgressDialog(progress->dialog);
-    IUnknown_Release((IUnknown *)progress->dialog);
-    progress->dialog = NULL;
-}
+/* scintilla_config.c configures each editor view through this host; the
+   persisted settings it reads come from settings_values.h directly. The host
+   is filled in before any view is created (see initialize_main_window). */
+static int scintilla_config_large_file_active(void) { return g_largeFile; }
+static const ScintillaConfigHost g_scintillaConfigHost = {
+    .splitEdit = &g_windows.splitEdit,
+    .largeFileActive = scintilla_config_large_file_active,
+};
 
 #define MAX_RECENT_FILES 10
 static WCHAR *g_recentFiles[MAX_RECENT_FILES];
@@ -436,9 +392,6 @@ static void set_edit_text(HWND hEdit, const char *text, Sci_Position length) {
    actually act on. Smart Markdown input is handled explicitly by
    EditSubclassProc; Scintilla call tips remain disabled, and its autocomplete
    list is populated by update_word_completions() rather than by the lexer. */
-#define MARGIN_LINENUMBERS 0
-#define MARGIN_BOOKMARKS 1
-#define MARGIN_FOLD 2
 /* Fixed point size for the minimap's copy of the editor font - deliberately
    independent of the user's chosen editor font size (and its zoom level) so
    the overview stays small and legible as an overview rather than scaling
@@ -446,53 +399,6 @@ static void set_edit_text(HWND hEdit, const char *text, Sci_Position length) {
    SCI_STYLESETSIZEFRACTIONAL/SC_FONT_SIZE_MULTIPLIER) so it can go below the
    smallest whole point size. */
 #define MINIMAP_FONT_SIZE_HUNDREDTHS 150
-/* Negative extra ascent/descent (see SCI_SETEXTRAASCENT/DESCENT) packs the
-   minimap's lines closer together than the font's natural leading - Scintilla
-   clamps ascent to a 1px and descent to a 0px floor, so this can't collapse
-   lines into each other. Passed as plain negative ints below; the WPARAM
-   round-trip preserves the sign (Scintilla reads it back via
-   static_cast<int>(wParam)). */
-#define MINIMAP_EXTRA_ASCENT -2
-#define MINIMAP_EXTRA_DESCENT -3
-#define MARKER_BOOKMARK 1
-#define MARKER_BREAKPOINT 2
-#define MARKER_DEBUG_LINE 3
-#define MARKER_DEBUG_ARROW 4
-#define FOLD_MARGIN_WIDTH 14
-#define INDICATOR_SPELLING 20
-static int g_lineNumberDigits = 0;
-static int g_splitLineNumberDigits = 0; /* separate cache for g_hSplitEdit - see update_linenumber_margin_width() */
-
-/* Widen/narrow the line-number margin to fit the current line count (so "9"
-   and "9999" both have comfortably-sized gutters, and it grows as the
-   document grows past another power of ten). Cached per-view (g_hEdit and
-   g_hSplitEdit each get their own digit count remembered) so two views of
-   the same document - which therefore usually recompute the same digit
-   count on the same edit - don't cause one view's cache hit to skip the
-   other view's still-needed SCI_SETMARGINWIDTHN call. */
-static int *linenumber_digit_cache(HWND hEdit) {
-    return hEdit == g_hSplitEdit ? &g_splitLineNumberDigits : &g_lineNumberDigits;
-}
-
-static void update_linenumber_margin_width(HWND hEdit) {
-    int *cache = linenumber_digit_cache(hEdit);
-    Sci_Position lineCount = (Sci_Position)SendMessageA(hEdit, SCI_GETLINECOUNT, 0, 0);
-    int digitCount = 1;
-    for (Sci_Position n = lineCount; n >= 10; n /= 10) digitCount++;
-    if (digitCount == *cache) return;
-    *cache = digitCount;
-    char digits[32];
-    snprintf(digits, sizeof(digits), "_%lld", (long long)lineCount); /* leading '_' gives a little breathing room */
-    int width = (int)SendMessageA(hEdit, SCI_TEXTWIDTH, STYLE_LINENUMBER, (LPARAM)digits);
-    SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_LINENUMBERS, width);
-}
-
-/* Resizes the gutter after a font or zoom change: the glyph width changed
-   even if the line count (and so the cached digit count) didn't. */
-static void remeasure_linenumber_margin(HWND hEdit) {
-    *linenumber_digit_cache(hEdit) = 0;
-    update_linenumber_margin_width(hEdit);
-}
 
 /* apply_editor_theme() bolds several per-construct styles (Markdown headings/
    strong text, and various lexers' keywords) to make them stand out in the
@@ -1127,87 +1033,6 @@ static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
     DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
-/* Wrapped lines continue with a hanging indent so a wrapped list item or
-   blockquote stays visually attached to its marker. Wrap mode belongs to
-   the view, not the document, so this is reapplied from
-   apply_document_language() whenever the active document changes:
-   wrapping a large-file document would lay out every line of it up front. */
-static void apply_word_wrap(HWND hEdit) {
-    int wrap = g_wordWrap && !g_largeFile;
-    SendMessageA(hEdit, SCI_SETWRAPMODE, wrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
-    if (!wrap) return;
-    SendMessageA(hEdit, SCI_SETWRAPINDENTMODE, SC_WRAPINDENT_SAME, 0);
-    SendMessageA(hEdit, SCI_SETWRAPVISUALFLAGS, SC_WRAPVISUALFLAG_END, 0);
-}
-
-static void apply_show_whitespace(HWND hEdit) {
-    SendMessageA(hEdit, SCI_SETVIEWWS, g_showWhitespace ? SCWS_VISIBLEALWAYS : SCWS_INVISIBLE, 0);
-}
-
-static void apply_indent_guides(HWND hEdit) {
-    SendMessageA(hEdit, SCI_SETINDENTATIONGUIDES, g_indentGuides ? SC_IV_LOOKBOTH : SC_IV_NONE, 0);
-}
-
-static void apply_indentation(HWND hEdit) {
-    SendMessageA(hEdit, SCI_SETUSETABS, g_indentUseSpaces ? FALSE : TRUE, 0);
-    SendMessageA(hEdit, SCI_SETTABWIDTH, g_tabWidth, 0);
-}
-
-static void configure_scintilla_editing(HWND hEdit) {
-    SendMessageA(hEdit, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
-    SendMessageA(hEdit, SCI_SETEOLMODE, SC_EOL_CRLF, 0);
-    apply_indentation(hEdit);
-    SendMessageA(hEdit, SCI_SETINDENT, 0, 0); /* 0 = indent width follows tab width */
-    SendMessageA(hEdit, SCI_SETMODEVENTMASK, SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT, 0);
-
-    /* Additional carets edit in step with the main one; the smart-input
-       handlers in EditSubclassProc still act on the main caret alone. */
-    SendMessageA(hEdit, SCI_SETMULTIPLESELECTION, TRUE, 0);
-    SendMessageA(hEdit, SCI_SETADDITIONALSELECTIONTYPING, TRUE, 0);
-    SendMessageA(hEdit, SCI_SETMULTIPASTE, SC_MULTIPASTE_EACH, 0);
-}
-
-static void configure_scintilla_view(HWND hEdit) {
-    themed_scrollbar_attach(hEdit, THEMED_SCROLL_SCINTILLA);
-    SendMessageA(hEdit, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
-    SendMessageA(hEdit, SCI_SETSCROLLWIDTH, 1, 0);
-    apply_word_wrap(hEdit);
-    apply_show_whitespace(hEdit);
-    apply_indent_guides(hEdit);
-    SendMessageA(hEdit, SCI_SETZOOM, (WPARAM)g_editorZoom, 0);
-}
-
-static void configure_scintilla_margins(HWND hEdit) {
-    /* Line numbers: a dedicated margin, sized to fit the current line count. */
-    SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_LINENUMBERS, SC_MARGIN_NUMBER);
-    update_linenumber_margin_width(hEdit);
-
-    /* Bookmark and fold margins. Marker definitions are per-view, so they are
-       set once here and survive the SCI_SETDOCPOINTER swaps done by tabs. */
-    SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_BOOKMARKS, SC_MARGIN_SYMBOL);
-    SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_BOOKMARKS,
-                 (LPARAM)((1 << MARKER_BOOKMARK) | (1 << MARKER_BREAKPOINT) |
-                          (1 << MARKER_DEBUG_ARROW)));
-    SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_BOOKMARKS, 14);
-    SendMessageA(hEdit, SCI_SETMARGINSENSITIVEN, MARGIN_BOOKMARKS, TRUE);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_BOOKMARK, SC_MARK_BOOKMARK);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_BREAKPOINT, SC_MARK_CIRCLE);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_DEBUG_LINE, SC_MARK_BACKGROUND);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, MARKER_DEBUG_ARROW, SC_MARK_SHORTARROW);
-
-    SendMessageA(hEdit, SCI_SETMARGINTYPEN, MARGIN_FOLD, SC_MARGIN_SYMBOL);
-    SendMessageA(hEdit, SCI_SETMARGINMASKN, MARGIN_FOLD, (LPARAM)SC_MASK_FOLDERS);
-    SendMessageA(hEdit, SCI_SETMARGINSENSITIVEN, MARGIN_FOLD, TRUE);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDER, SC_MARK_BOXPLUS);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDEROPEN, SC_MARK_BOXMINUS);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDERSUB, SC_MARK_VLINE);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDERTAIL, SC_MARK_LCORNER);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDEREND, SC_MARK_BOXPLUSCONNECTED);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDEROPENMID, SC_MARK_BOXMINUSCONNECTED);
-    SendMessageA(hEdit, SCI_MARKERDEFINE, SC_MARKNUM_FOLDERMIDTAIL, SC_MARK_TCORNER);
-    SendMessageA(hEdit, SCI_SETFOLDFLAGS, SC_FOLDFLAG_LINEAFTER_CONTRACTED, 0);
-    SendMessageA(hEdit, SCI_SETAUTOMATICFOLD, SC_AUTOMATICFOLD_CLICK | SC_AUTOMATICFOLD_CHANGE, 0);
-}
 
 static void configure_scintilla_feedback(HWND hEdit) {
     /* Syntax-highlight the source using one of Lexilla's bundled lexers
@@ -1353,8 +1178,8 @@ static void begin_background_document_access(BackgroundDocumentAccess *access) {
     access->anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
     access->firstVisibleLine = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
     access->xOffset = (int)SendMessageA(g_hEdit, SCI_GETXOFFSET, 0, 0);
-    access->oldSwitching = g_switchingDocument;
-    g_switchingDocument = 1;
+    access->oldSwitching = g_documentStore.switching;
+    g_documentStore.switching = 1;
 }
 
 static void end_background_document_access(const BackgroundDocumentAccess *access) {
@@ -1368,16 +1193,16 @@ static void end_background_document_access(const BackgroundDocumentAccess *acces
     SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)anchor, (LPARAM)caret);
     SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)access->firstVisibleLine, 0);
     SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)access->xOffset, 0);
-    g_switchingDocument = access->oldSwitching;
+    g_documentStore.switching = access->oldSwitching;
 }
 
 static char *get_document_text(int index, Sci_Position *outLength) {
-    if (!g_hEdit || index < 0 || index >= g_documentCount) return NULL;
+    if (!g_hEdit || index < 0 || index >= g_documentStore.count) return NULL;
     sptr_t current = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
-    if (current == g_documents[index].sciDocument) return get_edit_text(g_hEdit, outLength);
+    if (current == g_documentStore.documents[index].sciDocument) return get_edit_text(g_hEdit, outLength);
     BackgroundDocumentAccess access;
     begin_background_document_access(&access);
-    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[index].sciDocument);
+    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[index].sciDocument);
     char *text = get_edit_text(g_hEdit, outLength);
     end_background_document_access(&access);
     return text;
@@ -1402,8 +1227,8 @@ static void write_recovery_snapshot(void) {
     if (!g_hEdit || g_commandLinePreviewMode || !g_recoverySnapshotStale) return;
     RecoveryDocument documents[RECOVERY_MAX_DOCUMENTS];
     int count = 0;
-    for (int i = 0; i < g_documentCount; i++) {
-        Document *doc = &g_documents[i];
+    for (int i = 0; i < g_documentStore.count; i++) {
+        Document *doc = &g_documentStore.documents[i];
         if (!doc->dirty || doc->largeFile) continue;
         documents[count++] = (RecoveryDocument){ doc->path, doc->untitledNumber,
             doc->hasBom, (TextEncoding)doc->encoding, i };
@@ -1442,12 +1267,12 @@ static int restore_recovery_snapshot(void) {
         if (restored == 0 && !active_document_is_reusable() && !create_document_tab()) {
             recovery_entry_free(&entry); break;
         }
-        g_switchingDocument = 1;
+        g_documentStore.switching = 1;
         set_edit_text(g_hEdit, text, length);
         SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-        g_switchingDocument = 0;
+        g_documentStore.switching = 0;
         replace_wstring(&g_currentFile, entry.path[0] ? entry.path : NULL);
-        g_documents[g_activeDocument].untitledNumber = entry.untitledNumber;
+        g_documentStore.documents[g_documentStore.active].untitledNumber = entry.untitledNumber;
         g_hasBom = entry.hasBom;
         g_encoding = entry.encoding;
         recovery_entry_free(&entry);
@@ -1485,7 +1310,7 @@ static WCHAR g_statusPartText[4][128];
    counts need a full-document scan, so they're left to update_status_bar()
    and only refreshed when the text can actually have changed. */
 static void update_status_position(void) {
-    if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
+    if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
     HWND view = tracked_edit_view();
     Sci_Position position = (Sci_Position)SendMessageA(view, SCI_GETCURRENTPOS, 0, 0);
     Sci_Position line = (Sci_Position)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
@@ -1510,7 +1335,7 @@ static void update_status_position(void) {
 
 static void update_status_bar(void) {
     update_status_position();
-    if (!g_hStatus || !g_hEdit || g_documentCount <= 0) return;
+    if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
     if (g_largeFile) {
         double mib = (double)(Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) / (1024.0 * 1024.0);
         swprintf(g_statusPartText[1], 128, L"Large file mode   %.1f MB", mib);
@@ -1633,1024 +1458,21 @@ static void save_workspace_settings(void) {
 
 #include "internal/dialogs.inc"
 
-/* ---- Help > Markdown Reference and Keyboard Shortcuts. ----
-   The pages are built into the exe (markedit.rc): the reference is
-   src/help/markdown-reference.md as it stands, and the shortcuts page is
-   generated by src/help/keyboard-shortcuts.lua from the loaded menus and
-   the command table, so it matches the real shortcuts. */
-
-/* Help > Keyboard Shortcuts, as heap Markdown, or NULL after reporting why
-   it couldn't be built. */
-static char *generate_shortcuts_page(void) {
-    int commandCount = 0;
-    while (menu_command_at(commandCount)) commandCount++;
-    int pluginCount = plugin_host_command_count();
-    PluginShortcut *shortcuts = (PluginShortcut *)malloc(
-        (size_t)(commandCount + pluginCount + 1) * sizeof(*shortcuts));
-    int count = 0;
-    for (int i = 0; shortcuts && i < commandCount; i++) {
-        const MenuCommand *command = menu_command_at(i);
-        if (command->shortcut) shortcuts[count++] = (PluginShortcut){ command->name, command->shortcut };
-    }
-    for (int i = 0; shortcuts && i < pluginCount; i++) {
-        const char *keys = plugin_host_command_shortcut(i);
-        const char *label = plugin_host_command_label(i);
-        if (keys && label) shortcuts[count++] = (PluginShortcut){ label, keys };
-    }
-    size_t length;
-    const char *code = builtin_script(IDR_HELP_SHORTCUTS, &length);
-    char *page = NULL;
-    char *error;
-    if (!shortcuts) error = _strdup("out of memory");
-    else if (!code) error = _strdup("The keyboard shortcuts page is missing from markedit.exe.");
-    else error = plugin_host_render_page("keyboard-shortcuts.lua", code, length, shortcuts, count, &page);
-    free(shortcuts);
-    if (error) {
-        WCHAR *text = to_wide(error);
-        MessageBoxW(g_hMainWnd, text ? text : L"The keyboard shortcuts page could not be built.",
-                    L"MarkEdit Help", MB_OK | MB_ICONWARNING);
-        free(text);
-        free(error);
-    }
-    return page;
-}
-
-/* Opens a Help page as an ordinary unsaved document, so the live preview
-   renders it and every construct in it can be edited and experimented with.
-   Each page reuses its own tab if it's already open. */
-static void show_help_page(ReferenceKind kind) {
-    for (int i = 0; i < g_documentCount; i++) {
-        if (g_documents[i].isReference == (int)kind) {
-            switch_document(i);
-            return;
-        }
-    }
-    char *generated = NULL;
-    const char *page;
-    size_t pageLength;
-    if (kind == REFERENCE_SHORTCUTS) {
-        page = generated = generate_shortcuts_page();
-        pageLength = generated ? strlen(generated) : 0;
-    } else {
-        page = builtin_script(IDR_HELP_MARKDOWN, &pageLength);
-    }
-    if (!page) {
-        if (kind != REFERENCE_SHORTCUTS)
-            MessageBoxW(g_hMainWnd, L"The Markdown reference is missing from markedit.exe.", L"MarkEdit Help",
-                        MB_OK | MB_ICONWARNING);
-        return;
-    }
-    if (!create_document_tab()) {
-        free(generated);
-        return;
-    }
-    g_documents[g_activeDocument].isReference = kind;
-    /* create_document_tab() just defaulted this untitled tab's language to
-       plain text (language_for_path(NULL)). This tab's content is always
-       Markdown regardless, so force it back - passing any name that merely
-       *ends* in ".md" is enough, since language_for_path only inspects the
-       extension and never treats this string as a real path. */
-    apply_document_language(L"markdown-reference.md");
-    g_switchingDocument = 1;
-    set_edit_text(g_hEdit, page, (Sci_Position)pageLength);
-    free(generated);
-    SendMessageA(g_hEdit, SCI_SETSEL, 0, 0);
-    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-    g_switchingDocument = 0;
-    if (!g_previewVisible) toggle_preview(g_hMainWnd);
-    update_tab_label(g_activeDocument);
-    update_title();
-    update_preview();
-}
-
-/* Help > About. The version is read from the exe's own VERSIONINFO
-   resource (markedit.rc) rather than repeated here, so the two can't drift;
-   VS_FIXEDFILEINFO is located by its signature, which avoids linking
-   version.lib just for VerQueryValue(). */
-static void show_about_box(void) {
-    WCHAR version[32] = L"";
-    HRSRC resource = FindResourceW(NULL, MAKEINTRESOURCEW(VS_VERSION_INFO), MAKEINTRESOURCEW(16) /* RT_VERSION */);
-    HGLOBAL loaded = resource ? LoadResource(NULL, resource) : NULL;
-    const BYTE *bytes = loaded ? (const BYTE *)LockResource(loaded) : NULL;
-    DWORD size = resource ? SizeofResource(NULL, resource) : 0;
-    for (DWORD offset = 0; bytes && offset + sizeof(VS_FIXEDFILEINFO) <= size; offset += 4) {
-        const VS_FIXEDFILEINFO *info = (const VS_FIXEDFILEINFO *)(bytes + offset);
-        if (info->dwSignature != 0xFEEF04BD) continue;
-        swprintf(version, sizeof(version) / sizeof(version[0]), L"%u.%u.%u",
-                 (unsigned)HIWORD(info->dwFileVersionMS), (unsigned)LOWORD(info->dwFileVersionMS),
-                 (unsigned)HIWORD(info->dwFileVersionLS));
-        break;
-    }
-    WCHAR text[512];
-    swprintf(text, sizeof(text) / sizeof(text[0]),
-             L"MarkEdit%ls%ls\n"
-             L"A Markdown and source code editor for Windows.\n\n"
-             L"Copyright (c) 2026 Les Farrell\n\n"
-             L"Built with Scintilla, Lexilla, cmark-gfm, Microsoft Edge WebView2, "
-             L"highlight.js, KaTeX, and Mermaid. See THIRD_PARTY_NOTICES.md for "
-             L"their licences.",
-             version[0] ? L" " : L"", version);
-    MSGBOXPARAMSW box = {0};
-    box.cbSize = sizeof(box);
-    box.hwndOwner = g_hMainWnd;
-    box.hInstance = GetModuleHandleW(NULL);
-    box.lpszText = text;
-    box.lpszCaption = L"About MarkEdit";
-    box.dwStyle = MB_OK | MB_USERICON;
-    box.lpszIcon = MAKEINTRESOURCEW(IDI_APPICON);
-    MessageBoxIndirectW(&box);
-}
-
-/* Menu text treats '&' as an accelerator marker; escape it as '&&' so a path
-   containing '&' (rare, but legal on Windows) displays literally. */
-static void escape_ampersands(const WCHAR *in, WCHAR *out, size_t outSize) {
-    size_t o = 0;
-    for (size_t i = 0; in[i] && o + 2 < outSize; i++) {
-        if (in[i] == L'&' && o + 3 < outSize) out[o++] = L'&';
-        out[o++] = in[i];
-    }
-    out[o] = 0;
-}
-
-/* Windows does not recolour the visible, non-client menu bar when an app
-   switches its private dark-mode preference at runtime. Draw just those
-   top-level items ourselves; the dropdown contents remain native menus and
-   are themed by apply_menu_theme(). */
-static HFONT main_menu_font(void) {
-    HDC dc = GetDC(g_hMainWnd);
-    int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
-    if (dc) ReleaseDC(g_hMainWnd, dc);
-    if (!g_menuFont || dpi != g_menuFontDpi) {
-        if (g_menuFont) DeleteObject(g_menuFont);
-        g_menuFont = CreateFontA(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL,
-            FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
-        g_menuFontDpi = dpi;
-    }
-    return g_menuFont;
-}
-
-static void measure_main_menu_item(MEASUREITEMSTRUCT *mis) {
-    const char *label = (const char *)(UINT_PTR)mis->itemData;
-    HDC dc = GetDC(g_hMainWnd);
-    if (!dc || !label) {
-        if (dc) ReleaseDC(g_hMainWnd, dc);
-        return;
-    }
-    HFONT oldFont = (HFONT)SelectObject(dc, main_menu_font());
-    RECT textRect = {0};
-    DrawTextA(dc, label, -1, &textRect, DT_SINGLELINE | DT_CALCRECT);
-    int dpi = GetDeviceCaps(dc, LOGPIXELSY);
-    /* Win32 adds about 12 DPI-scaled pixels of its own to a menu-bar item's
-       measured width. Offset part of that so the final rectangle retains
-       the seven-pixel inset on each side that draw_main_menu_item uses. */
-    int requestedWidth = textRect.right + MulDiv(2, dpi, 96);
-    mis->itemWidth = (UINT)(requestedWidth > 1 ? requestedWidth : 1);
-    mis->itemHeight = (UINT)(textRect.bottom + MulDiv(8, dpi, 96));
-    SelectObject(dc, oldFont);
-    ReleaseDC(g_hMainWnd, dc);
-}
-
-static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
-    const char *label = (const char *)(UINT_PTR)dis->itemData;
-    if (!label) return;
-
-    int active = (dis->itemState & (ODS_SELECTED | ODS_HOTLIGHT)) != 0;
-    COLORREF background = g_editorDarkMode
-        ? (active ? RGB(0x21, 0x26, 0x2D) : THEME_DARK_BG)
-        : (active ? RGB(0xE8, 0xEC, 0xF1) : THEME_LIGHT_BG);
-    COLORREF foreground = (dis->itemState & (ODS_DISABLED | ODS_GRAYED))
-        ? (g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x65, 0x6D, 0x76))
-        : theme_fg_color();
-
-    fill_rect_color(dis->hDC, &dis->rcItem, background);
-
-    int oldBkMode = SetBkMode(dis->hDC, TRANSPARENT);
-    COLORREF oldText = SetTextColor(dis->hDC, foreground);
-    HFONT oldFont = (HFONT)SelectObject(dis->hDC, main_menu_font());
-    RECT textRect = dis->rcItem;
-    int dpi = GetDeviceCaps(dis->hDC, LOGPIXELSY);
-    textRect.left += MulDiv(7, dpi, 96);
-    UINT flags = DT_SINGLELINE | DT_LEFT | DT_VCENTER;
-    if (dis->itemState & ODS_NOACCEL) flags |= DT_HIDEPREFIX;
-    DrawTextA(dis->hDC, label, -1, &textRect, flags);
-    SelectObject(dis->hDC, oldFont);
-    SetTextColor(dis->hDC, oldText);
-    SetBkMode(dis->hDC, oldBkMode);
-}
+#include "internal/help_and_menu.inc"
 
 #include "internal/ui_shell.inc"
+#include "internal/debugger.inc"
 
-#include "internal/outline_minimap.inc"
+#include "internal/outline_host.inc"
 
 #include "internal/workspace.inc"
 
 #include "internal/settings_dialog.inc"
 #include "internal/command_dispatch.inc"
 
-/* ---- plugin host callbacks: the app's dialogs and the active document ---- */
+#include "internal/plugin_bridge.inc"
 
-#define PLUGIN_PROMPT_MAX_CHARS 4096
-
-/* Text a plugin passes that isn't valid UTF-8 can't be shown, so the dialog
-   is treated as cancelled. */
-static char *plugin_prompt(const char *title, const char *label, const char *initial) {
-    WCHAR *wideTitle = to_wide(title);
-    WCHAR *wideLabel = to_wide(label);
-    WCHAR *wideInitial = to_wide(initial);
-    WCHAR *answer = (WCHAR *)malloc(PLUGIN_PROMPT_MAX_CHARS * sizeof(WCHAR));
-    char *result = NULL;
-    if (wideTitle && wideLabel && answer &&
-        show_text_input(wideTitle, wideLabel, wideInitial, answer, PLUGIN_PROMPT_MAX_CHARS))
-        result = to_utf8(answer);
-    free(answer);
-    free(wideInitial);
-    free(wideLabel);
-    free(wideTitle);
-    return result;
-}
-
-static int plugin_choose(const char *title, const char *label, const char *const *items, int count) {
-    WCHAR *wideTitle = to_wide(title);
-    WCHAR *wideLabel = to_wide(label);
-    WCHAR **labels = (WCHAR **)calloc((size_t)count, sizeof(*labels));
-    int ready = wideTitle && wideLabel && labels;
-    for (int i = 0; ready && i < count; i++) ready = (labels[i] = to_wide(items[i])) != NULL;
-    int chosen = ready ? show_choice_dialog(wideTitle, wideLabel, labels, count, L"OK") : -1;
-    for (int i = 0; labels && i < count; i++) free(labels[i]);
-    free(labels);
-    free(wideLabel);
-    free(wideTitle);
-    return chosen;
-}
-
-static void plugin_message(const char *title, const char *text, const char *kind) {
-    WCHAR *wideTitle = to_wide(title);
-    WCHAR *wideText = to_wide(text);
-    UINT icon = strcmp(kind, "error") == 0 ? MB_ICONERROR
-              : strcmp(kind, "warning") == 0 ? MB_ICONWARNING : MB_ICONINFORMATION;
-    MessageBoxW(g_hMainWnd, wideText ? wideText : L"(This message isn't valid UTF-8 text.)",
-                wideTitle ? wideTitle : L"MarkEdit", MB_OK | icon);
-    free(wideText);
-    free(wideTitle);
-}
-
-static int plugin_save_binary(const char *title, const char *defaultName,
-                              const char *data, size_t length) {
-    const DWORD capacity = 32768;
-    WCHAR *path = (WCHAR *)calloc(capacity, sizeof(WCHAR));
-    WCHAR *wideDefault = to_wide(defaultName);
-    WCHAR *wideTitle = to_wide(title);
-    if (!path || !wideDefault || !wideTitle) {
-        free(path); free(wideDefault); free(wideTitle);
-        return -1;
-    }
-    wcsncpy(path, wideDefault, capacity - 1);
-    const WCHAR *extension = PathFindExtensionW(wideDefault);
-    const WCHAR *defaultExtension = extension && extension[0] == L'.' ? extension + 1 : NULL;
-    OPENFILENAMEW dialog = {0};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.hwndOwner = g_hMainWnd;
-    dialog.lpstrFilter = L"Binary Files (*.*)\0*.*\0All Files (*.*)\0*.*\0";
-    dialog.lpstrFile = path;
-    dialog.nMaxFile = capacity;
-    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    dialog.lpstrDefExt = defaultExtension;
-    dialog.lpstrTitle = wideTitle;
-    int result = 0;
-    if (GetSaveFileNameW(&dialog)) result = write_bytes_file(path, data, length) ? 1 : -1;
-    free(wideTitle);
-    free(wideDefault);
-    free(path);
-    return result;
-}
-
-static int plugin_confirm(const char *title, const char *text) {
-    WCHAR *wideTitle = to_wide(title), *wideText = to_wide(text);
-    int result = MessageBoxW(g_hMainWnd, wideText ? wideText : L"Confirm?",
-                             wideTitle ? wideTitle : L"MarkEdit", MB_YESNO | MB_ICONQUESTION);
-    free(wideTitle); free(wideText);
-    return result == IDYES;
-}
-
-static void plugin_status(const char *text) {
-    WCHAR *wide = to_wide(text);
-    if (wide) show_plugin_reload_status(wide);
-    free(wide);
-}
-
-static void plugin_log(const char *plugin, const char *text) {
-    OutputDebugStringA("[MarkEdit plugin: ");
-    OutputDebugStringA(plugin ? plugin : "unknown");
-    OutputDebugStringA("] ");
-    OutputDebugStringA(text);
-    OutputDebugStringA("\n");
-}
-
-static char *plugin_pick_path(const char *title, int folder) {
-    if (folder) {
-        WCHAR *path = choose_workspace_folder();
-        char *result = path ? to_utf8(path) : NULL;
-        free(path);
-        return result;
-    }
-    WCHAR path[32768] = L"";
-    WCHAR *wideTitle = to_wide(title);
-    OPENFILENAMEW dialog = {0};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.hwndOwner = g_hMainWnd;
-    dialog.lpstrFilter = L"All Files (*.*)\0*.*\0";
-    dialog.lpstrFile = path;
-    dialog.nMaxFile = (DWORD)(sizeof(path) / sizeof(path[0]));
-    dialog.lpstrTitle = wideTitle;
-    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    char *result = GetOpenFileNameW(&dialog) ? to_utf8(path) : NULL;
-    free(wideTitle);
-    return result;
-}
-
-static int plugin_invoke_command(const char *name) {
-    const MenuCommand *command = menu_command_find(name);
-    if (!command || !g_hMainWnd) return 0;
-    /* Queue it: executing a command while Lua owns the editor's undo group
-       could invalidate that group or recursively enter the plugin host. */
-    return PostMessageW(g_hMainWnd, WM_COMMAND, command->id, 0) != 0;
-}
-
-static int plugin_document_count(void) { return g_documentCount; }
-static int plugin_document_active(void) { return g_activeDocument; }
-
-typedef enum {
-    PLUGIN_DOCUMENT_ACTIVATE, PLUGIN_DOCUMENT_NEW, PLUGIN_DOCUMENT_OPEN,
-    PLUGIN_DOCUMENT_SAVE, PLUGIN_DOCUMENT_SAVE_AS, PLUGIN_DOCUMENT_CLOSE
-} PluginDocumentActionKind;
-typedef struct {
-    PluginDocumentActionKind kind;
-    int index;
-    WCHAR *path;
-} PluginDocumentAction;
-
-static int queue_plugin_document_action(PluginDocumentActionKind kind, int index,
-                                        const char *path) {
-    PluginDocumentAction *action = (PluginDocumentAction *)calloc(1, sizeof(*action));
-    if (!action) return 0;
-    action->kind = kind;
-    action->index = index;
-    action->path = path ? to_wide(path) : NULL;
-    if ((path && !action->path) ||
-        !PostMessageW(g_hMainWnd, WM_APP_PLUGIN_DOCUMENT_ACTION, 0, (LPARAM)action)) {
-        free(action->path); free(action);
-        return 0;
-    }
-    return 1;
-}
-
-static int plugin_document_activate(int index) {
-    if (index < 0 || index >= g_documentCount) return 0;
-    return queue_plugin_document_action(PLUGIN_DOCUMENT_ACTIVATE, index, NULL);
-}
-static int plugin_document_new(void) {
-    return queue_plugin_document_action(PLUGIN_DOCUMENT_NEW, 0, NULL);
-}
-static int plugin_document_open(const char *path) {
-    return queue_plugin_document_action(PLUGIN_DOCUMENT_OPEN, 0, path);
-}
-static int plugin_document_save(int saveAs) {
-    return queue_plugin_document_action(saveAs ? PLUGIN_DOCUMENT_SAVE_AS : PLUGIN_DOCUMENT_SAVE,
-                                        0, NULL);
-}
-static int plugin_document_close(int index) {
-    if (index < 0 || index >= g_documentCount) return 0;
-    return queue_plugin_document_action(PLUGIN_DOCUMENT_CLOSE, index, NULL);
-}
-static char *plugin_document_path(int index) {
-    return index >= 0 && index < g_documentCount && g_documents[index].path
-        ? to_utf8(g_documents[index].path) : NULL;
-}
-static int plugin_document_modified(int index) {
-    return index >= 0 && index < g_documentCount && g_documents[index].dirty;
-}
-static const char *plugin_document_encoding(void) {
-    static const char *const names[] = { "utf-8", "utf-16le", "utf-16be", "ansi" };
-    if (g_encoding == TEXT_ENCODING_UTF8 && g_hasBom) return "utf-8-bom";
-    return g_encoding >= TEXT_ENCODING_UTF8 && g_encoding <= TEXT_ENCODING_ANSI
-        ? names[g_encoding] : "utf-8";
-}
-static int plugin_document_set_encoding(const char *encoding) {
-    int oldEncoding = g_encoding;
-    int oldBom = g_hasBom;
-    if (strcmp(encoding, "utf-8") == 0) set_document_encoding(TEXT_ENCODING_UTF8, 0);
-    else if (strcmp(encoding, "utf-8-bom") == 0) set_document_encoding(TEXT_ENCODING_UTF8, 1);
-    else if (strcmp(encoding, "utf-16le") == 0) set_document_encoding(TEXT_ENCODING_UTF16LE, 1);
-    else if (strcmp(encoding, "utf-16be") == 0) set_document_encoding(TEXT_ENCODING_UTF16BE, 1);
-    else if (strcmp(encoding, "ansi") == 0) set_document_encoding(TEXT_ENCODING_ANSI, 0);
-    else return 0;
-    if (oldEncoding != g_encoding || oldBom != g_hasBom) g_pluginChangedSaveEncoding = 1;
-    return 1;
-}
-static char *plugin_workspace_path(void) {
-    return g_currentWorkspaceFolder ? to_utf8(g_currentWorkspaceFolder) : NULL;
-}
-
-static int plugin_schedule_deferred(int token, unsigned delayMs, int cancel) {
-    if (!g_hMainWnd || token <= 0) return 0;
-    UINT_PTR timer = (UINT_PTR)(IDT_PLUGIN_DEFER_BASE + token);
-    if (cancel) { KillTimer(g_hMainWnd, timer); return 1; }
-    return SetTimer(g_hMainWnd, timer, delayMs ? delayMs : 1, NULL) != 0;
-}
-
-static char *plugin_file_path(void) {
-    return g_currentFile ? to_utf8(g_currentFile) : NULL;
-}
-
-static const char *plugin_language(void) {
-    static const char *const names[LANGUAGE_COUNT] = {
-        "markdown", "json", "xml", "html", "yaml", "cpp", "python", "bash", "powershell", "lua", "text",
-    };
-    return g_activeLanguage >= 0 && g_activeLanguage < LANGUAGE_COUNT ? names[g_activeLanguage] : "text";
-}
-
-static char *plugin_config_section(const char *plugin) {
-    size_t length = strlen(plugin) + 8;
-    char *section = (char *)malloc(length);
-    if (section) snprintf(section, length, "Plugin:%s", plugin);
-    return section;
-}
-
-static char *plugin_config_get(const char *plugin, const char *key) {
-    char *section = plugin_config_section(plugin);
-    WCHAR *path = get_settings_path();
-    char *value = path && section ? plugin_settings_get(path, section, key) : NULL;
-    free(section);
-    free(path);
-    return value;
-}
-
-static int plugin_config_set(const char *plugin, const char *key, const char *value) {
-    char *section = plugin_config_section(plugin);
-    WCHAR *path = get_settings_path();
-    int ok = path && section && plugin_settings_set(path, section, key, value);
-    free(section);
-    free(path);
-    return ok;
-}
-
-static char *plugin_state_key(const char *scope, const char *name) {
-    size_t size = strlen(scope) + strlen(name) + 2;
-    char *key = (char *)malloc(size);
-    if (key) snprintf(key, size, "%s:%s", scope, name);
-    return key;
-}
-
-static int plugin_is_enabled(const char *scope, const char *name) {
-    WCHAR *path = get_settings_path();
-    char *key = plugin_state_key(scope, name);
-    char *value = path && key ? plugin_settings_get(path, "LuaPlugins", key) : NULL;
-    int enabled = !value || strcmp(value, "0") != 0;
-    free(value); free(key); free(path);
-    return enabled;
-}
-
-static int set_plugin_enabled(const char *scope, const char *name, int enabled) {
-    WCHAR *path = get_settings_path();
-    char *key = plugin_state_key(scope, name);
-    int ok = path && key && plugin_settings_set(path, "LuaPlugins", key, enabled ? "1" : "0");
-    free(key);
-    free(path);
-    return ok;
-}
-
-/* ---- loading the menu definition and plugins ---- */
-
-#define MENU_DEFINITION_MAX_BYTES (1024 * 1024)
-
-/* %APPDATA%\markedit\menus.lua: the user's menu definition, when it exists. */
-static WCHAR *user_settings_item_path(const WCHAR *name) {
-    WCHAR *settings = get_settings_path();
-    WCHAR *directory = settings ? path_directory(settings) : NULL;
-    WCHAR *path = directory ? path_join(directory, name) : NULL;
-    free(directory);
-    free(settings);
-    return path;
-}
-
-static WCHAR *user_menu_definition_path(void) {
-    return user_settings_item_path(L"menus.lua");
-}
-
-static void install_plugin_type_definitions(const WCHAR *directory) {
-    WCHAR *types = path_join(directory, L"types");
-    if (types) CreateDirectoryW(types, NULL);
-    WCHAR *destination = types ? path_join(types, L"markedit.lua") : NULL;
-    if (destination) {
-        WCHAR *module = module_directory();
-        WCHAR *source = module ? path_join(module, L"plugins\\types\\markedit.lua") : NULL;
-        if (source) CopyFileW(source, destination, FALSE);
-        free(source); free(module);
-    }
-    free(destination);
-    free(types);
-}
-
-/* Adds metadata used by Lua Language Server. Neither entry is executable, and
-   the plugin loader ignores them. The generated API file follows app updates;
-   an existing .luarc.json is left untouched so users can customise it. */
-static void install_plugin_editor_metadata(const WCHAR *directory) {
-    install_plugin_type_definitions(directory);
-    WCHAR *luarc = path_join(directory, L".luarc.json");
-    static const char metadata[] =
-        "{\n  \"workspace.library\": [\"types\"],\n  \"diagnostics.globals\": "
-        "[\"editor\", \"ui\", \"menu\", \"commands\", \"events\", \"config\", \"app\"]\n}\n";
-    if (luarc && GetFileAttributesW(luarc) == INVALID_FILE_ATTRIBUTES)
-        write_bytes_file(luarc, metadata, sizeof(metadata) - 1);
-    free(luarc);
-}
-
-/* %APPDATA%\markedit\plugins, created with editor metadata when needed. */
-static WCHAR *user_plugin_directory(void) {
-    WCHAR *directory = user_settings_item_path(L"plugins");
-    if (!directory) return NULL;
-    CreateDirectoryW(directory, NULL);
-    install_plugin_editor_metadata(directory);
-    return directory;
-}
-
-/* A Lua script built into the exe (markedit.rc). Not NUL-terminated. */
-static const char *builtin_script(int id, size_t *length) {
-    HRSRC resource = FindResourceW(NULL, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
-    HGLOBAL loaded = resource ? LoadResource(NULL, resource) : NULL;
-    *length = resource ? (size_t)SizeofResource(NULL, resource) : 0;
-    return loaded ? (const char *)LockResource(loaded) : NULL;
-}
-
-/* Joins source resources before compiling them, so formatting can live in
-   focused files while sharing one lexical scope and its local helpers. */
-static char *builtin_script_parts(const int *ids, int count, size_t *length) {
-    size_t total = 0;
-    for (int i = 0; i < count; i++) {
-        size_t partLength;
-        if (!builtin_script(ids[i], &partLength) || partLength > SIZE_MAX - total - 1) return NULL;
-        total += partLength + 1;
-    }
-    char *joined = (char *)malloc(total ? total : 1);
-    if (!joined) return NULL;
-    size_t used = 0;
-    for (int i = 0; i < count; i++) {
-        size_t partLength;
-        const char *part = builtin_script(ids[i], &partLength);
-        memcpy(joined + used, part, partLength);
-        used += partLength;
-        joined[used++] = '\n';
-    }
-    *length = used;
-    return joined;
-}
-
-/* Appends "<prefix><text>" as a line of a newline-separated report. */
-static char *append_report(char *report, const char *prefix, const char *text) {
-    size_t used = report ? strlen(report) : 0;
-    size_t needed = used + strlen(prefix) + strlen(text) + 2;
-    char *grown = (char *)realloc(report, needed);
-    if (!grown) return report;
-    snprintf(grown + used, needed - used, "%s%s%s", used ? "\n" : "", prefix, text);
-    return grown;
-}
-
-/* Loads the user's menu definition, or the built-in one when there's none
-   or it fails to load. Unknown command and list names are reported and
-   their items left out. Returns the report, or NULL. */
-static char *load_menu_definition(void) {
-    char *report = NULL;
-    WCHAR *path = user_menu_definition_path();
-    if (path && GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
-        size_t codeLength = 0;
-        char *code = read_utf8_text_file_length(path, MENU_DEFINITION_MAX_BYTES, &codeLength);
-        char *error = code ? plugin_host_load_menu("menus.lua", code, codeLength) : NULL;
-        if (!code) report = append_report(report, "", "menus.lua: could not be read as UTF-8 text (1 MiB at most).");
-        if (error) report = append_report(report, "", error);
-        if (!code || error) report = append_report(report, "", "Using the built-in menus instead.");
-        free(error);
-        free(code);
-    }
-    free(path);
-    int count;
-    if (!plugin_host_menu(&count)) {
-        size_t length;
-        const char *code = builtin_script(IDR_DEFAULT_MENUS, &length);
-        char *error = code ? plugin_host_load_menu("built-in menus.lua", code, length) : NULL;
-        if (!code) report = append_report(report, "", "The built-in menus are missing from markedit.exe.");
-        if (error) report = append_report(report, "", error);
-        free(error);
-    }
-    const PluginMenuItem *menus = plugin_host_menu(&count);
-    char *problems = menus ? menu_definition_problems(menus, count) : NULL;
-    if (problems) report = append_report(report, "menus.lua: ", problems);
-    free(problems);
-    return report;
-}
-
-static char *load_builtin_formatting(char *report) {
-    static const int formattingParts[] = {
-        IDR_BUILTIN_FORMATTING_BASE, IDR_BUILTIN_FORMATTING_TABLES,
-        IDR_BUILTIN_FORMATTING_TEXT,
-    };
-    size_t length;
-    char *formatting = builtin_script_parts(formattingParts,
-        (int)(sizeof(formattingParts) / sizeof(formattingParts[0])), &length);
-    char *formattingError = formatting ? plugin_host_load_builtin("formatting.lua", formatting, length) : NULL;
-    if (!formatting) report = append_report(report, "", "The formatting commands are missing from markedit.exe.");
-    if (formattingError) report = append_report(report, "", formattingError);
-    free(formattingError);
-    free(formatting);
-    return report;
-}
-
-static char *load_plugin_directory(char *report, const WCHAR *directory, const char *scope) {
-    char *error = directory ? plugin_host_load_directory(directory, scope) : NULL;
-    if (error) report = append_report(report, "", error);
-    free(error);
-    return report;
-}
-
-static WCHAR *bundled_plugin_directory(void) {
-    WCHAR *directory = module_directory();
-    WCHAR *pluginDirectory = directory ? path_join(directory, L"plugins") : NULL;
-    free(directory);
-    return pluginDirectory;
-}
-
-static void show_plugin_load_errors(const char *report) {
-    const WCHAR *errorPath = plugin_host_error_path();
-    if (!g_hMainWnd || !errorPath) { show_plugin_error(report); return; }
-    WCHAR *wide = to_wide(report);
-    size_t size = (wide ? wcslen(wide) : 0) + 80;
-    WCHAR *question = (WCHAR *)malloc(size * sizeof(WCHAR));
-    if (question) swprintf(question, size, L"%ls\n\nOpen the first failing script?",
-                           wide ? wide : L"A plugin failed.");
-    int answer = MessageBoxW(g_hMainWnd, question ? question : L"A plugin failed. Open it?",
-                             L"MarkEdit Plugins", MB_YESNO | MB_ICONWARNING);
-    free(question);
-    free(wide);
-    if (answer != IDYES || !open_file_in_tab(errorPath)) return;
-    int line = plugin_host_error_line();
-    if (line > 0) SendMessageA(g_hEdit, SCI_GOTOLINE, (WPARAM)(line - 1), 0);
-}
-
-/* Recreates the Lua state, then loads menus, built-in formatting, bundled
-   extensions and personal extensions in that order. */
-static void load_menus_and_plugins(void) {
-    static const PluginHostCallbacks callbacks = {
-        .prompt = plugin_prompt, .choose = plugin_choose, .file_path = plugin_file_path,
-        .language = plugin_language, .message = plugin_message,
-        .config_get = plugin_config_get, .config_set = plugin_config_set,
-        .plugin_enabled = plugin_is_enabled, .save_binary = plugin_save_binary,
-        .confirm = plugin_confirm, .status = plugin_status, .log = plugin_log,
-        .pick_path = plugin_pick_path, .invoke_command = plugin_invoke_command,
-        .document_count = plugin_document_count, .document_active = plugin_document_active,
-        .document_activate = plugin_document_activate, .document_new = plugin_document_new,
-        .document_open = plugin_document_open, .document_save = plugin_document_save,
-        .document_close = plugin_document_close, .document_path = plugin_document_path,
-        .document_modified = plugin_document_modified,
-        .document_encoding = plugin_document_encoding,
-        .document_set_encoding = plugin_document_set_encoding,
-        .workspace_path = plugin_workspace_path,
-        .schedule_deferred = plugin_schedule_deferred,
-    };
-    plugin_host_set_callbacks(&callbacks);
-    plugin_host_shutdown();
-    char *report = load_builtin_formatting(load_menu_definition());
-    WCHAR *bundled = bundled_plugin_directory();
-    WCHAR *user = user_plugin_directory();
-    report = load_plugin_directory(report, bundled, "bundled");
-    report = load_plugin_directory(report, user, "user");
-    free(bundled);
-    free(user);
-    g_lastPluginLoadSucceeded = report == NULL;
-    if (report) show_plugin_load_errors(report);
-    free(report);
-}
-
-/* Plugins > Customize Menus: opens the user's menu definition, first
-   copying the built-in one there if there isn't one yet. */
-static void customize_menus(void) {
-    WCHAR *path = user_menu_definition_path();
-    if (!path) return;
-    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
-        size_t length;
-        const char *code = builtin_script(IDR_DEFAULT_MENUS, &length);
-        if (!code || !write_bytes_file(path, code, length)) {
-            MessageBoxW(g_hMainWnd, L"Could not create menus.lua in the settings folder.", L"MarkEdit",
-                        MB_OK | MB_ICONERROR);
-            free(path);
-            return;
-        }
-    }
-    open_file_in_tab(path);
-    free(path);
-}
-
-static void open_plugin_folder(void) {
-    WCHAR *directory = user_plugin_directory();
-    if (directory) {
-        HINSTANCE result = ShellExecuteW(g_hMainWnd, L"open", directory, NULL, NULL, SW_SHOWNORMAL);
-        if ((INT_PTR)result <= 32)
-            MessageBoxW(g_hMainWnd, L"Could not open the personal plugins folder.",
-                        L"MarkEdit Plugins", MB_OK | MB_ICONERROR);
-    }
-    free(directory);
-}
-
-static int valid_plugin_file_name(const char *name) {
-    size_t length = strlen(name);
-    if (!length || length >= 100 || name[0] == '.' || strstr(name, "..")) return 0;
-    for (size_t i = 0; i < length; i++)
-        if (!(isalnum((unsigned char)name[i]) || name[i] == '-' ||
-              name[i] == '_' || name[i] == '.')) return 0;
-    return 1;
-}
-
-static WCHAR *new_plugin_path(const char *name) {
-    size_t length = strlen(name);
-    char fileName[128];
-    snprintf(fileName, sizeof(fileName), "%s%s", name,
-             length >= 4 && _stricmp(name + length - 4, ".lua") == 0 ? "" : ".lua");
-    WCHAR *wideName = to_wide(fileName);
-    WCHAR *directory = user_plugin_directory();
-    WCHAR *path = directory && wideName ? path_join(directory, wideName) : NULL;
-    free(directory);
-    free(wideName);
-    return path;
-}
-
-static void new_plugin(void) {
-    char *answer = plugin_prompt("New Plugin", "File name:", "my-plugin.lua");
-    if (!answer) return;
-    if (!valid_plugin_file_name(answer)) {
-        MessageBoxW(g_hMainWnd, L"Use a simple file name containing letters, digits, '-' or '_'.",
-                    L"New Plugin", MB_OK | MB_ICONWARNING);
-        free(answer); return;
-    }
-    WCHAR *path = new_plugin_path(answer);
-    static const char starter[] =
-        "-- MarkEdit plugin\n"
-        "menu.add(\"My Plugin/Hello\", function()\n"
-        "  ui.message(\"Hello from Lua!\")\n"
-        "end, \"Ctrl+Alt+H\")\n";
-    if (!path || GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
-        MessageBoxW(g_hMainWnd, L"A plugin with that name already exists.", L"New Plugin",
-                    MB_OK | MB_ICONWARNING);
-    } else if (!write_bytes_file(path, starter, sizeof(starter) - 1)) {
-        MessageBoxW(g_hMainWnd, L"Could not create the plugin file.", L"New Plugin",
-                    MB_OK | MB_ICONERROR);
-    } else {
-        open_file_in_tab(path);
-    }
-    free(path);
-    free(answer);
-}
-
-static void free_plugin_choices(char **items, int count) {
-    if (items) for (int i = 0; i < count; i++) free(items[i]);
-    free(items);
-}
-
-static char **plugin_choices(int count) {
-    char **items = (char **)calloc((size_t)count, sizeof(*items));
-    for (int i = 0; items && i < count; i++) {
-        const char *name = plugin_host_extension_name(i);
-        const char *scope = plugin_host_extension_scope(i);
-        size_t size = strlen(name) + strlen(scope) + 16;
-        items[i] = (char *)malloc(size);
-        if (!items[i]) { free_plugin_choices(items, count); return NULL; }
-        snprintf(items[i], size, "[%c] %s / %s",
-                 plugin_host_extension_is_enabled(i) ? 'x' : ' ', scope, name);
-    }
-    return items;
-}
-
-static void reload_plugin_ui(HWND hwnd, const WCHAR *successMessage) {
-    load_menus_and_plugins();
-    refresh_menu(hwnd);
-    rebuild_main_accelerators();
-    if (g_lastPluginLoadSucceeded && successMessage)
-        show_plugin_reload_status(successMessage);
-}
-
-static void toggle_plugin(int index) {
-    const char *name = plugin_host_extension_name(index);
-    const char *scope = plugin_host_extension_scope(index);
-    int enable = !plugin_host_extension_is_enabled(index);
-    if (!set_plugin_enabled(scope, name, enable)) {
-        MessageBoxW(g_hMainWnd, L"Could not save the plugin state.", L"Manage Plugins",
-                    MB_OK | MB_ICONERROR);
-        return;
-    }
-    reload_plugin_ui(g_hMainWnd, enable ? L"Plugin enabled" : L"Plugin disabled");
-}
-
-static void manage_plugins(void) {
-    int count = plugin_host_extension_count();
-    if (!count) {
-        MessageBoxW(g_hMainWnd, L"No plugins were found.", L"Manage Plugins",
-                    MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-    char **items = plugin_choices(count);
-    const char **choices = (const char **)items;
-    int selected = items ? plugin_choose("Manage Plugins",
-        "Choose a plugin to enable or disable:", choices, count) : -1;
-    if (selected >= 0 && selected < count) toggle_plugin(selected);
-    free_plugin_choices(items, count);
-}
-
-/* Lua commands act on the pane being edited: the split editor's when it
-   has the focus, otherwise the main one. */
-static void run_plugin_command(int index) {
-    int wasDirty = g_dirty;
-    g_pluginChangedSaveEncoding = 0;
-    char *error = plugin_host_run(index, active_edit_view());
-    sync_dirty_after_plugin(wasDirty);
-    if (error) show_plugin_error(error);
-    free(error);
-    /* A command may toggle its own menu.checkbox or change a setting used by
-       another checkbox through config.set(). The HMENU is a retained Win32
-       object, so refresh its state explicitly after Lua returns. */
-    update_view_menu(g_hMainWnd);
-    if (!plugin_host_is_busy()) queue_plugin_tab_check();
-    SetFocus(active_edit_view());
-}
-
-static void handle_main_command(HWND hwnd, WORD cmd) {
-    if (cmd >= IDM_PLUGIN_COMMAND_0 && cmd < IDM_PLUGIN_COMMAND_0 + PLUGIN_MAX_COMMANDS) {
-        run_plugin_command(cmd - IDM_PLUGIN_COMMAND_0);
-        return;
-    }
-    /* A built-in command registered in Lua (commands.register) runs there,
-       from the menu, toolbar or a shortcut alike. Built-in formatting Lua
-       supplies the Markdown and HTML implementations through this route. */
-    const MenuCommand *builtIn = menu_command_for_id(cmd);
-    int override = builtIn ? plugin_host_find_override(builtIn->name) : -1;
-    if (override >= 0) {
-        run_plugin_command(override);
-        return;
-    }
-    if (cmd == IDM_PLUGIN_RELOAD) {
-        reload_plugin_ui(hwnd, L"Plugins reloaded");
-        return;
-    }
-    if (cmd == IDM_PLUGIN_CUSTOMIZE_MENUS) {
-        customize_menus();
-        return;
-    }
-    if (cmd == IDM_PLUGIN_OPEN_FOLDER) { open_plugin_folder(); return; }
-    if (cmd == IDM_PLUGIN_NEW) { new_plugin(); return; }
-    if (cmd == IDM_PLUGIN_MANAGE) { manage_plugins(); return; }
-    if (cmd >= IDM_FILE_RECENT_0 && cmd < IDM_FILE_RECENT_0 + MAX_RECENT_FILES) {
-        do_open_recent(cmd - IDM_FILE_RECENT_0);
-        return;
-    }
-    if (cmd >= IDM_RECENT_WORKSPACE && cmd < IDM_RECENT_WORKSPACE + MAX_RECENT_FOLDERS) {
-        do_open_recent_workspace(cmd - IDM_RECENT_WORKSPACE);
-        return;
-    }
-
-    /* Each handler reports whether it recognized the command. */
-    if (handle_file_command(hwnd, cmd)) return;
-    if (handle_edit_command(cmd)) return;
-    if (handle_format_command(cmd)) return;
-    if (handle_debug_command(cmd)) return;
-    if (handle_view_command(hwnd, cmd)) return;
-    if (handle_help_command(cmd)) return;
-}
-
-static RECT tab_close_rectangle(const RECT *tabRect) {
-    RECT close = *tabRect;
-    close.left = close.right - 23;
-    close.right -= 5;
-    close.top += 3;
-    close.bottom -= 3;
-    return close;
-}
-
-static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
-    int index = (int)dis->itemID;
-    if (index < 0 || index >= g_documentCount) return;
-    int selected = TabCtrl_GetCurSel(g_hTabs) == index;
-    COLORREF bg = g_editorDarkMode ? THEME_DARK_BG
-        : (selected ? THEME_LIGHT_BG : RGB(0xF0, 0xF3, 0xF6));
-    COLORREF fg = g_editorDarkMode
-        ? (selected ? RGB(0xF0, 0xF6, 0xFC) : RGB(0xB1, 0xBA, 0xC4))
-        : THEME_LIGHT_FG;
-    fill_rect_color(dis->hDC, &dis->rcItem, bg);
-    HPEN borderPen = CreatePen(PS_SOLID, 1, theme_border_color());
-    HPEN oldPen = (HPEN)SelectObject(dis->hDC, borderPen);
-    MoveToEx(dis->hDC, dis->rcItem.right - 1, dis->rcItem.top + 2, NULL);
-    LineTo(dis->hDC, dis->rcItem.right - 1, dis->rcItem.bottom - 2);
-
-    RECT textRect = dis->rcItem;
-    textRect.left += 9;
-    textRect.right -= 33;
-    WCHAR label[MAX_PATH + 32];
-    format_document_label(&g_documents[index], label, sizeof(label) / sizeof(label[0]));
-    HFONT font = (HFONT)SendMessageW(g_hTabs, WM_GETFONT, 0, 0);
-    HFONT oldFont = font ? (HFONT)SelectObject(dis->hDC, font) : NULL;
-    SetTextColor(dis->hDC, fg);
-    SetBkMode(dis->hDC, TRANSPARENT);
-    DrawTextW(dis->hDC, label, -1, &textRect,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    if (oldFont) SelectObject(dis->hDC, oldFont);
-
-    /* tab_close_rectangle() is wider than it is tall (a roomier click
-       target), so inset-padding it directly for the X stretched the cross
-       into a near-flat bowtie instead of a diagonal. Draw the glyph in a
-       square centered on that rect instead, sized to its shorter side, so
-       the strokes stay a proper 45-degree X regardless of the hit box's
-       aspect ratio. */
-    RECT close = tab_close_rectangle(&dis->rcItem);
-    int side = (close.right - close.left < close.bottom - close.top)
-        ? (close.right - close.left) : (close.bottom - close.top);
-    int cx = (close.left + close.right) / 2, cy = (close.top + close.bottom) / 2;
-    int pad = 3;
-    if (pad * 2 >= side) pad = side / 2 - 1;
-    if (pad < 1) pad = 1;
-    RECT glyph = { cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2 };
-    int padTop = pad + 1, padBottom = pad;
-    HPEN closePen = CreatePen(PS_SOLID, 2, fg);
-    SelectObject(dis->hDC, closePen);
-    MoveToEx(dis->hDC, glyph.left + pad, glyph.top + padTop, NULL);
-    LineTo(dis->hDC, glyph.right - pad, glyph.bottom - padBottom);
-    MoveToEx(dis->hDC, glyph.right - pad, glyph.top + padTop, NULL);
-    LineTo(dis->hDC, glyph.left + pad, glyph.bottom - padBottom);
-    SelectObject(dis->hDC, oldPen);
-    DeleteObject(closePen);
-    DeleteObject(borderPen);
-
-    if (g_documents[index].externalChanged) {
-        COLORREF changedColor = RGB(0xD2, 0x99, 0x22);
-        HBRUSH changed = CreateSolidBrush(changedColor);
-        HPEN changedPen = CreatePen(PS_SOLID, 1, changedColor);
-        HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, changed);
-        HPEN changedOldPen = (HPEN)SelectObject(dis->hDC, changedPen);
-        Ellipse(dis->hDC, close.left - 9, (close.top + close.bottom) / 2 - 3,
-                close.left - 3, (close.top + close.bottom) / 2 + 3);
-        SelectObject(dis->hDC, changedOldPen);
-        SelectObject(dis->hDC, oldBrush);
-        DeleteObject(changedPen);
-        DeleteObject(changed);
-    }
-}
-
-/* Shared owner-draw for the app's plain, single-column LISTBOX controls (the
-   outline panel and the searchable picker's result list) so both follow the
-   app's light/dark theme - a plain LISTBOX always paints in system colors
-   regardless of SetWindowTheme. Parameterized by HWND since both listboxes
-   need identical drawing. */
-static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis) {
-    HFONT font = (HFONT)SendMessageW(listbox, WM_GETFONT, 0, 0);
-    HDC hdc = GetDC(listbox);
-    HFONT oldFont = font ? (HFONT)SelectObject(hdc, font) : NULL;
-    TEXTMETRICW tm;
-    GetTextMetricsW(hdc, &tm);
-    if (oldFont) SelectObject(hdc, oldFont);
-    ReleaseDC(listbox, hdc);
-    mis->itemHeight = (UINT)(tm.tmHeight + tm.tmExternalLeading + MulDiv(6, GetDpiForWindow(g_hMainWnd), 96));
-}
-
-static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis) {
-    if ((int)dis->itemID < 0) return;
-    int selected = (dis->itemState & ODS_SELECTED) != 0;
-    COLORREF bg = g_editorDarkMode
-        ? (selected ? RGB(0x26, 0x4F, 0x78) : THEME_DARK_BG)
-        : (selected ? RGB(0xB6, 0xD7, 0xFF) : THEME_LIGHT_BG);
-    COLORREF fg = theme_fg_color();
-    fill_rect_color(dis->hDC, &dis->rcItem, bg);
-
-    /* LB_GETTEXT overflows whatever buffer it's given rather than truncating
-       to it, so the buffer has to be sized from LB_GETTEXTLEN first - a
-       heading line (or a long file path in the picker) can run well past
-       any fixed stack buffer. */
-    int textLen = (int)SendMessageW(listbox, LB_GETTEXTLEN, dis->itemID, 0);
-    if (textLen <= 0) return;
-    WCHAR stackLabel[256];
-    WCHAR *heapLabel = NULL;
-    WCHAR *label = stackLabel;
-    if (textLen >= (int)(sizeof(stackLabel) / sizeof(stackLabel[0]))) {
-        heapLabel = (WCHAR *)malloc(((size_t)textLen + 1) * sizeof(WCHAR));
-        if (!heapLabel) return;
-        label = heapLabel;
-    }
-    int length = (int)SendMessageW(listbox, LB_GETTEXT, dis->itemID, (LPARAM)label);
-    if (length > 0) {
-        RECT textRect = dis->rcItem;
-        textRect.left += 4;
-        SetTextColor(dis->hDC, fg);
-        SetBkMode(dis->hDC, TRANSPARENT);
-        DrawTextW(dis->hDC, label, length, &textRect,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    }
-    free(heapLabel);
-}
+#include "internal/control_theme.inc"
 
 #include "internal/editor_input.inc"
 static void explorer_request_open(const WCHAR *path) {
@@ -2776,15 +1598,15 @@ static void create_editor_views(HWND hwnd) {
 }
 
 static void initialize_first_document(void) {
-    g_documentCount = 1;
-    g_activeDocument = 0;
-    memset(&g_documents[0], 0, sizeof(g_documents[0]));
-    g_documents[0].sciDocument = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
-    SendMessageA(g_hEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_documents[0].sciDocument);
-    SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[0].sciDocument);
-    SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[0].sciDocument);
+    g_documentStore.count = 1;
+    g_documentStore.active = 0;
+    memset(&g_documentStore.documents[0], 0, sizeof(g_documentStore.documents[0]));
+    g_documentStore.documents[0].sciDocument = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    SendMessageA(g_hEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_documentStore.documents[0].sciDocument);
+    SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[0].sciDocument);
+    SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[0].sciDocument);
     /* The sole blank startup tab is the unnumbered canonical document. */
-    g_documents[0].untitledNumber = 0;
+    g_documentStore.documents[0].untitledNumber = 0;
     TCITEMW firstTab = {0};
     firstTab.mask = TCIF_TEXT;
     firstTab.pszText = L"";
@@ -2809,6 +1631,14 @@ static void create_preview_control(HWND hwnd) {
 
 static void initialize_main_window(HWND hwnd) {
     g_hMainWnd = hwnd;
+
+    /* Point outline_minimap.c at the shell state it drives before any child
+       view (the minimap in particular) is created. */
+    init_outline_minimap();
+
+    /* Likewise point scintilla_config.c at the split view and large-file flag
+       before the editor and split views are configured. */
+    scintilla_config_init(&g_scintillaConfigHost);
 
     /* The process preference is selected before window creation; complete the
        per-window opt-in before attaching the menu so its first paint matches. */
@@ -2886,14 +1716,14 @@ static void handle_editor_margin_click(const struct SCNotification *scn) {
 }
 
 static void enter_large_file_mode_if_needed(HWND hwnd) {
-    if (g_switchingDocument || g_largeFile) return;
+    if (g_documentStore.switching || g_largeFile) return;
 
     Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     Sci_Position threshold = (Sci_Position)g_largeFileThresholdMB * 1024 * 1024;
     if (length < threshold) return;
 
     g_largeFile = 1;
-    PostMessageW(hwnd, WM_APP_APPLY_LARGE_FILE_MODE, (WPARAM)g_activeDocument, 0);
+    PostMessageW(hwnd, WM_APP_APPLY_LARGE_FILE_MODE, (WPARAM)g_documentStore.active, 0);
 }
 
 static void schedule_updates_after_edit(HWND hwnd, const struct SCNotification *scn) {
@@ -2919,8 +1749,8 @@ static void handle_document_modified(HWND hwnd, const struct SCNotification *scn
        views of the same shared document (without this, typing only in the
        split pane would never mark the tab dirty or stale the recovery
        snapshot, silently losing track of real unsaved edits). */
-    if (!g_switchingDocument && !g_dirty) set_dirty(1);
-    if (!g_switchingDocument) g_recoverySnapshotStale = 1;
+    if (!g_documentStore.switching && !g_dirty) set_dirty(1);
+    if (!g_documentStore.switching) g_recoverySnapshotStale = 1;
     enter_large_file_mode_if_needed(hwnd);
     schedule_updates_after_edit(hwnd, scn);
 }
@@ -2989,7 +1819,7 @@ static void destroy_main_window(HWND hwnd) {
     if (g_menuBkBrush) { DeleteObject(g_menuBkBrush); g_menuBkBrush = NULL; }
     if (g_menuFont) { DeleteObject(g_menuFont); g_menuFont = NULL; }
     for (int i = 0; i < g_recentFileCount; i++) free(g_recentFiles[i]);
-    for (int i = 0; i < g_documentCount; i++) free(g_documents[i].path);
+    for (int i = 0; i < g_documentStore.count; i++) free(g_documentStore.documents[i].path);
     for (int i = 0; i < g_closedDocumentCount; i++) free(g_closedDocuments[i].path);
     for (int i = 0; i < g_wikiBackCount; i++) free(g_wikiBackStack[i]);
     PostQuitMessage(0);
@@ -3172,8 +2002,8 @@ static void handle_main_notification(HWND hwnd, NMHDR *notification) {
                     notification->code == TTN_GETDISPINFOA;
     if (isTooltip && g_hTabs && notification->hwndFrom == TabCtrl_GetToolTips(g_hTabs)) {
         int index = (int)notification->idFrom;
-        const WCHAR *text = (index >= 0 && index < g_documentCount &&
-            g_documents[index].path) ? g_documents[index].path : L"Unsaved document";
+        const WCHAR *text = (index >= 0 && index < g_documentStore.count &&
+            g_documentStore.documents[index].path) ? g_documentStore.documents[index].path : L"Unsaved document";
         if (notification->code == TTN_GETDISPINFOW) {
             ((NMTTDISPINFOW *)notification)->lpszText = (WCHAR *)text;
         } else {
@@ -3217,7 +2047,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (!action) return 0;
             switch (action->kind) {
                 case PLUGIN_DOCUMENT_ACTIVATE:
-                    if (action->index >= 0 && action->index < g_documentCount)
+                    if (action->index >= 0 && action->index < g_documentStore.count)
                         switch_document(action->index);
                     break;
                 case PLUGIN_DOCUMENT_NEW: create_document_tab(); break;
@@ -3227,7 +2057,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case PLUGIN_DOCUMENT_SAVE: do_save(); break;
                 case PLUGIN_DOCUMENT_SAVE_AS: do_saveas(); break;
                 case PLUGIN_DOCUMENT_CLOSE:
-                    if (action->index >= 0 && action->index < g_documentCount)
+                    if (action->index >= 0 && action->index < g_documentStore.count)
                         do_close_document_at(action->index);
                     break;
             }
@@ -3523,6 +2353,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     HACCEL accelerators = create_main_accelerators();
     g_hAccel = accelerators;
 
+    /* The progress dialog needs the main window handle and COM state, both of
+       which exist by now. */
+    g_progressDialogHost.owner = g_hMainWnd;
+    g_progressDialogHost.comInitialized = &g_comInitialized;
+    progress_dialog_init(&g_progressDialogHost);
+
     ShowWindow(mainWindow, g_startMaximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(mainWindow);
     PostMessageW(mainWindow, WM_APP_DEFERRED_INIT, 0, 0);
@@ -3533,3 +2369,4 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     FreeLibrary(scintillaModule);
     return exitCode;
 }
+

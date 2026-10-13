@@ -6,7 +6,7 @@
 #include <wchar.h>
 
 #include "path_utils.h"
-#include "settings.h"
+#include "settings_io.h"
 
 static int recent_list_find(const RecentList *list, const WCHAR *path) {
     for (int i = 0; i < *list->count; i++)

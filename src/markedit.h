@@ -3,7 +3,7 @@
 
 #include <windows.h>
 
-#include "settings.h" /* SPLITTER_WIDTH is used by save_layout_settings() too */
+#include "settings_values.h" /* SPLITTER_WIDTH */
 
 /* ---- child control IDs ---- */
 #define ID_EDIT    101
@@ -66,8 +66,8 @@ static int do_save(void);
 static void update_preview(void);
 static void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
+static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
-static void apply_word_wrap(HWND hEdit);
 static void apply_preview_host_theme(void);
 static void refresh_menu(HWND hwnd);
 static void layout(HWND hwnd);
@@ -76,7 +76,6 @@ static void schedule_spell_check(void);
 static void perform_spell_check(void);
 static void update_status_position(void);
 static void update_status_bar(void);
-static void update_outline(void);
 static void write_recovery_snapshot(void);
 static int clear_recovery_snapshot(void);
 static int restore_recovery_snapshot(void);
@@ -86,8 +85,6 @@ static void fire_plugin_event(const char *event, const WCHAR *path);
 static int show_text_input(const WCHAR *title, const WCHAR *prompt,
                            const WCHAR *initial, WCHAR *output, int outputCapacity);
 static void toggle_preview(HWND hwnd);
-static void toggle_minimap(HWND hwnd);
-static void update_minimap_viewport(void);
 static void update_document_mapping(void);
 static void update_title(void);
 static void set_dirty(int dirty);

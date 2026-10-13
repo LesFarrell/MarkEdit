@@ -68,42 +68,25 @@ SCINTILLA_DIR = "third_party/scintilla"
 LEXILLA_DIR = "third_party/lexilla"
 LUA_DIR = "third_party/lua"
 
-CMARK_GFM_SOURCES = {
-    CMARK_GFM_DIR.."/src/arena.c",
-    CMARK_GFM_DIR.."/src/blocks.c",
-    CMARK_GFM_DIR.."/src/buffer.c",
-    CMARK_GFM_DIR.."/src/cmark.c",
-    CMARK_GFM_DIR.."/src/cmark_ctype.c",
-    CMARK_GFM_DIR.."/src/commonmark.c",
-    CMARK_GFM_DIR.."/src/footnotes.c",
-    CMARK_GFM_DIR.."/src/houdini_href_e.c",
-    CMARK_GFM_DIR.."/src/houdini_html_e.c",
-    CMARK_GFM_DIR.."/src/houdini_html_u.c",
-    CMARK_GFM_DIR.."/src/html.c",
-    CMARK_GFM_DIR.."/src/inlines.c",
-    CMARK_GFM_DIR.."/src/iterator.c",
-    CMARK_GFM_DIR.."/src/latex.c",
-    CMARK_GFM_DIR.."/src/linked_list.c",
-    CMARK_GFM_DIR.."/src/man.c",
-    CMARK_GFM_DIR.."/src/map.c",
-    CMARK_GFM_DIR.."/src/node.c",
-    CMARK_GFM_DIR.."/src/plaintext.c",
-    CMARK_GFM_DIR.."/src/plugin.c",
-    CMARK_GFM_DIR.."/src/references.c",
-    CMARK_GFM_DIR.."/src/registry.c",
-    CMARK_GFM_DIR.."/src/render.c",
-    CMARK_GFM_DIR.."/src/scanners.c",
-    CMARK_GFM_DIR.."/src/syntax_extension.c",
-    CMARK_GFM_DIR.."/src/utf8.c",
-    CMARK_GFM_DIR.."/src/xml.c",
-    CMARK_GFM_DIR.."/extensions/autolink.c",
-    CMARK_GFM_DIR.."/extensions/core-extensions.c",
-    CMARK_GFM_DIR.."/extensions/ext_scanners.c",
-    CMARK_GFM_DIR.."/extensions/strikethrough.c",
-    CMARK_GFM_DIR.."/extensions/table.c",
-    CMARK_GFM_DIR.."/extensions/tagfilter.c",
-    CMARK_GFM_DIR.."/extensions/tasklist.c",
-}
+-- The compiled translation units live in the repo-root *.rsp response files
+-- that build.bat hands to the compiler. Reading them here keeps Premake and
+-- the batch build in step; the .rsp also carry -D/-I/-W flags, which are
+-- filtered out (only .c/.cc/.cpp/.cxx entries are returned). This is the one
+-- place a compiled-source list is read, so a new file only has to be added to
+-- its .rsp.
+function sources_from_rsp(path)
+    local sources = {}
+    for line in io.lines(path) do
+        local entry = line:match("^%s*(.-)%s*$")
+        if entry:match("%.[cC]$") or entry:match("%.[cC][xX][xX]$") or
+           entry:match("%.[cC][cC]$") or entry:match("%.[cC][pP][pP]$") then
+            table.insert(sources, entry)
+        end
+    end
+    return sources
+end
+
+CMARK_GFM_SOURCES = sources_from_rsp("cmark-gfm-sources.rsp")
 
 function cmark_gfm_settings()
     files(CMARK_GFM_SOURCES)
@@ -119,14 +102,7 @@ end
 -- The Lua core plus the libraries plugins get; keep this list aligned with
 -- lua-sources.rsp (third_party/lua/VERSION.txt says why io/os/package/debug
 -- are left out).
-LUA_SOURCES = {}
-for _, name in ipairs {
-    "lapi", "lcode", "lctype", "ldebug", "ldo", "ldump", "lfunc", "lgc", "llex", "lmem",
-    "lobject", "lopcodes", "lparser", "lstate", "lstring", "ltable", "ltm", "lundump", "lvm",
-    "lzio", "lauxlib", "lbaselib", "lcorolib", "ltablib", "lstrlib", "lmathlib", "lutf8lib",
-} do
-    table.insert(LUA_SOURCES, LUA_DIR.."/src/"..name..".c")
-end
+LUA_SOURCES = sources_from_rsp("lua-sources.rsp")
 
 function lua_settings()
     files(LUA_SOURCES)
@@ -223,30 +199,7 @@ project "lexilla"
     targetname "Lexilla"
     objdir "build/obj/lexilla"
 
-    files {
-        LEXILLA_DIR.."/src/Lexilla.cxx",
-        LEXILLA_DIR.."/lexers/LexMarkdown.cxx",
-        LEXILLA_DIR.."/lexers/LexJSON.cxx",
-        LEXILLA_DIR.."/lexers/LexHTML.cxx",
-        LEXILLA_DIR.."/lexers/LexYAML.cxx",
-        LEXILLA_DIR.."/lexers/LexCPP.cxx",
-        LEXILLA_DIR.."/lexers/LexPython.cxx",
-        LEXILLA_DIR.."/lexers/LexBash.cxx",
-        LEXILLA_DIR.."/lexers/LexPowerShell.cxx",
-        LEXILLA_DIR.."/lexers/LexLua.cxx",
-        LEXILLA_DIR.."/lexlib/Accessor.cxx",
-        LEXILLA_DIR.."/lexlib/CharacterCategory.cxx",
-        LEXILLA_DIR.."/lexlib/CharacterSet.cxx",
-        LEXILLA_DIR.."/lexlib/DefaultLexer.cxx",
-        LEXILLA_DIR.."/lexlib/InList.cxx",
-        LEXILLA_DIR.."/lexlib/LexAccessor.cxx",
-        LEXILLA_DIR.."/lexlib/LexerBase.cxx",
-        LEXILLA_DIR.."/lexlib/LexerModule.cxx",
-        LEXILLA_DIR.."/lexlib/LexerSimple.cxx",
-        LEXILLA_DIR.."/lexlib/PropSetSimple.cxx",
-        LEXILLA_DIR.."/lexlib/StyleContext.cxx",
-        LEXILLA_DIR.."/lexlib/WordList.cxx",
-    }
+    files(sources_from_rsp("lexilla-sources.rsp"))
     includedirs { LEXILLA_DIR.."/include", LEXILLA_DIR.."/lexlib", SCINTILLA_DIR.."/include" }
     defines { "NDEBUG" }
     optimize "Size"
@@ -263,30 +216,35 @@ project "markedit"
     targetdir "."
     objdir "build/obj/markedit"
 
+    files(sources_from_rsp("markedit-sources.rsp"))
     files {
-        "src/markedit.c",
         "src/internal/preview.inc", "src/internal/documents.inc", "src/internal/dialogs.inc",
-        "src/internal/ui_shell.inc", "src/internal/debugger.inc", "src/internal/editor_input.inc",
-        "src/internal/outline_minimap.inc", "src/internal/workspace.inc",
+        "src/internal/help_and_menu.inc", "src/internal/ui_shell.inc", "src/internal/debugger.inc",
+        "src/internal/outline_host.inc", "src/internal/editor_input.inc",
+        "src/internal/workspace.inc",
         "src/internal/settings_dialog.inc", "src/internal/command_dispatch.inc",
-        "src/editor_commands.c", "src/editor_commands.h",
-        "src/editor_language.c", "src/editor_language.h",
-        "src/preview_fallback.c", "src/preview_fallback.h",
-        "src/path_utils.c", "src/path_utils.h",
-        "src/file_io.c", "src/file_io.h",
-        "src/recovery.c", "src/recovery.h",
-        "src/text_codec.c", "src/text_codec.h",
-        "src/workspace_text.c", "src/workspace_text.h",
-        "src/markdown.c", "src/markdown.h",
-        "src/settings.c", "src/settings.h",
-        "src/recent_list.c", "src/recent_list.h",
-        "src/file_explorer.c", "src/file_explorer.h",
-        "src/toolbar_icons.c", "src/toolbar_icons.h",
-        "src/themed_scrollbar.c", "src/themed_scrollbar.h",
-        "src/plugin_host.c", "src/plugin_host.h",
-        "src/plugin_settings.c", "src/plugin_settings.h",
-        "src/lua_editor_api.c", "src/lua_editor_api.h",
-        "src/menu_commands.c", "src/menu_commands.h", "src/command_ids.h",
+        "src/internal/plugin_bridge.inc", "src/internal/control_theme.inc",
+        "src/editor_commands.h",
+        "src/editor_language.h",
+        "src/preview_fallback.h",
+        "src/path_utils.h",
+        "src/file_io.h",
+        "src/recovery.h",
+        "src/text_codec.h",
+        "src/workspace_text.h",
+        "src/markdown.h",
+        "src/settings.h", "src/settings_values.h", "src/settings_io.h", "src/find_state.h",
+        "src/recent_list.h",
+        "src/layout_metrics.h", "src/file_explorer.h",
+        "src/toolbar_icons.h",
+        "src/themed_scrollbar.h",
+        "src/plugin_host.h",
+        "src/plugin_settings.h",
+        "src/lua_editor_api.h",
+        "src/outline_minimap.h",
+        "src/progress_dialog.h",
+        "src/scintilla_config.h",
+        "src/menu_commands.h", "src/command_ids.h",
         "src/menus.lua", "src/lua/formatting_base.lua",
         "src/lua/formatting_tables.lua", "src/lua/formatting_text.lua",
         "src/help/markdown-reference.md", "src/help/keyboard-shortcuts.lua",
@@ -429,7 +387,8 @@ project "test_plugin_host"
     targetname "test_plugin_host"
     targetdir "tests"
     objdir "build/obj/test_plugin_host"
-    files { "tests/test_plugin_host.c", "src/plugin_host.c", "src/plugin_host.h", "src/lua_editor_api.c", "src/lua_editor_api.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
+    files { "tests/test_plugin_host.c", "src/plugin_host.h", "src/lua_editor_api.h" }
+    files(sources_from_rsp("plugin-sources.rsp"))
     lua_settings()
     includedirs { "." }
     links { "user32" }
@@ -449,10 +408,8 @@ project "test_menus"
     targetname "test_menus"
     targetdir "tests"
     objdir "build/obj/test_menus"
-    files {
-        "tests/test_menus.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
-        "src/plugin_host.h", "src/lua_editor_api.c", "src/lua_editor_api.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
-    }
+    files { "tests/test_menus.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h", "src/lua_editor_api.h" }
+    files(sources_from_rsp("plugin-sources.rsp"))
     lua_settings()
     includedirs { "." }
     links { "user32" }
@@ -472,10 +429,8 @@ project "test_formatting"
     targetname "test_formatting"
     targetdir "tests"
     objdir "build/obj/test_formatting"
-    files {
-        "tests/test_formatting.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
-        "src/plugin_host.h", "src/lua_editor_api.c", "src/lua_editor_api.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
-    }
+    files { "tests/test_formatting.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h", "src/lua_editor_api.h" }
+    files(sources_from_rsp("plugin-sources.rsp"))
     lua_settings()
     includedirs { "." }
     links { "user32" }

@@ -1,0 +1,8 @@
+src/plugin_host.c
+src/plugin_lua_runtime.c
+src/plugin_registry.c
+src/plugin_discovery.c
+src/lua_editor_api.c
+src/file_io.c
+src/text_codec.c
+src/path_utils.c

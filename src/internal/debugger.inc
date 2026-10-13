@@ -1,3 +1,11 @@
+/* ---- Run / compile / debug: source launching, compiler discovery, GDB and
+   Python debugger control, and breakpoint persistence. Included directly from
+   markedit.c so the dependency is visible in one place. */
+
+typedef enum DebugSourceKind {
+    DEBUG_SOURCE_NONE = 0, DEBUG_SOURCE_PYTHON, DEBUG_SOURCE_C, DEBUG_SOURCE_CPP, DEBUG_SOURCE_LUA
+} DebugSourceKind;
+
 static DebugSourceKind debug_source_kind(const WCHAR *path) {
     const WCHAR *extension = path ? PathFindExtensionW(path) : NULL;
     if (!extension) return DEBUG_SOURCE_NONE;
@@ -104,13 +112,13 @@ static void restore_persisted_breakpoints(const WCHAR *path) {
    markers follow unsaved edits that may yet be discarded, so it's skipped
    here; save_to_path() writes its markers once the text is saved. */
 static void save_all_document_breakpoints(void) {
-    if (!g_hEdit || g_documentCount <= 0) return;
+    if (!g_hEdit || g_documentStore.count <= 0) return;
     BackgroundDocumentAccess access;
     begin_background_document_access(&access);
-    for (int i = 0; i < g_documentCount; i++) {
-        if (!g_documents[i].sciDocument || !g_documents[i].path || g_documents[i].dirty) continue;
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[i].sciDocument);
-        save_breakpoints_for_active_document(g_documents[i].path);
+    for (int i = 0; i < g_documentStore.count; i++) {
+        if (!g_documentStore.documents[i].sciDocument || !g_documentStore.documents[i].path || g_documentStore.documents[i].dirty) continue;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[i].sciDocument);
+        save_breakpoints_for_active_document(g_documentStore.documents[i].path);
     }
     end_background_document_access(&access);
 }
@@ -140,12 +148,12 @@ static void toggle_breakpoint_at_cursor(void) {
 }
 
 static void clear_debug_breakpoints(void) {
-    if (!g_hEdit || g_documentCount <= 0) return;
+    if (!g_hEdit || g_documentStore.count <= 0) return;
     BackgroundDocumentAccess access;
     begin_background_document_access(&access);
-    for (int i = 0; i < g_documentCount; i++) {
-        if (!g_documents[i].sciDocument) continue;
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[i].sciDocument);
+    for (int i = 0; i < g_documentStore.count; i++) {
+        if (!g_documentStore.documents[i].sciDocument) continue;
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[i].sciDocument);
         SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BREAKPOINT, 0);
     }
     end_background_document_access(&access);
@@ -413,11 +421,11 @@ static WCHAR *debug_temporary_path(const WCHAR *extension) {
 }
 
 static void clear_debug_execution_markers(void) {
-    if (!g_hEdit || g_documentCount <= 0) return;
+    if (!g_hEdit || g_documentStore.count <= 0) return;
     BackgroundDocumentAccess access;
     begin_background_document_access(&access);
-    for (int i = 0; i < g_documentCount; i++) {
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documents[i].sciDocument);
+    for (int i = 0; i < g_documentStore.count; i++) {
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[i].sciDocument);
         SendMessageA(g_hEdit, SCI_MARKERDELETEALL, MARKER_DEBUG_LINE, 0);
         SendMessageA(g_hEdit, SCI_MARKERDELETEALL, MARKER_DEBUG_ARROW, 0);
     }

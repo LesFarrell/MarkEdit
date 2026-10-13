@@ -50,7 +50,7 @@ static int handle_file_command(HWND hwnd, WORD cmd) {
             reveal_in_explorer();
             break;
         case IDM_FILE_CLOSE:
-            do_close_document_at(g_activeDocument);
+            do_close_document_at(g_documentStore.active);
             break;
         case IDM_FILE_REOPEN_CLOSED:
             do_reopen_closed_tab();
@@ -280,10 +280,10 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
             reset_editor_zoom();
             break;
         case IDM_VIEW_NEXT_TAB:
-            if (g_documentCount > 1) switch_document((g_activeDocument + 1) % g_documentCount);
+            if (g_documentStore.count > 1) switch_document((g_documentStore.active + 1) % g_documentStore.count);
             break;
         case IDM_VIEW_PREVIOUS_TAB:
-            if (g_documentCount > 1) switch_document((g_activeDocument + g_documentCount - 1) % g_documentCount);
+            if (g_documentStore.count > 1) switch_document((g_documentStore.active + g_documentStore.count - 1) % g_documentStore.count);
             break;
         case IDM_VIEW_CYCLE_PANE:
             cycle_pane_focus(0);
@@ -374,7 +374,7 @@ static void fire_plugin_event(const char *event, const WCHAR *path) {
 
 static void check_plugin_active_document(void) {
     g_pluginTabCheckPosted = 0;
-    sptr_t active = g_documents[g_activeDocument].sciDocument;
+    sptr_t active = g_documentStore.documents[g_documentStore.active].sciDocument;
     if (active == g_pluginActiveDocument) return;
     /* Plugin code is waiting in a dialog (a save handler during Save All,
        say), so the event couldn't run: leave the change to be seen again

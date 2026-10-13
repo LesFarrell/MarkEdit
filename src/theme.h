@@ -4,7 +4,7 @@
 #include <windows.h>
 #include <uxtheme.h>
 
-#include "settings.h" /* g_editorDarkMode, g_previewDarkMode */
+#include "settings_values.h" /* g_editorDarkMode, g_previewDarkMode */
 
 /* GitHub light/dark palette shared by every natively drawn surface (editor,
    menus, tabs, status bar, popups, file explorer). The preview's CSS

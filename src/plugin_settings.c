@@ -96,18 +96,11 @@ static int take(JsonReader *reader, char expected) {
     return 1;
 }
 
-static int hex_value(char character) {
-    if (character >= '0' && character <= '9') return character - '0';
-    if (character >= 'a' && character <= 'f') return character - 'a' + 10;
-    if (character >= 'A' && character <= 'F') return character - 'A' + 10;
-    return -1;
-}
-
 static int read_hex4(JsonReader *reader, uint32_t *value) {
     if (reader->end - reader->at < 4) return 0;
     uint32_t result = 0;
     for (int i = 0; i < 4; i++) {
-        int digit = hex_value(*reader->at++);
+        int digit = hex_digit_value((WCHAR)*reader->at++);
         if (digit < 0) return 0;
         result = result * 16u + (uint32_t)digit;
     }

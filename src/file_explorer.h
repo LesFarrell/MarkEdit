@@ -3,6 +3,8 @@
 
 #include <windows.h>
 
+#include "layout_metrics.h" /* explorer geometry values + explorer_content_x() */
+
 /* Posted (with no payload - the receiver drains file_explorer.c's own
    pending-directories queue) by the watcher thread whenever it observes a
    change under the current root. markedit.c's WndProc handles this by
@@ -70,19 +72,10 @@ void explorer_handle_notify(NMHDR *notification);
    timer (IDT_EXPLORER_REFRESH). */
 void explorer_handle_change_message(void);
 
-/* The pixel x-offset everything right of the explorer panel is shifted by -
-   the panel's width plus its splitter, or 0 when the panel isn't currently
-   occupying space (hidden, or suppressed by focus mode). layout() derives
-   this inline (it also has to clamp/normalize g_explorerWidth); other call
-   sites that need the same value once that's already settled (the main
-   splitter's hit-testing/drag math, and its persisted ratio in settings.c)
-   call this instead of re-deriving it, so they can't drift out of sync with
-   where the panel actually is. */
-int explorer_content_x(int focusModeActive);
+/* The explorer geometry values and explorer_content_x() now live in
+   layout_metrics.h (included above), which file_explorer.h re-exports so
+   existing users keep seeing them through this header. */
 
 extern HWND g_hExplorerTree;
-extern int g_explorerVisible;
-extern int g_explorerWidth;      /* live pixel width; -1 sentinel means "derive from ratio" */
-extern int g_explorerWidthRatio; /* persisted permille of client width, like g_splitterRatio */
 
 #endif
