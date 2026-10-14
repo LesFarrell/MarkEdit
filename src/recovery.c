@@ -234,7 +234,8 @@ static int read_unlocked(const WCHAR *directory, int index, RecoveryEntry *entry
     free(path);
     if (!entry->text) { free(manifest); return 0; }
     swprintf(key, 32, L"Path%d", index);
-    GetPrivateProfileStringW(L"Recovery", key, L"", entry->path, 32768, manifest);
+    GetPrivateProfileStringW(L"Recovery", key, L"", entry->path,
+                             (DWORD)(sizeof(entry->path) / sizeof(entry->path[0])), manifest);
     swprintf(key, 32, L"Untitled%d", index);
     entry->untitledNumber = GetPrivateProfileIntW(L"Recovery", key, 0, manifest);
     swprintf(key, 32, L"Bom%d", index);

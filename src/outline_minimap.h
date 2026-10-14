@@ -48,6 +48,10 @@ typedef struct OutlineMinimapHost {
    (i.e. before create_editor_views() creates the minimap). */
 void outline_minimap_init(const OutlineMinimapHost *host);
 
+/* The level (1-6) of the ATX heading on `line`, or 0 if it isn't one. On
+   success, *textStart and *textLength give the title without its markers. */
+int outline_parse_atx_heading(const char *line, int length, int *textStart, int *textLength);
+
 /* Rebuilds the outline listbox from the active document's headings. */
 void update_outline(void);
 

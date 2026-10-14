@@ -1,3 +1,173 @@
+/* ---- window, menu and title-bar theming ---- */
+
+/* Keeps the WebView2 controller's own background in step with the theme. It
+   shows through before the shell page paints: at startup, while resizing, and
+   for the frame between a theme switch and the page restyling itself. */
+static void apply_webview_background_colour(void) {
+    if (!g_webviewController) return;
+    ICoreWebView2Controller2 *ctrl2 = NULL;
+    ICoreWebView2Controller_QueryInterface(g_webviewController, &IID_ICoreWebView2Controller2,
+                                           (void **)&ctrl2);
+    if (!ctrl2) return;
+    COLORREF colour = preview_bg_color();
+    COREWEBVIEW2_COLOR bg = {255, GetRValue(colour), GetGValue(colour), GetBValue(colour)};
+    ICoreWebView2Controller2_put_DefaultBackgroundColor(ctrl2, bg);
+    ICoreWebView2Controller2_Release(ctrl2);
+}
+
+/* (Re)creates g_previewBkBrush to match g_previewDarkMode, so the preview
+   host STATIC control's WM_CTLCOLORSTATIC background doesn't flash white/
+   light when starting (or switching to) dark mode, before WebView2 itself
+   has painted anything. */
+static void apply_preview_host_theme(void) {
+    if (g_previewBkBrush) DeleteObject(g_previewBkBrush);
+    g_previewBkBrush = CreateSolidBrush(preview_bg_color());
+    if (g_hPreview) InvalidateRect(g_hPreview, NULL, TRUE);
+}
+
+/* (Re)creates g_mainBkBrush to match g_editorDarkMode, and repaints the
+   parts of the main window's own background it's used for (the toolbar
+   strip and the splitter gap - everywhere else is covered by child windows). */
+static void apply_main_theme(HWND hwnd) {
+    if (g_mainBkBrush) DeleteObject(g_mainBkBrush);
+    g_mainBkBrush = CreateSolidBrush(theme_bg_color());
+    if (hwnd) InvalidateRect(hwnd, NULL, TRUE);
+
+    /* The outline's content is owner-drawn (see draw_themed_listbox_item());
+       its scrollbar is themed separately (see themed_scrollbar.h). */
+    if (g_hOutline) {
+        themed_scrollbar_refresh(g_hOutline);
+        InvalidateRect(g_hOutline, NULL, TRUE);
+    }
+    apply_debug_panel_theme();
+    explorer_apply_theme();
+}
+
+/* Popup menus need an explicit uxtheme opt-in to follow MarkEdit's theme.
+   The visible menu bar is owner-drawn below because Windows does not repaint
+   that non-client area when this preference changes at runtime. These private
+   ordinal exports are available from Windows 10 1903 onward. */
+typedef enum { UXTHEME_APPMODE_FORCEDARK = 2, UXTHEME_APPMODE_FORCELIGHT = 3 } UxthemeAppMode;
+typedef UxthemeAppMode (WINAPI *SetPreferredAppModeFn)(UxthemeAppMode appMode);
+typedef BOOL (WINAPI *AllowDarkModeForWindowFn)(HWND hwnd, BOOL allow);
+typedef void (WINAPI *FlushMenuThemesFn)(void);
+/* uxtheme.dll exports these by ordinal only. */
+enum {
+    UXTHEME_ALLOW_DARK_MODE_FOR_WINDOW = 133,
+    UXTHEME_SET_PREFERRED_APP_MODE = 135,
+    UXTHEME_FLUSH_MENU_THEMES = 136,
+};
+
+static SetPreferredAppModeFn g_setPreferredAppMode = NULL;
+static AllowDarkModeForWindowFn g_allowDarkModeForWindow = NULL;
+static FlushMenuThemesFn g_flushMenuThemes = NULL;
+
+static void init_native_menu_theme_support(void) {
+    HMODULE uxtheme = LoadLibraryW(L"uxtheme.dll");
+    if (!uxtheme) return;
+    FARPROC procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(UXTHEME_ALLOW_DARK_MODE_FOR_WINDOW));
+    memcpy(&g_allowDarkModeForWindow, &procedure, sizeof(g_allowDarkModeForWindow));
+    procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(UXTHEME_SET_PREFERRED_APP_MODE));
+    memcpy(&g_setPreferredAppMode, &procedure, sizeof(g_setPreferredAppMode));
+    procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(UXTHEME_FLUSH_MENU_THEMES));
+    memcpy(&g_flushMenuThemes, &procedure, sizeof(g_flushMenuThemes));
+}
+
+/* DarkMode_Explorer themes the menu bar's fill and its dropdowns, but the
+   1px separator the non-client area draws along the menu bar's bottom edge
+   stays a light system colour regardless - it isn't part of what that theme
+   (or the ODT_MENU owner-draw for the item labels) covers. Painted over
+   directly with the same dark fill used elsewhere, right after Windows
+   finishes its own non-client painting. Only needed in dark mode; light
+   mode's own separator already matches the rest of the light chrome. */
+static void erase_menu_bottom_seam(HWND hwnd) {
+    if (!g_editorDarkMode) return;
+    RECT windowRect;
+    if (!GetWindowRect(hwnd, &windowRect)) return;
+    POINT clientTopLeft = {0, 0};
+    if (!ClientToScreen(hwnd, &clientTopLeft)) return;
+    RECT clientRect;
+    if (!GetClientRect(hwnd, &clientRect)) return;
+    int lineX = clientTopLeft.x - windowRect.left;
+    int lineY = clientTopLeft.y - windowRect.top - 1;
+    int lineWidth = clientRect.right - clientRect.left;
+    if (lineX < 0 || lineY < 0 || lineWidth <= 0) return;
+    HDC hdc = GetWindowDC(hwnd);
+    if (!hdc) return;
+    RECT lineRect = {lineX, lineY, lineX + lineWidth, lineY + 1};
+    fill_rect_color(hdc, &lineRect, theme_bg_color());
+    ReleaseDC(hwnd, hdc);
+}
+
+/* Dark/light title bar and border for any top-level window: the per-window
+   uxtheme opt-in, the DWM caption attribute (which DWM ignores until the
+   frame is told to repaint, hence the SWP_FRAMECHANGED nudge), and the
+   scrollbar/explorer theme. Used for the main window by apply_menu_theme()
+   below and on its own for the popup windows (Go to Line, the searchable
+   picker, the plain text prompt), which have no menu bar. */
+static void apply_popup_titlebar_theme(HWND hwnd, int dark) {
+    if (!hwnd) return;
+    if (g_allowDarkModeForWindow) g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
+    BOOL useDark = dark ? TRUE : FALSE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                      &useDark, sizeof(useDark))))
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                               &useDark, sizeof(useDark));
+    SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+/* Paints the menu bar's background with the current theme brush. */
+static void set_menu_background(HMENU menu) {
+    if (!g_menuBkBrush) return;
+    MENUINFO info = {0};
+    info.cbSize = sizeof(info);
+    info.fMask = MIM_BACKGROUND;
+    info.hbrBack = g_menuBkBrush;
+    SetMenuInfo(menu, &info);
+}
+
+/* Switches the menu bar, its dropdowns, and the window's title bar/border
+   between light and dark chrome. FORCEDARK/FORCELIGHT are intentional: the
+   app has its own theme selector, so the selected menu colour must not
+   depend on the Windows system theme. The per-window opt-in is what lets
+   the non-client menu bar follow that process preference. Safe on older
+   Windows releases where the private uxtheme exports (or DWMWA_USE_
+   IMMERSIVE_DARK_MODE) are absent; those releases retain their system
+   chrome. */
+static void apply_menu_theme(HWND hwnd, int dark) {
+    if (g_setPreferredAppMode)
+        g_setPreferredAppMode(dark ? UXTHEME_APPMODE_FORCEDARK : UXTHEME_APPMODE_FORCELIGHT);
+    if (hwnd && g_allowDarkModeForWindow)
+        g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
+    if (g_flushMenuThemes)
+        g_flushMenuThemes();
+    if (hwnd) {
+        apply_popup_titlebar_theme(hwnd, dark);
+
+        if (g_menuBkBrush) DeleteObject(g_menuBkBrush);
+        g_menuBkBrush = CreateSolidBrush(theme_palette_for(dark)->bg);
+        HMENU menu = GetMenu(hwnd);
+        if (menu) set_menu_background(menu);
+        SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+        DrawMenuBar(hwnd);
+        erase_menu_bottom_seam(hwnd);
+    }
+}
+
+/* Fills one splitter gap's rect with the border colour so it reads as a
+   draggable divider instead of just more of the pane background on either
+   side of it - shared by every splitter's WM_ERASEBKGND painting (main,
+   explorer, split-editor). A zeroed/empty rect (the splitter's own "not
+   currently shown" state) is a no-op. */
+static void paint_splitter_gap(HDC hdc, const RECT *rect) {
+    if (rect->right <= rect->left || rect->bottom <= rect->top) return;
+    fill_rect_color(hdc, rect, theme_border_color());
+}
+
+/* ---- owner-drawn tabs and listboxes ---- */
+
 static RECT tab_close_rectangle(const RECT *tabRect) {
     RECT close = *tabRect;
     close.left = close.right - 23;
@@ -11,11 +181,9 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
     int index = (int)dis->itemID;
     if (index < 0 || index >= g_documentStore.count) return;
     int selected = TabCtrl_GetCurSel(g_hTabs) == index;
-    COLORREF bg = g_editorDarkMode ? THEME_DARK_BG
-        : (selected ? THEME_LIGHT_BG : RGB(0xF0, 0xF3, 0xF6));
-    COLORREF fg = g_editorDarkMode
-        ? (selected ? RGB(0xF0, 0xF6, 0xFC) : RGB(0xB1, 0xBA, 0xC4))
-        : THEME_LIGHT_FG;
+    const ThemePalette *p = theme_palette();
+    COLORREF bg = selected ? p->tabSelectedBg : p->tabBg;
+    COLORREF fg = selected ? p->tabSelectedFg : p->tabFg;
     fill_rect_color(dis->hDC, &dis->rcItem, bg);
     HPEN borderPen = CreatePen(PS_SOLID, 1, theme_border_color());
     HPEN oldPen = (HPEN)SelectObject(dis->hDC, borderPen);
@@ -61,7 +229,7 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
     DeleteObject(borderPen);
 
     if (g_documentStore.documents[index].externalChanged) {
-        COLORREF changedColor = RGB(0xD2, 0x99, 0x22);
+        COLORREF changedColor = p->changedMarker;
         HBRUSH changed = CreateSolidBrush(changedColor);
         HPEN changedPen = CreatePen(PS_SOLID, 1, changedColor);
         HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, changed);
@@ -94,9 +262,7 @@ static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis) {
 static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis) {
     if ((int)dis->itemID < 0) return;
     int selected = (dis->itemState & ODS_SELECTED) != 0;
-    COLORREF bg = g_editorDarkMode
-        ? (selected ? RGB(0x26, 0x4F, 0x78) : THEME_DARK_BG)
-        : (selected ? RGB(0xB6, 0xD7, 0xFF) : THEME_LIGHT_BG);
+    COLORREF bg = selected ? theme_palette()->selectionBg : theme_bg_color();
     COLORREF fg = theme_fg_color();
     fill_rect_color(dis->hDC, &dis->rcItem, bg);
 

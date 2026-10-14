@@ -1,3 +1,9 @@
+-- MarkEdit joins formatting_base.lua, formatting_tables.lua and this file
+-- into one chunk before loading it, so the helpers used here are defined in
+-- the earlier files. A language server checking this file on its own can't
+-- see them.
+---@diagnostic disable: undefined-global
+
 -- ---- Edit menu text commands ----
 
 -- Edit > Trim Trailing Whitespace: removes spaces and tabs from the end of

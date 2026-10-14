@@ -157,6 +157,7 @@ return {
     { "Open Plugins &Folder", "plugins.open_folder" },
     { "&Manage Plugins...", "plugins.manage" },
     { "&Customize Menus...", "plugins.customize_menus" },
+    { "Customize &Theme Colours...", "plugins.customize_theme" },
   } },
 
   { "&Snippets", {

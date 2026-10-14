@@ -115,27 +115,19 @@ local function html_encode(text)
     :gsub("'", "&#39;"))
 end
 
+local HTML_ENTITIES = { quot = '"', apos = "'", lt = "<", gt = ">", amp = "&" }
+
+-- A single pass, so a decoded "&" never starts another entity: "&#38;lt;"
+-- becomes "&lt;", not "<". Unknown or invalid entities are left as they are.
 local function html_decode(text)
-  return (text:gsub("&#[xX](%x+);", function(value)
-      local code = tonumber(value, 16)
-      if not code or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF) then
-        return "&#x" .. value .. ";"
-      end
-      return utf8.char(code)
-    end)
-    :gsub("&#(%d+);", function(value)
-      local code = tonumber(value, 10)
-      if not code or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF) then
-        return "&#" .. value .. ";"
-      end
-      return utf8.char(code)
-    end)
-    :gsub("&quot;", '"')
-    :gsub("&#39;", "'")
-    :gsub("&apos;", "'")
-    :gsub("&lt;", "<")
-    :gsub("&gt;", ">")
-    :gsub("&amp;", "&"))
+  return (text:gsub("&(#?%w+);", function(name)
+    local code
+    if name:match("^#[xX]%x+$") then code = tonumber(name:sub(3), 16)
+    elseif name:match("^#%d+$") then code = tonumber(name:sub(2), 10)
+    else return HTML_ENTITIES[name] end
+    if not code or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF) then return nil end
+    return utf8.char(code)
+  end))
 end
 
 menu.add("Developer Tools/Base64 Encode", function()
@@ -143,16 +135,23 @@ menu.add("Developer Tools/Base64 Encode", function()
   if text then editor.replace_selection(base64_encode(text)) end
 end)
 
-menu.add("Developer Tools/Base64 Decode", function()
+-- Replaces the selection with what `decode` makes of it. Decoded bytes
+-- become document text only if they are UTF-8, as in encoding.lua.
+local function replace_with_decoded(decode, what)
   local text = selection_or_warn()
   if not text then return end
-  local decoded, message = base64_decode(text)
+  local decoded, message = decode(text)
+  if decoded and not utf8.len(decoded) then
+    decoded, message = nil, what .. " decodes to binary data, not UTF-8 text, so it wasn't inserted."
+  end
   if not decoded then
     ui.message(message, nil, "warning")
     return
   end
   editor.replace_selection(decoded)
-end)
+end
+
+menu.add("Developer Tools/Base64 Decode", function() replace_with_decoded(base64_decode, "This Base64") end)
 
 menu.separator("Developer Tools")
 
@@ -161,16 +160,7 @@ menu.add("Developer Tools/Hex Encode", function()
   if text then editor.replace_selection(hex_encode(text)) end
 end)
 
-menu.add("Developer Tools/Hex Decode", function()
-  local text = selection_or_warn()
-  if not text then return end
-  local decoded, message = hex_decode(text)
-  if not decoded then
-    ui.message(message, nil, "warning")
-    return
-  end
-  editor.replace_selection(decoded)
-end)
+menu.add("Developer Tools/Hex Decode", function() replace_with_decoded(hex_decode, "This hex") end)
 
 menu.separator("Developer Tools")
 
@@ -179,16 +169,7 @@ menu.add("Developer Tools/URL Encode", function()
   if text then editor.replace_selection(url_encode(text)) end
 end)
 
-menu.add("Developer Tools/URL Decode", function()
-  local text = selection_or_warn()
-  if not text then return end
-  local decoded, message = url_decode(text)
-  if not decoded then
-    ui.message(message, nil, "warning")
-    return
-  end
-  editor.replace_selection(decoded)
-end)
+menu.add("Developer Tools/URL Decode", function() replace_with_decoded(url_decode, "This URL text") end)
 
 menu.separator("Developer Tools")
 

@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 #include <windows.h>
+
+#include "path_utils.h" /* LONG_PATH_CAPACITY */
 #include "text_codec.h"
 
 #define RECOVERY_MAX_DOCUMENTS 32
@@ -16,7 +18,7 @@ typedef struct {
 } RecoveryDocument;
 
 typedef struct {
-    WCHAR path[32768];
+    WCHAR path[LONG_PATH_CAPACITY];
     unsigned untitledNumber;
     int hasBom;
     TextEncoding encoding;

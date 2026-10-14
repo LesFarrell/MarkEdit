@@ -3,6 +3,7 @@
 
 local LONG_SENTENCE_INDICATOR = 18
 local REPEATED_WORD_INDICATOR = 19
+local READING_WORDS_PER_MINUTE = 200 -- a typical adult silent-reading pace
 
 local stop_words = {
   a = true, an = true, ["and"] = true, are = true, as = true, at = true, be = true,
@@ -15,10 +16,18 @@ local stop_words = {
   you = true, your = true
 }
 
+-- Bytes 128-255 count as word characters so non-ASCII letters work, which
+-- would include common UTF-8 punctuation: curly quotes, en/em dashes, the
+-- ellipsis and no-break space. Those become spaces of the same byte length,
+-- so word positions still match the text.
+local function mask_punctuation(text)
+  return (text:gsub("\226\128[\147\148\152\153\156\157\166]", "   "):gsub("\194\160", "  "))
+end
+
 local function words_in(text, offset)
   local words = {}
   offset = offset or 0
-  for first, word, after in text:gmatch("()([A-Za-z0-9_\128-\255]+)()") do
+  for first, word, after in mask_punctuation(text):gmatch("()([A-Za-z0-9_\128-\255]+)()") do
     words[#words + 1] = {
       text = word,
       key = word:lower(),
@@ -183,7 +192,7 @@ local function show_report()
     return
   end
 
-  local reading_seconds = math.max(1, math.floor(stats.words / 200 * 60 + 0.5))
+  local reading_seconds = math.max(1, math.floor(stats.words / READING_WORDS_PER_MINUTE * 60 + 0.5))
   local reading_time = reading_seconds < 60 and reading_seconds .. " seconds"
     or math.ceil(reading_seconds / 60) .. " minutes"
   local favourite = stats.favourite and

@@ -10,11 +10,12 @@ This guide is for people working on MarkEdit's source. It covers each Lua file i
 |---|---|---|---|
 | [src/menus.lua](../src/menus.lua) | The default menu bar. | Built into `markedit.exe` (resource `IDR_DEFAULT_MENUS`). | MarkEdit developers |
 | `%APPDATA%\markedit\menus.lua` | A user's own menu bar, which replaces the default. | On disk. **Plugins > Customize Menus** creates it as a copy of the default. | Users |
+| `%APPDATA%\markedit\themes.lua` | A user's colours for the light and dark themes, overriding the built-in ones in [src/theme.c](../src/theme.c). | On disk. **Plugins > Customize Theme Colours** creates it, listing every colour. Run in a Lua state of its own (`plugin_host_load_theme()`). | Users |
 | `src/lua/formatting_*.lua` | Markdown and HTML formatting plus Markdown-aware Edit commands. | Built into `markedit.exe` as three resources and compiled together as one Lua chunk. | MarkEdit developers |
 | [plugins/edit-convert.lua](../plugins/edit-convert.lua) | The complete **Edit > Convert** submenu and its transformations. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/json-tools.lua](../plugins/json-tools.lua) | JSON formatting, validation and related tools. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/csv-tools.lua](../plugins/csv-tools.lua) | Delimited-text parsing, transformations and export. | Loaded from the `plugins` folder. | MarkEdit developers |
-| `plugins/*-tools.lua` and other bundled plugins | SQL, logs, data conversion, natural sorting, number conversion, grammar and other optional tools. | Loaded from the `plugins` folder. | MarkEdit developers |
+| `plugins/*-tools.lua` and other bundled plugins | SQL, logs, data conversion, natural sorting, number conversion, grammar, Lua formatting and other optional tools. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [src/help/keyboard-shortcuts.lua](../src/help/keyboard-shortcuts.lua) | Builds the **Help > Keyboard Shortcuts** page. | Built into `markedit.exe` (resource `IDR_HELP_SHORTCUTS`). | MarkEdit developers |
 | [plugins/*.lua](../plugins/) | Bundled plugins and examples. | The `plugins` folder beside `markedit.exe` (copied to `dist/` by the build). | MarkEdit developers |
 | `%APPDATA%\markedit\plugins` | Personal `.lua` plugins or folders containing `init.lua`. | Created by **Plugins > New Plugin/Open Plugins Folder**. | Users |
@@ -30,6 +31,10 @@ The **Run** command (Ctrl+F5) is unrelated. It runs a `.lua` document with an ex
 The same sequence runs at startup and on **Plugins > Reload Plugins**. It's `load_menus_and_plugins()` in [src/markedit.c](../src/markedit.c):
 
 ```
+load_theme_colours()                built-in palettes, then %APPDATA%\markedit\themes.lua
+                                    in its own Lua state (only base and string,
+                                    stopped if it doesn't finish)
+        │
 plugin_host_shutdown()              throw away the Lua state: every command,
                                     handler, global and the menu definition
         │
@@ -53,6 +58,7 @@ What this order means:
 
 - **Personal plugins load last**, so they can replace bundled or built-in commands. Within one location, the later alphabetical entry wins.
 - **A broken user `menus.lua` never leaves the user without menus.** The built-in definition is loaded instead, and the error is reported.
+- **A broken `themes.lua` never leaves the window uncoloured.** Loading starts from the built-in palettes; each bad entry is reported and skipped, and the good ones still apply.
 - **Each script loads all or nothing.** If a script's top-level code fails, the commands and handlers it had registered so far are discarded (`run_script()` in [src/plugin_host.c](../src/plugin_host.c)).
 
 ## One shared Lua state
@@ -61,7 +67,7 @@ Every script above runs in a single `lua_State`, created in `ensure_state()` / `
 
 - **Globals are shared.** That's why the built-in formatting chunk and `example.lua` declare everything `local`.
 - **It's sandboxed.** Only the base, `string`, `table`, `math`, `utf8` and `coroutine` libraries are opened. `dofile` and `loadfile` are removed, and `load` accepts source text only. The custom `require` reads source modules only beneath the folder extension currently loading.
-- **The API is seven global tables:** `editor`, `ui`, `menu`, `commands`, `events`, `config` and `app`, each a `luaL_Reg` array in `plugin_registry.c`. The `editor` functions only work while a command or event handler has an active editor. Called from a script's top-level code, they raise an error.
+- **The API is eight global tables:** `editor`, `ui`, `menu`, `commands`, `events`, `config`, `app` and `documents`. All but `editor` are `luaL_Reg` arrays in `plugin_registry.c`; `editor` is built in `lua_editor_api.c`. The `editor` functions only work while a command or event handler has an active editor. Called from a script's top-level code, they raise an error.
 - **There's a time limit.** A count hook (`time_limit_hook`) stops any call that runs longer than `PLUGIN_TIME_LIMIT_MS` (5 s, not counting time in dialogs). Commands registered by a built-in script (`plugin_host_load_builtin`) are exempt, because formatting a large document can legitimately take longer.
 - **Each command is one undo step.** `plugin_host_run()` wraps the call in a Scintilla undo action, and if the command raises an error, it undoes what the command had changed.
 - **Reload recreates the Lua state.** Lua variables last until the next reload; values saved with `config.set` remain in `settings.json`.

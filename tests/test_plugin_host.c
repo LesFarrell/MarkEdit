@@ -154,6 +154,16 @@ static int fake_config_set(const char *plugin, const char *key, const char *valu
 static char *fake_prompt(const char *title, const char *label, const char *initial) {
     snprintf(s_lastTitle, sizeof(s_lastTitle), "%s", title);
     if (strcmp(label, "cancel") == 0) return NULL;
+    if (strcmp(label, "Keep events containing:") == 0) {
+        char *reply = (char *)malloc(4);
+        if (reply) strcpy(reply, "ADA");
+        return reply;
+    }
+    if (strcmp(label, "Remove the lines containing:") == 0) {
+        char *reply = (char *)malloc(5);
+        if (reply) strcpy(reply, "drop");
+        return reply;
+    }
     if (strncmp(label, "Expression ", 11) == 0) {
         char *reply = (char *)malloc(strlen(s_calculatorExpression) + 1);
         if (reply) strcpy(reply, s_calculatorExpression);
@@ -169,6 +179,7 @@ static int fake_choose(const char *title, const char *label, const char *const *
     if (strstr(label, " = ") && count == 2 && strcmp(items[0], "Insert result") == 0)
         return 0;
     if (strcmp(label, "Include headings at:") == 0 && count == 4) return 1;
+    if (strcmp(label, "Keep events at or above:") == 0 && count == 6) return 4;
     return strcmp(label, "Level:") == 0 && count == 3 && strcmp(items[1], "h2") == 0 ? 1 : -1;
 }
 
@@ -352,6 +363,21 @@ static void test_editor_api(HWND editor) {
     expect(run_ok(bulk, editor) && document_is(editor, "A! middle! C!") &&
            SendMessageA(editor, SCI_GETSELECTIONS, 0, 0) == 3,
            "bulk replacement keeps multiple carets stable");
+
+    int positions = load_ok("find-scroll.lua",
+        "menu.add('Find and scroll', function()\n"
+        "  local s, f = editor.find('abc', 1)\n"
+        "  assert(s == 1 and f == 3, 'find from the first position')\n"
+        "  s, f = editor.find('abc', 2)\n"
+        "  assert(s == 4 and f == 6, 'find starts at the given position')\n"
+        "  assert(editor.find('abc', 5) == nil, 'find skips matches before the start')\n"
+        "  editor.scroll_to(4)\n"
+        "  assert(editor.get_caret() == 4, 'scroll_to moves the caret to the position')\n"
+        "  editor.scroll_to(1)\n"
+        "  assert(editor.get_caret() == 1, 'scroll_to the first position')\n"
+        "end)");
+    set_document(editor, "abcabc");
+    expect(run_ok(positions, editor), "find and scroll_to take 1-based positions");
 }
 
 static void test_ui(HWND editor) {
@@ -714,11 +740,20 @@ static void test_bundled_plugins(HWND editor) {
     int numberRoman = find_command("/Tools/Number Converter/To Roman Numerals");
     int sqlFormat = find_command("/Tools/SQL/Format SQL");
     int sqlMinify = find_command("/Tools/SQL/Minify SQL");
+    int sqlUpper = find_command("/Tools/SQL/Uppercase Keywords");
+    int sqlLower = find_command("/Tools/SQL/Lowercase Keywords");
+    int removeContaining = find_command("Lines/Remove Lines Containing...");
     int jsonLinesToArray = find_command("/Tools/Data Converter/JSON Lines to JSON Array");
     int jsonArrayToLines = find_command("/Tools/Data Converter/JSON Array to JSON Lines");
     int queryToJson = find_command("/Tools/Data Converter/Query String to JSON");
     int clefFormat = find_command("/Tools/Logs/CLEF/Format Events");
     int clefWarnings = find_command("/Tools/Logs/CLEF/Keep Warnings and Above");
+    int clefFormatProperties = find_command("/Tools/Logs/CLEF/Format Events with Properties");
+    int clefInspect = find_command("/Tools/Logs/CLEF/Inspect");
+    int clefLevel = find_command("/Tools/Logs/CLEF/Keep Level and Above...");
+    int clefSearch = find_command("/Tools/Logs/CLEF/Keep Events Containing...");
+    int clefSort = find_command("/Tools/Logs/CLEF/Sort by Timestamp");
+    int clefExceptions = find_command("/Tools/Logs/CLEF/Extract Exceptions");
     int grammarCheck = find_command("/Tools/Grammar Checker/Check");
     int grammarHighlight = find_command("/Tools/Grammar Checker/Highlight Issues");
     int grammarFix = find_command("/Tools/Grammar Checker/Fix Safe Issues");
@@ -756,9 +791,12 @@ static void test_bundled_plugins(HWND editor) {
            editCrlf >= 0 && editLf >= 0 && editCr >= 0 && editUtf8 >= 0 &&
            editUtf8Bom >= 0 && editUtf16Le >= 0 && editUtf16Be >= 0 && editAnsi >= 0 &&
            naturalSort >= 0 && numberHex >= 0 && numberDecimal >= 0 && numberRoman >= 0 &&
-           sqlFormat >= 0 && sqlMinify >= 0 && jsonLinesToArray >= 0 &&
+           sqlFormat >= 0 && sqlMinify >= 0 && sqlUpper >= 0 && sqlLower >= 0 &&
+           removeContaining >= 0 && jsonLinesToArray >= 0 &&
            jsonArrayToLines >= 0 && queryToJson >= 0 && clefFormat >= 0 &&
-           clefWarnings >= 0 && grammarCheck >= 0 && grammarHighlight >= 0 && grammarFix >= 0 &&
+           clefWarnings >= 0 && clefFormatProperties >= 0 && clefInspect >= 0 &&
+           clefLevel >= 0 && clefSearch >= 0 && clefSort >= 0 && clefExceptions >= 0 &&
+           grammarCheck >= 0 && grammarHighlight >= 0 && grammarFix >= 0 &&
            rot13 >= 0 && atbash >= 0 && encodeMorse >= 0 && decodeMorse >= 0 &&
            encodeNato >= 0 && decodeNato >= 0 && encodeBinary >= 0 &&
            decodeBinary >= 0 && pigLatin >= 0 &&
@@ -850,6 +888,18 @@ static void test_bundled_plugins(HWND editor) {
     SendMessageA(editor, SCI_SETSEL, 0, 0);
     expect(run_ok(sqlFormat, editor) && document_is(editor, "SELECT count(*)\nFROM users;"),
            "SQL plugin keeps function parentheses on the same line");
+    set_document(editor, "select a from t where id=$1 and n=@p and s=N'x' and k=:key and v=a::int");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(sqlMinify, editor) &&
+           document_is(editor, "SELECT a FROM t WHERE id = $1 AND n = @p AND s = N'x' AND k = :key AND v = a::int"),
+           "SQL plugin keeps parameters, variables and prefixed strings whole");
+    set_document(editor, "select a,\n  b\nfrom t -- note\nwhere x=1");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(sqlUpper, editor) && document_is(editor, "SELECT a,\n  b\nFROM t -- note\nWHERE x=1"),
+           "SQL plugin changes keyword case without changing the layout");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(sqlLower, editor) && document_is(editor, "select a,\n  b\nfrom t -- note\nwhere x=1"),
+           "SQL plugin lowercases keywords in place");
 
     set_document(editor, "{\"a\":1}\n{\"a\":2}");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
@@ -879,6 +929,86 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(clefWarnings, editor) &&
            document_is(editor, "{\"@t\":\"2\",\"@m\":\"bad\",\"@l\":\"Error\"}"),
            "log plugin filters CLEF by severity");
+    set_document(editor,
+        "{\"@t\":\"1\",\"@mt\":\"{{x}} {$Name,-5}| {Missing} [{Empty}] {Quote} {Face}\","
+        "\"Name\":\"Ada\",\"Empty\":\"\",\"Quote\":\"\\\"q\\\"\",\"Face\":\"\\ud83d\\ude00\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefFormat, editor) &&
+           document_is(editor, "1 [INF] {x} Ada  | {Missing} [] \"q\" \xF0\x9F\x98\x80"),
+           "log plugin renders CLEF escapes, alignment, empty values and surrogate pairs");
+    set_document(editor,
+        "{\"@t\":\"1\",\"@mt\":\"Saw {raw}\",\"@@t\":\"user\",\"raw\":\"x\",\"@l\":\"Error\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefFormatProperties, editor) &&
+           document_is(editor, "1 [ERR] Saw x\n    @t = \"user\"\n    raw = \"x\""),
+           "log plugin keeps @@ properties apart from reserved CLEF fields");
+    set_document(editor, "{\"@m\":\"a\"}\n\nnot json");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(clefFormat, editor) && strstr(s_lastMessage, "line 3."),
+           "log plugin reports the real line number of an invalid CLEF event");
+    set_document(editor,
+        "{\"@t\":\"2026-01-01T01:00:00+02:00\",\"@m\":\"b\"}\n"
+        "{\"@m\":\"none\"}\n"
+        "{\"@t\":\"2026-01-01T00:00:00.5Z\",\"@m\":\"d\"}\n"
+        "{\"@t\":\"2026-01-01T00:00:00Z\",\"@m\":\"c\"}\n"
+        "{\"@t\":\"2025-12-31T23:00:00.25Z\",\"@m\":\"a\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefSort, editor) &&
+           document_is(editor,
+               "{\"@t\":\"2026-01-01T01:00:00+02:00\",\"@m\":\"b\"}\n"
+               "{\"@t\":\"2025-12-31T23:00:00.25Z\",\"@m\":\"a\"}\n"
+               "{\"@t\":\"2026-01-01T00:00:00Z\",\"@m\":\"c\"}\n"
+               "{\"@t\":\"2026-01-01T00:00:00.5Z\",\"@m\":\"d\"}\n"
+               "{\"@m\":\"none\"}"),
+           "log plugin sorts CLEF events by UTC timestamp");
+    s_lastMessage[0] = 0;
+    expect(run_ok(clefInspect, editor) && strstr(s_lastMessage, "CLEF events: 5") &&
+           strstr(s_lastMessage, "First: 2026-01-01T01:00:00+02:00") &&
+           strstr(s_lastMessage, "Last: 2026-01-01T00:00:00.5Z"),
+           "log plugin inspect reports the CLEF time range");
+    set_document(editor,
+        "{\"@m\":\"i\",\"@l\":\"Information\"}\n"
+        "{\"@m\":\"e\",\"@l\":\"Error\"}\n"
+        "{\"@m\":\"f\",\"@l\":\"Fatal\",\"User\":\"ada\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefLevel, editor) &&
+           document_is(editor, "{\"@m\":\"e\",\"@l\":\"Error\"}\n"
+                               "{\"@m\":\"f\",\"@l\":\"Fatal\",\"User\":\"ada\"}"),
+           "log plugin filters CLEF by a chosen level");
+    expect(run_ok(clefSearch, editor) &&
+           document_is(editor, "{\"@m\":\"f\",\"@l\":\"Fatal\",\"User\":\"ada\"}"),
+           "log plugin keeps CLEF events containing text");
+    set_document(editor,
+        "{\"@t\":\"1\",\"@m\":\"ok\"}\n"
+        "{\"@t\":\"2\",\"@m\":\"boom\",\"@x\":\"System.Exception: boom\\n   at Main\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefExceptions, editor) &&
+           document_is(editor, "2 boom\nSystem.Exception: boom\n   at Main"),
+           "log plugin extracts CLEF exceptions with their message");
+    set_document(editor,
+        "{\"@t\":\"1\",\"@mt\":\"Placed {@Order} for {Tags} in {Elapsed:0.0} ms\","
+        "\"Order\":{\"$type\":\"Order\",\"Id\":5,\"Lines\":[{\"Sku\":\"}A\\\"1\"},null]},"
+        "\"Tags\":[\"x\",true],\"Elapsed\":12.345,\"@r\":[\"12.3\"]}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefFormat, editor) &&
+           document_is(editor, "1 [INF] Placed Order { Id: 5, Lines: [{ Sku: \"}A\\\"1\" }, null] }"
+                               " for [\"x\", true] in 12.3 ms"),
+           "log plugin renders nested CLEF objects, arrays and @r renderings");
+    set_document(editor,
+        "{\"@t\":\"1\",\"@m\":\"m\",\"Order\":{\"Id\":5,\"Tags\":[]},"
+        "\"Body\":\"{\\\"a\\\":[1,2]}\"}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(clefFormatProperties, editor) &&
+           document_is(editor, "1 [INF] m\n"
+                               "    Order = {\n      \"Id\": 5,\n      \"Tags\": []\n    }\n"
+                               "    Body = {\n      \"a\": [\n        1,\n        2\n      ]\n    }"),
+           "log plugin lists nested and embedded JSON properties as indented JSON");
+    set_document(editor, "{\"@m\":\"x\",\"A\":{\"b\":}}");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(clefFormat, editor) && strstr(s_lastMessage, "line 1."),
+           "log plugin rejects invalid nested JSON in a CLEF event");
 
     set_document(editor, "this is is a error.");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
@@ -961,6 +1091,20 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(calculator, editor) && document_contains(editor, " = 184"),
            "bundled calculator evaluates trigonometry and angle conversions");
 
+    s_calculatorExpression = "max(1, 2) * 3";
+    set_document(editor, s_calculatorExpression);
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(calculator, editor) && document_contains(editor, " = 6"),
+           "bundled calculator accepts commas between function arguments");
+
+    s_calculatorExpression = "1,000 * 2";
+    set_document(editor, s_calculatorExpression);
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    s_lastMessage[0] = 0;
+    expect(run_ok(calculator, editor) && document_is(editor, "1,000 * 2") &&
+           strstr(s_lastMessage, "Commas can only separate function arguments"),
+           "bundled calculator rejects thousands separators instead of misreading them");
+
     set_document(editor, "hello world");
     SendMessageA(editor, SCI_SETSEL, 0, 5);
     expect(encode64 >= 0 && run_ok(encode64, editor) && document_is(editor, "aGVsbG8= world"),
@@ -975,6 +1119,35 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(decode64, editor) && document_is(editor, "AB==") &&
            strstr(s_lastMessage, "not valid Base64"),
            "bundled Base64 decoder rejects non-canonical padding bits");
+
+    set_document(editor, "AAEC/w==");
+    SendMessageA(editor, SCI_SETSEL, 0, 8);
+    s_lastMessage[0] = 0;
+    expect(run_ok(decode64, editor) && document_is(editor, "AAEC/w==") &&
+           strstr(s_lastMessage, "binary data"),
+           "bundled Base64 decoder refuses to insert binary data");
+    set_document(editor, "ff fe");
+    SendMessageA(editor, SCI_SETSEL, 0, 5);
+    s_lastMessage[0] = 0;
+    expect(run_ok(decodeHex, editor) && document_is(editor, "ff fe") &&
+           strstr(s_lastMessage, "binary data"),
+           "bundled hexadecimal decoder refuses to insert binary data");
+    set_document(editor, "%FF");
+    SendMessageA(editor, SCI_SETSEL, 0, 3);
+    s_lastMessage[0] = 0;
+    expect(run_ok(decodeUrl, editor) && document_is(editor, "%FF") &&
+           strstr(s_lastMessage, "binary data"),
+           "bundled URL decoder refuses to insert binary data");
+
+    set_document(editor, "keep\ndrop 1\ndrop 2\nkeep too");
+    SendMessageA(editor, SCI_SETSEL, 5, 18);
+    expect(removeContaining >= 0 && run_ok(removeContaining, editor) &&
+           document_is(editor, "keep\nkeep too"),
+           "removing every selected line leaves no blank line behind");
+    set_document(editor, "keep\ndrop 1\ndrop 2");
+    SendMessageA(editor, SCI_SETSEL, 5, 18);
+    expect(run_ok(removeContaining, editor) && document_is(editor, "keep"),
+           "removing the last lines also removes the line ending before them");
 
     set_document(editor, "a b+c");
     SendMessageA(editor, SCI_SETSEL, 0, 5);
@@ -1020,8 +1193,8 @@ static void test_bundled_plugins(HWND editor) {
 
     set_document(editor, "name age\nAda 36\nBob 40");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
-    expect(run_ok(csvToComma, editor) && document_is(editor, "name,age\nAda,36\nBob,40"),
-           "bundled CSV plugin processes whitespace-separated data");
+    expect(run_ok(csvToComma, editor) && document_is(editor, "name age\nAda 36\nBob 40"),
+           "bundled CSV plugin never auto-detects whitespace as the separator");
 
     set_document(editor, "name;age\nAda;36\nBob;40");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
@@ -1057,8 +1230,30 @@ static void test_bundled_plugins(HWND editor) {
     set_document(editor, "name,age\nAlexandra,9\nBo,12");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
     expect(run_ok(csvFormat, editor) &&
-           document_is(editor, "\"name\"     ,\"age\"\n\"Alexandra\",\"9\"  \n\"Bo\"       ,\"12\" "),
-           "bundled CSV plugin aligns columns without changing field values");
+           document_is(editor, "name     ,age\nAlexandra,9\nBo       ,12"),
+           "bundled CSV plugin aligns columns without adding quotes");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvFormat, editor) &&
+           document_is(editor, "name     ,age\nAlexandra,9\nBo       ,12"),
+           "formatting aligned CSV again leaves it unchanged");
+    set_document(editor, "a,b\n\"x,y\",\"say \"\"hi\"\"\"");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvFormat, editor) &&
+           document_is(editor, "a    ,b\n\"x,y\",\"say \"\"hi\"\"\""),
+           "CSV formatting keeps fields that were quoted as they were");
+    set_document(editor, "id, name, city\n1, Alexandra, Oslo\n22, Bo, \"Rome, IT\"");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvFormat, editor) &&
+           document_is(editor, "id,name     ,city\n1 ,Alexandra,Oslo\n22,Bo       ,\"Rome, IT\""),
+           "CSV formatting aligns spaced-out separators without adding quotes");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvFormat, editor) &&
+           document_is(editor, "id,name     ,city\n1 ,Alexandra,Oslo\n22,Bo       ,\"Rome, IT\""),
+           "formatting spaced-out CSV twice leaves it unchanged");
+    set_document(editor, "  a ,  b  \n ccc,d   ");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(csvFormat, editor) && document_is(editor, "a  ,b\nccc,d"),
+           "CSV formatting trims blanks around fields and at line ends");
 
     set_document(editor, "{\"z\":0,\"a\":[1,true,null]}");
     SendMessageA(editor, SCI_SETSEL, 0, 0);

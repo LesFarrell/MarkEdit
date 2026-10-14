@@ -117,6 +117,17 @@ typedef struct {
 char *plugin_host_render_page(const char *name, const char *code, size_t length,
                               const PluginShortcut *shortcuts, int shortcutCount, char **page);
 
+/* Called for each colour a themes.lua sets: dark is 0 for the light theme.
+   Returns NULL when the colour was applied, or why it wasn't. */
+typedef const char *(*PluginThemeColourFn)(void *context, int dark, const char *name, const char *value);
+
+/* Runs a themes.lua in a Lua state of its own. The file returns
+   { light = { name = "#RRGGBB", ... }, dark = { ... } }; each colour goes to
+   setColour. Returns NULL, or a report of every problem (heap, caller frees).
+   Colours before a Lua error may already have been applied. */
+char *plugin_host_load_theme(const char *name, const char *code, size_t length,
+                             PluginThemeColourFn setColour, void *context);
+
 /* Runs every top-level *.lua file and folder containing init.lua in name
    order, adding to what is loaded. scope identifies the source to the
    enable-state callback. A missing directory is not an error. */

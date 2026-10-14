@@ -1,3 +1,9 @@
+-- MarkEdit joins formatting_base.lua, this file and formatting_text.lua into
+-- one chunk before loading it, so the helpers used here are formatting_base's
+-- locals, and the table commands here are only used by formatting_text.lua.
+-- A language server checking this file on its own can't see either.
+---@diagnostic disable: undefined-global, unused-local, unused-function
+
 -- ---- Markdown tables ----
 --
 -- A table is a run of lines containing "|", with a header row, a separator
@@ -11,16 +17,18 @@ local function trim(text)
   return text:match("^[ \t]*(.-)[ \t]*$")
 end
 
+local BACKSLASH, PIPE = ("\\"):byte(), ("|"):byte()
+
 -- Finds the next table delimiter. A pipe preceded by an odd run of
 -- backslashes is literal Markdown cell text ("a \| b"), not a boundary.
 local function next_table_pipe(line, from, limit)
   local escaped = false
   for position = from, limit do
     local byte = line:byte(position)
-    if byte == 92 then -- "\\"
+    if byte == BACKSLASH then
       escaped = not escaped
     else
-      if byte == 124 and not escaped then return position end -- "|"
+      if byte == PIPE and not escaped then return position end
       escaped = false
     end
   end
@@ -260,10 +268,11 @@ local function sort_table_rows(descending)
     local line = editor.get_line(tbl.first + 1 + i)
     local key = row_cells(line, MAX_TABLE_CELLS)[tbl.column + 1] or ""
     if numeric and tonumber(key) == nil then numeric = false end
-    rows[i] = { line = line, key = key, index = i }
+    rows[i] = { line = line, cell = key, index = i }
   end
+  -- Sort by number when every key is one, otherwise by text ignoring case.
   for _, row in ipairs(rows) do
-    row.key = numeric and tonumber(row.key) or row.key:lower()
+    if numeric then row.key = tonumber(row.cell) else row.key = row.cell:lower() end
   end
 
   table.sort(rows, function(a, b)
@@ -303,26 +312,29 @@ end
 -- still fit), or inserts a new table when the caret isn't in one.
 local function table_editor()
   local caret = editor.get_caret()
-  local caretLine = editor.line_at(caret)
-  local first, last, existing = caretLine, caretLine, false
   local tbl = find_table()
-  if tbl then
-    first, last, existing = tbl.first, tbl.last, true
-  end
+  local existing = tbl ~= nil
 
-  -- The existing table's header and data cells (at most 20 columns and 50
-  -- data rows, the most ask_table_size allows).
+  -- The existing table's header and data cells. A table bigger than
+  -- ask_table_size allows (50 data rows, 20 columns) is refused, since
+  -- rebuilding it would drop the rows or columns past those limits.
   local header, body, columns = {}, {}, 3
-  if existing then
-    header = row_cells(editor.get_line(first), 20)
+  if tbl then
+    header = row_cells(editor.get_line(tbl.first), MAX_TABLE_CELLS)
     columns = math.max(#header, 1)
-    for n = first + 2, last do
-      if #body >= 50 then break end
+    if columns > 20 or tbl.last - tbl.first - 1 > 50 then
+      ui.message("The Table Editor handles tables of up to 50 data rows and 20 columns.",
+        "Table Editor", "warning")
+      return
+    end
+    for n = tbl.first + 2, tbl.last do
       body[#body + 1] = row_cells(editor.get_line(n), columns)
     end
   end
 
-  local dataRows, newColumns = ask_table_size("Table Editor", existing and #body or 3, columns)
+  -- A table with no data rows yet is offered one, the fewest allowed.
+  local dataRows, newColumns = ask_table_size("Table Editor",
+    existing and math.max(#body, 1) or 3, columns)
   if not dataRows then return end
 
   local eol = editor.eol()
@@ -348,8 +360,9 @@ local function table_editor()
   local text = table.concat(out)
 
   if existing then
-    local finish = last < editor.line_count() and line_start(last + 1) - 1 or editor.length()
-    editor.replace_range(line_start(first), finish, text)
+    local start, finish, atEnd = table_range(tbl)
+    if atEnd then text = text:sub(1, -#eol - 1) end
+    editor.replace_range(start, finish, text)
   else
     if needs_leading_eol(caret) then text = eol .. text end
     editor.insert(text, caret)

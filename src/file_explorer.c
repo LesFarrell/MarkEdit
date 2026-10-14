@@ -632,7 +632,7 @@ static int delete_to_recycle_bin(const WCHAR *path)
         if (SUCCEEDED(hr))
             return 1;
     }
-    WCHAR doubleNulPath[32768] = {0};
+    WCHAR doubleNulPath[LONG_PATH_CAPACITY] = {0};
     size_t pathLength = wcslen(path);
     if (pathLength > sizeof(doubleNulPath) / sizeof(doubleNulPath[0]) - 2)
         return 0;

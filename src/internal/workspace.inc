@@ -82,8 +82,12 @@ static int workspace_file_extension(const WCHAR *name) {
     return 0;
 }
 
+/* Scans stop (and report themselves as truncated) past these limits, so
+   a workspace rooted at a huge tree stays responsive. */
+enum { WORKSPACE_MAX_FILES = 5000, WORKSPACE_MAX_DEPTH = 24 };
+
 static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *directory, int depth) {
-    if (depth > 24 || files->count >= 5000) { files->truncated = 1; return; }
+    if (depth > WORKSPACE_MAX_DEPTH || files->count >= WORKSPACE_MAX_FILES) { files->truncated = 1; return; }
     WCHAR *pattern = path_join(directory, L"*");
     if (!pattern) { files->truncated = 1; return; }
     WIN32_FIND_DATAW data;
@@ -119,8 +123,8 @@ static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *direct
         }
         free(full);
         if (stoppedEarly) break;
-    } while (files->count < 5000 && FindNextFileW(search, &data));
-    if (files->count >= 5000) files->truncated = 1;
+    } while (files->count < WORKSPACE_MAX_FILES && FindNextFileW(search, &data));
+    if (files->count >= WORKSPACE_MAX_FILES) files->truncated = 1;
     else if (!stoppedEarly && GetLastError() != ERROR_NO_MORE_FILES)
         files->truncated = 1;
     FindClose(search);
@@ -261,12 +265,14 @@ static void toggle_explorer_panel(HWND hwnd) {
    when the match couldn't be stored. */
 typedef int (*WorkspaceMatchFn)(void *context, const WCHAR *path, int lineNumber, WCHAR *label);
 
-/* "relative/path:12 — text of the line", the snippet cut at 180 bytes on a
-   UTF-8 character boundary. */
+enum { WORKSPACE_SNIPPET_BYTES = 180 };
+
+/* "relative/path:12 — text of the line", the snippet cut at
+   WORKSPACE_SNIPPET_BYTES on a UTF-8 character boundary. */
 static WCHAR *workspace_match_label(const WCHAR *fileLabel, int lineNumber, const char *line) {
-    char snippet[181];
+    char snippet[WORKSPACE_SNIPPET_BYTES + 1];
     size_t snippetLength = strlen(line);
-    if (snippetLength > 180) snippetLength = 180;
+    if (snippetLength > WORKSPACE_SNIPPET_BYTES) snippetLength = WORKSPACE_SNIPPET_BYTES;
     while (snippetLength && ((unsigned char)line[snippetLength] & 0xC0) == 0x80)
         snippetLength--;
     memcpy(snippet, line, snippetLength);
@@ -490,118 +496,145 @@ static char *replace_all_in_line(const char *line, const char *find, const char 
     return out;
 }
 
+/* How a Replace in Folder run went, for the summary at the end. */
+typedef struct ReplaceTally {
+    int changed;  /* files written */
+    int failed;   /* files that couldn't be read or written */
+    int skipped;  /* files left alone: NUL bytes, or text the encoding can't store */
+} ReplaceTally;
+
+/* `text` with the replacement applied to each line that has an accepted
+   match among matches[first..last), keeping every line ending as it was.
+   `text` is modified while scanning but restored. Returns a heap string
+   with *outLength set and *changed nonzero if any line changed, or NULL
+   when out of memory. */
+static char *replace_accepted_lines(char *text, size_t length, const ReplaceMatch *matches,
+                                    int first, int last, const char *find, const char *replace,
+                                    size_t *outLength, int *changed) {
+    size_t outCapacity = length + 256;
+    char *out = (char *)malloc(outCapacity);
+    if (!out) return NULL;
+    size_t used = 0;
+    *changed = 0;
+    char *cursor = text;
+    int lineNumber = 1;
+    while (*cursor) {
+        size_t terminatorLength = 0;
+        char *end = text_line_break(cursor, &terminatorLength);
+        char terminator[2] = {0, 0};
+        if (terminatorLength) memcpy(terminator, end, terminatorLength);
+        *end = 0;
+        int accept = 0;
+        for (int j = first; j < last; j++)
+            if (matches[j].line == lineNumber && matches[j].accepted) { accept = 1; break; }
+        char *lineOut = accept ? replace_all_in_line(cursor, find, replace) : NULL;
+        const char *piece = lineOut ? lineOut : cursor;
+        size_t pieceLen = strlen(piece);
+        if (lineOut) *changed = 1;
+        size_t needed = used + pieceLen + terminatorLength + 1;
+        if (needed > outCapacity) {
+            outCapacity = needed * 2;
+            char *grown = (char *)realloc(out, outCapacity);
+            if (!grown) { free(lineOut); free(out); memcpy(end, terminator, terminatorLength); return NULL; }
+            out = grown;
+        }
+        memcpy(out + used, piece, pieceLen);
+        used += pieceLen;
+        free(lineOut);
+        if (!terminatorLength) break;
+        memcpy(out + used, terminator, terminatorLength);
+        used += terminatorLength;
+        memcpy(end, terminator, terminatorLength);
+        cursor = end + terminatorLength;
+        lineNumber++;
+    }
+    out[used] = 0;
+    *outLength = used;
+    return out;
+}
+
+/* Applies the accepted matches[first..last), which all belong to one file,
+   and writes the file back. */
+static void replace_in_file(const ReplaceMatch *matches, int first, int last,
+                            const char *find, const char *replace, ReplaceTally *tally) {
+    const WCHAR *path = matches[first].path;
+    WorkspaceText source;
+    int loaded = load_workspace_text(path, &source);
+    if (loaded <= 0) {
+        if (loaded < 0) tally->skipped++;
+        else tally->failed++;
+        return;
+    }
+    size_t outLength = 0;
+    int changed = 0;
+    char *out = replace_accepted_lines(source.text, source.length, matches, first, last,
+                                       find, replace, &outLength, &changed);
+    if (out && changed) {
+        int saved = save_workspace_text(path, out, outLength, source.encoding, source.hasBom);
+        if (saved < 0) {
+            tally->skipped++;
+        } else if (saved) {
+            tally->changed++;
+            /* `out` was built from the live editor buffer (including any
+               other unsaved edits), so it's exactly what was just written
+               to disk regardless of the tab's prior dirty state - syncing
+               the buffer to it (and clearing dirty) is correct either way.
+               Leaving the buffer holding the pre-replacement text would let
+               the next Ctrl+S silently overwrite this file again, undoing
+               the replacement that had just been written. */
+            if (source.openIndex >= 0) reload_document_buffer(source.openIndex, out);
+        } else {
+            tally->failed++;
+        }
+    }
+    free(out);
+    free(source.text);
+}
+
+/* One summary for the whole run rather than one message per failed file,
+   which otherwise forced dismissing a modal for every read-only or locked
+   file before a large batch replace could finish. */
+static void report_workspace_replace(const ReplaceTally *tally) {
+    WCHAR message[512];
+    const size_t messageCap = sizeof(message) / sizeof(message[0]);
+    if (tally->changed == 0 && tally->failed == 0 && tally->skipped == 0) {
+        swprintf(message, messageCap, L"No files were changed.");
+    } else {
+        int used = swprintf(message, messageCap, L"Updated %d file%ls.",
+                            tally->changed, tally->changed == 1 ? L"" : L"s");
+        if (tally->failed && used > 0)
+            used += swprintf(message + used, messageCap - (size_t)used,
+                             L" %d file%ls could not be written and %ls skipped.",
+                             tally->failed, tally->failed == 1 ? L"" : L"s",
+                             tally->failed == 1 ? L"was" : L"were");
+        if (tally->skipped && used > 0)
+            swprintf(message + used, messageCap - (size_t)used,
+                     L" %d file%ls left unchanged (a NUL character in the file, or a "
+                     L"replacement its encoding can't store).",
+                     tally->skipped, tally->skipped == 1 ? L" was" : L"s were");
+    }
+    MessageBoxW(g_hMainWnd, message, L"Replace in Folder",
+               MB_OK | (tally->failed || tally->skipped ? MB_ICONWARNING : MB_ICONINFORMATION));
+}
+
 /* Applies the checked matches: one file at a time, replaces every
    occurrence of `find` with `replace` on each accepted line only (matching
    the line-level granularity the review checklist offers), then writes the
    result with write_file_atomic(). `matches` must be sorted by path, which
    the scan in do_replace_in_workspace() below already produces. */
 static void apply_workspace_replace(ReplaceMatch *matches, int count, const char *find, const char *replace) {
-    int filesChanged = 0;
-    int filesFailed = 0;
-    int filesSkipped = 0;
-    int i = 0;
-    while (i < count) {
-        const WCHAR *path = matches[i].path;
-        int fileEnd = i;
-        while (fileEnd < count && _wcsicmp(matches[fileEnd].path, path) == 0) fileEnd++;
-
+    ReplaceTally tally = {0};
+    int first = 0;
+    while (first < count) {
+        /* Matches are sorted by path, so each file's are one run. */
+        int last = first;
+        while (last < count && _wcsicmp(matches[last].path, matches[first].path) == 0) last++;
         int anyAccepted = 0;
-        for (int j = i; j < fileEnd; j++) if (matches[j].accepted) { anyAccepted = 1; break; }
-        if (!anyAccepted) { i = fileEnd; continue; }
-
-        WorkspaceText source;
-        int loaded = load_workspace_text(path, &source);
-        if (loaded <= 0) {
-            if (loaded < 0) filesSkipped++;
-            else filesFailed++;
-            i = fileEnd;
-            continue;
-        }
-        char *content = source.text;
-        char *body = content;
-
-        size_t outCapacity = source.length + 256;
-        char *out = (char *)malloc(outCapacity);
-        size_t outLength = 0;
-        int changed = 0;
-        if (out) {
-            char *cursor = body;
-            int lineNumber = 1;
-            while (*cursor) {
-                size_t terminatorLength = 0;
-                char *end = text_line_break(cursor, &terminatorLength);
-                char terminator[2] = {0, 0};
-                if (terminatorLength) memcpy(terminator, end, terminatorLength);
-                *end = 0;
-                int accept = 0;
-                for (int j = i; j < fileEnd; j++)
-                    if (matches[j].line == lineNumber && matches[j].accepted) { accept = 1; break; }
-                char *lineOut = accept ? replace_all_in_line(cursor, find, replace) : NULL;
-                const char *piece = lineOut ? lineOut : cursor;
-                size_t pieceLen = strlen(piece);
-                if (lineOut) changed = 1;
-                size_t needed = outLength + pieceLen + terminatorLength + 1;
-                if (needed > outCapacity) {
-                    outCapacity = needed * 2;
-                    char *grown = (char *)realloc(out, outCapacity);
-                    if (!grown) { free(lineOut); free(out); out = NULL; break; }
-                    out = grown;
-                }
-                memcpy(out + outLength, piece, pieceLen); outLength += pieceLen;
-                free(lineOut);
-                if (!terminatorLength) break;
-                memcpy(out + outLength, terminator, terminatorLength);
-                outLength += terminatorLength;
-                memcpy(end, terminator, terminatorLength);
-                cursor = end + terminatorLength;
-                lineNumber++;
-            }
-            if (out) out[outLength] = 0;
-        }
-
-        if (out && changed) {
-            int saved = save_workspace_text(path, out, outLength, source.encoding, source.hasBom);
-            if (saved < 0) {
-                filesSkipped++;
-            } else if (saved) {
-                filesChanged++;
-                /* `out` was built from the live editor buffer (including any
-                   other unsaved edits), so it's exactly what was just written
-                   to disk regardless of the tab's prior dirty state - syncing
-                   the buffer to it (and clearing dirty) is correct either way.
-                   The previous dirty-only branch instead left the buffer
-                   holding the pre-replacement text, so the next Ctrl+S
-                   silently overwrote this file again, undoing the replacement
-                   that had just been written. */
-                if (source.openIndex >= 0) reload_document_buffer(source.openIndex, out);
-            } else {
-                filesFailed++;
-            }
-        }
-        free(out);
-        free(content);
-        i = fileEnd;
+        for (int j = first; j < last; j++) if (matches[j].accepted) { anyAccepted = 1; break; }
+        if (anyAccepted) replace_in_file(matches, first, last, find, replace, &tally);
+        first = last;
     }
-    WCHAR message[512];
-    if (filesChanged == 0 && filesFailed == 0 && filesSkipped == 0) {
-        swprintf(message, 512, L"No files were changed.");
-    } else {
-        /* Aggregated into one dialog rather than one per failed file, which
-           otherwise forced dismissing a modal for every read-only/locked file
-           in a row before a large batch replace could finish. */
-        int used = swprintf(message, 512, L"Updated %d file%ls.", filesChanged, filesChanged == 1 ? L"" : L"s");
-        if (filesFailed && used > 0)
-            used += swprintf(message + used, 512 - (size_t)used,
-                             L" %d file%ls could not be written and %ls skipped.",
-                             filesFailed, filesFailed == 1 ? L"" : L"s", filesFailed == 1 ? L"was" : L"were");
-        if (filesSkipped && used > 0)
-            swprintf(message + used, 512 - (size_t)used,
-                     L" %d file%ls left unchanged (a NUL character in the file, or a "
-                     L"replacement its encoding can't store).",
-                     filesSkipped, filesSkipped == 1 ? L" was" : L"s were");
-    }
-    MessageBoxW(g_hMainWnd, message, L"Replace in Folder",
-               MB_OK | (filesFailed || filesSkipped ? MB_ICONWARNING : MB_ICONINFORMATION));
+    report_workspace_replace(&tally);
 }
 
 /* Same folder enumeration and line scan as do_find_in_folder(), but every
@@ -873,10 +906,10 @@ static void select_preview_theme(HWND hwnd, int darkMode) {
    Theme, Settings > Appearance). The separate Markdown Theme control
    (select_preview_theme(), above) can still be used afterwards to override
    just the preview on its own. */
-static void select_theme(HWND hwnd, int darkMode) {
-    g_editorDarkMode = darkMode;
-    save_theme_settings();
-    apply_menu_theme(hwnd, darkMode);
+/* Repaints everything natively drawn in the current palette - after a theme
+   switch, or after themes.lua changed the colours (Plugins > Reload). */
+static void refresh_theme(HWND hwnd) {
+    apply_menu_theme(hwnd, g_editorDarkMode);
     apply_editor_theme(g_hEdit);
     if (g_hMinimap) {
         apply_editor_theme(g_hMinimap);
@@ -891,6 +924,14 @@ static void select_theme(HWND hwnd, int darkMode) {
     apply_toolbar_tooltip_theme();
     if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);
     if (g_hStatus) InvalidateRect(g_hStatus, NULL, TRUE);
+    apply_preview_host_theme();
+    apply_webview_background_colour();
+}
+
+static void select_theme(HWND hwnd, int darkMode) {
+    g_editorDarkMode = darkMode;
+    save_theme_settings();
+    refresh_theme(hwnd);
     select_preview_theme(hwnd, darkMode);
     fire_plugin_event("theme_changed", g_currentFile);
 }

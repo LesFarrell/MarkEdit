@@ -204,7 +204,7 @@ typedef struct DocumentStore {
     int switching;
 } DocumentStore;
 static DocumentStore g_documentStore = { .nextUntitledNumber = 1 };
-static char g_tabTooltipAnsi[32768];
+static char g_tabTooltipAnsi[LONG_PATH_CAPACITY];
 /* Set on every edit and every dirty-state change; cleared once
    write_recovery_snapshot() has brought the on-disk snapshot back in sync.
    Lets the 5s autosave timer skip its work entirely while idle instead of
@@ -241,6 +241,10 @@ static int g_wikiBackCount = 0;
    brace matching, smart Enter/Tab, and recovery snapshots. Plain editing, find/replace, and
    save still work. Persisted as [View] LargeFileThresholdMB. */
 int g_largeFileThresholdMB = 64;
+
+static long long large_file_threshold_bytes(void) {
+    return (long long)g_largeFileThresholdMB * 1024 * 1024;
+}
 int g_previewVisible = 0;
 int g_editorVisible = 1;
 int g_previewOnLeft = 0;
@@ -323,1089 +327,6 @@ WCHAR g_replaceWith[256] = L"";
 DWORD g_findFlags = FR_DOWN;
 static UINT g_msgFindReplace;
 
-/* ---- copying text out of the Scintilla control ---- */
-
-/* A NUL-terminated heap copy of [start, end), or NULL. Caller frees. */
-static char *get_text_range(HWND hEdit, Sci_Position start, Sci_Position end) {
-    if (end < start) return NULL;
-    char *text = (char *)malloc((size_t)(end - start) + 1);
-    if (!text) return NULL;
-    struct Sci_TextRangeFull range = { { start, end }, text };
-    SendMessageA(hEdit, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&range);
-    text[end - start] = 0;
-    return text;
-}
-
-static char *get_edit_text(HWND hEdit, Sci_Position *outLen) {
-    Sci_Position len = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
-    char *buf = (char *)malloc((size_t)len + 1);
-    if (!buf) { if (outLen) *outLen = 0; return NULL; }
-    SendMessageA(hEdit, SCI_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf);
-    if (outLen) *outLen = len;
-    return buf;
-}
-
-static const char *editor_eol_sequence(void) {
-    switch ((int)SendMessageA(g_hEdit, SCI_GETEOLMODE, 0, 0)) {
-        case SC_EOL_CR: return "\r";
-        case SC_EOL_LF: return "\n";
-        default: return "\r\n";
-    }
-}
-
-/* Sets the EOL mode new lines are typed with to whichever line ending the
-   freshly loaded document uses first (CRLF when it has none). Read back from
-   Scintilla rather than the loaded bytes, so read_large_file_document()'s
-   streamed load - which never holds the whole text in one buffer - gets the
-   same answer as set_edit_text(). */
-static void apply_detected_eol_mode(HWND hEdit) {
-    Sci_Position length = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
-    Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, 0, 0);
-    int eolMode = SC_EOL_CRLF;
-    if (lineEnd < length) {
-        char first = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)lineEnd, 0);
-        char next = lineEnd + 1 < length
-            ? (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(lineEnd + 1), 0) : 0;
-        if (first == '\n') eolMode = SC_EOL_LF;
-        else eolMode = next == '\n' ? SC_EOL_CRLF : SC_EOL_CR;
-    }
-    SendMessageA(hEdit, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
-}
-
-/* Replace the Scintilla control's entire contents with `length` bytes of
-   `text`. A whole-document target replace rather than SCI_SETTEXT, which
-   stops at the first NUL - a UTF-16 file can legitimately contain U+0000.
-   It's still a single undoable change; callers loading a fresh document
-   (New/Open) should follow up with SCI_EMPTYUNDOBUFFER so the previous
-   document's content isn't reachable via Undo. */
-static void set_edit_text(HWND hEdit, const char *text, Sci_Position length) {
-    SendMessageA(hEdit, SCI_TARGETWHOLEDOCUMENT, 0, 0);
-    SendMessageA(hEdit, SCI_REPLACETARGET, (WPARAM)length, (LPARAM)text);
-    SendMessageA(hEdit, SCI_SETEMPTYSELECTION, 0, 0);
-    apply_detected_eol_mode(hEdit);
-}
-
-/* Configure the Scintilla control as a source editor: a Lexilla lexer for
-   syntax highlighting (a passive read-only colorizer - it never edits the
-   buffer), real tab characters at a width of 4, CRLF line endings to match
-   the rest of the app's file I/O, and only the change-notifications we
-   actually act on. Smart Markdown input is handled explicitly by
-   EditSubclassProc; Scintilla call tips remain disabled, and its autocomplete
-   list is populated by update_word_completions() rather than by the lexer. */
-/* Fixed point size for the minimap's copy of the editor font - deliberately
-   independent of the user's chosen editor font size (and its zoom level) so
-   the overview stays small and legible as an overview rather than scaling
-   up along with the main editor's text. In hundredths of a point (see
-   SCI_STYLESETSIZEFRACTIONAL/SC_FONT_SIZE_MULTIPLIER) so it can go below the
-   smallest whole point size. */
-#define MINIMAP_FONT_SIZE_HUNDREDTHS 150
-
-/* apply_editor_theme() bolds several per-construct styles (Markdown headings/
-   strong text, and various lexers' keywords) to make them stand out in the
-   full-size editor. At the minimap's tiny fixed size (MINIMAP_FONT_SIZE_HUNDREDTHS)
-   bold weight just reads as thick, smudged blocks rather than legible text,
-   so every style is forced back to regular weight there after the theme is
-   applied. */
-static void strip_minimap_bold(void) {
-    if (!g_hMinimap) return;
-    for (int style = 0; style <= STYLE_MAX; style++)
-        SendMessageA(g_hMinimap, SCI_STYLESETBOLD, (WPARAM)style, FALSE);
-}
-
-/* Apply GitHub's light/dark palette to the editor so it matches the preview.
-   Called once at startup and whenever the selected theme changes. */
-static void apply_editor_theme(HWND hEdit) {
-    /* Scintilla draws its own client area but leaves the scrollbars to the
-       system, which can't paint the track in the editor's background colour -
-       so they're replaced with themed ones (see themed_scrollbar.h). */
-    themed_scrollbar_refresh(hEdit);
-
-    if (g_editorDarkMode) {
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, THEME_DARK_FG);
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, THEME_DARK_BG);
-        SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0);
-
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x7D, 0x85, 0x90));
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, THEME_DARK_BG);
-
-        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0x21, 0x26, 0x2D), 0);
-        SendMessageA(hEdit, SCI_SETCARETFORE, THEME_DARK_FG, 0);
-        SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0x26, 0x4F, 0x78));
-        SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0xFF, 0xFF, 0xFF));
-
-        /* The word-completion popup (see update_word_completions()) is drawn
-           by Scintilla itself via its Element colour API rather than styles,
-           and otherwise defaults to plain system list-box colors (always
-           white/black) regardless of editor theme. Mirrors STYLE_DEFAULT and
-           SETSEL* above. Element colours carry an alpha byte (bits 24-31,
-           unlike SCI_STYLESETFORE/BACK's plain COLORREF), hence the
-           0xFF000000 for fully opaque. Its scrollbar is a separate, system-
-           drawn native listbox these colours don't reach - see
-           theme_autocomplete_popup(), applied each time the popup is shown. */
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST, (LPARAM)(THEME_DARK_FG | 0xFF000000));
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK, (LPARAM)(THEME_DARK_BG | 0xFF000000));
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED, (LPARAM)(RGB(0xFF, 0xFF, 0xFF) | 0xFF000000));
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED_BACK, (LPARAM)(RGB(0x26, 0x4F, 0x78) | 0xFF000000));
-    } else {
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_DEFAULT, THEME_LIGHT_FG);
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_DEFAULT, THEME_LIGHT_BG);
-        SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0);
-
-        SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x65, 0x6D, 0x76));
-        SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0xF6, 0xF8, 0xFA));
-
-        SendMessageA(hEdit, SCI_SETCARETLINEBACK, RGB(0xE8, 0xEC, 0xF1), 0);
-        SendMessageA(hEdit, SCI_SETCARETFORE, RGB(0x1F, 0x23, 0x28), 0);
-        SendMessageA(hEdit, SCI_SETSELBACK, TRUE, RGB(0xB6, 0xD7, 0xFF));
-        SendMessageA(hEdit, SCI_SETSELFORE, TRUE, RGB(0x1F, 0x23, 0x28));
-
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST, (LPARAM)(RGB(0x1F, 0x23, 0x28) | 0xFF000000));
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_BACK, (LPARAM)(RGB(0xFF, 0xFF, 0xFF) | 0xFF000000));
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED, (LPARAM)(RGB(0x1F, 0x23, 0x28) | 0xFF000000));
-        SendMessageA(hEdit, SCI_SETELEMENTCOLOUR, SC_ELEMENT_LIST_SELECTED_BACK, (LPARAM)(RGB(0xB6, 0xD7, 0xFF) | 0xFF000000));
-    }
-
-    /* These follow SCI_STYLECLEARALL above, which resets every style. The
-       gutter colours match STYLE_LINENUMBER so the margins read as one strip. */
-    COLORREF faint = g_editorDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0xAF, 0xB8, 0xC1);
-    COLORREF gutter = g_editorDarkMode ? THEME_DARK_BG : RGB(0xF6, 0xF8, 0xFA);
-    COLORREF text = theme_fg_color();
-
-    SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_INDENTGUIDE, (LPARAM)faint);
-    SendMessageA(hEdit, SCI_SETWHITESPACEFORE, TRUE, (LPARAM)faint);
-    SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_BRACELIGHT, (LPARAM)text);
-    SendMessageA(hEdit, SCI_STYLESETBACK, STYLE_BRACELIGHT,
-                 g_editorDarkMode ? RGB(0x3F, 0x46, 0x4F) : RGB(0xCF, 0xD8, 0xE3));
-    SendMessageA(hEdit, SCI_STYLESETBOLD, STYLE_BRACELIGHT, TRUE);
-    SendMessageA(hEdit, SCI_STYLESETFORE, STYLE_BRACEBAD,
-                 g_editorDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E));
-    SendMessageA(hEdit, SCI_STYLESETBOLD, STYLE_BRACEBAD, TRUE);
-
-    SendMessageA(hEdit, SCI_SETFOLDMARGINCOLOUR, TRUE, (LPARAM)gutter);
-    SendMessageA(hEdit, SCI_SETFOLDMARGINHICOLOUR, TRUE, (LPARAM)gutter);
-    for (int marker = SC_MARKNUM_FOLDEREND; marker <= SC_MARKNUM_FOLDEROPEN; marker++) {
-        SendMessageA(hEdit, SCI_MARKERSETFORE, (WPARAM)marker, (LPARAM)gutter);
-        SendMessageA(hEdit, SCI_MARKERSETBACK, (WPARAM)marker, (LPARAM)faint);
-    }
-    SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_BOOKMARK,
-                 (LPARAM)(g_editorDarkMode ? RGB(0x1F, 0x6F, 0xEB) : RGB(0x09, 0x69, 0xDA)));
-    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_BOOKMARK,
-                 (LPARAM)(g_editorDarkMode ? RGB(0x38, 0x8B, 0xFD) : RGB(0x21, 0x8B, 0xFF)));
-    SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_BREAKPOINT, RGB(0xFF, 0xFF, 0xFF));
-    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_BREAKPOINT,
-                 (LPARAM)(g_editorDarkMode ? RGB(0xF8, 0x51, 0x49) : RGB(0xCF, 0x22, 0x2E)));
-    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_DEBUG_LINE,
-                 (LPARAM)(g_editorDarkMode ? RGB(0x9E, 0x6A, 0x03) : RGB(0xFF, 0xDF, 0x5D)));
-    SendMessageA(hEdit, SCI_MARKERSETALPHA, MARKER_DEBUG_LINE, 110);
-    SendMessageA(hEdit, SCI_MARKERSETFORE, MARKER_DEBUG_ARROW,
-                 (LPARAM)(g_editorDarkMode ? THEME_DARK_BG : RGB(0xFF, 0xFF, 0xFF)));
-    SendMessageA(hEdit, SCI_MARKERSETBACK, MARKER_DEBUG_ARROW,
-                 (LPARAM)(g_editorDarkMode ? RGB(0xD2, 0x99, 0x22) : RGB(0x9A, 0x67, 0x00)));
-
-    SendMessageA(hEdit, SCI_INDICSETSTYLE, INDICATOR_SPELLING, INDIC_SQUIGGLE);
-    SendMessageA(hEdit, SCI_INDICSETFORE, INDICATOR_SPELLING,
-                 (LPARAM)(g_editorDarkMode ? RGB(0xFF, 0x7B, 0x72) : RGB(0xCF, 0x22, 0x2E)));
-    SendMessageA(hEdit, SCI_INDICSETUNDER, INDICATOR_SPELLING, TRUE);
-
-    apply_language_styles(hEdit, (Language)g_activeLanguage, g_editorDarkMode);
-    InvalidateRect(hEdit, NULL, TRUE);
-}
-
-/* Switches the editor to the lexer for `path`, reapplying the theme so the
-   new styles get colours. Safe to call when the language is unchanged. A
-   large-file document is always plain text: its document has no style
-   storage to lex into (see read_large_file_document()). */
-static void apply_language_to_view(HWND hEdit, const WCHAR *path) {
-    const LanguageInfo *language = g_largeFile ? &LANGUAGES[LANG_TEXT] : language_for_path(path);
-    g_activeLanguage = language->id;
-
-    void *lexer = CreateLexer(language->lexer);
-    /* NULL explicitly clears the previous lexer when switching to plain text. */
-    SendMessageA(hEdit, SCI_SETILEXER, 0, (LPARAM)lexer);
-    if (language->keywords)
-        SendMessageA(hEdit, SCI_SETKEYWORDS, 0, (LPARAM)language->keywords);
-
-    /* fold.html is separate from fold: without it the XML/HTML lexer reports no
-       fold points at all. The margin is hidden for languages that cannot fold,
-       rather than shown as a dead strip. */
-    SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold", (LPARAM)(language->folds ? "1" : "0"));
-    SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold.compact", (LPARAM)"0");
-    SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold.html", (LPARAM)"1");
-    SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_FOLD,
-                 language->folds ? FOLD_MARGIN_WIDTH : 0);
-
-    apply_editor_theme(hEdit);
-    apply_word_wrap(hEdit);
-    if (!g_largeFile) SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
-
-    /* Style bytes live in the shared Scintilla document, but the colours
-       assigned to those style numbers belong to each view. Keep the minimap's
-       palette in step when the main view changes language (tab switches,
-       Open, Save As, and large-file mode all come through here). It does not
-       need its own lexer or a second colourising pass. */
-    if (hEdit == g_hEdit && g_hMinimap) {
-        apply_editor_theme(g_hMinimap);
-        strip_minimap_bold();
-    }
-    schedule_spell_check();
-}
-
-/* Applies the language for `path` to every editable view of the active
-   document: the main pane and, when it exists, the split pane. */
-static void apply_document_language(const WCHAR *path) {
-    apply_language_to_view(g_hEdit, path);
-    if (g_hSplitEdit) apply_language_to_view(g_hSplitEdit, path);
-}
-
-/* ---- Native Windows spell checking for Markdown prose. -----------------
-   Scintilla stores UTF-8 byte positions while ISpellChecker reports UTF-16
-   offsets, so each reported range is converted before applying an indicator.
-   Lexer styles keep code, links, rules, and Markdown punctuation unmarked. */
-
-static const GUID MARKEDIT_CLSID_SPELL_CHECKER_FACTORY =
-    {0x7ab36653, 0x1796, 0x484b, {0xbd, 0xfa, 0xe7, 0x4f, 0x1d, 0xb7, 0xc1, 0xdc}};
-static const GUID MARKEDIT_IID_SPELL_CHECKER_FACTORY =
-    {0x8e018a9d, 0x2415, 0x4677, {0xbf, 0x08, 0x79, 0x4e, 0xa6, 0x1f, 0x94, 0xbb}};
-
-static void copy_locale_name(WCHAR destination[LOCALE_NAME_MAX_LENGTH], const WCHAR *source) {
-    wcsncpy(destination, source, LOCALE_NAME_MAX_LENGTH - 1);
-    destination[LOCALE_NAME_MAX_LENGTH - 1] = 0;
-}
-
-static int create_spell_checker_for_language(const WCHAR *requested, int reportErrors) {
-    ISpellCheckerFactory *factory = NULL;
-    HRESULT hr = CoCreateInstance(&MARKEDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
-        CLSCTX_INPROC_SERVER, &MARKEDIT_IID_SPELL_CHECKER_FACTORY, (void **)&factory);
-    if (FAILED(hr) || !factory) return 0;
-
-    WCHAR language[LOCALE_NAME_MAX_LENGTH] = L"";
-    if (requested && requested[0]) {
-        copy_locale_name(language, requested);
-    } else if (!GetUserDefaultLocaleName(language, LOCALE_NAME_MAX_LENGTH))
-        wcscpy(language, L"en-GB");
-
-    BOOL supported = FALSE;
-    ISpellCheckerFactory_IsSupported(factory, language, &supported);
-    if (!supported) {
-        IEnumString *languages = NULL;
-        if (SUCCEEDED(ISpellCheckerFactory_get_SupportedLanguages(factory, &languages)) && languages) {
-            LPOLESTR first = NULL;
-            ULONG fetched = 0;
-            if (IEnumString_Next(languages, 1, &first, &fetched) == S_OK && first) {
-                copy_locale_name(language, first);
-                CoTaskMemFree(first);
-                supported = TRUE;
-            }
-            IEnumString_Release(languages);
-        }
-    }
-
-    ISpellChecker *checker = NULL;
-    if (supported && SUCCEEDED(ISpellCheckerFactory_CreateSpellChecker(
-            factory, language, &checker)) && checker) {
-        if (g_spellChecker) ISpellChecker_Release(g_spellChecker);
-        g_spellChecker = checker;
-        copy_locale_name(g_spellLanguage, language);
-    }
-    ISpellCheckerFactory_Release(factory);
-    if (!checker && reportErrors)
-        MessageBoxW(g_hMainWnd, L"The selected Windows spelling dictionary is unavailable.",
-                    L"Spell Check", MB_OK | MB_ICONWARNING);
-    return checker != NULL;
-}
-
-static void init_spell_checker(void) {
-    create_spell_checker_for_language(g_spellLanguage, 0);
-}
-
-static void choose_spell_language(void) {
-    ISpellCheckerFactory *factory = NULL;
-    if (FAILED(CoCreateInstance(&MARKEDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
-                                CLSCTX_INPROC_SERVER, &MARKEDIT_IID_SPELL_CHECKER_FACTORY,
-                                (void **)&factory)) || !factory) return;
-    IEnumString *languages = NULL;
-    WCHAR **labels = NULL;
-    int count = 0;
-    if (SUCCEEDED(ISpellCheckerFactory_get_SupportedLanguages(factory, &languages)) && languages) {
-        int capacity = 0;
-        for (;;) {
-            LPOLESTR language = NULL; ULONG fetched = 0;
-            if (IEnumString_Next(languages, 1, &language, &fetched) != S_OK || !language) break;
-            if (count >= capacity) {
-                int next = capacity ? capacity * 2 : 16;
-                WCHAR **grown = (WCHAR **)realloc(labels, (size_t)next * sizeof(WCHAR *));
-                if (!grown) { CoTaskMemFree(language); break; }
-                labels = grown; capacity = next;
-            }
-            WCHAR displayName[LOCALE_NAME_MAX_LENGTH] = L"";
-            GetLocaleInfoEx(language, LOCALE_SLOCALIZEDDISPLAYNAME, displayName,
-                            LOCALE_NAME_MAX_LENGTH);
-            size_t labelCapacity = wcslen(language) + wcslen(displayName) + 8;
-            labels[count] = (WCHAR *)malloc(labelCapacity * sizeof(WCHAR));
-            if (labels[count]) {
-                if (displayName[0]) swprintf(labels[count], labelCapacity, L"%ls — %ls", displayName, language);
-                else wcscpy(labels[count], language);
-                count++;
-            }
-            CoTaskMemFree(language);
-        }
-        IEnumString_Release(languages);
-    }
-    ISpellCheckerFactory_Release(factory);
-    if (!count) {
-        MessageBoxW(g_hMainWnd, L"Windows has no installed spelling dictionaries.",
-                    L"Spell Check", MB_OK | MB_ICONINFORMATION);
-        free(labels); return;
-    }
-    int selected = show_choice_dialog(L"Spell Check Language",
-                                      L"Choose an installed Windows dictionary:", labels, count, L"Open");
-    if (selected >= 0 && selected < count) {
-        WCHAR locale[LOCALE_NAME_MAX_LENGTH];
-        WCHAR *dash = wcsrchr(labels[selected], L'—');
-        const WCHAR *source = dash ? dash + 1 : labels[selected];
-        while (*source == L' ') source++;
-        copy_locale_name(locale, source);
-        if (create_spell_checker_for_language(locale, 1)) {
-            g_spellCheckEnabled = 1;
-            save_layout_settings(); /* persists the language and the enabled state */
-            schedule_spell_check();
-            refresh_menu(g_hMainWnd);
-        }
-    }
-    for (int i = 0; i < count; i++) free(labels[i]);
-    free(labels);
-}
-
-static int markdown_style_is_prose(int style) {
-    return style == SCE_MARKDOWN_DEFAULT ||
-           style == SCE_MARKDOWN_STRONG1 || style == SCE_MARKDOWN_STRONG2 ||
-           style == SCE_MARKDOWN_EM1 || style == SCE_MARKDOWN_EM2 ||
-           (style >= SCE_MARKDOWN_HEADER1 && style <= SCE_MARKDOWN_HEADER6) ||
-           style == SCE_MARKDOWN_BLOCKQUOTE || style == SCE_MARKDOWN_STRIKEOUT;
-}
-
-static void schedule_spell_check(void) {
-    if (!g_hMainWnd) return;
-    if (g_largeFile) {
-        KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
-        return;
-    }
-    SetTimer(g_hMainWnd, IDT_SPELL_CHECK, 350, NULL);
-}
-
-/* ISpellChecker_Check() below is a single synchronous COM call over the
-   *entire* document (there's no incremental/ranged spellcheck API), run
-   right on the UI thread with no chunking or background thread. That's
-   unnoticeable at normal typing volume, since each keystroke rechecks a
-   document that's already close to this size - but pasting a large block
-   makes the document balloon in one step, and the native spellchecker is
-   slow per byte, so the very next check after a big paste can block the UI
-   thread (and the whole app's message pump) for a long, visible stretch.
-   Skipping the check above this size trades spelling squiggles in huge
-   documents for not freezing on every large paste. */
-#define SPELLCHECK_MAX_LENGTH (256 * 1024)
-
-static void perform_spell_check(void) {
-    if (!g_hEdit) return;
-    if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
-    if (g_largeFile) return;
-
-    Sci_Position textLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
-    SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
-    if (!g_spellCheckEnabled || !g_spellChecker ||
-        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT) ||
-        textLength <= 0 || textLength > SPELLCHECK_MAX_LENGTH) return;
-
-    /* Ensure the Markdown styles used to exclude code and links are current. */
-    SendMessageA(g_hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
-    Sci_Position ignoredLength = 0;
-    char *utf8 = get_edit_text(g_hEdit, &ignoredLength);
-    if (!utf8) return;
-
-    int wideLength = 0;
-    WCHAR *wide = to_wide_n(utf8, (size_t)textLength, &wideLength);
-    if (!wide || wideLength <= 0) {
-        free(wide);
-        free(utf8);
-        return;
-    }
-
-    IEnumSpellingError *errors = NULL;
-    if (SUCCEEDED(ISpellChecker_Check(g_spellChecker, wide, &errors)) && errors) {
-        for (;;) {
-            ISpellingError *error = NULL;
-            if (IEnumSpellingError_Next(errors, &error) != S_OK || !error) break;
-            ULONG wideStart = 0, wideSpan = 0;
-            CORRECTIVE_ACTION action = CORRECTIVE_ACTION_NONE;
-            ISpellingError_get_StartIndex(error, &wideStart);
-            ISpellingError_get_Length(error, &wideSpan);
-            ISpellingError_get_CorrectiveAction(error, &action);
-            if (action != CORRECTIVE_ACTION_NONE && wideSpan > 0 &&
-                wideStart <= (ULONG)wideLength && wideSpan <= (ULONG)wideLength - wideStart) {
-                int byteStart = WideCharToMultiByte(CP_UTF8, 0, wide, (int)wideStart,
-                    NULL, 0, NULL, NULL);
-                int byteSpan = WideCharToMultiByte(CP_UTF8, 0, wide + wideStart,
-                    (int)wideSpan, NULL, 0, NULL, NULL);
-                /* Plain text has no lexer at all (see the LANG_TEXT entry in
-                   LANGUAGES) to distinguish code/links from prose the way
-                   Markdown's does, so every character in it is spellable. */
-                int spellable = g_activeLanguage == LANG_TEXT || markdown_style_is_prose(
-                    (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)byteStart, 0));
-                if (byteSpan > 0 && byteStart >= 0 && byteStart + byteSpan <= textLength &&
-                    spellable) {
-                    SendMessageA(g_hEdit, SCI_SETINDICATORVALUE, 1, 0);
-                    SendMessageA(g_hEdit, SCI_INDICATORFILLRANGE,
-                                 (WPARAM)byteStart, (LPARAM)byteSpan);
-                }
-            }
-            ISpellingError_Release(error);
-        }
-        IEnumSpellingError_Release(errors);
-    }
-    free(wide);
-    free(utf8);
-}
-
-/* Keeps the WebView2 controller's own background in step with the theme. It
-   shows through before the shell page paints: at startup, while resizing, and
-   for the frame between a theme switch and the page restyling itself. */
-static void apply_webview_background_colour(void) {
-    if (!g_webviewController) return;
-    ICoreWebView2Controller2 *ctrl2 = NULL;
-    ICoreWebView2Controller_QueryInterface(g_webviewController, &IID_ICoreWebView2Controller2,
-                                           (void **)&ctrl2);
-    if (!ctrl2) return;
-    COLORREF colour = preview_bg_color();
-    COREWEBVIEW2_COLOR bg = {255, GetRValue(colour), GetGValue(colour), GetBValue(colour)};
-    ICoreWebView2Controller2_put_DefaultBackgroundColor(ctrl2, bg);
-    ICoreWebView2Controller2_Release(ctrl2);
-}
-
-/* (Re)creates g_previewBkBrush to match g_previewDarkMode, so the preview
-   host STATIC control's WM_CTLCOLORSTATIC background doesn't flash white/
-   light when starting (or switching to) dark mode, before WebView2 itself
-   has painted anything. */
-static void apply_preview_host_theme(void) {
-    if (g_previewBkBrush) DeleteObject(g_previewBkBrush);
-    g_previewBkBrush = CreateSolidBrush(preview_bg_color());
-    if (g_hPreview) InvalidateRect(g_hPreview, NULL, TRUE);
-}
-
-/* (Re)creates g_mainBkBrush to match g_editorDarkMode, and repaints the
-   parts of the main window's own background it's used for (the toolbar
-   strip and the splitter gap - everywhere else is covered by child windows). */
-static void apply_main_theme(HWND hwnd) {
-    if (g_mainBkBrush) DeleteObject(g_mainBkBrush);
-    g_mainBkBrush = CreateSolidBrush(theme_bg_color());
-    if (hwnd) InvalidateRect(hwnd, NULL, TRUE);
-
-    /* The outline's content is owner-drawn (see draw_themed_listbox_item());
-       its scrollbar is themed separately (see themed_scrollbar.h). */
-    if (g_hOutline) {
-        themed_scrollbar_refresh(g_hOutline);
-        InvalidateRect(g_hOutline, NULL, TRUE);
-    }
-    apply_debug_panel_theme();
-    explorer_apply_theme();
-}
-
-/* Popup menus need an explicit uxtheme opt-in to follow MarkEdit's theme.
-   The visible menu bar is owner-drawn below because Windows does not repaint
-   that non-client area when this preference changes at runtime. These private
-   ordinal exports are available from Windows 10 1903 onward. */
-typedef enum { UXTHEME_APPMODE_FORCEDARK = 2, UXTHEME_APPMODE_FORCELIGHT = 3 } UxthemeAppMode;
-typedef UxthemeAppMode (WINAPI *SetPreferredAppModeFn)(UxthemeAppMode appMode);
-typedef BOOL (WINAPI *AllowDarkModeForWindowFn)(HWND hwnd, BOOL allow);
-typedef void (WINAPI *FlushMenuThemesFn)(void);
-
-static SetPreferredAppModeFn g_setPreferredAppMode = NULL;
-static AllowDarkModeForWindowFn g_allowDarkModeForWindow = NULL;
-static FlushMenuThemesFn g_flushMenuThemes = NULL;
-
-static void init_native_menu_theme_support(void) {
-    HMODULE uxtheme = LoadLibraryW(L"uxtheme.dll");
-    if (!uxtheme) return;
-    FARPROC procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(133));
-    memcpy(&g_allowDarkModeForWindow, &procedure, sizeof(g_allowDarkModeForWindow));
-    procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(135));
-    memcpy(&g_setPreferredAppMode, &procedure, sizeof(g_setPreferredAppMode));
-    procedure = GetProcAddress(uxtheme, MAKEINTRESOURCEA(136));
-    memcpy(&g_flushMenuThemes, &procedure, sizeof(g_flushMenuThemes));
-}
-
-/* DarkMode_Explorer themes the menu bar's fill and its dropdowns, but the
-   1px separator the non-client area draws along the menu bar's bottom edge
-   stays a light system colour regardless - it isn't part of what that theme
-   (or the ODT_MENU owner-draw for the item labels) covers. Painted over
-   directly with the same dark fill used elsewhere, right after Windows
-   finishes its own non-client painting. Only needed in dark mode; light
-   mode's own separator already matches the rest of the light chrome. */
-static void erase_menu_bottom_seam(HWND hwnd) {
-    if (!g_editorDarkMode) return;
-    RECT windowRect;
-    if (!GetWindowRect(hwnd, &windowRect)) return;
-    POINT clientTopLeft = {0, 0};
-    if (!ClientToScreen(hwnd, &clientTopLeft)) return;
-    RECT clientRect;
-    if (!GetClientRect(hwnd, &clientRect)) return;
-    int lineX = clientTopLeft.x - windowRect.left;
-    int lineY = clientTopLeft.y - windowRect.top - 1;
-    int lineWidth = clientRect.right - clientRect.left;
-    if (lineX < 0 || lineY < 0 || lineWidth <= 0) return;
-    HDC hdc = GetWindowDC(hwnd);
-    if (!hdc) return;
-    RECT lineRect = {lineX, lineY, lineX + lineWidth, lineY + 1};
-    fill_rect_color(hdc, &lineRect, THEME_DARK_BG);
-    ReleaseDC(hwnd, hdc);
-}
-
-/* Dark/light title bar and border for any top-level window: the per-window
-   uxtheme opt-in, the DWM caption attribute (which DWM ignores until the
-   frame is told to repaint, hence the SWP_FRAMECHANGED nudge), and the
-   scrollbar/explorer theme. Used for the main window by apply_menu_theme()
-   below and on its own for the popup windows (Go to Line, the searchable
-   picker, the plain text prompt), which have no menu bar. */
-static void apply_popup_titlebar_theme(HWND hwnd, int dark) {
-    if (!hwnd) return;
-    if (g_allowDarkModeForWindow) g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
-    BOOL useDark = dark ? TRUE : FALSE;
-    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                      &useDark, sizeof(useDark))))
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
-                               &useDark, sizeof(useDark));
-    SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
-    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-}
-
-/* Paints the menu bar's background with the current theme brush. */
-static void set_menu_background(HMENU menu) {
-    if (!g_menuBkBrush) return;
-    MENUINFO info = {0};
-    info.cbSize = sizeof(info);
-    info.fMask = MIM_BACKGROUND;
-    info.hbrBack = g_menuBkBrush;
-    SetMenuInfo(menu, &info);
-}
-
-/* Switches the menu bar, its dropdowns, and the window's title bar/border
-   between light and dark chrome. FORCEDARK/FORCELIGHT are intentional: the
-   app has its own theme selector, so the selected menu colour must not
-   depend on the Windows system theme. The per-window opt-in is what lets
-   the non-client menu bar follow that process preference. Safe on older
-   Windows releases where the private uxtheme exports (or DWMWA_USE_
-   IMMERSIVE_DARK_MODE) are absent; those releases retain their system
-   chrome. */
-static void apply_menu_theme(HWND hwnd, int dark) {
-    if (g_setPreferredAppMode)
-        g_setPreferredAppMode(dark ? UXTHEME_APPMODE_FORCEDARK : UXTHEME_APPMODE_FORCELIGHT);
-    if (hwnd && g_allowDarkModeForWindow)
-        g_allowDarkModeForWindow(hwnd, dark ? TRUE : FALSE);
-    if (g_flushMenuThemes)
-        g_flushMenuThemes();
-    if (hwnd) {
-        apply_popup_titlebar_theme(hwnd, dark);
-
-        if (g_menuBkBrush) DeleteObject(g_menuBkBrush);
-        g_menuBkBrush = CreateSolidBrush(dark ? THEME_DARK_BG : THEME_LIGHT_BG);
-        HMENU menu = GetMenu(hwnd);
-        if (menu) set_menu_background(menu);
-        SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
-        DrawMenuBar(hwnd);
-        erase_menu_bottom_seam(hwnd);
-    }
-}
-
-/* Fills one splitter gap's rect with the border colour so it reads as a
-   draggable divider instead of just more of the pane background on either
-   side of it - shared by every splitter's WM_ERASEBKGND painting (main,
-   explorer, split-editor). A zeroed/empty rect (the splitter's own "not
-   currently shown" state) is a no-op. */
-static void paint_splitter_gap(HDC hdc, const RECT *rect) {
-    if (rect->right <= rect->left || rect->bottom <= rect->top) return;
-    fill_rect_color(hdc, rect, theme_border_color());
-}
-
-/* One shared background brush for whichever of these popup dialogs
-   (show_goto_line_dialog()/show_choice_dialog()/show_text_input()/the
-   Find & Replace review list/the Settings dialog) are currently open. Most
-   of them run their own modal message loop and never nest, but the Settings
-   dialog's Compiler category and its spell-check language picker (Choose...)
-   can open one of these ON TOP of another already-open one (Settings itself
-   opening the Choice dialog) - g_popupThemeDepth counts how many are
-   currently open so the brush is only actually torn down once the last one
-   closes, rather than being pulled out from under a still-open outer dialog
-   the moment a nested one exits. popup_dialog_theme_created() itself stays a
-   plain "make sure the themed brush exists right now" call with no bearing
-   on that count, since refresh_settings_dialog_theme() also calls it to
-   recolor an already-open dialog's brush without opening a new one. */
-static HBRUSH g_popupBkBrush = NULL;
-static int g_popupThemeDepth = 0;
-
-static void popup_dialog_theme_created(HWND hwnd) {
-    apply_popup_titlebar_theme(hwnd, g_editorDarkMode);
-    if (g_popupBkBrush) DeleteObject(g_popupBkBrush);
-    g_popupBkBrush = CreateSolidBrush(theme_bg_color());
-}
-
-/* Call once per popup window actually opened (WM_CREATE), paired with
-   popup_dialog_theme_destroyed() at that same window's WM_NCDESTROY. */
-static void popup_dialog_theme_opened(HWND hwnd) {
-    g_popupThemeDepth++;
-    popup_dialog_theme_created(hwnd);
-}
-
-static void popup_dialog_theme_destroyed(void) {
-    if (g_popupThemeDepth > 0) g_popupThemeDepth--;
-    if (g_popupThemeDepth == 0 && g_popupBkBrush) {
-        DeleteObject(g_popupBkBrush);
-        g_popupBkBrush = NULL;
-    }
-}
-
-/* Defined further down (with the outline panel's owner-draw, which they're
-   shared with); forward-declared here since ChoiceWndProc, above the
-   outline code in the file, needs them for its own result listbox. */
-static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis);
-static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis);
-
-/* Shared WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLORBTN/WM_CTLCOLOREDIT/
-   WM_CTLCOLORLISTBOX handling for the popup dialogs below - factored out since they all need
-   identical theming for their STATIC labels, EDIT fields, and checkbox/radio
-   buttons. Returns the brush/TRUE the caller should return from its WndProc,
-   or 0 if msg wasn't handled. */
-static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LRESULT *handled) {
-    *handled = 1;
-    if (msg == WM_ERASEBKGND) {
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        FillRect((HDC)wParam, &rc, g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
-        return 1;
-    }
-    /* Checkboxes send WM_CTLCOLORSTATIC for their label; radio buttons send
-       WM_CTLCOLORBTN instead - both need the same themed text colour, or the
-       radio labels stay stuck at the system default (near-black) in dark mode. */
-    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, theme_fg_color());
-        SetBkMode(hdc, TRANSPARENT);
-        return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
-    }
-    /* Owner-drawn listboxes still ask for WM_CTLCOLORLISTBOX to paint
-       whatever their items don't cover - the blank area below the last row,
-       or the whole box when there are only a few rows - so without it that
-       space stays the default white regardless of theme. */
-    if (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX) {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, theme_fg_color());
-        SetBkColor(hdc, theme_bg_color());
-        return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
-    }
-    *handled = 0;
-    return 0;
-}
-
-/* Owner-drawn OK/Cancel-style push button matching the popup dialogs'
-   theme - standard BUTTON controls are visual-styles-drawn regardless of
-   WM_CTLCOLORBTN, so getting a themed fill/border needs BS_OWNERDRAW. */
-static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
-    int pressed = (dis->itemState & ODS_SELECTED) != 0;
-    int isDefault = (GetWindowLongW(dis->hwndItem, GWL_STYLE) & BS_DEFPUSHBUTTON) != 0;
-    COLORREF fill = g_editorDarkMode
-        ? (pressed ? THEME_DARK_BORDER : THEME_DARK_BG)
-        : (pressed ? RGB(0xE1, 0xE7, 0xEC) : RGB(0xF6, 0xF8, 0xFA));
-    fill_rect_color(dis->hDC, &dis->rcItem, fill);
-
-    HPEN pen = CreatePen(PS_SOLID, isDefault ? 2 : 1, isDefault ? theme_accent_color() : theme_border_color());
-    HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-    Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
-    SelectObject(dis->hDC, oldBrush);
-    SelectObject(dis->hDC, oldPen);
-    DeleteObject(pen);
-
-    WCHAR text[128];
-    GetWindowTextW(dis->hwndItem, text, 128);
-    SetTextColor(dis->hDC, theme_fg_color());
-    SetBkMode(dis->hDC, TRANSPARENT);
-    RECT textRect = dis->rcItem;
-    DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-}
-
-
-static void configure_scintilla_feedback(HWND hEdit) {
-    /* Syntax-highlight the source using one of Lexilla's bundled lexers
-       (vendored trimmed to the languages listed in LANGUAGES - see
-       third_party/lexilla). ILexer5* ownership passes to Scintilla once
-       handed to SCI_SETILEXER. apply_language_to_view() picks the lexer
-       from the file extension; new documents start out as Markdown.
-
-       Explicit text colors, rather than relying on Scintilla's own defaults,
-       so the caret-line highlight below is guaranteed to contrast with them.
-       apply_editor_theme() sets the actual color values (light or dark),
-       including the lexer's per-construct colors. */
-    apply_language_to_view(hEdit, g_currentFile);
-
-    /* Highlight the line the caret is on. SC_ALPHA_NOALPHA (rather than
-       SC_ALPHA_OPAQUE) is required here: passing anything other than "no
-       alpha" switches the caret line to Layer::OverText internally, which
-       paints the highlight *over* the glyphs instead of behind them and is
-       what was making the text unreadable. */
-    SendMessageA(hEdit, SCI_SETCARETLINEVISIBLE, TRUE, 0);
-    SendMessageA(hEdit, SCI_SETCARETLINEVISIBLEALWAYS, TRUE, 0); /* keep it visible even without focus */
-    SendMessageA(hEdit, SCI_SETCARETLINEBACKALPHA, SC_ALPHA_NOALPHA, 0);
-
-    /* Word completion (see update_word_completions()): matching is
-       case-insensitive, the list we build is already sorted so Scintilla
-       doesn't need to re-sort it, and the popup auto-hides once nothing
-       typed so far matches any entry. */
-    SendMessageA(hEdit, SCI_AUTOCSETIGNORECASE, TRUE, 0);
-    SendMessageA(hEdit, SCI_AUTOCSETAUTOHIDE, TRUE, 0);
-    SendMessageA(hEdit, SCI_AUTOCSETORDER, SC_ORDER_PRESORTED, 0);
-    SendMessageA(hEdit, SCI_AUTOCSETMAXHEIGHT, 8, 0);
-}
-
-static void configure_scintilla(HWND hEdit) {
-    configure_scintilla_editing(hEdit);
-    configure_scintilla_view(hEdit);
-    configure_scintilla_margins(hEdit);
-    configure_scintilla_feedback(hEdit);
-}
-
-/* Apply a font face/point size to the Scintilla control by setting the
-   default style (Scintilla styles text via numeric style IDs rather than an
-   HFONT). SCI_STYLECLEARALL below resets every style - including the
-   Markdown lexer's per-construct styles - back to STYLE_DEFAULT's font, so
-   apply_editor_theme() must run afterwards to reapply them. */
-static void apply_font_to_editor_view(HWND hEdit, const char *faceUtf8) {
-    SendMessageA(hEdit, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
-    SendMessageA(hEdit, SCI_STYLESETSIZE, STYLE_DEFAULT, g_fontPointSize);
-    SendMessageA(hEdit, SCI_STYLESETWEIGHT, STYLE_DEFAULT, g_fontWeight);
-    SendMessageA(hEdit, SCI_STYLESETITALIC, STYLE_DEFAULT, g_fontItalic);
-    SendMessageA(hEdit, SCI_STYLECLEARALL, 0, 0); /* copies STYLE_DEFAULT (fore/back included) to all other styles, including STYLE_LINENUMBER */
-
-    /* STYLECLEARALL just overwrote STYLE_LINENUMBER's fore/back with
-       STYLE_DEFAULT's, undoing apply_editor_theme()'s margin colors (which
-       are deliberately different from the text area). Re-apply the theme so
-       the gutter doesn't revert to the wrong colors after a font change. */
-    apply_editor_theme(hEdit);
-
-    /* The margin's digit width depends on the font, so keep both in sync. */
-    SendMessageA(hEdit, SCI_STYLESETFONT, STYLE_LINENUMBER, (LPARAM)faceUtf8);
-    SendMessageA(hEdit, SCI_STYLESETSIZE, STYLE_LINENUMBER, g_fontPointSize);
-    remeasure_linenumber_margin(hEdit);
-}
-
-/* Applies the configured editor font (g_fontFaceName, g_fontPointSize,
-   g_fontWeight, g_fontItalic) to every view onto the document. */
-static void apply_editor_font(void) {
-    char *faceUtf8 = to_utf8(g_fontFaceName);
-    if (!faceUtf8) faceUtf8 = _strdup("Consolas");
-    if (!faceUtf8) return;
-    apply_font_to_editor_view(g_hEdit, faceUtf8);
-
-    /* The minimap is a second view onto the same document, so it keeps its
-       own copy of every style and needs the same font/theme applied - but at
-       a fixed small size (see MINIMAP_FONT_SIZE_HUNDREDTHS) rather than the
-       editor's own point size, so it doesn't grow along with it. Zoom stays
-       at 0: sizing is done via STYLESETSIZEFRACTIONAL alone. */
-    if (g_hMinimap) {
-        SendMessageA(g_hMinimap, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
-        SendMessageA(g_hMinimap, SCI_STYLESETSIZEFRACTIONAL, STYLE_DEFAULT, MINIMAP_FONT_SIZE_HUNDREDTHS);
-        SendMessageA(g_hMinimap, SCI_STYLECLEARALL, 0, 0);
-        apply_editor_theme(g_hMinimap);
-        strip_minimap_bold();
-        SendMessageA(g_hMinimap, SCI_SETZOOM, 0, 0);
-        update_minimap_viewport();
-    }
-
-    /* The split pane is a second fully-interactive view onto the same
-       document (unlike the minimap), so it gets the real point size, not a
-       fixed fraction of it. */
-    if (g_hSplitEdit) apply_font_to_editor_view(g_hSplitEdit, faceUtf8);
-    free(faceUtf8);
-}
-
-/* ---- autosave recovery -------------------------------------------------
-   Recovery snapshots live in LocalAppData rather than beside the executable,
-   so running the portable distribution never dirties its own folder. Only
-   modified documents are written; normal saves and a clean exit remove them. */
-
-/* %LOCALAPPDATA%\MarkEdit\<name>, created if needed: per-user, machine-local
-   state that has to be writable wherever markedit.exe itself lives -
-   including a Program Files install a standard user can't write to. */
-static WCHAR *get_local_app_directory(const WCHAR *name) {
-    DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", NULL, 0);
-    if (!needed) return NULL;
-    WCHAR *local = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));
-    if (!local || !GetEnvironmentVariableW(L"LOCALAPPDATA", local, needed)) {
-        free(local);
-        return NULL;
-    }
-    WCHAR *app = path_join(local, L"MarkEdit");
-    free(local);
-    if (!app) return NULL;
-    CreateDirectoryW(app, NULL);
-    WCHAR *directory = path_join(app, name);
-    free(app);
-    if (directory) CreateDirectoryW(directory, NULL);
-    return directory;
-}
-
-static WCHAR *get_recovery_directory(void) {
-    return get_local_app_directory(L"Recovery");
-}
-
-
-/* Some commands briefly point g_hEdit at other tabs' documents to read or
-   change them (recovery snapshots, breakpoints, execution markers, link
-   rewrites). SCI_SETDOCPOINTER resets the view's selection and scroll
-   position, so these bracket that work and put the active tab's view back
-   afterwards. */
-typedef struct BackgroundDocumentAccess {
-    sptr_t document;
-    Sci_Position caret;
-    Sci_Position anchor;
-    Sci_Position firstVisibleLine;
-    int xOffset;
-    int oldSwitching;
-} BackgroundDocumentAccess;
-
-static void begin_background_document_access(BackgroundDocumentAccess *access) {
-    access->document = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
-    access->caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-    access->anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
-    access->firstVisibleLine = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
-    access->xOffset = (int)SendMessageA(g_hEdit, SCI_GETXOFFSET, 0, 0);
-    access->oldSwitching = g_documentStore.switching;
-    g_documentStore.switching = 1;
-}
-
-static void end_background_document_access(const BackgroundDocumentAccess *access) {
-    if (access->document &&
-        (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0) != access->document) {
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)access->document);
-    }
-    Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    Sci_Position caret = access->caret > length ? length : access->caret;
-    Sci_Position anchor = access->anchor > length ? length : access->anchor;
-    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)anchor, (LPARAM)caret);
-    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)access->firstVisibleLine, 0);
-    SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)access->xOffset, 0);
-    g_documentStore.switching = access->oldSwitching;
-}
-
-static char *get_document_text(int index, Sci_Position *outLength) {
-    if (!g_hEdit || index < 0 || index >= g_documentStore.count) return NULL;
-    sptr_t current = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
-    if (current == g_documentStore.documents[index].sciDocument) return get_edit_text(g_hEdit, outLength);
-    BackgroundDocumentAccess access;
-    begin_background_document_access(&access);
-    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[index].sciDocument);
-    char *text = get_edit_text(g_hEdit, outLength);
-    end_background_document_access(&access);
-    return text;
-}
-
-static int clear_recovery_snapshot(void) {
-    WCHAR *directory = get_recovery_directory();
-    int ok = directory && recovery_clear(directory);
-    free(directory);
-    return ok;
-}
-
-static char *read_recovery_editor_text(void *context, int index, size_t *outLength) {
-    (void)context;
-    Sci_Position length = 0;
-    char *text = get_document_text(index, &length);
-    *outLength = (size_t)length;
-    return text;
-}
-
-static void write_recovery_snapshot(void) {
-    if (!g_hEdit || g_commandLinePreviewMode || !g_recoverySnapshotStale) return;
-    RecoveryDocument documents[RECOVERY_MAX_DOCUMENTS];
-    int count = 0;
-    for (int i = 0; i < g_documentStore.count; i++) {
-        Document *doc = &g_documentStore.documents[i];
-        if (!doc->dirty || doc->largeFile) continue;
-        documents[count++] = (RecoveryDocument){ doc->path, doc->untitledNumber,
-            doc->hasBom, (TextEncoding)doc->encoding, i };
-    }
-    WCHAR *directory = get_recovery_directory();
-    if (directory && recovery_write(directory, documents, count, read_recovery_editor_text, NULL))
-        g_recoverySnapshotStale = 0;
-    free(directory);
-    update_status_bar();
-}
-
-static int restore_recovery_snapshot(void) {
-    WCHAR *directory = get_recovery_directory();
-    if (!directory) return 0;
-    recovery_cleanup(directory);
-    int count = recovery_count(directory);
-    if (count <= 0 || count > MAX_DOCUMENTS) {
-        free(directory); return 0;
-    }
-    int answer = MessageBoxW(g_hMainWnd,
-        L"MarkEdit found autosaved documents from an interrupted session. Recover them?",
-        L"Recover Documents", MB_YESNO | MB_ICONQUESTION);
-    if (answer != IDYES) {
-        free(directory);
-        clear_recovery_snapshot();
-        return 0;
-    }
-
-    int restored = 0;
-    for (int i = 0; i < count; i++) {
-        RecoveryEntry entry;
-        if (!recovery_read(directory, i, &entry)) continue;
-        char *text = entry.text;
-        int length = entry.length;
-        if (restored > 0 && !create_document_tab()) { recovery_entry_free(&entry); break; }
-        if (restored == 0 && !active_document_is_reusable() && !create_document_tab()) {
-            recovery_entry_free(&entry); break;
-        }
-        g_documentStore.switching = 1;
-        set_edit_text(g_hEdit, text, length);
-        SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-        g_documentStore.switching = 0;
-        replace_wstring(&g_currentFile, entry.path[0] ? entry.path : NULL);
-        g_documentStore.documents[g_documentStore.active].untitledNumber = entry.untitledNumber;
-        g_hasBom = entry.hasBom;
-        g_encoding = entry.encoding;
-        recovery_entry_free(&entry);
-        apply_document_language(g_currentFile);
-        /* Matches load_file_as(): a recovered tab keeps the breakpoints that
-           were persisted for the file it was snapshotted from. */
-        restore_persisted_breakpoints(g_currentFile);
-        set_dirty(1);
-        restored++;
-    }
-    free(directory);
-
-    if (restored) {
-        update_document_mapping();
-        update_preview();
-        write_recovery_snapshot();
-    }
-    return restored > 0;
-}
-
-/* Backing storage for the status bar's four segments (0: Ln/Col, 1: Words/
-   Characters, 2: encoding, 3: save state). The strip is fully repainted by
-   StatusSubclassProc below instead of through SB_SETTEXT + owner-draw:
-   comctl32 draws a light 3D bevel between parts by itself regardless of
-   SBT_OWNERDRAW/SBT_NOBORDERS, which reads as bright seams against a dark
-   theme. Parts must own their text for as long as the control might repaint
-   them, so a transient stack buffer would otherwise be read back as a
-   dangling pointer once these functions return. */
-static WCHAR g_statusPartText[4][128];
-
-/* The status bar deliberately computes from Scintilla's UTF-8 document model:
-   character counts are Unicode-aware while columns remain editor columns. */
-/* Ln/Col, encoding, and dirty-status fields only - all O(1) Scintilla
-   queries, safe to call on every caret move or scroll tick. Word/character
-   counts need a full-document scan, so they're left to update_status_bar()
-   and only refreshed when the text can actually have changed. */
-static void update_status_position(void) {
-    if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
-    HWND view = tracked_edit_view();
-    Sci_Position position = (Sci_Position)SendMessageA(view, SCI_GETCURRENTPOS, 0, 0);
-    Sci_Position line = (Sci_Position)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
-    Sci_Position column = (Sci_Position)SendMessageA(view, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
-    swprintf(g_statusPartText[0], 128, L"Ln %lld, Col %lld", (long long)line, (long long)column);
-    int eol = (int)SendMessageA(view, SCI_GETEOLMODE, 0, 0);
-    const WCHAR *eolName = eol == SC_EOL_LF ? L"LF" : eol == SC_EOL_CR ? L"CR" : L"CRLF";
-    WCHAR encodingName[40];
-    switch (g_encoding) {
-        case TEXT_ENCODING_UTF16LE: wcscpy(encodingName, L"UTF-16 LE"); break;
-        case TEXT_ENCODING_UTF16BE: wcscpy(encodingName, L"UTF-16 BE"); break;
-        case TEXT_ENCODING_ANSI:
-            swprintf(encodingName, 40, L"ANSI (CP %u)", text_ansi_code_page());
-            break;
-        default: wcscpy(encodingName, L"UTF-8"); break;
-    }
-    swprintf(g_statusPartText[2], 128, L"%ls%ls   %ls", encodingName, g_hasBom ? L" BOM" : L"", eolName);
-    swprintf(g_statusPartText[3], 128, L"%ls", !g_dirty ? L"Saved"
-             : g_largeFile ? L"Modified" : L"Modified · recovery enabled");
-    InvalidateRect(g_hStatus, NULL, FALSE);
-}
-
-static void update_status_bar(void) {
-    update_status_position();
-    if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
-    if (g_largeFile) {
-        double mib = (double)(Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) / (1024.0 * 1024.0);
-        swprintf(g_statusPartText[1], 128, L"Large file mode   %.1f MB", mib);
-        InvalidateRect(g_hStatus, NULL, FALSE);
-        return;
-    }
-    Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    Sci_Position characters = (Sci_Position)SendMessageA(g_hEdit, SCI_COUNTCHARACTERS, 0, (LPARAM)length);
-    Sci_Position ignored = 0;
-    int words = 0;
-    char *text = get_edit_text(g_hEdit, &ignored);
-    if (text) {
-        int inWord = 0;
-        for (Sci_Position i = 0; i < length; i++) {
-            unsigned char ch = (unsigned char)text[i];
-            int wordChar = ch >= 0x80 || isalnum(ch) || ch == '_' || ch == '\'';
-            if (wordChar && !inWord) words++;
-            inWord = wordChar;
-        }
-        free(text);
-    }
-    swprintf(g_statusPartText[1], 128, L"Words %d   Characters %lld", words, (long long)characters);
-    InvalidateRect(g_hStatus, NULL, FALSE);
-}
-
-static void show_plugin_reload_status(const WCHAR *text) {
-    if (!g_hStatus) return;
-    KillTimer(g_hMainWnd, IDT_STATUS_UPDATE);
-    wcsncpy(g_statusPartText[3], text, 127);
-    g_statusPartText[3][127] = 0;
-    InvalidateRect(g_hStatus, NULL, FALSE);
-    SetTimer(g_hMainWnd, IDT_PLUGIN_STATUS, 1800, NULL);
-}
-
-/* Paints the whole status bar strip itself in the app's own GitHub palette:
-   comctl32's default rendering has no opt-in for a custom light/dark palette
-   the way the editor/menu/toolbar do, and (unlike those) drawing only the
-   owner-drawn parts still leaves the control's own bevel between them, which
-   shows up as light seams. SB_SETPARTS (via layout()) still establishes the
-   four part rectangles this reads with SB_GETRECT; nothing else about the
-   control's own painting is used. */
-static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
-                                            UINT_PTR subclassId, DWORD_PTR refData) {
-    (void)subclassId; (void)refData;
-    if (msg == WM_ERASEBKGND) {
-        return 1; /* WM_PAINT fills the whole strip itself. */
-    } else if (msg == WM_PAINT) {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT client;
-        GetClientRect(hwnd, &client);
-        fill_rect_color(dc, &client, theme_bg_color());
-        SetTextColor(dc, theme_fg_color());
-        SetBkMode(dc, TRANSPARENT);
-        for (int i = 0; i < 4; i++) {
-            RECT partRect = {0};
-            if (!SendMessageW(hwnd, SB_GETRECT, (WPARAM)i, (LPARAM)&partRect)) continue;
-            partRect.left += 4;
-            partRect.right -= 4;
-            DrawTextW(dc, g_statusPartText[i], -1, &partRect,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        }
-        EndPaint(hwnd, &ps);
-        return 0;
-    } else if (msg == WM_NCDESTROY) {
-        RemoveWindowSubclass(hwnd, StatusSubclassProc, 1);
-    }
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
-}
-
 /* ---- recently opened files and workspace folders, most-recent-first.
    Both lists share one implementation; only the backing array, its cap,
    and the settings.json section/key names differ. ---- */
@@ -1450,11 +371,23 @@ static void save_workspace_settings(void) {
     free(path);
 }
 
+/* The standard error message box, owned by the main window. Messages about
+   one feature (Run, Debug, Plugins) use their own title instead. */
+static void show_error(const WCHAR *message) {
+    MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_OK | MB_ICONERROR);
+}
 
+#include "internal/editor_view.inc"
+
+#include "internal/control_theme.inc"
 
 #include "internal/preview.inc"
 
 #include "internal/documents.inc"
+
+#include "internal/recovery_host.inc"
+
+#include "internal/spell_check.inc"
 
 #include "internal/dialogs.inc"
 
@@ -1471,8 +404,6 @@ static void save_workspace_settings(void) {
 #include "internal/command_dispatch.inc"
 
 #include "internal/plugin_bridge.inc"
-
-#include "internal/control_theme.inc"
 
 #include "internal/editor_input.inc"
 static void explorer_request_open(const WCHAR *path) {
@@ -1539,9 +470,9 @@ static void create_debug_controls(HWND hwnd, int dpi) {
         LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
     LVCOLUMNW debugColumn = {0};
     debugColumn.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    debugColumn.pszText = L"Name"; debugColumn.cx = MulDiv(220, dpi, 96);
+    debugColumn.pszText = L"Name"; debugColumn.cx = MulDiv(DEBUG_NAME_COLUMN_WIDTH, dpi, 96);
     SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 0, (LPARAM)&debugColumn);
-    debugColumn.pszText = L"Value"; debugColumn.cx = MulDiv(640, dpi, 96); debugColumn.iSubItem = 1;
+    debugColumn.pszText = L"Value"; debugColumn.cx = MulDiv(DEBUG_VALUE_COLUMN_WIDTH, dpi, 96); debugColumn.iSubItem = 1;
     SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 1, (LPARAM)&debugColumn);
     HWND debugHeader = ListView_GetHeader(g_hDebugVariables);
     if (debugHeader) SetWindowSubclass(debugHeader, DebugHeaderSubclassProc, 1, 0);
@@ -1563,11 +494,11 @@ static void create_document_tabs(HWND hwnd, int dpi) {
        short filenames consume excessive space. The tooltip below supplies
        the full path whenever the visible label is clipped. */
     SendMessageW(g_hTabs, TCM_SETITEMSIZE, 0,
-        MAKELPARAM(MulDiv(120, dpi, 96), MulDiv(22, dpi, 96)));
+        MAKELPARAM(MulDiv(TAB_ITEM_WIDTH, dpi, 96), MulDiv(TAB_ITEM_HEIGHT, dpi, 96)));
     HWND tabTooltips = TabCtrl_GetToolTips(g_hTabs);
     if (tabTooltips) {
         SendMessageW(tabTooltips, CCM_SETUNICODEFORMAT, TRUE, 0);
-        SendMessageW(tabTooltips, TTM_SETMAXTIPWIDTH, 0, 700);
+        SendMessageW(tabTooltips, TTM_SETMAXTIPWIDTH, 0, TAB_TOOLTIP_MAX_WIDTH);
     }
     SetWindowSubclass(g_hTabs, TabSubclassProc, 1, 0);
 }
@@ -1659,8 +590,8 @@ static void initialize_main_window(HWND hwnd) {
     initialize_first_document();
     create_preview_control(hwnd);
 
-    SetTimer(hwnd, IDT_FILE_WATCH, 1500, NULL);
-    SetTimer(hwnd, IDT_AUTOSAVE, 5000, NULL);
+    SetTimer(hwnd, IDT_FILE_WATCH, FILE_WATCH_INTERVAL_MS, NULL);
+    SetTimer(hwnd, IDT_AUTOSAVE, AUTOSAVE_INTERVAL_MS, NULL);
     update_status_bar();
     update_outline();
     layout(hwnd);
@@ -1693,12 +624,12 @@ static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotif
     g_lastEditView = editor;
     if ((scn->updated & SC_UPDATE_V_SCROLL) && g_editorVisible && g_previewVisible) {
             if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
-            else SetTimer(hwnd, IDT_SCROLL_SYNC, 35, NULL);
+            else SetTimer(hwnd, IDT_SCROLL_SYNC, SCROLL_SYNC_DELAY_MS, NULL);
     }
     update_brace_highlight(editor);
     update_status_position();
     update_minimap_viewport();
-    if (scn->updated & SC_UPDATE_SELECTION) SetTimer(hwnd, IDT_PLUGIN_SELECTION, 100, NULL);
+    if (scn->updated & SC_UPDATE_SELECTION) SetTimer(hwnd, IDT_PLUGIN_SELECTION, PLUGIN_SELECTION_DELAY_MS, NULL);
 }
 
 static void handle_editor_margin_click(const struct SCNotification *scn) {
@@ -1719,7 +650,7 @@ static void enter_large_file_mode_if_needed(HWND hwnd) {
     if (g_documentStore.switching || g_largeFile) return;
 
     Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    Sci_Position threshold = (Sci_Position)g_largeFileThresholdMB * 1024 * 1024;
+    Sci_Position threshold = (Sci_Position)large_file_threshold_bytes();
     if (length < threshold) return;
 
     g_largeFile = 1;
@@ -1729,12 +660,12 @@ static void enter_large_file_mode_if_needed(HWND hwnd) {
 static void schedule_updates_after_edit(HWND hwnd, const struct SCNotification *scn) {
     /* HTML previews show the saved file; other previews show unsaved text. */
     if (!g_largeFile && g_previewVisible && g_activeLanguage != LANG_HTML)
-        SetTimer(hwnd, IDT_PREVIEW_UPDATE, 150, NULL);
+        SetTimer(hwnd, IDT_PREVIEW_UPDATE, PREVIEW_UPDATE_DELAY_MS, NULL);
     if (!g_largeFile) schedule_spell_check();
 
     /* Full-document status and outline scans are debounced across typing. */
-    SetTimer(hwnd, IDT_STATUS_UPDATE, 200, NULL);
-    if (!g_largeFile) SetTimer(hwnd, IDT_OUTLINE_UPDATE, 500, NULL);
+    SetTimer(hwnd, IDT_STATUS_UPDATE, STATUS_UPDATE_DELAY_MS, NULL);
+    if (!g_largeFile) SetTimer(hwnd, IDT_OUTLINE_UPDATE, OUTLINE_UPDATE_DELAY_MS, NULL);
     if (scn->linesAdded != 0) {
         update_linenumber_margin_width(g_hEdit);
         if (g_hSplitEdit) update_linenumber_margin_width(g_hSplitEdit);
@@ -1830,7 +761,7 @@ static int handle_control_color(UINT msg, WPARAM wParam, LPARAM lParam, LRESULT 
     HDC hdc = (HDC)wParam;
     if (msg == WM_CTLCOLORSTATIC && control == g_hPreview && g_previewBkBrush) {
         SetBkColor(hdc, preview_bg_color());
-        SetTextColor(hdc, g_previewDarkMode ? THEME_DARK_FG : RGB(0x00, 0x00, 0x00));
+        SetTextColor(hdc, preview_palette()->previewTextFg);
         *result = (LRESULT)g_previewBkBrush;
         return 1;
     }
@@ -1890,7 +821,7 @@ static LRESULT paint_main_background(HWND hwnd, HDC hdc) {
 static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
     if (timerId >= IDT_PLUGIN_DEFER_BASE) {
         if (plugin_host_is_busy()) {
-            SetTimer(hwnd, timerId, 50, NULL);
+            SetTimer(hwnd, timerId, PLUGIN_DEFER_RETRY_MS, NULL);
             return 1;
         }
         KillTimer(hwnd, timerId);
@@ -2042,28 +973,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_APPLY_LARGE_FILE_MODE:
             apply_large_file_mode_after_growth((int)wParam);
             return 0;
-        case WM_APP_PLUGIN_DOCUMENT_ACTION: {
-            PluginDocumentAction *action = (PluginDocumentAction *)lParam;
-            if (!action) return 0;
-            switch (action->kind) {
-                case PLUGIN_DOCUMENT_ACTIVATE:
-                    if (action->index >= 0 && action->index < g_documentStore.count)
-                        switch_document(action->index);
-                    break;
-                case PLUGIN_DOCUMENT_NEW: create_document_tab(); break;
-                case PLUGIN_DOCUMENT_OPEN:
-                    if (action->path) open_file_in_tab(action->path);
-                    break;
-                case PLUGIN_DOCUMENT_SAVE: do_save(); break;
-                case PLUGIN_DOCUMENT_SAVE_AS: do_saveas(); break;
-                case PLUGIN_DOCUMENT_CLOSE:
-                    if (action->index >= 0 && action->index < g_documentStore.count)
-                        do_close_document_at(action->index);
-                    break;
-            }
-            free(action->path); free(action);
+        case WM_APP_PLUGIN_DOCUMENT_ACTION:
+            run_plugin_document_action((PluginDocumentAction *)lParam);
             return 0;
-        }
         case WM_CREATE:
             initialize_main_window(hwnd);
             return 0;
@@ -2146,7 +1058,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                changes (e.g. a git operation) collapses into one refresh
                shortly after the burst ends, same idea as the outline/status
                update timers above. */
-            SetTimer(hwnd, IDT_EXPLORER_REFRESH, 400, NULL);
+            SetTimer(hwnd, IDT_EXPLORER_REFRESH, EXPLORER_REFRESH_DELAY_MS, NULL);
             return 0;
         case WM_CLOSE:
             do_exit();
@@ -2220,9 +1132,9 @@ static HWND create_main_window(HINSTANCE instance, HICON largeIcon, HICON smallI
     int x = g_haveSavedWindowRect ? g_savedWindowRect.left : CW_USEDEFAULT;
     int y = g_haveSavedWindowRect ? g_savedWindowRect.top : CW_USEDEFAULT;
     int width = g_haveSavedWindowRect
-        ? g_savedWindowRect.right - g_savedWindowRect.left : 1100;
+        ? g_savedWindowRect.right - g_savedWindowRect.left : DEFAULT_WINDOW_WIDTH;
     int height = g_haveSavedWindowRect
-        ? g_savedWindowRect.bottom - g_savedWindowRect.top : 750;
+        ? g_savedWindowRect.bottom - g_savedWindowRect.top : DEFAULT_WINDOW_HEIGHT;
     HWND window = CreateWindowExW(WS_EX_ACCEPTFILES, L"MarkEditWndClass",
         L"Untitled.txt - MarkEdit", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, width, height, NULL, NULL, instance, NULL);

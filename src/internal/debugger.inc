@@ -148,15 +148,16 @@ static void toggle_breakpoint_at_cursor(void) {
 }
 
 static void clear_debug_breakpoints(void) {
-    if (!g_hEdit || g_documentStore.count <= 0) return;
-    BackgroundDocumentAccess access;
-    begin_background_document_access(&access);
-    for (int i = 0; i < g_documentStore.count; i++) {
-        if (!g_documentStore.documents[i].sciDocument) continue;
-        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[i].sciDocument);
-        SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BREAKPOINT, 0);
+    if (g_hEdit && g_documentStore.count > 0) {
+        BackgroundDocumentAccess access;
+        begin_background_document_access(&access);
+        for (int i = 0; i < g_documentStore.count; i++) {
+            if (!g_documentStore.documents[i].sciDocument) continue;
+            SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[i].sciDocument);
+            SendMessageA(g_hEdit, SCI_MARKERDELETEALL, (WPARAM)MARKER_BREAKPOINT, 0);
+        }
+        end_background_document_access(&access);
     }
-    end_background_document_access(&access);
 
     /* The command says "all", so remove entries for closed files too rather
        than allowing their persisted markers to reappear when reopened. */
@@ -167,11 +168,6 @@ static void clear_debug_breakpoints(void) {
     }
 }
 
-static int is_existing_file(const WCHAR *path) {
-    DWORD attributes = path ? GetFileAttributesW(path) : INVALID_FILE_ATTRIBUTES;
-    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
-}
-
 /* `directory`\`name` when that file exists, else NULL. Used for
    user-configured folder overrides (Settings > Compiler's GCC/Clang/Zig/Lua/
    GDB path boxes) - the counterpart to executable_on_search_path() - and for
@@ -179,7 +175,7 @@ static int is_existing_file(const WCHAR *path) {
 static WCHAR *existing_file_in_directory(const WCHAR *directory, const WCHAR *name) {
     if (!directory || !directory[0]) return NULL;
     WCHAR *candidate = path_join(directory, name);
-    if (candidate && is_existing_file(candidate)) return candidate;
+    if (file_exists(candidate)) return candidate;
     free(candidate);
     return NULL;
 }
@@ -425,6 +421,10 @@ static void clear_debug_execution_markers(void) {
     BackgroundDocumentAccess access;
     begin_background_document_access(&access);
     for (int i = 0; i < g_documentStore.count; i++) {
+        /* do_exit() has already released every document by the time
+           shutdown clears these markers; attaching 0 would only make
+           Scintilla create a throwaway empty document. */
+        if (!g_documentStore.documents[i].sciDocument) continue;
         SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[i].sciDocument);
         SendMessageA(g_hEdit, SCI_MARKERDELETEALL, MARKER_DEBUG_LINE, 0);
         SendMessageA(g_hEdit, SCI_MARKERDELETEALL, MARKER_DEBUG_ARROW, 0);
@@ -516,7 +516,7 @@ static void stop_debug_location_tracking(void) {
         g_debugJob = NULL;
         /* Closing the job requests termination; wait briefly for its file
            handles to close before removing the generated debugger files. */
-        if (g_debugProcess) WaitForSingleObject(g_debugProcess, 1000);
+        if (g_debugProcess) WaitForSingleObject(g_debugProcess, DEBUGGER_EXIT_WAIT_MS);
     }
     if (g_debugProcess) {
         CloseHandle(g_debugProcess);
@@ -553,7 +553,7 @@ static void start_debug_location_tracking(const WCHAR *locationPath,
     if (g_hDebugVariables) ListView_DeleteAllItems(g_hDebugVariables);
     set_debug_panel_status(L"Debugger starting...");
     show_debug_panel();
-    if (g_hMainWnd) SetTimer(g_hMainWnd, IDT_DEBUG_LOCATION, 150, NULL);
+    if (g_hMainWnd) SetTimer(g_hMainWnd, IDT_DEBUG_LOCATION, DEBUG_LOCATION_POLL_MS, NULL);
 }
 
 /* Starts a debugger's PowerShell host inside a JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -664,7 +664,7 @@ static void poll_debug_location(void) {
     if (!text) {
         /* A debugger may have the file briefly open while replacing its
            contents. Only a genuinely missing file means the session ended. */
-        if (GetFileAttributesW(g_debugLocationPath) != INVALID_FILE_ATTRIBUTES) return;
+        if (file_exists(g_debugLocationPath)) return;
         stop_debug_location_tracking();
         return;
     }
@@ -708,7 +708,7 @@ static void poll_debug_location(void) {
         free(source);
         return;
     }
-    if (!is_existing_file(source) || !open_file_in_tab(source)) {
+    if (!file_exists(source) || !open_file_in_tab(source)) {
         free(source);
         return;
     }
@@ -1275,7 +1275,166 @@ static void launch_msvc_file(DebugSourceKind kind, WCHAR *vcvarsallPath) {
     free(directory);
 }
 
-static void launch_native_file(DebugSourceKind kind, int debug) {
+/* Everything one C/C++ Run or Debug launch needs, owned until
+   free_native_launch(). The quoted* fields are PowerShell literals. */
+typedef struct NativeLaunch {
+    WCHAR *directory, *output, *gdbCommands, *debugLocation;
+    WCHAR *sourceForGdb, *locationForGdb, *extraFlags;
+    WCHAR *quotedCompiler, *quotedDebugger, *quotedSource, *quotedOutput;
+    WCHAR *quotedGdbCommands, *quotedDebugLocation;
+} NativeLaunch;
+
+static void free_native_launch(NativeLaunch *launch) {
+    WCHAR *fields[] = {
+        launch->directory, launch->output, launch->gdbCommands, launch->debugLocation,
+        launch->sourceForGdb, launch->locationForGdb, launch->extraFlags,
+        launch->quotedCompiler, launch->quotedDebugger, launch->quotedSource, launch->quotedOutput,
+        launch->quotedGdbCommands, launch->quotedDebugLocation,
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) free(fields[i]);
+}
+
+/* `debugger` is NULL for Run. Returns 0 when anything the launch needs
+   couldn't be allocated. */
+static int prepare_native_launch(NativeLaunch *launch, const WCHAR *source,
+                                 const WCHAR *compiler, const WCHAR *debugger) {
+    memset(launch, 0, sizeof(*launch));
+    launch->directory = path_directory(source);
+    launch->output = debug_temporary_path(L"exe");
+    launch->sourceForGdb = gdb_source_path(source);
+    launch->extraFlags = quote_extra_compiler_flags(g_compilerExtraFlags, FLAG_QUOTE_POWERSHELL);
+    launch->quotedCompiler = powershell_literal(compiler);
+    launch->quotedSource = powershell_literal(source);
+    launch->quotedOutput = launch->output ? powershell_literal(launch->output) : NULL;
+    int ok = launch->directory && launch->output && launch->sourceForGdb &&
+             launch->quotedCompiler && launch->quotedSource && launch->quotedOutput;
+    if (!debugger) return ok;
+    launch->gdbCommands = debug_temporary_path(L"gdb");
+    launch->debugLocation = debug_temporary_path(L"location");
+    launch->locationForGdb = launch->debugLocation ? gdb_source_path(launch->debugLocation) : NULL;
+    launch->quotedDebugger = powershell_literal(debugger);
+    launch->quotedGdbCommands = launch->gdbCommands ? powershell_literal(launch->gdbCommands) : NULL;
+    launch->quotedDebugLocation = launch->debugLocation ? powershell_literal(launch->debugLocation) : NULL;
+    return ok && launch->locationForGdb && launch->quotedDebugger &&
+           launch->quotedGdbCommands && launch->quotedDebugLocation;
+}
+
+/* The GDB command file, carrying the active document's breakpoints, and the
+   location file the session starts from. */
+static int write_native_debug_files(const NativeLaunch *launch) {
+    int *breakpointLines = NULL;
+    int breakpointCount = collect_breakpoint_lines(&breakpointLines);
+    int ok = write_gdb_commands(launch->gdbCommands, launch->sourceForGdb, launch->locationForGdb,
+                                breakpointLines, breakpointCount) &&
+             write_bytes_file(launch->debugLocation, "starting\n", 9);
+    free(breakpointLines);
+    return ok;
+}
+
+/* Appends to `buffer` at *used. Returns 0 when the text didn't fit. */
+static int append_format(WCHAR *buffer, size_t capacity, size_t *used, const WCHAR *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    int written = vswprintf(buffer + *used, capacity - *used, format, arguments);
+    va_end(arguments);
+    if (written < 0) return 0;
+    *used += (size_t)written;
+    return 1;
+}
+
+static size_t optional_length(const WCHAR *text) {
+    return text ? wcslen(text) : 0;
+}
+
+/* The PowerShell command line that builds the source, then either runs it
+   and reports its exit code or debugs it under GDB, and finally deletes the
+   build output and any debugger files. */
+static WCHAR *native_launch_parameters(const NativeLaunch *launch, DebugSourceKind kind,
+                                       NativeCompilerKind compilerKind, int debug) {
+    size_t capacity = wcslen(launch->quotedCompiler) + wcslen(launch->quotedSource) +
+                      wcslen(launch->quotedOutput) + optional_length(launch->quotedDebugger) +
+                      optional_length(launch->quotedGdbCommands) +
+                      optional_length(launch->quotedDebugLocation) +
+                      optional_length(launch->extraFlags) + 2048;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return NULL;
+
+    const WCHAR *compilerMode = compilerKind == NATIVE_COMPILER_ZIG
+        ? (kind == DEBUG_SOURCE_C ? L" cc" : L" c++") : L"";
+    const WCHAR *standard = kind == DEBUG_SOURCE_C ? L"-std=gnu11" : L"-std=gnu++17";
+    const WCHAR *buildFlags = debug
+        ? L"'-g' '-O0' '-fno-omit-frame-pointer'" : L"'-O2'";
+    /* Debugger output and controls live in MarkEdit, so the host PowerShell
+       console stays hidden for GDB sessions and exits with GDB; ordinary
+       Run still leaves its visible results console open. */
+    const WCHAR *shellOptions = debug
+        ? L"-NoLogo -NoProfile -WindowStyle Hidden -Command"
+        : L"-NoLogo -NoProfile -NoExit -Command";
+    size_t used = 0;
+    int ok = append_format(parameters, capacity, &used,
+        L"%ls \"Write-Host 'Building %ls...'; "
+        L"& %ls%ls '%ls' %ls %ls '-o' %ls %ls; "
+        L"if ($LASTEXITCODE -eq 0) { ",
+        shellOptions, kind == DEBUG_SOURCE_C ? L"C" : L"C++", launch->quotedCompiler, compilerMode,
+        standard, buildFlags, launch->extraFlags ? launch->extraFlags : L"",
+        launch->quotedOutput, launch->quotedSource);
+    if (debug)
+        ok = ok && append_format(parameters, capacity, &used,
+            L"Write-Host 'gdb: next/n, step/s, finish, continue/c, vars, print <expr>, bt, watch <expr>, quit'; "
+            L"Write-Host 'Arguments and locals are shown automatically whenever execution stops.'; "
+            L"& %ls '-q' '-x' %ls %ls; ",
+            launch->quotedDebugger, launch->quotedGdbCommands, launch->quotedOutput);
+    else
+        ok = ok && append_format(parameters, capacity, &used,
+            L"& %ls; $markeditExit = $LASTEXITCODE; Write-Host ''; "
+            L"Write-Host ('Process exited with code ' + $markeditExit); ", launch->quotedOutput);
+    /* Deleting the just-executed binary can transiently fail with "Access is
+       denied" (Windows Defender's on-execute scan holds a brief lock on a
+       freshly run .exe); a bare Delete() call would surface that as a scary
+       PowerShell error right after the program's own output, even though the
+       run itself succeeded. try/catch makes the best-effort cleanup silent. */
+    if (debug)
+        ok = ok && append_format(parameters, capacity, &used,
+            L"}; try { [System.IO.File]::Delete(%ls) } catch {}; "
+            L"try { [System.IO.File]::Delete(%ls) } catch {}; "
+            L"try { [System.IO.File]::Delete(%ls) } catch {}\"",
+            launch->quotedOutput, launch->quotedGdbCommands, launch->quotedDebugLocation);
+    else
+        ok = ok && append_format(parameters, capacity, &used,
+            L"}; try { [System.IO.File]::Delete(%ls) } catch {}\"", launch->quotedOutput);
+    if (!ok) {
+        free(parameters);
+        return NULL;
+    }
+    return parameters;
+}
+
+/* Runs `parameters` in PowerShell: a visible console for Run, or a hidden
+   one tracked as the debug session for Debug. Returns 1 when the debug
+   session took over the GDB command and location files. */
+static int start_native_launch(const NativeLaunch *launch, const WCHAR *parameters, int debug) {
+    WCHAR *powershell = locate_powershell();
+    int handedOff = 0;
+    if (powershell && debug) {
+        HANDLE job = NULL;
+        HANDLE process = launch_debug_console(powershell, parameters, launch->directory, SW_HIDE, &job);
+        if (!process) {
+            MessageBoxW(g_hMainWnd, L"The C/C++ build console could not be started.",
+                        L"Debug C/C++", MB_OK | MB_ICONERROR);
+        } else {
+            handedOff = 1;
+            start_debug_location_tracking(launch->debugLocation, launch->directory, 2, process, job,
+                                          launch->gdbCommands, launch->output);
+        }
+    } else if (powershell) {
+        open_console(powershell, parameters, launch->directory,
+                     L"The C/C++ build console could not be started.", L"Run C/C++");
+    }
+    free(powershell);
+    return handedOff;
+}
+
+static void launch_native_file(const WCHAR *source, DebugSourceKind kind, int debug) {
     NativeCompilerKind compilerKind = NATIVE_COMPILER_GCC;
     WCHAR *compiler = find_native_compiler(kind, debug, &compilerKind);
     if (compiler && compilerKind == NATIVE_COMPILER_MSVC) {
@@ -1283,156 +1442,34 @@ static void launch_native_file(DebugSourceKind kind, int debug) {
         return;
     }
     WCHAR *debugger = debug ? find_gdb_executable() : NULL;
-    if (!compiler) {
-        free(debugger);
-        MessageBoxW(g_hMainWnd,
-                    debug
-                        ? L"No GDB-compatible C/C++ compiler was found. Install GCC/G++ or Clang and add it to PATH."
-                        : L"No C/C++ compiler was found. Install GCC, Clang, Zig, or Visual Studio "
-                          L"(Desktop development with C++ workload) and add it to PATH.",
-                    debug ? L"Debug C/C++" : L"Run C/C++", MB_OK | MB_ICONERROR);
-        return;
-    }
-    if (debug && !debugger) {
+    if (!compiler || (debug && !debugger)) {
+        const WCHAR *message =
+            compiler ? L"GDB was not found. Choose a GDB folder in Settings, or add gdb.exe to PATH."
+            : debug ? L"No GDB-compatible C/C++ compiler was found. Install GCC/G++ or Clang and add it to PATH."
+            : L"No C/C++ compiler was found. Install GCC, Clang, Zig, or Visual Studio "
+              L"(Desktop development with C++ workload) and add it to PATH.";
+        MessageBoxW(g_hMainWnd, message, debug ? L"Debug C/C++" : L"Run C/C++", MB_OK | MB_ICONERROR);
         free(compiler);
-        MessageBoxW(g_hMainWnd,
-                    L"GDB was not found. Choose a GDB folder in Settings, "
-                    L"or add gdb.exe to PATH.",
-                    L"Debug C/C++", MB_OK | MB_ICONERROR);
+        free(debugger);
         return;
     }
 
-    WCHAR *output = debug_temporary_path(L"exe");
-    WCHAR *gdbCommands = debug ? debug_temporary_path(L"gdb") : NULL;
-    WCHAR *debugLocation = debug ? debug_temporary_path(L"location") : NULL;
-    WCHAR *directory = path_directory(g_currentFile);
-    WCHAR *sourceForGdb = gdb_source_path(g_currentFile);
-    WCHAR *locationForGdb = debugLocation ? gdb_source_path(debugLocation) : NULL;
-    WCHAR *quotedCompiler = powershell_literal(compiler);
-    WCHAR *quotedDebugger = debugger ? powershell_literal(debugger) : NULL;
-    WCHAR *quotedSource = powershell_literal(g_currentFile);
-    WCHAR *quotedOutput = output ? powershell_literal(output) : NULL;
-    WCHAR *quotedGdbCommands = gdbCommands ? powershell_literal(gdbCommands) : NULL;
-    WCHAR *quotedDebugLocation = debugLocation ? powershell_literal(debugLocation) : NULL;
+    NativeLaunch launch;
+    int prepared = prepare_native_launch(&launch, source, compiler, debugger);
     free(compiler);
     free(debugger);
-    if (!output || (debug && (!gdbCommands || !debugLocation || !locationForGdb)) ||
-        !directory || !sourceForGdb || !quotedCompiler ||
-        (debug && (!quotedDebugger || !quotedGdbCommands || !quotedDebugLocation)) ||
-        !quotedSource || !quotedOutput) {
-        free(output); free(directory); free(sourceForGdb); free(quotedCompiler);
-        free(gdbCommands); free(debugLocation); free(locationForGdb);
-        free(quotedGdbCommands); free(quotedDebugLocation); free(quotedDebugger);
-        free(quotedSource); free(quotedOutput);
-        return;
-    }
 
-    int commandFileHandedOff = 0;
-    WCHAR *extraFlags = quote_extra_compiler_flags(g_compilerExtraFlags, FLAG_QUOTE_POWERSHELL);
-    int *breakpointLines = NULL;
-    int breakpointCount = debug ? collect_breakpoint_lines(&breakpointLines) : 0;
-    if (debug) {
-        int wroteCommands = write_gdb_commands(gdbCommands, sourceForGdb, locationForGdb,
-                                                breakpointLines, breakpointCount);
-        free(breakpointLines);
-        if (!wroteCommands || !write_bytes_file(debugLocation, "starting\n", 9))
-            goto native_launch_cleanup;
+    int handedOff = 0;
+    if (prepared && (!debug || write_native_debug_files(&launch))) {
+        WCHAR *parameters = native_launch_parameters(&launch, kind, compilerKind, debug);
+        if (parameters) handedOff = start_native_launch(&launch, parameters, debug);
+        free(parameters);
     }
-    size_t capacity = wcslen(quotedCompiler) + wcslen(quotedSource) +
-                      wcslen(quotedOutput) + (quotedDebugger ? wcslen(quotedDebugger) : 0) +
-                      (quotedGdbCommands ? wcslen(quotedGdbCommands) : 0) +
-                      (quotedDebugLocation ? wcslen(quotedDebugLocation) : 0) +
-                      (extraFlags ? wcslen(extraFlags) : 0) + 2048;
-    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (!parameters) goto native_launch_cleanup;
-
-    const WCHAR *compilerMode = compilerKind == NATIVE_COMPILER_ZIG
-        ? (kind == DEBUG_SOURCE_C ? L" cc" : L" c++") : L"";
-    const WCHAR *standard = kind == DEBUG_SOURCE_C ? L"-std=gnu11" : L"-std=gnu++17";
-    const WCHAR *buildFlags = debug
-        ? L"'-g' '-O0' '-fno-omit-frame-pointer'" : L"'-O2'";
-    /* Debugger output and controls now live in MarkEdit. Keep the host
-       PowerShell console hidden for GDB sessions and let it exit with GDB;
-       ordinary Run still leaves its visible results console open. */
-    const WCHAR *shellOptions = debug
-        ? L"-NoLogo -NoProfile -WindowStyle Hidden -Command"
-        : L"-NoLogo -NoProfile -NoExit -Command";
-    int written = swprintf(parameters, capacity,
-        L"%ls \"Write-Host 'Building %ls...'; "
-        L"& %ls%ls '%ls' %ls %ls '-o' %ls %ls; "
-        L"if ($LASTEXITCODE -eq 0) { ",
-        shellOptions, kind == DEBUG_SOURCE_C ? L"C" : L"C++", quotedCompiler, compilerMode,
-        standard, buildFlags, extraFlags ? extraFlags : L"", quotedOutput, quotedSource);
-    if (written < 0) goto native_parameters_cleanup;
-    size_t used = (size_t)written;
-
-    if (debug) {
-        written = swprintf(parameters + used, capacity - used,
-            L"Write-Host 'gdb: next/n, step/s, finish, continue/c, vars, print <expr>, bt, watch <expr>, quit'; "
-            L"Write-Host 'Arguments and locals are shown automatically whenever execution stops.'; "
-            L"& %ls '-q' '-x' %ls %ls; ",
-            quotedDebugger, quotedGdbCommands, quotedOutput);
-        if (written < 0) goto native_parameters_cleanup;
-        /* `used` is advanced once, below, after this if/else. */
-    } else {
-        written = swprintf(parameters + used, capacity - used,
-            L"& %ls; $markeditExit = $LASTEXITCODE; Write-Host ''; "
-            L"Write-Host ('Process exited with code ' + $markeditExit); ", quotedOutput);
+    if (!handedOff) {
+        if (launch.gdbCommands) DeleteFileW(launch.gdbCommands);
+        if (launch.debugLocation) DeleteFileW(launch.debugLocation);
     }
-    if (written < 0) goto native_parameters_cleanup;
-    used += (size_t)written;
-    /* Deleting the just-executed binary can transiently fail with "Access is
-       denied" (Windows Defender's on-execute scan holds a brief lock on a
-       freshly run .exe); a bare Delete() call would surface that as a scary
-       PowerShell error right after the program's own output, even though the
-       run itself succeeded. try/catch makes the best-effort cleanup silent. */
-    written = swprintf(parameters + used, capacity - used,
-        debug
-            ? L"}; try { [System.IO.File]::Delete(%ls) } catch {}; "
-              L"try { [System.IO.File]::Delete(%ls) } catch {}; "
-              L"try { [System.IO.File]::Delete(%ls) } catch {}\""
-            : L"}; try { [System.IO.File]::Delete(%ls) } catch {}\"",
-        quotedOutput, quotedGdbCommands, quotedDebugLocation);
-    if (written < 0) goto native_parameters_cleanup;
-
-    WCHAR *powershell = locate_powershell();
-    if (powershell && debug) {
-        HANDLE job = NULL;
-        HANDLE process = launch_debug_console(powershell, parameters, directory, SW_HIDE, &job);
-        if (!process) {
-            MessageBoxW(g_hMainWnd, L"The C/C++ build console could not be started.",
-                        L"Debug C/C++", MB_OK | MB_ICONERROR);
-        } else {
-            commandFileHandedOff = 1;
-            start_debug_location_tracking(debugLocation, directory, 2, process, job,
-                                          gdbCommands, output);
-        }
-    } else if (powershell) {
-        open_console(powershell, parameters, directory,
-                     L"The C/C++ build console could not be started.", L"Run C/C++");
-    }
-    free(powershell);
-
-native_parameters_cleanup:
-    free(parameters);
-native_launch_cleanup:
-    if (!commandFileHandedOff) {
-        if (gdbCommands) DeleteFileW(gdbCommands);
-        if (debugLocation) DeleteFileW(debugLocation);
-    }
-    free(output);
-    free(gdbCommands);
-    free(debugLocation);
-    free(locationForGdb);
-    free(quotedGdbCommands);
-    free(quotedDebugLocation);
-    free(directory);
-    free(sourceForGdb);
-    free(quotedCompiler);
-    free(quotedDebugger);
-    free(quotedSource);
-    free(quotedOutput);
-    free(extraFlags);
+    free_native_launch(&launch);
 }
 
 static void launch_active_source_file(int debug) {
@@ -1445,7 +1482,7 @@ static void launch_active_source_file(int debug) {
     if (kind == DEBUG_SOURCE_PYTHON) {
         launch_python_file(debug);
     } else if (kind == DEBUG_SOURCE_C || kind == DEBUG_SOURCE_CPP) {
-        launch_native_file(kind, debug);
+        launch_native_file(g_currentFile, kind, debug);
     } else if (kind == DEBUG_SOURCE_LUA) {
         if (debug) {
             MessageBoxW(g_hMainWnd, L"Lua files support Run only; there is no Lua debugger integration.",

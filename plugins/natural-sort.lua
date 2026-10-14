@@ -63,7 +63,8 @@ local function sort_lines(descending, unique)
   table.sort(decorated, function(a, b)
     local order = natural_compare(a, b)
     if order == 0 then return a.index < b.index end
-    return descending and order > 0 or order < 0
+    if descending then return order > 0 end
+    return order < 0
   end)
   local output, seen = {}, {}
   for _, item in ipairs(decorated) do

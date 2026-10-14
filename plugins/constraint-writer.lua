@@ -5,10 +5,18 @@ local FORBIDDEN_INDICATOR = 14
 local SENTENCE_INDICATOR = 15
 local STYLE_INDICATOR = 16
 
+-- Bytes 128-255 count as word characters so non-ASCII letters work, which
+-- would include common UTF-8 punctuation: curly quotes, en/em dashes, the
+-- ellipsis and no-break space. Those become spaces of the same byte length,
+-- so word positions still match the text.
+local function mask_punctuation(text)
+  return (text:gsub("\226\128[\147\148\152\153\156\157\166]", "   "):gsub("\194\160", "  "))
+end
+
 local function words_in(text, offset)
   local words = {}
   offset = offset or 0
-  for first, word, after in text:gmatch("()([A-Za-z0-9_\128-\255]+)()") do
+  for first, word, after in mask_punctuation(text):gmatch("()([A-Za-z0-9_\128-\255]+)()") do
     words[#words + 1] = {
       text = word,
       key = word:lower(),
@@ -54,7 +62,7 @@ end
 
 local function forbidden_words()
   local result = {}
-  for word in config.get("forbidden_words", ""):gmatch("[A-Za-z0-9_\128-\255]+") do
+  for word in mask_punctuation(config.get("forbidden_words", "")):gmatch("[A-Za-z0-9_\128-\255]+") do
     result[word:lower()] = true
   end
   return result

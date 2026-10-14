@@ -32,12 +32,10 @@ static void execute_webview_string_call(const char *prefix, const char *text, co
 
 static void apply_custom_preview_css(int reportErrors) {
     if (!g_webviewReady || !g_webview || g_previewShowingRawHtml) return;
-    char *css = g_customCssPath ? read_utf8_text_file(g_customCssPath, 4 * 1024 * 1024) : _strdup("");
+    char *css = g_customCssPath ? read_utf8_text_file(g_customCssPath, CUSTOM_CSS_MAX_BYTES) : _strdup("");
     if (!css) {
         if (reportErrors)
-            MessageBoxW(g_hMainWnd,
-                L"The custom stylesheet could not be read. It must be a UTF-8 CSS file smaller than 4 MB.",
-                L"MarkEdit", MB_OK | MB_ICONERROR);
+            show_error(L"The custom stylesheet could not be read. It must be a UTF-8 CSS file smaller than 4 MB.");
         css = _strdup("");
     }
     if (!css) return;
@@ -136,7 +134,7 @@ static HRESULT STDMETHODCALLTYPE ExportDone_Invoke(ICoreWebView2ExecuteScriptCom
         ok = write_bytes_file(ioPath ? ioPath : g_exportPath, utf8, strlen(utf8));
         free(ioPath);
     }
-    if (!ok) MessageBoxW(g_hMainWnd, L"Could not export the rendered HTML.", L"MarkEdit", MB_OK | MB_ICONERROR);
+    if (!ok) show_error(L"Could not export the rendered HTML.");
     free(utf8);
     free(html);
     free(g_exportPath);
@@ -164,8 +162,7 @@ static HRESULT STDMETHODCALLTYPE PdfDone_Invoke(ICoreWebView2PrintToPdfCompleted
                                                  HRESULT errorCode, BOOL result) {
     (void)this_;
     if (FAILED(errorCode) || !result)
-        MessageBoxW(g_hMainWnd, L"Could not export the rendered preview to PDF.",
-                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Could not export the rendered preview to PDF.");
     else
         MessageBoxW(g_hMainWnd, L"PDF export completed.", L"MarkEdit",
                     MB_OK | MB_ICONINFORMATION);
@@ -255,7 +252,9 @@ static ICoreWebView2WebMessageReceivedEventHandler g_webMessageHandler = { &g_we
    a real WM_(SYS)KEYDOWN through TranslateAcceleratorA against the same
    table WinMain's message loop uses puts every accelerator back to work
    from the preview, and is a no-op (falls through unhandled) for any key
-   that isn't actually one of them. */
+   that isn't actually one of them. Ctrl+A is the exception: it's left to
+   the preview so it selects the rendered text there, rather than invisibly
+   selecting the whole of the unfocused editor. */
 static HRESULT STDMETHODCALLTYPE AccelKey_Invoke(ICoreWebView2AcceleratorKeyPressedEventHandler *this_,
                                                    ICoreWebView2Controller *sender,
                                                    ICoreWebView2AcceleratorKeyPressedEventArgs *args) {
@@ -269,6 +268,9 @@ static HRESULT STDMETHODCALLTYPE AccelKey_Invoke(ICoreWebView2AcceleratorKeyPres
     INT keyLParam = 0;
     ICoreWebView2AcceleratorKeyPressedEventArgs_get_VirtualKey(args, &virtualKey);
     ICoreWebView2AcceleratorKeyPressedEventArgs_get_KeyEventLParam(args, &keyLParam);
+    if (virtualKey == 'A' && (GetKeyState(VK_CONTROL) & 0x8000) &&
+        !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000))
+        return S_OK;
     MSG msg = {0};
     msg.hwnd = g_hMainWnd;
     msg.message = (kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) ? WM_SYSKEYDOWN : WM_KEYDOWN;
@@ -494,7 +496,7 @@ static void open_wikilink_target(const WCHAR *encoded) {
         if (create) {
             HANDLE file = CreateFileW(full, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
             if (file == INVALID_HANDLE_VALUE) {
-                MessageBoxW(g_hMainWnd, L"Could not create the note.", L"MarkEdit", MB_OK | MB_ICONERROR);
+                show_error(L"Could not create the note.");
             } else {
                 CloseHandle(file);
                 push_wiki_back();
@@ -860,7 +862,7 @@ static void update_preview(void) {
     push_html_to_webview(html);
     free(html);
     if (g_hMainWnd && g_editorVisible && g_previewVisible)
-        SetTimer(g_hMainWnd, IDT_SCROLL_SYNC, 40, NULL);
+        SetTimer(g_hMainWnd, IDT_SCROLL_SYNC, SCROLL_SYNC_AFTER_RENDER_DELAY_MS, NULL);
 }
 
 static void sync_preview_to_editor_scroll(void) {

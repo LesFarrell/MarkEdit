@@ -37,6 +37,7 @@ local function parse_integer(text)
   elseif body:match("^0[oO]") then base, body = 8, body:sub(3)
   elseif body:match("^[IVXLCDMivxlcdm]+$") then
     local value = roman_to_integer(body)
+    if not value then return nil end
     return sign == "-" and -value or value
   end
   if body == "" or (base == 10 and body:find("[^0-9]"))
@@ -44,22 +45,30 @@ local function parse_integer(text)
     or (base == 8 and body:find("[^0-7]")) or (base == 2 and body:find("[^01]")) then
     return nil
   end
-  local value = tonumber(body, base)
-  if not value or value % 1 ~= 0 then return nil end
-  return sign == "-" and -value or value
+  -- Accumulate as a negative number so math.mininteger is reachable and any
+  -- value outside the 64-bit range is rejected instead of wrapping.
+  local limit = sign == "-" and math.mininteger or -math.maxinteger
+  local value = 0
+  for index = 1, #body do
+    local digit = tonumber(body:sub(index, index), base)
+    if value < (limit + digit + base - 1) // base then return nil end
+    value = value * base - digit
+  end
+  return sign == "-" and value or -value
 end
 
+-- Digits of the magnitude of value; works on the negative side so that
+-- math.mininteger, whose magnitude has no positive integer, converts too.
 local function digits(value, base)
   if value == 0 then return "0" end
-  local negative, output = value < 0, {}
-  value = math.abs(value)
-  while value > 0 do
-    local digit = value % base
+  local output = {}
+  if value > 0 then value = -value end
+  while value < 0 do
+    local digit = -(value % -base)
     output[#output + 1] = ("0123456789ABCDEF"):sub(digit + 1, digit + 1)
-    value = value // base
+    value = (value + digit) // base
   end
-  local result = table.concat(output):reverse()
-  return negative and "-" .. result or result
+  return table.concat(output):reverse()
 end
 
 local function convert(format)
@@ -70,9 +79,9 @@ local function convert(format)
     local value = parse_integer(text)
     if not value then ui.message("Not a supported whole number: " .. text, nil, "warning"); return end
     if format == "decimal" then replacements[index] = tostring(value)
-    elseif format == "hex" then replacements[index] = (value < 0 and "-0x" or "0x") .. digits(math.abs(value), 16)
-    elseif format == "binary" then replacements[index] = (value < 0 and "-0b" or "0b") .. digits(math.abs(value), 2)
-    elseif format == "octal" then replacements[index] = (value < 0 and "-0o" or "0o") .. digits(math.abs(value), 8)
+    elseif format == "hex" then replacements[index] = (value < 0 and "-0x" or "0x") .. digits(value, 16)
+    elseif format == "binary" then replacements[index] = (value < 0 and "-0b" or "0b") .. digits(value, 2)
+    elseif format == "octal" then replacements[index] = (value < 0 and "-0o" or "0o") .. digits(value, 8)
     else
       replacements[index] = integer_to_roman(value)
       if not replacements[index] then

@@ -63,7 +63,11 @@ menu.add("Text/Wrap Selection...", function()
   local marker = ui.prompt("Wrap the selection in:", "**")
   if not marker or marker == "" then return end
   -- Closing markers mirror opening brackets, so "(" wraps as "(...)".
-  local closing = marker:reverse():gsub(".", { ["("] = ")", ["["] = "]", ["{"] = "}", ["<"] = ">" })
+  -- Reversed by character, not byte, so UTF-8 markers like "“" stay valid.
+  local reversed = {}
+  for _, code in utf8.codes(marker) do table.insert(reversed, 1, utf8.char(code)) end
+  local closing = table.concat(reversed):gsub(utf8.charpattern,
+    { ["("] = ")", ["["] = "]", ["{"] = "}", ["<"] = ">", ["“"] = "”", ["‘"] = "’" })
   editor.replace_selection(marker .. editor.get_selection() .. closing)
 end)
 

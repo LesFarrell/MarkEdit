@@ -34,7 +34,7 @@ function commands.execute(name) end
 
 events = {}
 ---@param name 'before_save'|'save'|'after_save'|'open'|'close'|'tab_changed'|'text_changed'|'selection_changed'|'workspace_changed'|'theme_changed'|'shutdown'
----@param fn fun(path:string?)
+---@param fn fun(path: string|nil)
 ---@return integer subscription
 function events.on(name, fn) end
 ---@param subscription integer
@@ -231,9 +231,15 @@ function editor.read_only(value) end
 function editor.visible_range() end
 ---@param position integer
 function editor.scroll_to(position) end
+---@class MarkEditFindOptions
+---@field match_case boolean|nil
+---@field whole_word boolean|nil
+---@field word_start boolean|nil
+---@field regex boolean|nil
+
 ---@param text string
 ---@param start? integer
----@param options? {match_case?:boolean, whole_word?:boolean, word_start?:boolean, regex?:boolean}
+---@param options? MarkEditFindOptions
 ---@return integer? start, integer? finish
 function editor.find(text, start, options) end
 function editor.begin_undo() end

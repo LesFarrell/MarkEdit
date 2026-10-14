@@ -41,7 +41,7 @@ const LanguageInfo LANGUAGES[LANGUAGE_COUNT] = {
        CreateLexer() returns NULL for it, which apply_document_language() passes
        to SCI_SETILEXER to clear any previous lexer: genuinely
        unstyled plain text rather than a lexer that happens to add no colour. */
-    { LANG_TEXT, "text", L".txt", NULL, "text", 0 },
+    { LANG_TEXT, "text", L".txt;.log", NULL, "text", 0 },
 };
 
 /* Case-insensitive match of `extension` against one semicolon-delimited list. */
@@ -79,15 +79,9 @@ const LanguageInfo *language_for_path(const WCHAR *path) {
    SciLexer.h, SCE_MARKDOWN_*) to match the GitHub light/dark palette used
    everywhere else in the app. Called from apply_editor_theme() after every
    SCI_STYLECLEARALL, since that resets every style back to STYLE_DEFAULT. */
-static void apply_markdown_lexer_styles(HWND hEdit, int darkMode) {
-    COLORREF text = (darkMode ? THEME_DARK_FG : THEME_LIGHT_FG);
-    COLORREF heading = darkMode ? RGB(0x79, 0xC0, 0xFF) : RGB(0x09, 0x69, 0xDA);
-    COLORREF link = darkMode ? RGB(0x58, 0xA6, 0xFF) : RGB(0x09, 0x69, 0xDA);
-    COLORREF code = darkMode ? RGB(0xFF, 0xA6, 0x57) : RGB(0xB3, 0x53, 0x00);
-    COLORREF quote = darkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
-    COLORREF list = darkMode ? RGB(0xD2, 0xA8, 0xFF) : RGB(0x82, 0x50, 0xDF);
-    COLORREF strike = darkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x5A, 0x5A, 0x5A);
-    COLORREF rule = darkMode ? RGB(0x7D, 0x85, 0x90) : RGB(0x65, 0x6D, 0x76);
+static void apply_markdown_lexer_styles(HWND hEdit, const ThemePalette *p) {
+    COLORREF text = p->fg, heading = p->heading, link = p->link, code = p->code;
+    COLORREF quote = p->quote, list = p->list, strike = p->quote, rule = p->lineNumber;
 
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MARKDOWN_STRONG1, text);
     SendMessageA(hEdit, SCI_STYLESETBOLD, SCE_MARKDOWN_STRONG1, TRUE);
@@ -120,44 +114,12 @@ static void apply_markdown_lexer_styles(HWND hEdit, int darkMode) {
     SendMessageA(hEdit, SCI_STYLESETFONT, SCE_MARKDOWN_CODEBK, (LPARAM)"Consolas");
 }
 
-/* The GitHub syntax palette, shared by every non-Markdown lexer so the editor
-   keeps one look across languages. */
-typedef struct SyntaxPalette {
-    COLORREF comment, keyword, string, number, function, variable, tag, attribute, operatorColour;
-} SyntaxPalette;
-
-static SyntaxPalette syntax_palette(int darkMode) {
-    SyntaxPalette p;
-    if (darkMode) {
-        p.comment = RGB(0x1f,0x88,0x3d);
-        p.keyword = RGB(0xFF, 0x7B, 0x72);
-        p.string = RGB(0xA5, 0xD6, 0xFF);
-        p.number = RGB(0x79, 0xC0, 0xFF);
-        p.function = RGB(0xD2, 0xA8, 0xFF);
-        p.variable = RGB(0xFF, 0xA6, 0x57);
-        p.tag = RGB(0x7E, 0xE7, 0x87);
-        p.attribute = RGB(0x79, 0xC0, 0xFF);
-        p.operatorColour = RGB(0xE6, 0xED, 0xF3);
-    } else {
-        p.comment = RGB(0x1f,0x88,0x3d);
-        p.keyword = RGB(0xCF, 0x22, 0x2E);
-        p.string = RGB(0x0A, 0x30, 0x69);
-        p.number = RGB(0x09, 0x69, 0xDA);
-        p.function = RGB(0x82, 0x50, 0xDF);
-        p.variable = RGB(0x95, 0x38, 0x00);
-        p.tag = RGB(0x11, 0x63, 0x29);
-        p.attribute = RGB(0x09, 0x69, 0xDA);
-        p.operatorColour = RGB(0x1F, 0x23, 0x28);
-    }
-    return p;
-}
-
 static void style_range(HWND hEdit, const int *styles, int count, COLORREF colour) {
     for (int i = 0; i < count; i++)
         SendMessageA(hEdit, SCI_STYLESETFORE, (WPARAM)styles[i], (LPARAM)colour);
 }
 
-static void apply_json_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_json_styles(HWND hEdit, const ThemePalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_PROPERTYNAME, (LPARAM)p->attribute);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_STRING, (LPARAM)p->string);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_NUMBER, (LPARAM)p->number);
@@ -171,7 +133,7 @@ static void apply_json_styles(HWND hEdit, const SyntaxPalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_JSON_ERROR, (LPARAM)p->keyword);
 }
 
-static void apply_markup_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_markup_styles(HWND hEdit, const ThemePalette *p) {
     const int tags[] = { SCE_H_TAG, SCE_H_TAGEND, SCE_H_TAGUNKNOWN, SCE_H_XMLSTART, SCE_H_XMLEND };
     style_range(hEdit, tags, 5, p->tag);
     const int attributes[] = { SCE_H_ATTRIBUTE, SCE_H_ATTRIBUTEUNKNOWN };
@@ -184,7 +146,7 @@ static void apply_markup_styles(HWND hEdit, const SyntaxPalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_H_CDATA, (LPARAM)p->comment);
 }
 
-static void apply_yaml_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_yaml_styles(HWND hEdit, const ThemePalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_IDENTIFIER, (LPARAM)p->attribute);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_KEYWORD, (LPARAM)p->keyword);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_NUMBER, (LPARAM)p->number);
@@ -195,33 +157,33 @@ static void apply_yaml_styles(HWND hEdit, const SyntaxPalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_YAML_ERROR, (LPARAM)p->keyword);
 }
 
-static void apply_cpp_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_cpp_styles(HWND hEdit, const ThemePalette *p) {
     const int comments[] = { SCE_C_COMMENT, SCE_C_COMMENTLINE, SCE_C_COMMENTDOC, SCE_C_COMMENTLINEDOC };
     style_range(hEdit, comments, 4, p->comment);
     const int strings[] = { SCE_C_STRING, SCE_C_CHARACTER, SCE_C_VERBATIM, SCE_C_STRINGEOL };
     style_range(hEdit, strings, 4, p->string);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_WORD, (LPARAM)p->keyword);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_WORD2, (LPARAM)p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_WORD2, (LPARAM)p->functionName);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_NUMBER, (LPARAM)p->number);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_PREPROCESSOR, (LPARAM)p->variable);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_OPERATOR, (LPARAM)p->operatorColour);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_C_REGEX, (LPARAM)p->string);
 }
 
-static void apply_python_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_python_styles(HWND hEdit, const ThemePalette *p) {
     const int comments[] = { SCE_P_COMMENTLINE, SCE_P_COMMENTBLOCK };
     style_range(hEdit, comments, 2, p->comment);
     const int strings[] = { SCE_P_STRING, SCE_P_CHARACTER, SCE_P_TRIPLE, SCE_P_TRIPLEDOUBLE, SCE_P_FSTRING };
     style_range(hEdit, strings, 5, p->string);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_WORD, (LPARAM)p->keyword);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_NUMBER, (LPARAM)p->number);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_DEFNAME, (LPARAM)p->function);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_CLASSNAME, (LPARAM)p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_DEFNAME, (LPARAM)p->functionName);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_CLASSNAME, (LPARAM)p->functionName);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_DECORATOR, (LPARAM)p->variable);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_P_OPERATOR, (LPARAM)p->operatorColour);
 }
 
-static void apply_bash_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_bash_styles(HWND hEdit, const ThemePalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_COMMENTLINE, (LPARAM)p->comment);
     const int strings[] = { SCE_SH_STRING, SCE_SH_CHARACTER, SCE_SH_HERE_Q, SCE_SH_BACKTICKS };
     style_range(hEdit, strings, 4, p->string);
@@ -233,7 +195,7 @@ static void apply_bash_styles(HWND hEdit, const SyntaxPalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_SH_ERROR, (LPARAM)p->keyword);
 }
 
-static void apply_powershell_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_powershell_styles(HWND hEdit, const ThemePalette *p) {
     const int comments[] = { SCE_POWERSHELL_COMMENT, SCE_POWERSHELL_COMMENTSTREAM,
                              SCE_POWERSHELL_COMMENTDOCKEYWORD };
     style_range(hEdit, comments, 3, p->comment);
@@ -244,11 +206,11 @@ static void apply_powershell_styles(HWND hEdit, const SyntaxPalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_NUMBER, (LPARAM)p->number);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_VARIABLE, (LPARAM)p->variable);
     const int functions[] = { SCE_POWERSHELL_CMDLET, SCE_POWERSHELL_FUNCTION, SCE_POWERSHELL_ALIAS };
-    style_range(hEdit, functions, 3, p->function);
+    style_range(hEdit, functions, 3, p->functionName);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_POWERSHELL_OPERATOR, (LPARAM)p->operatorColour);
 }
 
-static void apply_lua_styles(HWND hEdit, const SyntaxPalette *p) {
+static void apply_lua_styles(HWND hEdit, const ThemePalette *p) {
     const int comments[] = { SCE_LUA_COMMENT, SCE_LUA_COMMENTLINE, SCE_LUA_COMMENTDOC };
     style_range(hEdit, comments, 3, p->comment);
     const int strings[] = { SCE_LUA_STRING, SCE_LUA_CHARACTER, SCE_LUA_LITERALSTRING, SCE_LUA_STRINGEOL };
@@ -256,31 +218,31 @@ static void apply_lua_styles(HWND hEdit, const SyntaxPalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_WORD, (LPARAM)p->keyword);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_NUMBER, (LPARAM)p->number);
     const int functions[] = { SCE_LUA_WORD2, SCE_LUA_WORD3 };
-    style_range(hEdit, functions, 2, p->function);
+    style_range(hEdit, functions, 2, p->functionName);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_IDENTIFIER, (LPARAM)p->variable);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_PREPROCESSOR, (LPARAM)p->variable);
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_OPERATOR, (LPARAM)p->operatorColour);
-    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_LABEL, (LPARAM)p->function);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_LUA_LABEL, (LPARAM)p->functionName);
 }
 
 /* Applies the current theme colours for whichever language is active. */
 void apply_language_styles(HWND hEdit, Language language, int darkMode) {
+    const ThemePalette *palette = theme_palette_for(darkMode);
     if (language == LANG_MARKDOWN) {
-        apply_markdown_lexer_styles(hEdit, darkMode);
+        apply_markdown_lexer_styles(hEdit, palette);
         return;
     }
 
-    SyntaxPalette palette = syntax_palette(darkMode);
     switch (language) {
-        case LANG_JSON: apply_json_styles(hEdit, &palette); break;
+        case LANG_JSON: apply_json_styles(hEdit, palette); break;
         case LANG_XML:
-        case LANG_HTML: apply_markup_styles(hEdit, &palette); break;
-        case LANG_YAML: apply_yaml_styles(hEdit, &palette); break;
-        case LANG_CPP: apply_cpp_styles(hEdit, &palette); break;
-        case LANG_PYTHON: apply_python_styles(hEdit, &palette); break;
-        case LANG_BASH: apply_bash_styles(hEdit, &palette); break;
-        case LANG_POWERSHELL: apply_powershell_styles(hEdit, &palette); break;
-        case LANG_LUA: apply_lua_styles(hEdit, &palette); break;
+        case LANG_HTML: apply_markup_styles(hEdit, palette); break;
+        case LANG_YAML: apply_yaml_styles(hEdit, palette); break;
+        case LANG_CPP: apply_cpp_styles(hEdit, palette); break;
+        case LANG_PYTHON: apply_python_styles(hEdit, palette); break;
+        case LANG_BASH: apply_bash_styles(hEdit, palette); break;
+        case LANG_POWERSHELL: apply_powershell_styles(hEdit, palette); break;
+        case LANG_LUA: apply_lua_styles(hEdit, palette); break;
         default: break;
     }
 }

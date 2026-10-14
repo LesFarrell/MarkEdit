@@ -2,7 +2,7 @@
 
 A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
 
-This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, Markdown, text, calculator, assembler, and developer-oriented extensions.
+This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, Markdown, text, calculator, assembler, Lua formatting, and developer-oriented extensions.
 
 **Contents:** [Quick start](#quick-start) · [How plugins are loaded](#how-plugins-are-loaded) · [Positions, ranges, and lines](#positions-ranges-and-lines) · [API reference](#api-reference) · [Where commands appear](#where-commands-appear) · [Replacing built-in commands](#replacing-built-in-commands) · [Customizing the menu bar](#customizing-the-menu-bar) · [How commands run](#how-commands-run) · [The Lua environment](#the-lua-environment) · [Limits](#limits) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting)
 
@@ -290,13 +290,31 @@ These are the names `commands.register` and the menu definition use.
 - **File:** `file.new`, `file.open`, `file.reopen_utf8`, `file.reopen_utf16le`, `file.reopen_utf16be`, `file.reopen_ansi`, `file.quick_open`, `file.find_in_folder`, `file.replace_in_folder`, `file.open_workspace`, `file.insert_file`, `file.save`, `file.save_as`, `file.save_all`, `file.export_html`, `file.export_pdf`, `file.print`, `file.open_terminal`, `file.show_in_explorer`, `file.close_tab`, `file.reopen_closed_tab`, `file.go_back`, `file.exit`
 - **Edit** (Lua): `edit.toggle_comment`, `edit.trim_whitespace`
 - **Edit:** `edit.undo`, `edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, `edit.delete`, `edit.select_all`, `edit.duplicate_line`, `edit.move_line_up`, `edit.move_line_down`, `edit.delete_line`, `edit.join_lines`, `edit.select_next`, `edit.select_all_occurrences`, `edit.match_brace`, `edit.bookmark_toggle`, `edit.bookmark_next`, `edit.bookmark_previous`, `edit.bookmark_clear`, `edit.find`, `edit.find_next`, `edit.replace`, `edit.go_to_line`
-- **View:** `view.preview`, `view.editor`, `view.next_tab`, `view.previous_tab`, `view.cycle_panes`, `view.theme_light`, `view.theme_dark`, `view.preview_theme_light`, `view.preview_theme_dark`, `view.custom_css`, `view.clear_custom_css`, `view.font`, `view.preview_on_left`, `view.focus_mode`, `view.word_wrap`, `view.spell_check`, `view.spell_check_language`, `view.outline`, `view.file_explorer`, `view.minimap`, `view.split_editor`, `view.reset_split_editor`, `view.show_whitespace`, `view.indent_guides`, `view.use_spaces`, `view.toggle_fold`, `view.fold_all`, `view.unfold_all`, `view.zoom_in`, `view.zoom_out`, `view.zoom_reset`
+- **View:** `view.preview`, `view.editor`, `view.next_tab`, `view.previous_tab`, `view.cycle_panes`, `view.theme_light`, `view.theme_dark`, `view.preview_theme_light`, `view.preview_theme_dark`, `view.custom_css`, `view.clear_custom_css`, `view.font`, `view.preview_on_left`, `view.focus_mode`, `view.word_wrap`, `view.spell_check`, `view.spell_check_language`, `view.outline`, `view.file_explorer`, `view.minimap`, `view.split_editor`, `view.split_editor_vertical`, `view.reset_split_editor`, `view.show_whitespace`, `view.indent_guides`, `view.use_spaces`, `view.toggle_fold`, `view.fold_all`, `view.unfold_all`, `view.zoom_in`, `view.zoom_out`, `view.zoom_reset`
 - **Markdown** (Lua): `markdown.bold`, `markdown.italic`, `markdown.strikethrough`, `markdown.inline_code`, `markdown.heading1`, `markdown.heading2`, `markdown.heading3`, `markdown.blockquote`, `markdown.bullet_list`, `markdown.numbered_list`, `markdown.task_list`, `markdown.link`, `markdown.image`, `markdown.table`, `markdown.table_editor`, `markdown.table_row_above`, `markdown.table_row_below`, `markdown.table_row_delete`, `markdown.table_column_left`, `markdown.table_column_right`, `markdown.table_column_delete`, `markdown.table_sort_ascending`, `markdown.table_sort_descending`, `markdown.table_align_left`, `markdown.table_align_center`, `markdown.table_align_right`, `markdown.code_block`, `markdown.footnote`, `markdown.horizontal_rule`, `markdown.alert`
 - **HTML** (Lua): `html.html`, `html.head`, `html.body`, `html.paragraph`, `html.bold`, `html.italic`, `html.underline`, `html.div`, `html.span`, `html.link`, `html.image`, `html.table`, `html.bullet_list`, `html.numbered_list`, `html.line_break`
 - **Tools:** `tools.settings`
 - **Run:** `run.run_file`, `run.debug_file`, `run.continue`, `run.step_over`, `run.step_into`, `run.step_out`, `run.toggle_breakpoint`, `run.clear_breakpoints`
-- **Plugins:** `plugins.reload`, `plugins.new`, `plugins.open_folder`, `plugins.manage`, `plugins.customize_menus`
+- **Plugins:** `plugins.reload`, `plugins.new`, `plugins.open_folder`, `plugins.manage`, `plugins.customize_menus`, `plugins.customize_theme`
 - **Help:** `help.markdown_reference`, `help.keyboard_shortcuts`, `help.plugin_guide`, `help.about`
+
+## Customizing theme colours
+
+The colours of the light and dark themes come from `%APPDATA%\markedit\themes.lua` when it exists, over the built-in ones. **Plugins → Customize Theme Colours** writes that file (if it isn't there yet), listing every colour with its built-in value and what it paints, and opens it. Edit it, save it, then choose **Plugins → Reload Plugins**. Delete a line to go back to that colour's built-in value, or the file to go back to all of them.
+
+```lua
+return {
+  light = { selectionBg = "#FFE8A3" },
+  dark  = { bg = "#0D1117", keyword = "#FF7B72" },
+}
+```
+
+- Colours are `"#RRGGBB"`; names are the ones the generated file lists. Unknown names and malformed colours are reported and skipped.
+- Only `light` and `dark` exist; **View** and **Settings → Appearance** still switch between them.
+- The file runs in a Lua state of its own with only the base and string libraries, so it can compute colours but can't see plugins or the editor.
+- It covers the editor and window. The rendered preview is styled by CSS; use **View → Custom CSS** for that.
+
+[examples/themes.lua](examples/themes.lua) is a complete example: Solarized colours for both themes, built from one function, with in-between shades computed by a small `mix()` helper. Copy it to `%APPDATA%\markedit\themes.lua` to try it. Folders in `plugins` without an `init.lua`, like `examples`, aren't loaded as plugins.
 
 ## Customizing the menu bar
 
@@ -336,6 +354,7 @@ return {
     { "Open Plugins &Folder", "plugins.open_folder" },
     { "&Manage Plugins...", "plugins.manage" },
     { "&Customize Menus...", "plugins.customize_menus" },
+    { "Customize &Theme Colours...", "plugins.customize_theme" },
   } },
 }
 ```

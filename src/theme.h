@@ -6,36 +6,70 @@
 
 #include "settings_values.h" /* g_editorDarkMode, g_previewDarkMode */
 
-/* GitHub light/dark palette shared by every natively drawn surface (editor,
-   menus, tabs, status bar, popups, file explorer). The preview's CSS
-   (preview_shell.html, github-markdown.css, preview_fallback.c)
-   carries the same values and must be kept in step by hand. */
-#define THEME_DARK_BG      RGB(0x16, 0x1B, 0x22)
-#define THEME_DARK_FG      RGB(0xE6, 0xED, 0xF3)
-#define THEME_DARK_BORDER  RGB(0x30, 0x36, 0x3D)
-#define THEME_DARK_ACCENT  RGB(0x38, 0x8B, 0xFD)
-#define THEME_LIGHT_BG     RGB(0xFF, 0xFF, 0xFF)
-#define THEME_LIGHT_FG     RGB(0x1F, 0x23, 0x28)
-#define THEME_LIGHT_BORDER RGB(0xD0, 0xD7, 0xDE)
-#define THEME_LIGHT_ACCENT RGB(0x09, 0x69, 0xDA)
+/* The light and dark palettes shared by every natively drawn surface
+   (editor, menus, tabs, status bar, popups, file explorer). The built-in
+   values live in theme.c; a user's themes.lua can override any of them.
+   The preview's CSS (preview_shell.html, github-markdown.css,
+   preview_fallback.c) carries the built-in values too and must be kept in
+   step by hand. */
 
-#define THEME_DARK_SCROLL_THUMB        RGB(0x48, 0x4F, 0x58)
-#define THEME_DARK_SCROLL_THUMB_HOT    RGB(0x6E, 0x76, 0x81)
-#define THEME_DARK_SCROLL_THUMB_DRAG   RGB(0x8B, 0x94, 0x9E)
-#define THEME_LIGHT_SCROLL_THUMB       RGB(0xC8, 0xCD, 0xD3)
-#define THEME_LIGHT_SCROLL_THUMB_HOT   RGB(0xA8, 0xB0, 0xB9)
-#define THEME_LIGHT_SCROLL_THUMB_DRAG  RGB(0x8C, 0x95, 0x9F)
+/* Every colour the native UI draws with, by role, for one theme. Code picks
+   a field from theme_palette() rather than choosing between two literal
+   colours itself. Each field needs a row in theme.c's THEME_COLOURS, which
+   gives its themes.lua name and built-in values. */
+typedef struct ThemePalette {
+    /* Window chrome */
+    COLORREF bg, fg, border, accent;
+    COLORREF subtleBg;        /* gutters, unpressed buttons, the tab strip */
+    COLORREF pressedBg;       /* pressed buttons */
+    COLORREF highlightBg;     /* the caret line, the hot menu-bar item */
+    COLORREF selectionBg, selectionFg;
+    COLORREF disabledFg;      /* disabled debug-panel buttons */
+    COLORREF menuDisabledFg;  /* disabled menu-bar items */
+    COLORREF scrollThumb, scrollThumbHot, scrollThumbDrag;
+    COLORREF tabBg, tabSelectedBg, tabFg, tabSelectedFg;
+    COLORREF changedMarker;   /* the dot on a tab whose file changed on disk */
+    COLORREF minimapFrame;    /* the visible-region box on the minimap */
+    COLORREF previewTextFg;   /* the preview host's text before WebView2 paints */
+    /* Editor */
+    COLORREF lineNumber;
+    COLORREF faint;           /* indent guides, visible whitespace */
+    COLORREF braceBg;
+    COLORREF error;           /* unmatched braces, spelling squiggles */
+    COLORREF bookmarkFore, bookmarkBack;
+    COLORREF breakpointFore, breakpointBack;
+    COLORREF debugLineBack, debugArrowBack;
+    /* Markdown styles */
+    COLORREF heading, link, code, quote, list;
+    /* Code syntax styles, shared by every non-Markdown lexer */
+    COLORREF comment, keyword, string, number, functionName, variable, tag, attribute, operatorColour;
+} ThemePalette;
+
+/* The palette for the light (0) or dark (non-zero) theme. */
+const ThemePalette *theme_palette_for(int dark);
+/* Puts every colour back to its built-in value. */
+void theme_reset_palettes(void);
+/* Sets one colour by its themes.lua name; 0 if there is no such colour. */
+int theme_set_colour(int dark, const char *name, COLORREF colour);
+/* Reads "#RRGGBB"; 0 if `text` isn't in that form. */
+int theme_parse_colour(const char *text, COLORREF *colour);
+/* A themes.lua listing every colour with its built-in value and what it
+   paints, as a heap string (NULL when out of memory). */
+char *theme_template_lua(void);
 
 /* Editor-side chrome follows g_editorDarkMode; the preview pane host
    follows g_previewDarkMode. */
-static inline COLORREF theme_bg_color(void) { return g_editorDarkMode ? THEME_DARK_BG : THEME_LIGHT_BG; }
-static inline COLORREF theme_fg_color(void) { return g_editorDarkMode ? THEME_DARK_FG : THEME_LIGHT_FG; }
-static inline COLORREF theme_border_color(void) { return g_editorDarkMode ? THEME_DARK_BORDER : THEME_LIGHT_BORDER; }
-static inline COLORREF theme_accent_color(void) { return g_editorDarkMode ? THEME_DARK_ACCENT : THEME_LIGHT_ACCENT; }
-static inline COLORREF theme_scroll_thumb_color(void) { return g_editorDarkMode ? THEME_DARK_SCROLL_THUMB : THEME_LIGHT_SCROLL_THUMB; }
-static inline COLORREF theme_scroll_thumb_hot_color(void) { return g_editorDarkMode ? THEME_DARK_SCROLL_THUMB_HOT : THEME_LIGHT_SCROLL_THUMB_HOT; }
-static inline COLORREF theme_scroll_thumb_drag_color(void) { return g_editorDarkMode ? THEME_DARK_SCROLL_THUMB_DRAG : THEME_LIGHT_SCROLL_THUMB_DRAG; }
-static inline COLORREF preview_bg_color(void) { return g_previewDarkMode ? THEME_DARK_BG : THEME_LIGHT_BG; }
+static inline const ThemePalette *theme_palette(void) { return theme_palette_for(g_editorDarkMode); }
+static inline const ThemePalette *preview_palette(void) { return theme_palette_for(g_previewDarkMode); }
+
+static inline COLORREF theme_bg_color(void) { return theme_palette()->bg; }
+static inline COLORREF theme_fg_color(void) { return theme_palette()->fg; }
+static inline COLORREF theme_border_color(void) { return theme_palette()->border; }
+static inline COLORREF theme_accent_color(void) { return theme_palette()->accent; }
+static inline COLORREF theme_scroll_thumb_color(void) { return theme_palette()->scrollThumb; }
+static inline COLORREF theme_scroll_thumb_hot_color(void) { return theme_palette()->scrollThumbHot; }
+static inline COLORREF theme_scroll_thumb_drag_color(void) { return theme_palette()->scrollThumbDrag; }
+static inline COLORREF preview_bg_color(void) { return preview_palette()->bg; }
 
 /* Opts a control's system-drawn parts (scrollbars, tree/list chrome) into
    the explorer theme matching g_editorDarkMode. */

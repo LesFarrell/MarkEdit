@@ -481,7 +481,7 @@ static int editor_visible_range(lua_State *L) {
 static int editor_scroll_to(lua_State *L) {
     HWND hEdit = checked_editor(L);
     Sci_Position position = checked_position(L, hEdit, 1);
-    SendMessageA(hEdit, SCI_GOTOPOS, position - 1, 0);
+    SendMessageA(hEdit, SCI_GOTOPOS, position, 0);
     SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
     return 0;
 }
@@ -491,7 +491,7 @@ static int editor_find(lua_State *L) {
     size_t length;
     const char *text = luaL_checklstring(L, 1, &length);
     Sci_Position documentLength = document_length(hEdit);
-    Sci_Position start = lua_isnoneornil(L, 2) ? 0 : checked_position(L, hEdit, 2) - 1;
+    Sci_Position start = lua_isnoneornil(L, 2) ? 0 : checked_position(L, hEdit, 2);
     int flags = 0;
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "match_case"); if (lua_toboolean(L, -1)) flags |= SCFIND_MATCHCASE; lua_pop(L, 1);

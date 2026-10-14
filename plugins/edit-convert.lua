@@ -8,7 +8,7 @@ local function transform_selections(transform)
   local selections = editor.get_selections()
   local main = editor.get_main_selection()
   local replacements, changed = {}, false
-  for index, selection in ipairs(selections) do
+  for index in ipairs(selections) do
     local text = editor.get_selection(index)
     replacements[index] = transform(text)
     if replacements[index] ~= text then changed = true end
@@ -29,12 +29,33 @@ end
 local function uppercase() transform_selections(string.upper) end
 local function lowercase() transform_selections(string.lower) end
 
+-- Whether a UTF-8 character is part of a word: ASCII letters and digits, and
+-- non-ASCII letters, approximated as U+00C0 and up minus × ÷ and the
+-- punctuation and symbol blocks, so “quoted” words still start a new word.
+local function word_character(char)
+  if #char == 1 then return char:match("%w") ~= nil end
+  local code = utf8.len(char) == 1 and utf8.codepoint(char) or 0
+  return code >= 0xC0 and code ~= 0xD7 and code ~= 0xF7
+    and not (code >= 0x2000 and code <= 0x2BFF) and not (code >= 0x3000 and code <= 0x303F)
+end
+
+-- Upper-cases the first character of each word and lower-cases the rest, so
+-- "naïve café 3RD" becomes "Naïve Café 3rd".
 local function title_case_text(text)
-  return (text:gsub("()(%a)(%a*)", function(position, first, rest)
-    -- Up to four bytes before the word: one ASCII letter and a three-byte ’.
-    local before = text:sub(math.max(position - 4, 1), position - 1)
-    local continues = before:find("%a'$") or before:find("%a\u{2019}$")
-    return (continues and first:lower() or first:upper()) .. rest:lower()
+  local in_word, previous, before_previous = false, "", ""
+  return (text:gsub(utf8.charpattern, function(char)
+    local result = char
+    if word_character(char) then
+      -- A letter after a word and an apostrophe continues it, as in "don't".
+      local continues = in_word
+        or ((previous == "'" or previous == "\u{2019}") and word_character(before_previous))
+      result = continues and char:lower() or char:upper()
+      in_word = true
+    else
+      in_word = false
+    end
+    before_previous, previous = previous, char
+    return result
   end))
 end
 

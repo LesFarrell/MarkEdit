@@ -5,37 +5,126 @@
    select_theme(), toggle_word_wrap(), etc. Every control applies and
    persists immediately via whichever of those it calls, the same as
    clicking the equivalent menu item would, so there's nothing to commit or
-   revert: Close (and Esc) just dismiss the window. */
+   revert: Close (and Esc) just dismiss the window.
+
+   The controls are described by SETTINGS_CONTROLS below, one row each, and
+   named by SettingsControl. A control's window ID is derived from its name
+   (ID_SETTINGS_FIRST + name), so the creation code and WM_COMMAND handling
+   can't disagree about which number means what. */
+
+enum { ID_SETTINGS_CATEGORIES = 10, ID_SETTINGS_FIRST = 100 };
+
+typedef enum {
+    SETTINGS_APPEARANCE, SETTINGS_FONT, SETTINGS_WORD_WRAP,
+    SETTINGS_PREVIEW, SETTINGS_EDITOR, SETTINGS_COMPILER, SETTINGS_CATEGORY_COUNT
+} SettingsCategory;
+
+typedef enum {
+    SC_THEME_LIGHT, SC_THEME_DARK,
+    SC_FONT_LABEL, SC_FONT_CHOOSE,
+    SC_WORD_WRAP,
+    SC_PREVIEW_ON_LEFT, SC_PREVIEW_THEME_CAPTION, SC_PREVIEW_THEME_LIGHT, SC_PREVIEW_THEME_DARK,
+    SC_CSS_CAPTION, SC_CSS_LABEL, SC_CSS_CHOOSE, SC_CSS_CLEAR,
+    SC_SPELL_CHECK, SC_SHOW_WHITESPACE, SC_INDENT_GUIDES, SC_MINIMAP, SC_USE_SPACES,
+    SC_TAB_WIDTH_CAPTION, SC_TAB_WIDTH,
+    SC_SPELL_LANGUAGE_CAPTION, SC_SPELL_LANGUAGE_LABEL, SC_SPELL_LANGUAGE_CHOOSE,
+    SC_COMPILER_HINT,
+    SC_VCVARS_CAPTION, SC_VCVARS, SC_VCVARS_BROWSE,
+    SC_GCC_CAPTION, SC_GCC, SC_GCC_BROWSE,
+    SC_CLANG_CAPTION, SC_CLANG, SC_CLANG_BROWSE,
+    SC_ZIG_CAPTION, SC_ZIG, SC_ZIG_BROWSE,
+    SC_LUA_CAPTION, SC_LUA, SC_LUA_BROWSE,
+    SC_GDB_CAPTION, SC_GDB, SC_GDB_BROWSE,
+    SC_FLAGS_CAPTION, SC_FLAGS,
+    SC_COUNT
+} SettingsControl;
+
+typedef enum {
+    SETTINGS_TEXT,        /* a STATIC caption or value label */
+    SETTINGS_CHECK,       /* checkbox showing *setting != 0 */
+    SETTINGS_RADIO_FIRST, /* first radio button of a group */
+    SETTINGS_RADIO,       /* checked when *setting equals its value */
+    SETTINGS_BUTTON,      /* owner-drawn push button */
+    SETTINGS_PATH_EDIT,   /* text box editing *path; committed on losing focus */
+    SETTINGS_NUMBER_EDIT, /* digits-only text box */
+} SettingsControlKind;
+
+typedef struct SettingsControlSpec {
+    SettingsCategory category;
+    SettingsControlKind kind;
+    const WCHAR *text;
+    int x, y, width, height; /* relative to the panel's top-left corner */
+    const int *setting;      /* SETTINGS_CHECK / SETTINGS_RADIO* */
+    int value;               /* SETTINGS_RADIO*: the setting value that checks it */
+    WCHAR **path;            /* SETTINGS_PATH_EDIT */
+} SettingsControlSpec;
+
+/* One row per control, indexed by SettingsControl, so a new control needs a
+   name above and a row here. Browse buttons directly follow the path box
+   they fill in. */
+static const SettingsControlSpec SETTINGS_CONTROLS[SC_COUNT] = {
+    [SC_THEME_LIGHT] = { SETTINGS_APPEARANCE, SETTINGS_RADIO_FIRST, L"Light", 0, 0, 220, 22, &g_editorDarkMode, 0, NULL },
+    [SC_THEME_DARK] = { SETTINGS_APPEARANCE, SETTINGS_RADIO, L"Dark", 0, 28, 220, 22, &g_editorDarkMode, 1, NULL },
+
+    [SC_FONT_LABEL] = { SETTINGS_FONT, SETTINGS_TEXT, NULL, 0, 0, 320, 20, NULL, 0, NULL },
+    [SC_FONT_CHOOSE] = { SETTINGS_FONT, SETTINGS_BUTTON, L"Choose Font...", 0, 28, 140, 26, NULL, 0, NULL },
+
+    [SC_WORD_WRAP] = { SETTINGS_WORD_WRAP, SETTINGS_CHECK, L"Wrap long lines in the editor", 0, 0, 320, 22, &g_wordWrap, 1, NULL },
+
+    [SC_PREVIEW_ON_LEFT] = { SETTINGS_PREVIEW, SETTINGS_CHECK, L"Show preview on the left", 0, 0, 320, 22, &g_previewOnLeft, 1, NULL },
+    [SC_PREVIEW_THEME_CAPTION] = { SETTINGS_PREVIEW, SETTINGS_TEXT, L"Markdown theme:", 0, 36, 320, 20, NULL, 0, NULL },
+    [SC_PREVIEW_THEME_LIGHT] = { SETTINGS_PREVIEW, SETTINGS_RADIO_FIRST, L"GitHub Light", 0, 58, 220, 22, &g_previewDarkMode, 0, NULL },
+    [SC_PREVIEW_THEME_DARK] = { SETTINGS_PREVIEW, SETTINGS_RADIO, L"GitHub Dark", 0, 86, 220, 22, &g_previewDarkMode, 1, NULL },
+    [SC_CSS_CAPTION] = { SETTINGS_PREVIEW, SETTINGS_TEXT, L"Custom preview CSS:", 0, 122, 320, 20, NULL, 0, NULL },
+    [SC_CSS_LABEL] = { SETTINGS_PREVIEW, SETTINGS_TEXT, NULL, 0, 144, 320, 20, NULL, 0, NULL },
+    [SC_CSS_CHOOSE] = { SETTINGS_PREVIEW, SETTINGS_BUTTON, L"Choose CSS...", 0, 170, 120, 26, NULL, 0, NULL },
+    [SC_CSS_CLEAR] = { SETTINGS_PREVIEW, SETTINGS_BUTTON, L"Clear", 128, 170, 90, 26, NULL, 0, NULL },
+
+    [SC_SPELL_CHECK] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Spell check", 0, 0, 320, 22, &g_spellCheckEnabled, 1, NULL },
+    [SC_SHOW_WHITESPACE] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Show whitespace", 0, 28, 320, 22, &g_showWhitespace, 1, NULL },
+    [SC_INDENT_GUIDES] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Indent guides", 0, 56, 320, 22, &g_indentGuides, 1, NULL },
+    [SC_MINIMAP] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Minimap", 0, 84, 320, 22, &g_minimapVisible, 1, NULL },
+    [SC_USE_SPACES] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Use spaces for indentation", 0, 112, 320, 22, &g_indentUseSpaces, 1, NULL },
+    [SC_TAB_WIDTH_CAPTION] = { SETTINGS_EDITOR, SETTINGS_TEXT, L"Spaces per tab:", 0, 142, 120, 20, NULL, 0, NULL },
+    [SC_TAB_WIDTH] = { SETTINGS_EDITOR, SETTINGS_NUMBER_EDIT, NULL, 124, 140, 50, 24, NULL, 0, NULL },
+    [SC_SPELL_LANGUAGE_CAPTION] = { SETTINGS_EDITOR, SETTINGS_TEXT, L"Spell check language:", 0, 172, 200, 20, NULL, 0, NULL },
+    [SC_SPELL_LANGUAGE_LABEL] = { SETTINGS_EDITOR, SETTINGS_TEXT, NULL, 0, 194, 320, 20, NULL, 0, NULL },
+    [SC_SPELL_LANGUAGE_CHOOSE] = { SETTINGS_EDITOR, SETTINGS_BUTTON, L"Choose...", 0, 220, 120, 26, NULL, 0, NULL },
+
+    [SC_COMPILER_HINT] = { SETTINGS_COMPILER, SETTINGS_TEXT,
+        L"Optional overrides (leave blank to search PATH automatically):", 0, 0, 380, 18, NULL, 0, NULL },
+#define COMPILER_PATH_ROW(name, label, y, slot) \
+    [name##_CAPTION] = { SETTINGS_COMPILER, SETTINGS_TEXT, label, 0, (y) + 2, 90, 20, NULL, 0, NULL }, \
+    [name] = { SETTINGS_COMPILER, SETTINGS_PATH_EDIT, NULL, 96, (y), 176, 24, NULL, 0, (slot) }, \
+    [name##_BROWSE] = { SETTINGS_COMPILER, SETTINGS_BUTTON, L"Browse...", 280, (y), 90, 24, NULL, 0, NULL }
+    COMPILER_PATH_ROW(SC_VCVARS, L"MSVC vcvars:", 22, &g_vcvarsallOverridePath),
+    COMPILER_PATH_ROW(SC_GCC, L"GCC/G++:", 56, &g_gccBinOverride),
+    COMPILER_PATH_ROW(SC_CLANG, L"Clang:", 90, &g_clangBinOverride),
+    COMPILER_PATH_ROW(SC_ZIG, L"Zig:", 124, &g_zigBinOverride),
+    COMPILER_PATH_ROW(SC_LUA, L"Lua:", 158, &g_luaBinOverride),
+    COMPILER_PATH_ROW(SC_GDB, L"GDB:", 192, &g_gdbBinOverride),
+#undef COMPILER_PATH_ROW
+    [SC_FLAGS_CAPTION] = { SETTINGS_COMPILER, SETTINGS_TEXT,
+        L"Extra flags passed to Run/Debug C/C++ builds:", 0, 228, 380, 20, NULL, 0, NULL },
+    [SC_FLAGS] = { SETTINGS_COMPILER, SETTINGS_PATH_EDIT, NULL, 0, 252, 380, 24, NULL, 0, &g_compilerExtraFlags },
+};
+
 typedef struct SettingsDialogState {
     HWND categoryList;
     int activeCategory;
-    HWND themeLightRadio, themeDarkRadio;
-    HWND fontLabel, fontChooseButton;
-    HWND wordWrapCheck;
-    HWND previewOnLeftCheck, customCssCaption, customCssLabel, customCssChooseButton, customCssClearButton;
-    HWND previewThemeCaption, previewThemeLightRadio, previewThemeDarkRadio;
-    HWND spellCheckCheck, showWhitespaceCheck, indentGuidesCheck, minimapCheck;
-    HWND indentUseSpacesCheck, tabWidthCaption, tabWidthEdit;
-    HWND spellLanguageCaption, spellLanguageLabel, spellLanguageChooseButton;
-    HWND compilerPathsHintCaption;
-    HWND vcvarsallCaption, vcvarsallEdit, vcvarsallBrowseButton;
-    HWND gccCaption, gccEdit, gccBrowseButton;
-    HWND clangCaption, clangEdit, clangBrowseButton;
-    HWND zigCaption, zigEdit, zigBrowseButton;
-    HWND luaCaption, luaEdit, luaBrowseButton;
-    HWND gdbCaption, gdbEdit, gdbBrowseButton;
-    HWND compilerFlagsCaption, compilerFlagsEdit;
+    HWND controls[SC_COUNT];
 } SettingsDialogState;
 
 static void update_settings_font_label(SettingsDialogState *state) {
     WCHAR text[MAX_FONT_FACE_NAME + 32];
     swprintf(text, sizeof(text) / sizeof(text[0]), L"%ls, %dpt", g_fontFaceName, g_fontPointSize);
-    SetWindowTextW(state->fontLabel, text);
+    SetWindowTextW(state->controls[SC_FONT_LABEL], text);
 }
 
 static void update_settings_css_label(SettingsDialogState *state) {
-    SetWindowTextW(state->customCssLabel, g_customCssPath && g_customCssPath[0] ? g_customCssPath : L"(none)");
-    EnableWindow(state->customCssClearButton, g_customCssPath && g_customCssPath[0]);
+    SetWindowTextW(state->controls[SC_CSS_LABEL],
+                   g_customCssPath && g_customCssPath[0] ? g_customCssPath : L"(none)");
+    EnableWindow(state->controls[SC_CSS_CLEAR], g_customCssPath && g_customCssPath[0]);
 }
 
 /* Mirrors choose_spell_language()'s own label building (LOCALE_SLOCALIZEDDISPLAYNAME
@@ -45,7 +134,13 @@ static void update_settings_spell_label(SettingsDialogState *state) {
     WCHAR displayName[LOCALE_NAME_MAX_LENGTH] = L"";
     if (g_spellLanguage[0])
         GetLocaleInfoEx(g_spellLanguage, LOCALE_SLOCALIZEDDISPLAYNAME, displayName, LOCALE_NAME_MAX_LENGTH);
-    SetWindowTextW(state->spellLanguageLabel, displayName[0] ? displayName : g_spellLanguage);
+    SetWindowTextW(state->controls[SC_SPELL_LANGUAGE_LABEL], displayName[0] ? displayName : g_spellLanguage);
+}
+
+static void update_settings_tab_width(SettingsDialogState *state) {
+    WCHAR text[16];
+    swprintf(text, sizeof(text) / sizeof(text[0]), L"%d", g_tabWidth);
+    SetWindowTextW(state->controls[SC_TAB_WIDTH], text);
 }
 
 static int is_flag_edit_whitespace(WCHAR ch) {
@@ -87,7 +182,7 @@ static void set_compiler_string_setting(WCHAR **slot, const WCHAR *text) {
    than a folder to search, so this picks a file the same way
    do_choose_custom_css() does instead of reusing choose_workspace_folder(). */
 static void choose_vcvarsall_path(HWND editControl) {
-    DWORD cap = 32768;
+    DWORD cap = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return;
     if (g_vcvarsallOverridePath) wcsncpy(path, g_vcvarsallOverridePath, cap - 1);
@@ -120,86 +215,11 @@ static void choose_compiler_folder(WCHAR **slot, HWND editControl) {
     SetWindowTextW(editControl, *slot);
 }
 
+/* Shows the active category's controls and hides every other one. */
 static void update_settings_category(SettingsDialogState *state) {
-    HWND all[] = {
-        state->themeLightRadio, state->themeDarkRadio,
-        state->fontLabel, state->fontChooseButton,
-        state->wordWrapCheck,
-        state->previewOnLeftCheck, state->customCssCaption, state->customCssLabel,
-        state->customCssChooseButton, state->customCssClearButton,
-        state->previewThemeCaption, state->previewThemeLightRadio, state->previewThemeDarkRadio,
-        state->spellCheckCheck, state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
-        state->indentUseSpacesCheck, state->tabWidthCaption, state->tabWidthEdit,
-        state->spellLanguageCaption, state->spellLanguageLabel, state->spellLanguageChooseButton,
-        state->compilerPathsHintCaption,
-        state->vcvarsallCaption, state->vcvarsallEdit, state->vcvarsallBrowseButton,
-        state->gccCaption, state->gccEdit, state->gccBrowseButton,
-        state->clangCaption, state->clangEdit, state->clangBrowseButton,
-        state->zigCaption, state->zigEdit, state->zigBrowseButton,
-        state->luaCaption, state->luaEdit, state->luaBrowseButton,
-        state->gdbCaption, state->gdbEdit, state->gdbBrowseButton,
-        state->compilerFlagsCaption, state->compilerFlagsEdit,
-    };
-    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
-        if (all[i]) ShowWindow(all[i], SW_HIDE);
-    switch (state->activeCategory) {
-        case 0:
-            ShowWindow(state->themeLightRadio, SW_SHOW);
-            ShowWindow(state->themeDarkRadio, SW_SHOW);
-            break;
-        case 1:
-            ShowWindow(state->fontLabel, SW_SHOW);
-            ShowWindow(state->fontChooseButton, SW_SHOW);
-            break;
-        case 2:
-            ShowWindow(state->wordWrapCheck, SW_SHOW);
-            break;
-        case 3:
-            ShowWindow(state->previewOnLeftCheck, SW_SHOW);
-            ShowWindow(state->customCssCaption, SW_SHOW);
-            ShowWindow(state->customCssLabel, SW_SHOW);
-            ShowWindow(state->customCssChooseButton, SW_SHOW);
-            ShowWindow(state->customCssClearButton, SW_SHOW);
-            ShowWindow(state->previewThemeCaption, SW_SHOW);
-            ShowWindow(state->previewThemeLightRadio, SW_SHOW);
-            ShowWindow(state->previewThemeDarkRadio, SW_SHOW);
-            break;
-        case 4:
-            ShowWindow(state->spellCheckCheck, SW_SHOW);
-            ShowWindow(state->showWhitespaceCheck, SW_SHOW);
-            ShowWindow(state->indentGuidesCheck, SW_SHOW);
-            ShowWindow(state->minimapCheck, SW_SHOW);
-            ShowWindow(state->indentUseSpacesCheck, SW_SHOW);
-            ShowWindow(state->tabWidthCaption, SW_SHOW);
-            ShowWindow(state->tabWidthEdit, SW_SHOW);
-            ShowWindow(state->spellLanguageCaption, SW_SHOW);
-            ShowWindow(state->spellLanguageLabel, SW_SHOW);
-            ShowWindow(state->spellLanguageChooseButton, SW_SHOW);
-            break;
-        case 5:
-            ShowWindow(state->compilerPathsHintCaption, SW_SHOW);
-            ShowWindow(state->vcvarsallCaption, SW_SHOW);
-            ShowWindow(state->vcvarsallEdit, SW_SHOW);
-            ShowWindow(state->vcvarsallBrowseButton, SW_SHOW);
-            ShowWindow(state->gccCaption, SW_SHOW);
-            ShowWindow(state->gccEdit, SW_SHOW);
-            ShowWindow(state->gccBrowseButton, SW_SHOW);
-            ShowWindow(state->clangCaption, SW_SHOW);
-            ShowWindow(state->clangEdit, SW_SHOW);
-            ShowWindow(state->clangBrowseButton, SW_SHOW);
-            ShowWindow(state->zigCaption, SW_SHOW);
-            ShowWindow(state->zigEdit, SW_SHOW);
-            ShowWindow(state->zigBrowseButton, SW_SHOW);
-            ShowWindow(state->luaCaption, SW_SHOW);
-            ShowWindow(state->luaEdit, SW_SHOW);
-            ShowWindow(state->luaBrowseButton, SW_SHOW);
-            ShowWindow(state->gdbCaption, SW_SHOW);
-            ShowWindow(state->gdbEdit, SW_SHOW);
-            ShowWindow(state->gdbBrowseButton, SW_SHOW);
-            ShowWindow(state->compilerFlagsCaption, SW_SHOW);
-            ShowWindow(state->compilerFlagsEdit, SW_SHOW);
-            break;
-    }
+    for (int i = 0; i < SC_COUNT; i++)
+        ShowWindow(state->controls[i],
+                   (int)SETTINGS_CONTROLS[i].category == state->activeCategory ? SW_SHOW : SW_HIDE);
 }
 
 /* The shared g_popupBkBrush is normally created once when a popup dialog
@@ -212,174 +232,55 @@ static void update_settings_category(SettingsDialogState *state) {
 static void refresh_settings_dialog_theme(HWND hwnd, SettingsDialogState *state) {
     popup_dialog_theme_created(hwnd);
     apply_explorer_theme(state->categoryList);
-    /* Checkboxes/radios stay unthemed (see the WM_CREATE block below for why);
-       nothing to redo here since that opt-out doesn't depend on light/dark. */
+    /* Checkboxes/radios stay unthemed (see create_settings_control() for
+       why); nothing to redo here since that opt-out doesn't depend on
+       light/dark. */
     RedrawWindow(hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 static void create_settings_category_list(HWND hwnd, SettingsDialogState *state, HINSTANCE instance) {
-    const WCHAR *categories[] = {
+    static const WCHAR *const categories[SETTINGS_CATEGORY_COUNT] = {
         L"Appearance", L"Font", L"Word Wrap", L"Preview", L"Editor", L"Compiler"
     };
     state->categoryList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
         LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
-        12, 12, 140, 300, hwnd, (HMENU)10, instance, NULL);
-    for (size_t i = 0; i < sizeof(categories) / sizeof(categories[0]); i++)
+        12, 12, 140, 300, hwnd, (HMENU)ID_SETTINGS_CATEGORIES, instance, NULL);
+    for (int i = 0; i < SETTINGS_CATEGORY_COUNT; i++)
         SendMessageW(state->categoryList, LB_ADDSTRING, 0, (LPARAM)categories[i]);
     apply_explorer_theme(state->categoryList);
 }
 
-static void create_general_settings_controls(HWND hwnd, SettingsDialogState *state,
-                                             HINSTANCE instance, int x, int y) {
-    state->themeLightRadio = CreateWindowExW(0, L"BUTTON", L"Light",
-        WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-        x, y, 220, 22, hwnd, (HMENU)20, instance, NULL);
-    state->themeDarkRadio = CreateWindowExW(0, L"BUTTON", L"Dark",
-        WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-        x, y + 28, 220, 22, hwnd, (HMENU)21, instance, NULL);
-    SendMessageW(g_editorDarkMode ? state->themeDarkRadio : state->themeLightRadio,
-                 BM_SETCHECK, BST_CHECKED, 0);
-
-    state->fontLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD,
-        x, y, 320, 20, hwnd, NULL, instance, NULL);
-    state->fontChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose Font...",
-        WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
-        x, y + 28, 140, 26, hwnd, (HMENU)30, instance, NULL);
-    state->wordWrapCheck = CreateWindowExW(0, L"BUTTON", L"Wrap long lines in the editor",
-        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-        x, y, 320, 22, hwnd, (HMENU)40, instance, NULL);
-    SendMessageW(state->wordWrapCheck, BM_SETCHECK,
-                 g_wordWrap ? BST_CHECKED : BST_UNCHECKED, 0);
-}
-
-static void create_preview_settings_controls(HWND hwnd, SettingsDialogState *state,
-                                             HINSTANCE instance, int x, int y) {
-    state->previewOnLeftCheck = CreateWindowExW(0, L"BUTTON", L"Show preview on the left",
-        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-        x, y, 320, 22, hwnd, (HMENU)50, instance, NULL);
-    SendMessageW(state->previewOnLeftCheck, BM_SETCHECK,
-                 g_previewOnLeft ? BST_CHECKED : BST_UNCHECKED, 0);
-    state->previewThemeCaption = CreateWindowExW(0, L"STATIC", L"Markdown theme:", WS_CHILD,
-        x, y + 36, 320, 20, hwnd, NULL, instance, NULL);
-    state->previewThemeLightRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Light",
-        WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-        x, y + 58, 220, 22, hwnd, (HMENU)53, instance, NULL);
-    state->previewThemeDarkRadio = CreateWindowExW(0, L"BUTTON", L"GitHub Dark",
-        WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-        x, y + 86, 220, 22, hwnd, (HMENU)54, instance, NULL);
-    SendMessageW(g_previewDarkMode ? state->previewThemeDarkRadio : state->previewThemeLightRadio,
-                 BM_SETCHECK, BST_CHECKED, 0);
-    state->customCssCaption = CreateWindowExW(0, L"STATIC", L"Custom preview CSS:", WS_CHILD,
-        x, y + 122, 320, 20, hwnd, NULL, instance, NULL);
-    state->customCssLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD,
-        x, y + 144, 320, 20, hwnd, NULL, instance, NULL);
-    state->customCssChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose CSS...",
-        WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
-        x, y + 170, 120, 26, hwnd, (HMENU)51, instance, NULL);
-    state->customCssClearButton = CreateWindowExW(0, L"BUTTON", L"Clear",
-        WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
-        x + 128, y + 170, 90, 26, hwnd, (HMENU)52, instance, NULL);
-}
-
-static void create_editor_settings_controls(HWND hwnd, SettingsDialogState *state,
-                                            HINSTANCE instance, int x, int y) {
-    state->spellCheckCheck = CreateWindowExW(0, L"BUTTON", L"Spell check",
-        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, x, y, 320, 22, hwnd, (HMENU)60, instance, NULL);
-    SendMessageW(state->spellCheckCheck, BM_SETCHECK,
-                 g_spellCheckEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
-    EnableWindow(state->spellCheckCheck, g_spellChecker != NULL);
-    state->showWhitespaceCheck = CreateWindowExW(0, L"BUTTON", L"Show whitespace",
-        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, x, y + 28, 320, 22, hwnd, (HMENU)61, instance, NULL);
-    SendMessageW(state->showWhitespaceCheck, BM_SETCHECK,
-                 g_showWhitespace ? BST_CHECKED : BST_UNCHECKED, 0);
-    state->indentGuidesCheck = CreateWindowExW(0, L"BUTTON", L"Indent guides",
-        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, x, y + 56, 320, 22, hwnd, (HMENU)62, instance, NULL);
-    SendMessageW(state->indentGuidesCheck, BM_SETCHECK,
-                 g_indentGuides ? BST_CHECKED : BST_UNCHECKED, 0);
-    state->minimapCheck = CreateWindowExW(0, L"BUTTON", L"Minimap",
-        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, x, y + 84, 320, 22, hwnd, (HMENU)63, instance, NULL);
-    SendMessageW(state->minimapCheck, BM_SETCHECK,
-                 g_minimapVisible ? BST_CHECKED : BST_UNCHECKED, 0);
-    state->indentUseSpacesCheck = CreateWindowExW(0, L"BUTTON", L"Use spaces for indentation",
-        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, x, y + 112, 320, 22, hwnd, (HMENU)64, instance, NULL);
-    SendMessageW(state->indentUseSpacesCheck, BM_SETCHECK,
-                 g_indentUseSpaces ? BST_CHECKED : BST_UNCHECKED, 0);
-    state->tabWidthCaption = CreateWindowExW(0, L"STATIC", L"Spaces per tab:", WS_CHILD,
-        x, y + 142, 120, 20, hwnd, NULL, instance, NULL);
-    state->tabWidthEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
-        x + 124, y + 140, 50, 24, hwnd, (HMENU)65, instance, NULL);
-    WCHAR tabWidthText[16];
-    swprintf(tabWidthText, sizeof(tabWidthText) / sizeof(tabWidthText[0]), L"%d", g_tabWidth);
-    SetWindowTextW(state->tabWidthEdit, tabWidthText);
-    state->spellLanguageCaption = CreateWindowExW(0, L"STATIC", L"Spell check language:", WS_CHILD,
-        x, y + 172, 200, 20, hwnd, NULL, instance, NULL);
-    state->spellLanguageLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD,
-        x, y + 194, 320, 20, hwnd, NULL, instance, NULL);
-    state->spellLanguageChooseButton = CreateWindowExW(0, L"BUTTON", L"Choose...",
-        WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
-        x, y + 220, 120, 26, hwnd, (HMENU)66, instance, NULL);
-    EnableWindow(state->spellLanguageChooseButton, g_spellChecker != NULL);
-    update_settings_spell_label(state);
-}
-
-static void create_compiler_path_row(HWND hwnd, HINSTANCE instance, int x, int y,
-                                     const WCHAR *label, WORD editId, WORD browseId,
-                                     const WCHAR *value, HWND *caption, HWND *edit, HWND *button) {
-    *caption = CreateWindowExW(0, L"STATIC", label, WS_CHILD,
-        x, y + 2, 90, 20, hwnd, NULL, instance, NULL);
-    *edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-        x + 96, y, 176, 24, hwnd, (HMENU)(UINT_PTR)editId, instance, NULL);
-    *button = CreateWindowExW(0, L"BUTTON", L"Browse...",
-        WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
-        x + 280, y, 90, 24, hwnd, (HMENU)(UINT_PTR)browseId, instance, NULL);
-    SetWindowTextW(*edit, value ? value : L"");
-}
-
-static void create_compiler_settings_controls(HWND hwnd, SettingsDialogState *state,
-                                              HINSTANCE instance, int x, int y) {
-    state->compilerPathsHintCaption = CreateWindowExW(0, L"STATIC",
-        L"Optional overrides (leave blank to search PATH automatically):", WS_CHILD,
-        x, y, 380, 18, hwnd, NULL, instance, NULL);
-    create_compiler_path_row(hwnd, instance, x, y + 22, L"MSVC vcvars:", 71, 72,
-        g_vcvarsallOverridePath, &state->vcvarsallCaption, &state->vcvarsallEdit, &state->vcvarsallBrowseButton);
-    create_compiler_path_row(hwnd, instance, x, y + 56, L"GCC/G++:", 73, 74,
-        g_gccBinOverride, &state->gccCaption, &state->gccEdit, &state->gccBrowseButton);
-    create_compiler_path_row(hwnd, instance, x, y + 90, L"Clang:", 75, 76,
-        g_clangBinOverride, &state->clangCaption, &state->clangEdit, &state->clangBrowseButton);
-    create_compiler_path_row(hwnd, instance, x, y + 124, L"Zig:", 77, 78,
-        g_zigBinOverride, &state->zigCaption, &state->zigEdit, &state->zigBrowseButton);
-    create_compiler_path_row(hwnd, instance, x, y + 158, L"Lua:", 79, 80,
-        g_luaBinOverride, &state->luaCaption, &state->luaEdit, &state->luaBrowseButton);
-    create_compiler_path_row(hwnd, instance, x, y + 192, L"GDB:", 81, 82,
-        g_gdbBinOverride, &state->gdbCaption, &state->gdbEdit, &state->gdbBrowseButton);
-    state->compilerFlagsCaption = CreateWindowExW(0, L"STATIC",
-        L"Extra flags passed to Run/Debug C/C++ builds:", WS_CHILD,
-        x, y + 228, 380, 20, hwnd, NULL, instance, NULL);
-    state->compilerFlagsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-        x, y + 252, 380, 24, hwnd, (HMENU)70, instance, NULL);
-    SetWindowTextW(state->compilerFlagsEdit, g_compilerExtraFlags ? g_compilerExtraFlags : L"");
-}
-
-static void finish_settings_dialog_setup(HWND hwnd, SettingsDialogState *state, HINSTANCE instance) {
-    HWND checkboxes[] = { state->wordWrapCheck, state->previewOnLeftCheck, state->spellCheckCheck,
-                          state->showWhitespaceCheck, state->indentGuidesCheck, state->minimapCheck,
-                          state->indentUseSpacesCheck, state->themeLightRadio, state->themeDarkRadio,
-                          state->previewThemeLightRadio, state->previewThemeDarkRadio };
-    for (size_t i = 0; i < sizeof(checkboxes) / sizeof(checkboxes[0]); i++)
-        SetWindowTheme(checkboxes[i], L"", L"");
-    CreateWindowExW(0, L"BUTTON", L"Close",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
-        496, 330, 78, 26, hwnd, (HMENU)IDCANCEL, instance, NULL);
-    update_settings_font_label(state);
-    update_settings_css_label(state);
-    SendMessageW(state->categoryList, LB_SETCURSEL, 0, 0);
-    update_settings_category(state);
-    SetFocus(state->categoryList);
-    popup_dialog_theme_opened(hwnd);
+/* Creates one control from its SETTINGS_CONTROLS row, positioned relative
+   to the panel at (panelX, panelY), and shows the setting it reflects. */
+static HWND create_settings_control(HWND hwnd, HINSTANCE instance, SettingsControl control,
+                                    int panelX, int panelY) {
+    const SettingsControlSpec *spec = &SETTINGS_CONTROLS[control];
+    const WCHAR *windowClass = L"BUTTON";
+    DWORD style = WS_CHILD | WS_TABSTOP, exStyle = 0;
+    switch (spec->kind) {
+        case SETTINGS_TEXT: windowClass = L"STATIC"; style = WS_CHILD; break;
+        case SETTINGS_CHECK: style |= BS_AUTOCHECKBOX; break;
+        case SETTINGS_RADIO_FIRST: style |= WS_GROUP | BS_AUTORADIOBUTTON; break;
+        case SETTINGS_RADIO: style |= BS_AUTORADIOBUTTON; break;
+        case SETTINGS_BUTTON: style |= BS_OWNERDRAW; break;
+        case SETTINGS_NUMBER_EDIT: style |= ES_NUMBER; /* fall through */
+        case SETTINGS_PATH_EDIT:
+            windowClass = L"EDIT"; exStyle = WS_EX_CLIENTEDGE; style |= ES_AUTOHSCROLL; break;
+    }
+    HMENU id = spec->kind == SETTINGS_TEXT ? NULL : (HMENU)(UINT_PTR)(ID_SETTINGS_FIRST + control);
+    HWND window = CreateWindowExW(exStyle, windowClass, spec->text ? spec->text : L"", style,
+        panelX + spec->x, panelY + spec->y, spec->width, spec->height, hwnd, id, instance, NULL);
+    if (spec->setting) {
+        int on = (*spec->setting != 0) == (spec->value != 0);
+        SendMessageW(window, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+        /* The visual style draws checkbox and radio labels in the system
+           text colour, unreadable on the dark theme's background; unthemed,
+           they take the colour WM_CTLCOLORSTATIC/BTN gives them. */
+        SetWindowTheme(window, L"", L"");
+    }
+    if (spec->path) SetWindowTextW(window, *spec->path ? *spec->path : L"");
+    return window;
 }
 
 static void initialize_settings_dialog(HWND hwnd, SettingsDialogState *state) {
@@ -387,84 +288,84 @@ static void initialize_settings_dialog(HWND hwnd, SettingsDialogState *state) {
     const int panelX = 168, panelY = 16;
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
     create_settings_category_list(hwnd, state, instance);
-    create_general_settings_controls(hwnd, state, instance, panelX, panelY);
-    create_preview_settings_controls(hwnd, state, instance, panelX, panelY);
-    create_editor_settings_controls(hwnd, state, instance, panelX, panelY);
-    create_compiler_settings_controls(hwnd, state, instance, panelX, panelY);
-    finish_settings_dialog_setup(hwnd, state, instance);
+    for (int i = 0; i < SC_COUNT; i++)
+        state->controls[i] = create_settings_control(hwnd, instance, (SettingsControl)i, panelX, panelY);
+    EnableWindow(state->controls[SC_SPELL_CHECK], g_spellChecker != NULL);
+    EnableWindow(state->controls[SC_SPELL_LANGUAGE_CHOOSE], g_spellChecker != NULL);
+    CreateWindowExW(0, L"BUTTON", L"Close",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+        496, 330, 78, 26, hwnd, (HMENU)IDCANCEL, instance, NULL);
+    update_settings_font_label(state);
+    update_settings_css_label(state);
+    update_settings_spell_label(state);
+    update_settings_tab_width(state);
+    SendMessageW(state->categoryList, LB_SETCURSEL, 0, 0);
+    update_settings_category(state);
+    SetFocus(state->categoryList);
+    popup_dialog_theme_opened(hwnd);
 }
 
-static void commit_tab_width(SettingsDialogState *state) {
-    WCHAR text[16];
-    GetWindowTextW(state->tabWidthEdit, text, sizeof(text) / sizeof(text[0]));
-    set_tab_width((int)wcstol(text, NULL, 10));
-    swprintf(text, sizeof(text) / sizeof(text[0]), L"%d", g_tabWidth);
-    SetWindowTextW(state->tabWidthEdit, text);
-}
-
-static int commit_compiler_setting(SettingsDialogState *state, WORD controlId) {
-    struct CompilerField { WORD id; HWND edit; WCHAR **setting; } fields[] = {
-        { 70, state->compilerFlagsEdit, &g_compilerExtraFlags },
-        { 71, state->vcvarsallEdit, &g_vcvarsallOverridePath },
-        { 73, state->gccEdit, &g_gccBinOverride },
-        { 75, state->clangEdit, &g_clangBinOverride },
-        { 77, state->zigEdit, &g_zigBinOverride },
-        { 79, state->luaEdit, &g_luaBinOverride },
-        { 81, state->gdbEdit, &g_gdbBinOverride },
-    };
-    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
-        if (controlId != fields[i].id) continue;
-        WCHAR text[1024];
-        GetWindowTextW(fields[i].edit, text, sizeof(text) / sizeof(text[0]));
-        set_compiler_string_setting(fields[i].setting, text);
-        SetWindowTextW(fields[i].edit, *fields[i].setting ? *fields[i].setting : L"");
-        return 1;
+/* An edit box lost focus: store what it now says. */
+static void commit_settings_edit(SettingsDialogState *state, SettingsControl control) {
+    HWND edit = state->controls[control];
+    if (control == SC_TAB_WIDTH) {
+        WCHAR text[16];
+        GetWindowTextW(edit, text, sizeof(text) / sizeof(text[0]));
+        set_tab_width((int)wcstol(text, NULL, 10));
+        update_settings_tab_width(state);
+        return;
     }
-    return 0;
+    WCHAR **slot = SETTINGS_CONTROLS[control].path;
+    if (!slot) return;
+    WCHAR text[1024];
+    GetWindowTextW(edit, text, sizeof(text) / sizeof(text[0]));
+    set_compiler_string_setting(slot, text);
+    SetWindowTextW(edit, *slot ? *slot : L"");
 }
 
-static void handle_settings_button(HWND hwnd, SettingsDialogState *state, WORD controlId) {
-    switch (controlId) {
-        case 20: select_theme(g_hMainWnd, 0); refresh_settings_dialog_theme(hwnd, state); break;
-        case 21: select_theme(g_hMainWnd, 1); refresh_settings_dialog_theme(hwnd, state); break;
-        case 30: do_choose_font(); update_settings_font_label(state); break;
-        case 40: toggle_word_wrap(g_hMainWnd); break;
-        case 50: toggle_panel_sides(g_hMainWnd); break;
-        case 51: do_choose_custom_css(); update_settings_css_label(state); break;
-        case 52: clear_custom_css(); update_settings_css_label(state); break;
-        case 53: select_preview_theme(g_hMainWnd, 0); break;
-        case 54: select_preview_theme(g_hMainWnd, 1); break;
-        case 60: toggle_spell_check(g_hMainWnd); break;
-        case 61: toggle_show_whitespace(g_hMainWnd); break;
-        case 62: toggle_indent_guides(g_hMainWnd); break;
-        case 63: toggle_minimap(g_hMainWnd); break;
-        case 64: toggle_indent_use_spaces(g_hMainWnd); break;
-        case 66: choose_spell_language(); update_settings_spell_label(state); break;
-        case 72: choose_vcvarsall_path(state->vcvarsallEdit); break;
-        case 74: choose_compiler_folder(&g_gccBinOverride, state->gccEdit); break;
-        case 76: choose_compiler_folder(&g_clangBinOverride, state->clangEdit); break;
-        case 78: choose_compiler_folder(&g_zigBinOverride, state->zigEdit); break;
-        case 80: choose_compiler_folder(&g_luaBinOverride, state->luaEdit); break;
-        case 82: choose_compiler_folder(&g_gdbBinOverride, state->gdbEdit); break;
-        case IDCANCEL: DestroyWindow(hwnd); break;
+static void handle_settings_button(HWND hwnd, SettingsDialogState *state, SettingsControl control) {
+    switch (control) {
+        case SC_THEME_LIGHT: select_theme(g_hMainWnd, 0); refresh_settings_dialog_theme(hwnd, state); break;
+        case SC_THEME_DARK: select_theme(g_hMainWnd, 1); refresh_settings_dialog_theme(hwnd, state); break;
+        case SC_FONT_CHOOSE: do_choose_font(); update_settings_font_label(state); break;
+        case SC_WORD_WRAP: toggle_word_wrap(g_hMainWnd); break;
+        case SC_PREVIEW_ON_LEFT: toggle_panel_sides(g_hMainWnd); break;
+        case SC_CSS_CHOOSE: do_choose_custom_css(); update_settings_css_label(state); break;
+        case SC_CSS_CLEAR: clear_custom_css(); update_settings_css_label(state); break;
+        case SC_PREVIEW_THEME_LIGHT: select_preview_theme(g_hMainWnd, 0); break;
+        case SC_PREVIEW_THEME_DARK: select_preview_theme(g_hMainWnd, 1); break;
+        case SC_SPELL_CHECK: toggle_spell_check(g_hMainWnd); break;
+        case SC_SHOW_WHITESPACE: toggle_show_whitespace(g_hMainWnd); break;
+        case SC_INDENT_GUIDES: toggle_indent_guides(g_hMainWnd); break;
+        case SC_MINIMAP: toggle_minimap(g_hMainWnd); break;
+        case SC_USE_SPACES: toggle_indent_use_spaces(g_hMainWnd); break;
+        case SC_SPELL_LANGUAGE_CHOOSE: choose_spell_language(); update_settings_spell_label(state); break;
+        case SC_VCVARS_BROWSE: choose_vcvarsall_path(state->controls[SC_VCVARS]); break;
+        case SC_GCC_BROWSE: case SC_CLANG_BROWSE: case SC_ZIG_BROWSE:
+        case SC_LUA_BROWSE: case SC_GDB_BROWSE:
+            /* Each Browse button directly follows the path box it fills in. */
+            choose_compiler_folder(SETTINGS_CONTROLS[control - 1].path, state->controls[control - 1]);
+            break;
+        default: break;
     }
 }
 
 static void handle_settings_command(HWND hwnd, SettingsDialogState *state, WPARAM wParam) {
     WORD controlId = LOWORD(wParam);
     WORD event = HIWORD(wParam);
-    if (controlId == 10 && event == LBN_SELCHANGE) {
+    if (controlId == ID_SETTINGS_CATEGORIES) {
+        if (event != LBN_SELCHANGE) return;
         int selection = (int)SendMessageW(state->categoryList, LB_GETCURSEL, 0, 0);
         if (selection != LB_ERR) {
             state->activeCategory = selection;
             update_settings_category(state);
         }
-    } else if (controlId == 65 && event == EN_KILLFOCUS) {
-        commit_tab_width(state);
-    } else if (event == EN_KILLFOCUS) {
-        commit_compiler_setting(state, controlId);
-    } else if (event == BN_CLICKED) {
-        handle_settings_button(hwnd, state, controlId);
+    } else if (controlId == IDCANCEL) {
+        DestroyWindow(hwnd);
+    } else if (controlId >= ID_SETTINGS_FIRST && controlId < ID_SETTINGS_FIRST + SC_COUNT) {
+        SettingsControl control = (SettingsControl)(controlId - ID_SETTINGS_FIRST);
+        if (event == EN_KILLFOCUS) commit_settings_edit(state, control);
+        else if (event == BN_CLICKED) handle_settings_button(hwnd, state, control);
     }
 }
 
@@ -510,17 +411,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 }
 
 static void show_settings_dialog(void) {
-    static int registered = 0;
-    if (!registered) {
-        WNDCLASSW wc = {0};
-        wc.lpfnWndProc = SettingsWndProc;
-        wc.hInstance = GetModuleHandleW(NULL);
-        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"MarkEditSettingsDialog";
-        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
-        registered = 1;
-    }
+    if (!register_popup_class(L"MarkEditSettingsDialog", SettingsWndProc)) return;
     SettingsDialogState state = {0};
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditSettingsDialog", L"Settings",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,

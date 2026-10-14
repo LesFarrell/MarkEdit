@@ -1,3 +1,54 @@
+/* Some commands briefly point g_hEdit at other tabs' documents to read or
+   change them (recovery snapshots, breakpoints, execution markers, link
+   rewrites). SCI_SETDOCPOINTER resets the view's selection and scroll
+   position, so these bracket that work and put the active tab's view back
+   afterwards. */
+typedef struct BackgroundDocumentAccess {
+    sptr_t document;
+    Sci_Position caret;
+    Sci_Position anchor;
+    Sci_Position firstVisibleLine;
+    int xOffset;
+    int oldSwitching;
+} BackgroundDocumentAccess;
+
+static void begin_background_document_access(BackgroundDocumentAccess *access) {
+    access->document = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    access->caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+    access->anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
+    access->firstVisibleLine = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    access->xOffset = (int)SendMessageA(g_hEdit, SCI_GETXOFFSET, 0, 0);
+    access->oldSwitching = g_documentStore.switching;
+    g_documentStore.switching = 1;
+}
+
+static void end_background_document_access(const BackgroundDocumentAccess *access) {
+    if (access->document &&
+        (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0) != access->document) {
+        SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)access->document);
+    }
+    Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position caret = access->caret > length ? length : access->caret;
+    Sci_Position anchor = access->anchor > length ? length : access->anchor;
+    SendMessageA(g_hEdit, SCI_SETSEL, (WPARAM)anchor, (LPARAM)caret);
+    SendMessageA(g_hEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)access->firstVisibleLine, 0);
+    SendMessageA(g_hEdit, SCI_SETXOFFSET, (WPARAM)access->xOffset, 0);
+    g_documentStore.switching = access->oldSwitching;
+}
+
+static char *get_document_text(int index, Sci_Position *outLength) {
+    if (!g_hEdit || index < 0 || index >= g_documentStore.count) return NULL;
+    sptr_t current = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
+    if (current == g_documentStore.documents[index].sciDocument) return get_edit_text(g_hEdit, outLength);
+    BackgroundDocumentAccess access;
+    begin_background_document_access(&access);
+    SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[index].sciDocument);
+    char *text = get_edit_text(g_hEdit, outLength);
+    end_background_document_access(&access);
+    return text;
+}
+
+
 /* ================= rest of the app (menus, file I/O, find/replace, font) ================= */
 
 static const WCHAR *document_short_name(const Document *doc) {
@@ -220,6 +271,7 @@ typedef struct SciLoaderVtbl {
 struct SciLoader { const SciLoaderVtbl *lpVtbl; };
 
 #define LARGE_FILE_READ_CHUNK (4 * 1024 * 1024)
+#define ORDINARY_FILE_READ_CHUNK (1024 * 1024)
 
 /* Streams `file` into a new large-file document (see LARGE_FILE_FEATURES)
    through SCI_CREATELOADER, so the text is only ever held once - by
@@ -309,172 +361,194 @@ static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEnc
     return result;
 }
 
+/* Why a file didn't load, for the message load_file_as() shows. */
+typedef enum {
+    LOAD_OK, LOAD_READ_FAILED, LOAD_OUT_OF_MEMORY, LOAD_TOO_LARGE, LOAD_CANCELLED
+} LoadResult;
+
+/* Streams `file` into a new large-file document for the active tab (see
+   read_large_file_document()). */
+static LoadResult load_large_file(HANDLE file, size_t length, int forcedEncoding) {
+    /* SCI_CREATELOADER resets g_hEdit's per-view line state as a side
+       effect (Editor.cxx's CreateLoader). A successful load swaps in the
+       new document, which rebuilds it; a failed one re-attaches the
+       tab's own document below to do the same, so the view is saved
+       first to put the caret and scroll position back. */
+    save_active_document_view();
+    HCURSOR oldCursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
+    int hasBom = 0, encoding = TEXT_ENCODING_UTF8, outOfMemory = 0;
+    LargeOperationProgress progress;
+    large_operation_progress_begin(&progress, L"Opening large file", L"Loading text...");
+    sptr_t sciDoc = read_large_file_document(file, length, forcedEncoding, &encoding,
+                                             &hasBom, &outOfMemory, &progress);
+    int cancelled = progress.cancelled;
+    large_operation_progress_end(&progress);
+    SetCursor(oldCursor);
+    if (!sciDoc) {
+        const Document *doc = &g_documentStore.documents[g_documentStore.active];
+        g_documentStore.switching = 1;
+        set_active_editor_document(doc->sciDocument);
+        restore_document_view(g_hEdit, doc);
+        g_documentStore.switching = 0;
+        return cancelled ? LOAD_CANCELLED : outOfMemory ? LOAD_OUT_OF_MEMORY : LOAD_READ_FAILED;
+    }
+    g_documentStore.switching = 1;
+    replace_active_scintilla_document(sciDoc, 1);
+    apply_detected_eol_mode(g_hEdit);
+    /* A loader-built document starts with undo collection off. */
+    SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, TRUE, 0);
+    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    g_documentStore.switching = 0;
+    g_hasBom = hasBom;
+    g_encoding = encoding;
+    g_documentStore.documents[g_documentStore.active].encodingForced = forcedEncoding >= 0;
+    /* Swapping in a loader-built document raises no SCN_MODIFIED, which is
+       what refreshes these after an ordinary load. */
+    update_linenumber_margin_width(g_hEdit);
+    if (g_hSplitEdit) update_linenumber_margin_width(g_hSplitEdit);
+    update_status_bar();
+    /* No convert_indentation() here, unlike set_loaded_text(): rewriting
+       every line of a large file on load is the kind of whole-document pass
+       this mode exists to avoid. */
+    return LOAD_OK;
+}
+
+/* Puts already-decoded UTF-8 text into the active tab as its loaded,
+   unmodified content. */
+static void set_loaded_text(const char *content, size_t contentLength, int hasBom,
+                            TextEncoding encoding, int forcedEncoding) {
+    /* The threshold describes editor size, not merely bytes on disk: ANSI
+       text can expand to three UTF-8 bytes per source byte. */
+    int largeMode = (long long)contentLength >= large_file_threshold_bytes();
+    /* Reloading a tab that was in large-file mode with a file that's since
+       shrunk needs an ordinary, lexable document again. */
+    if (g_largeFile) {
+        sptr_t sciDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
+        if (sciDoc) replace_active_scintilla_document(sciDoc, 0);
+        else largeMode = 1; /* keep the existing style-less document mode */
+    }
+    g_largeFile = largeMode;
+    g_hasBom = hasBom;
+    g_encoding = encoding;
+    g_documentStore.documents[g_documentStore.active].encodingForced = forcedEncoding >= 0;
+    g_documentStore.switching = 1;
+    set_edit_text(g_hEdit, content, (Sci_Position)contentLength);
+    /* Matches toggle_indent_use_spaces(): when the setting is on, a file
+       opened (or dropped) with tab-indentation should come in already
+       converted rather than leaving a mix of tabs and spaces. Done inside the
+       g_documentStore.switching window and before SCI_EMPTYUNDOBUFFER so
+       it's folded into the loaded state - no spurious dirty flag and nothing
+       to undo back into tabs. */
+    if (g_indentUseSpaces && !g_largeFile) convert_indentation(g_hEdit, 1);
+    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    g_documentStore.switching = 0;
+}
+
+/* Reads all of `file` into memory, converts it to UTF-8, and loads it into
+   the active tab. */
+static LoadResult load_ordinary_file(HANDLE file, size_t length, int forcedEncoding) {
+    char *buf = (char *)malloc(length + 1);
+    if (!buf) return LOAD_OUT_OF_MEMORY;
+    size_t total = 0;
+    while (total < length) {
+        DWORD chunk = (DWORD)((length - total) > ORDINARY_FILE_READ_CHUNK ? ORDINARY_FILE_READ_CHUNK : (length - total));
+        DWORD got = 0;
+        if (!ReadFile(file, buf + total, chunk, &got, NULL) || got == 0) break;
+        total += got;
+    }
+    if (total != length) {
+        free(buf);
+        return LOAD_READ_FAILED;
+    }
+    buf[length] = 0;
+    size_t bom = 0;
+    TextEncoding encoding = forcedEncoding >= 0 ? (TextEncoding)forcedEncoding
+                                                : detect_text_encoding(buf, length, 1, &bom);
+    if (forcedEncoding >= 0) bom = text_bom_length(buf, length, encoding);
+    LoadResult result = LOAD_OK;
+    char *decoded = NULL;
+    const char *content = buf + bom;
+    size_t contentLength = length - bom;
+    if (encoding != TEXT_ENCODING_UTF8) {
+        decoded = text_decode_all(encoding, content, contentLength, &contentLength);
+        if (!decoded) result = LOAD_OUT_OF_MEMORY;
+        /* ANSI text can triple in size as UTF-8, past what an ordinary
+           (32-bit) document holds; only large-file mode can take that. */
+        else if (contentLength > INT_MAX) result = LOAD_TOO_LARGE;
+        content = decoded;
+    }
+    if (result == LOAD_OK) set_loaded_text(content, contentLength, bom > 0, encoding, forcedEncoding);
+    free(decoded);
+    free(buf);
+    return result;
+}
+
+/* The active tab now holds `path`'s text: point the tab at the file and
+   bring everything that depends on it up to date. */
+static void finish_file_load(const WCHAR *path) {
+    replace_wstring(&g_currentFile, path);
+    apply_document_language(g_currentFile);
+    restore_persisted_breakpoints(g_currentFile);
+    ensure_large_file_editor_visible();
+    /* An ordinary load's SCN_MODIFIED schedules this; a large-file load
+       raises none, so clear the outline the old text built. */
+    if (g_largeFile) update_outline();
+    record_document_file_time(g_documentStore.active);
+    update_document_mapping();
+    update_preview();
+    set_dirty(0);
+    recent_list_add(&g_recentFileList, path);
+    refresh_menu(g_hMainWnd);
+    fire_plugin_event("open", g_currentFile);
+}
+
+static void report_load_failure(LoadResult result) {
+    /* A cancelled large-file read is an expected outcome, not an error. */
+    if (result == LOAD_CANCELLED) return;
+    const WCHAR *message =
+        result == LOAD_OUT_OF_MEMORY ? L"Not enough memory to open this file."
+        : result == LOAD_TOO_LARGE ? L"This file is too large to open as text below the large-file "
+                                     L"threshold. Lower View.LargeFileThresholdMB in settings.json "
+                                     L"to open it in large-file mode."
+        : L"Could not read file.";
+    show_error(message);
+}
+
 /* `forcedEncoding` is a TextEncoding to read the file as (File > Reopen
    with Encoding), or -1 to detect it. */
 static int load_file_as(const WCHAR *path, int forcedEncoding) {
-    WCHAR *displayPath = absolute_path(path);
     WCHAR *ioPath = extended_path(path);
-    HANDLE hFile = ioPath ? CreateFileW(ioPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    HANDLE file = ioPath ? CreateFileW(ioPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL)
         : INVALID_HANDLE_VALUE;
     free(ioPath);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        MessageBoxW(g_hMainWnd, L"Could not open file.", L"MarkEdit", MB_OK | MB_ICONERROR);
+    if (file == INVALID_HANDLE_VALUE) {
+        show_error(L"Could not open file.");
         recent_list_remove(&g_recentFileList, path);
         refresh_menu(g_hMainWnd);
-        free(displayPath);
         return 0;
     }
     LARGE_INTEGER size;
-    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0) {
-        CloseHandle(hFile);
-        MessageBoxW(g_hMainWnd, L"Could not read file.", L"MarkEdit", MB_OK | MB_ICONERROR);
-        free(displayPath);
+    LoadResult result = LOAD_READ_FAILED;
+    if (GetFileSizeEx(file, &size) && size.QuadPart >= 0) {
+        /* Past INT_MAX a file has to open in large-file mode whatever the
+           threshold is set to: only a large-file document has 64-bit positions. */
+        int largeFile = size.QuadPart >= large_file_threshold_bytes() ||
+                        size.QuadPart > INT_MAX;
+        result = largeFile ? load_large_file(file, (size_t)size.QuadPart, forcedEncoding)
+                           : load_ordinary_file(file, (size_t)size.QuadPart, forcedEncoding);
+    }
+    CloseHandle(file);
+    if (result != LOAD_OK) {
+        report_load_failure(result);
         return 0;
     }
-    size_t length = (size_t)size.QuadPart;
-    /* Past INT_MAX a file has to open in large-file mode whatever the
-       threshold is set to: only a large-file document has 64-bit positions. */
-    int largeFile = size.QuadPart >= (LONGLONG)g_largeFileThresholdMB * 1024 * 1024 ||
-                    size.QuadPart > INT_MAX;
-    char *buf = NULL;
-    size_t total = 0;
-    int ok = 0, loaded = 0, outOfMemory = 0, tooLarge = 0, cancelled = 0;
-    char *decoded = NULL;
-    if (largeFile) {
-        /* SCI_CREATELOADER resets g_hEdit's per-view line state as a side
-           effect (Editor.cxx's CreateLoader). A successful load swaps in the
-           new document, which rebuilds it; a failed one re-attaches the
-           tab's own document below to do the same, so the view is saved
-           first to put the caret and scroll position back. */
-        save_active_document_view();
-        HCURSOR oldCursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
-        int hasBom = 0, encoding = TEXT_ENCODING_UTF8;
-        LargeOperationProgress progress;
-        large_operation_progress_begin(&progress, L"Opening large file", L"Loading text...");
-        sptr_t sciDoc = read_large_file_document(hFile, length, forcedEncoding, &encoding,
-                                                 &hasBom, &outOfMemory, &progress);
-        cancelled = progress.cancelled;
-        large_operation_progress_end(&progress);
-        SetCursor(oldCursor);
-        if (!sciDoc) {
-            const Document *doc = &g_documentStore.documents[g_documentStore.active];
-            g_documentStore.switching = 1;
-            set_active_editor_document(doc->sciDocument);
-            restore_document_view(g_hEdit, doc);
-            g_documentStore.switching = 0;
-        } else {
-            g_documentStore.switching = 1;
-            replace_active_scintilla_document(sciDoc, 1);
-            apply_detected_eol_mode(g_hEdit);
-            /* A loader-built document starts with undo collection off. */
-            SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, TRUE, 0);
-            SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-            SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-            g_documentStore.switching = 0;
-            g_hasBom = hasBom;
-            g_encoding = encoding;
-            g_documentStore.documents[g_documentStore.active].encodingForced = forcedEncoding >= 0;
-            /* Swapping in a loader-built document raises no SCN_MODIFIED,
-               which is what refreshes these after an ordinary load. */
-            update_linenumber_margin_width(g_hEdit);
-            if (g_hSplitEdit) update_linenumber_margin_width(g_hSplitEdit);
-            update_status_bar();
-            loaded = 1;
-            /* No convert_indentation() here, unlike the ordinary path
-               below: rewriting every line of a large file on load is the
-               kind of whole-document pass this mode exists to avoid. */
-        }
-    } else {
-        buf = (char *)malloc(length + 1);
-        if (!buf) outOfMemory = 1;
-    }
-    while (buf && total < length) {
-        DWORD chunk = (DWORD)((length - total) > 1024 * 1024 ? 1024 * 1024 : (length - total));
-        DWORD got = 0;
-        if (!ReadFile(hFile, buf + total, chunk, &got, NULL) || got == 0) break;
-        total += got;
-    }
-    if (buf && total == length) {
-        buf[length] = 0;
-        size_t bom = 0;
-        TextEncoding encoding = forcedEncoding >= 0 ? (TextEncoding)forcedEncoding
-                                                    : detect_text_encoding(buf, length, 1, &bom);
-        if (forcedEncoding >= 0) bom = text_bom_length(buf, length, encoding);
-        const char *content = buf + bom;
-        size_t contentLength = length - bom;
-        if (encoding != TEXT_ENCODING_UTF8) {
-            size_t decodedLength = 0;
-            decoded = text_decode_all(encoding, content, length - bom, &decodedLength);
-            contentLength = decodedLength;
-            if (!decoded) outOfMemory = 1;
-            /* ANSI text can triple in size as UTF-8, past what an ordinary
-               (32-bit) document holds; only large-file mode can take that. */
-            else if (decodedLength > INT_MAX) tooLarge = 1;
-            content = outOfMemory || tooLarge ? NULL : decoded;
-        }
-        if (content) {
-            int decodedLargeMode = contentLength >=
-                (size_t)g_largeFileThresholdMB * 1024 * 1024;
-            /* Reloading a tab that was in large-file mode with a file that's
-               since shrunk needs an ordinary, lexable document again. */
-            if (g_largeFile) {
-                sptr_t sciDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
-                if (sciDoc) replace_active_scintilla_document(sciDoc, 0);
-                else decodedLargeMode = 1; /* keep the existing style-less document mode */
-            }
-            /* The threshold describes editor size, not merely bytes on disk:
-               ANSI text can expand to three UTF-8 bytes per source byte. */
-            g_largeFile = decodedLargeMode;
-            g_hasBom = bom > 0;
-            g_encoding = encoding;
-            g_documentStore.documents[g_documentStore.active].encodingForced = forcedEncoding >= 0;
-            g_documentStore.switching = 1;
-            set_edit_text(g_hEdit, content, (Sci_Position)contentLength);
-            /* Matches toggle_indent_use_spaces(): when the setting is on, a
-               file opened (or dropped) with tab-indentation should come in
-               already converted rather than leaving a mix of tabs and spaces.
-               Done inside the g_documentStore.switching window and before
-               SCI_EMPTYUNDOBUFFER so it's folded into the loaded state - no
-               spurious dirty flag and nothing to undo back into tabs. */
-            if (g_indentUseSpaces && !g_largeFile) convert_indentation(g_hEdit, 1);
-            SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
-            SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-            g_documentStore.switching = 0;
-            loaded = 1;
-        }
-    }
-    if (loaded) {
-        replace_wstring(&g_currentFile, displayPath ? displayPath : path);
-        apply_document_language(g_currentFile);
-        restore_persisted_breakpoints(g_currentFile);
-        ensure_large_file_editor_visible();
-        /* An ordinary load's SCN_MODIFIED schedules this; a large-file
-           load raises none, so clear the outline the old text built. */
-        if (g_largeFile) update_outline();
-        record_document_file_time(g_documentStore.active);
-        update_document_mapping();
-        update_preview();
-        set_dirty(0);
-        recent_list_add(&g_recentFileList, displayPath ? displayPath : path);
-        refresh_menu(g_hMainWnd);
-        ok = 1;
-        fire_plugin_event("open", g_currentFile);
-    } else {
-        /* A cancelled large-file read is an expected outcome, not a read error. */
-        if (!cancelled)
-            MessageBoxW(g_hMainWnd, outOfMemory ? L"Not enough memory to open this file."
-                    : tooLarge ? L"This file is too large to open as text below the large-file "
-                                  L"threshold. Lower View.LargeFileThresholdMB in settings.json "
-                                  L"to open it in large-file mode."
-                    : L"Could not read file.",
-                    L"MarkEdit", MB_OK | MB_ICONERROR);
-    }
-    free(decoded);
-    free(buf);
-    CloseHandle(hFile);
+    WCHAR *displayPath = absolute_path(path);
+    finish_file_load(displayPath ? displayPath : path);
     free(displayPath);
-    return ok;
+    return 1;
 }
 
 static int load_file(const WCHAR *path) {
@@ -639,7 +713,7 @@ static void do_open_recent(int index) {
 }
 
 static void do_open(void) {
-    DWORD cap = 32768;
+    DWORD cap = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return;
     OPENFILENAMEW ofn = {0};
@@ -672,7 +746,7 @@ static void do_open(void) {
    gives every other insert command in this file. */
 static void do_insert_file(void) {
     if (!g_hEdit) return;
-    DWORD cap = 32768;
+    DWORD cap = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return;
     OPENFILENAMEW ofn = {0};
@@ -692,8 +766,7 @@ static void do_insert_file(void) {
             SendMessageA(g_hEdit, SCI_ENDUNDOACTION, 0, 0);
             SetFocus(g_hEdit);
         } else {
-            MessageBoxW(g_hMainWnd, L"Could not read the selected file.", L"MarkEdit",
-                        MB_OK | MB_ICONERROR);
+            show_error(L"Could not read the selected file.");
         }
         free(text);
     }
@@ -725,8 +798,7 @@ static int create_image_destination(const WCHAR *preferredName, const WCHAR *def
     free(ioDirectory);
     if (!made && directoryError != ERROR_ALREADY_EXISTS) {
         free(imagesDirectory);
-        MessageBoxW(g_hMainWnd, L"Could not create the document's images folder.",
-                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Could not create the document's images folder.");
         return 0;
     }
 
@@ -751,7 +823,8 @@ static int create_image_destination(const WCHAR *preferredName, const WCHAR *def
     safe[extensionOffset] = 0;
     if (!safe[0]) wcscpy(safe, L"image");
 
-    for (unsigned suffix = 0; suffix < 10000; suffix++) {
+    enum { MAX_NAME_ATTEMPTS = 10000 }; /* image.png, image-1.png, ... */
+    for (unsigned suffix = 0; suffix < MAX_NAME_ATTEMPTS; suffix++) {
         size_t nameCap = wcslen(safe) + (extensionCopy ? wcslen(extensionCopy) : 0) + 32;
         WCHAR *name = (WCHAR *)malloc(nameCap * sizeof(WCHAR));
         if (!name) break;
@@ -873,8 +946,7 @@ static int import_image_file(const WCHAR *source) {
     free(ioSource);
     free(ioDestination);
     if (!copied) {
-        MessageBoxW(g_hMainWnd, L"Could not copy the dropped image into the document's images folder.",
-                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Could not copy the dropped image into the document's images folder.");
         free(destination);
         free(relative);
         return 0;
@@ -945,8 +1017,7 @@ static int paste_image_from_clipboard(void) {
     int saved = made && save_hbitmap_as_png(bitmap, destination);
     CloseClipboard();
     if (!saved) {
-        MessageBoxW(g_hMainWnd, L"Could not save the clipboard image.",
-                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Could not save the clipboard image.");
         free(destination);
         free(relative);
         return 1;
@@ -999,6 +1070,56 @@ static void handle_dropfiles(HDROP hDrop) {
     DragFinish(hDrop);
 }
 
+/* Some of the text can't be stored in `*encoding`: asks whether to save as
+   UTF-8 instead (which updates *encoding and *hasBom) or as it is, with
+   those characters replaced. Returns 0 if the user cancelled. */
+static int confirm_lossy_encoding(TextEncoding *encoding, int *hasBom) {
+    WCHAR message[400];
+    if (*encoding == TEXT_ENCODING_ANSI)
+        swprintf(message, sizeof(message) / sizeof(message[0]),
+                 L"Some characters in this document can't be stored in ANSI (code page %u).\n\n"
+                 L"Yes: save it as UTF-8 instead.\n"
+                 L"No: save as ANSI anyway, replacing those characters with '?'.",
+                 text_ansi_code_page());
+    else
+        swprintf(message, sizeof(message) / sizeof(message[0]),
+                 L"This document contains bytes that aren't valid text - it was probably "
+                 L"reopened with the wrong encoding - and they can't be stored in UTF-16.\n\n"
+                 L"Yes: save it as UTF-8 instead, keeping those bytes as they are.\n"
+                 L"No: save as UTF-16 anyway, replacing them with \x201C\xFFFD\x201D.");
+    int answer = MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
+    if (answer == IDCANCEL) return 0;
+    if (answer == IDYES) {
+        *encoding = TEXT_ENCODING_UTF8;
+        *hasBom = 0;
+    }
+    return 1;
+}
+
+/* The active document was just written to `path`: point the tab at it and
+   bring everything that depends on the saved file up to date. */
+static void finish_document_save(const WCHAR *path, TextEncoding encoding, int hasBom) {
+    g_encoding = encoding;
+    g_hasBom = hasBom;
+    /* Record the path before replace_wstring(): when saving the current file,
+       `path` may alias g_currentFile, which replace_wstring() can free. */
+    recent_list_add(&g_recentFileList, path);
+    replace_wstring(&g_currentFile, path);
+    apply_document_language(g_currentFile);
+    /* Save As changes the persistence key from the old path to the new one;
+       write the current markers immediately instead of waiting for exit. */
+    save_breakpoints_for_active_document(g_currentFile);
+    record_document_file_time(g_documentStore.active);
+    update_document_mapping();
+    /* HTML's preview (see show_html_file_preview()) is a real navigation to
+       the saved file, not a re-render of the live buffer like Markdown's -
+       it only reflects this save's content once it's refreshed here. */
+    if (g_activeLanguage == LANG_HTML) update_preview();
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    set_dirty(0);
+    refresh_menu(g_hMainWnd);
+}
+
 /* save_to_path()'s write, once the save handlers have run. */
 static int write_active_document(const WCHAR *path) {
     /* Written straight from Scintilla's own buffer: SCI_GETCHARACTERPOINTER
@@ -1011,7 +1132,7 @@ static int write_active_document(const WCHAR *path) {
     Sci_Position len = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     const char *text = (const char *)SendMessageA(g_hEdit, SCI_GETCHARACTERPOINTER, 0, 0);
     if (!text) {
-        MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Not enough memory to save the document.");
         return 0;
     }
     TextEncoding encoding = (TextEncoding)g_encoding;
@@ -1027,36 +1148,18 @@ static int write_active_document(const WCHAR *path) {
     }
     if (lossless < 0) {
         large_operation_progress_end(&progress);
-        MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Not enough memory to save the document.");
         return 0;
     }
     if (!lossless) {
         large_operation_progress_end(&progress);
-        WCHAR message[400];
-        if (encoding == TEXT_ENCODING_ANSI)
-            swprintf(message, sizeof(message) / sizeof(message[0]),
-                     L"Some characters in this document can't be stored in ANSI (code page %u).\n\n"
-                     L"Yes: save it as UTF-8 instead.\n"
-                     L"No: save as ANSI anyway, replacing those characters with '?'.",
-                     text_ansi_code_page());
-        else
-            swprintf(message, sizeof(message) / sizeof(message[0]),
-                     L"This document contains bytes that aren't valid text - it was probably "
-                     L"reopened with the wrong encoding - and they can't be stored in UTF-16.\n\n"
-                     L"Yes: save it as UTF-8 instead, keeping those bytes as they are.\n"
-                     L"No: save as UTF-16 anyway, replacing them with \x201C\xFFFD\x201D.");
-        int answer = MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
-        if (answer == IDCANCEL) return 0;
-        if (answer == IDYES) {
-            encoding = TEXT_ENCODING_UTF8;
-            hasBom = 0;
-        }
+        if (!confirm_lossy_encoding(&encoding, &hasBom)) return 0;
         /* The prompt's message loop runs timers - an external-change reload
            can replace the text under it - so the buffer is fetched again. */
         len = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
         text = (const char *)SendMessageA(g_hEdit, SCI_GETCHARACTERPOINTER, 0, 0);
         if (!text) {
-            MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
+            show_error(L"Not enough memory to save the document.");
             return 0;
         }
         if (g_largeFile)
@@ -1064,41 +1167,20 @@ static int write_active_document(const WCHAR *path) {
     } else {
         large_operation_progress_set_line(&progress, L"Writing text...");
     }
-    WCHAR *displayPath = absolute_path(path);
     WCHAR *ioPath = extended_path(path);
-    const WCHAR *target = ioPath ? ioPath : path;
-    int ok = write_file_atomic_progress(target, text, (size_t)len, encoding, hasBom,
+    int ok = write_file_atomic_progress(ioPath ? ioPath : path, text, (size_t)len, encoding, hasBom,
         large_operation_progress_callback, &progress);
+    free(ioPath);
     int cancelled = progress.cancelled;
     large_operation_progress_end(&progress);
     if (!ok) {
-        free(displayPath);
-        free(ioPath);
         if (!cancelled)
-            MessageBoxW(g_hMainWnd, L"Could not write the complete file; the original was left unchanged.", L"MarkEdit", MB_OK | MB_ICONERROR);
+            show_error(L"Could not write the complete file; the original was left unchanged.");
         return 0;
     }
-    g_encoding = encoding;
-    g_hasBom = hasBom;
-    /* Record the path before replace_wstring(): when saving the current file,
-       `path` may alias g_currentFile, which replace_wstring() can free. */
-    recent_list_add(&g_recentFileList, displayPath ? displayPath : path);
-    replace_wstring(&g_currentFile, displayPath ? displayPath : path);
-    apply_document_language(g_currentFile);
-    /* Save As changes the persistence key from the old path to the new one;
-       write the current markers immediately instead of waiting for exit. */
-    save_breakpoints_for_active_document(g_currentFile);
-    free(ioPath);
-    record_document_file_time(g_documentStore.active);
-    update_document_mapping();
-    /* HTML's preview (see show_html_file_preview()) is a real navigation to
-       the saved file, not a re-render of the live buffer like Markdown's -
-       it only reflects this save's content once it's refreshed here. */
-    if (g_activeLanguage == LANG_HTML) update_preview();
-    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
-    set_dirty(0);
+    WCHAR *displayPath = absolute_path(path);
+    finish_document_save(displayPath ? displayPath : path, encoding, hasBom);
     free(displayPath);
-    refresh_menu(g_hMainWnd);
     return 1;
 }
 
@@ -1108,7 +1190,7 @@ static int save_to_path(const WCHAR *requestedPath) {
        requestedPath usually is - so the save works from a copy. */
     WCHAR *path = wcsdup_heap(requestedPath);
     if (!path) {
-        MessageBoxW(g_hMainWnd, L"Not enough memory to save the document.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Not enough memory to save the document.");
         return 0;
     }
     /* First, so whatever the handlers change is what gets saved. `save` is
@@ -1122,7 +1204,7 @@ static int save_to_path(const WCHAR *requestedPath) {
 }
 
 static int do_saveas(void) {
-    DWORD cap = 32768;
+    DWORD cap = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return 0;
     if (g_currentFile) wcsncpy(path, g_currentFile, cap - 1);
@@ -1179,7 +1261,7 @@ static void do_export_html(void) {
         return;
     }
 
-    DWORD cap = 32768;
+    DWORD cap = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return;
     if (g_currentFile) {
@@ -1200,7 +1282,7 @@ static void do_export_html(void) {
 
     WCHAR *directory = document_or_module_directory();
     WCHAR *directorySlash = directory ? path_join(directory, L"") : NULL; /* adds the trailing '\' */
-    WCHAR url[32768];
+    WCHAR url[LONG_PATH_CAPACITY];
     DWORD urlLength = sizeof(url) / sizeof(url[0]);
     if (!directorySlash || FAILED(UrlCreateFromPathW(directorySlash, url, &urlLength, 0))) wcscpy(url, L"");
     free(directorySlash);
@@ -1230,14 +1312,14 @@ static void do_export_html(void) {
         ".catch(()=>chrome.webview.postMessage('export-html:%lu:null'));return true;})()",
         baseEscaped, titleEscaped, g_exportRequest, g_exportRequest);
     g_exportPath = path;
-    SetTimer(g_hMainWnd, IDT_HTML_EXPORT, 30000, NULL);
+    SetTimer(g_hMainWnd, IDT_HTML_EXPORT, HTML_EXPORT_TIMEOUT_MS, NULL);
     update_preview();
     HRESULT hr = execute_webview_script(script, &g_exportScriptHandler);
     if (FAILED(hr)) {
         KillTimer(g_hMainWnd, IDT_HTML_EXPORT);
         free(g_exportPath);
         g_exportPath = NULL;
-        MessageBoxW(g_hMainWnd, L"Could not start the HTML export.", L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"Could not start the HTML export.");
     }
     free(script); free(baseUtf8); free(titleUtf8); free(baseEscaped); free(titleEscaped);
 }
@@ -1254,7 +1336,7 @@ static void prepare_rendered_print(int exportPdf) {
         return;
     }
     if (exportPdf) {
-        DWORD capacity = 32768;
+        DWORD capacity = LONG_PATH_CAPACITY;
         WCHAR *path = (WCHAR *)calloc(capacity, sizeof(WCHAR));
         if (!path) return;
         if (g_currentFile) {
@@ -1281,7 +1363,7 @@ static void prepare_rendered_print(int exportPdf) {
         layout(g_hMainWnd);
     }
     update_preview();
-    SetTimer(g_hMainWnd, IDT_PRINT_PREVIEW, 300, NULL);
+    SetTimer(g_hMainWnd, IDT_PRINT_PREVIEW, PRINT_PREVIEW_DELAY_MS, NULL);
 }
 
 static void run_pending_print(void) {
@@ -1295,11 +1377,9 @@ static void run_pending_print(void) {
                 COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM);
             ICoreWebView2_16_Release(printWebView);
             if (FAILED(result))
-                MessageBoxW(g_hMainWnd, L"Could not open the print dialog.", L"MarkEdit",
-                            MB_OK | MB_ICONERROR);
+                show_error(L"Could not open the print dialog.");
         } else {
-            MessageBoxW(g_hMainWnd, L"This WebView2 Runtime does not support printing.",
-                        L"MarkEdit", MB_OK | MB_ICONERROR);
+            show_error(L"This WebView2 Runtime does not support printing.");
         }
         g_pendingPrintAction = PRINT_ACTION_NONE;
     } else if (g_pendingPrintAction == PRINT_ACTION_EXPORT_PDF && g_pendingPdfPath) {
@@ -1311,8 +1391,7 @@ static void run_pending_print(void) {
             ICoreWebView2_7_Release(pdfWebView);
             if (SUCCEEDED(result)) return;
         }
-        MessageBoxW(g_hMainWnd, L"This WebView2 Runtime could not start PDF export.",
-                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        show_error(L"This WebView2 Runtime could not start PDF export.");
         free(g_pendingPdfPath);
         g_pendingPdfPath = NULL;
         g_pendingPrintAction = PRINT_ACTION_NONE;

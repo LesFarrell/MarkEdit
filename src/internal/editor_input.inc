@@ -637,7 +637,7 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
         /* The recessed strip behind the tabs, matching the editor's
            line-number gutter immediately below it. */
-        fill_rect_color(buffer, &client, g_editorDarkMode ? THEME_DARK_BG : RGB(0xF6, 0xF8, 0xFA));
+        fill_rect_color(buffer, &client, theme_palette()->subtleBg);
 
         int selected = TabCtrl_GetCurSel(hwnd);
         for (int i = 0; i < g_documentStore.count; i++) {

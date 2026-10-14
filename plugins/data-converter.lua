@@ -23,6 +23,7 @@ local function skip_space(text, position)
 end
 
 local function scan_string(text, position)
+  if text:sub(position, position) ~= '"' then return nil end
   local start = position
   position = position + 1
   while position <= #text do
@@ -38,6 +39,15 @@ local function scan_string(text, position)
     elseif character:byte() < 32 then return nil
     else position = position + 1 end
   end
+end
+
+-- JSON's number grammar: no leading zeros, digits on both sides of a
+-- decimal point, and digits after an exponent.
+local function is_json_number(raw)
+  local rest = raw:match("^-?0(.*)$") or raw:match("^-?[1-9]%d*(.*)$")
+  if not rest then return false end
+  rest = rest:gsub("^%.%d+", "", 1)
+  return rest == "" or rest:match("^[eE][+-]?%d+$") ~= nil
 end
 
 local function scan_value(text, position)
@@ -66,9 +76,7 @@ local function scan_value(text, position)
   end
   local finish = text:find("[,}%]%s]", position) or (#text + 1)
   local raw = text:sub(start, finish - 1)
-  if raw == "true" or raw == "false" or raw == "null"
-    or raw:match("^-?%d+$") or raw:match("^-?%d+%.%d+[eE]?[+-]?%d*$")
-    or raw:match("^-?%d+[eE][+-]?%d+$") then return finish, raw end
+  if raw == "true" or raw == "false" or raw == "null" or is_json_number(raw) then return finish, raw end
 end
 
 local function decode_json_string(raw)
@@ -81,7 +89,17 @@ local function decode_json_string(raw)
       local simple = { ['"']='"', ["\\"]="\\", ["/"]="/", b="\b", f="\f", n="\n", r="\r", t="\t" }
       if escaped == "u" then
         local code = tonumber(raw:sub(position + 2, position + 5), 16)
-        output[#output + 1], position = utf8.char(code), position + 6
+        position = position + 6
+        -- Characters above U+FFFF are written as a high and low surrogate
+        -- pair; a surrogate on its own isn't a character.
+        if code >= 0xD800 and code <= 0xDBFF then
+          local low = raw:sub(position, position + 1) == "\\u" and tonumber(raw:sub(position + 2, position + 5), 16)
+          if not low or low < 0xDC00 or low > 0xDFFF then return nil end
+          code, position = 0x10000 + (code - 0xD800) * 0x400 + (low - 0xDC00), position + 6
+        elseif code >= 0xDC00 and code <= 0xDFFF then
+          return nil
+        end
+        output[#output + 1] = utf8.char(code)
       else output[#output + 1], position = simple[escaped], position + 2 end
     end
   end
@@ -131,8 +149,10 @@ local function parse_flat_object(text)
     if not after_value or value_raw:match("^[%[{]") then
       return nil, "Only flat objects with scalar values are supported."
     end
-    local value = value_raw:sub(1, 1) == '"' and decode_json_string(value_raw) or value_raw
-    fields[#fields + 1] = { key = decode_json_string(key_raw), value = value }
+    local key, value = decode_json_string(key_raw), value_raw
+    if value_raw:sub(1, 1) == '"' then value = decode_json_string(value_raw) end
+    if not key or not value then return nil, "A string contains an unpaired \\u surrogate escape." end
+    fields[#fields + 1] = { key = key, value = value }
     position = skip_space(text, after_value)
     local separator = text:sub(position, position)
     if separator == "}" then
@@ -172,10 +192,30 @@ local function fields_to_json(fields)
   return "{" .. (#lines > 0 and editor.eol() .. table.concat(lines, "," .. editor.eol()) .. editor.eol() or "") .. "}"
 end
 
+-- Removes the whitespace outside strings, so a nested value fits on one line.
+local function compact_json(raw)
+  local output, position, quoted = {}, 1, false
+  while position <= #raw do
+    local character = raw:sub(position, position)
+    if quoted then
+      if character == "\\" then
+        character, position = raw:sub(position, position + 1), position + 1
+      elseif character == '"' then quoted = false end
+      output[#output + 1] = character
+    elseif not character:match("[ \t\r\n]") then
+      quoted = character == '"'
+      output[#output + 1] = character
+    end
+    position = position + 1
+  end
+  return table.concat(output)
+end
+
 local function convert_json_array_to_lines()
   local text, first, last = source_range()
   local values, problem = split_json_array(text)
   if not values then ui.message(problem, nil, "warning"); return end
+  for index, value in ipairs(values) do values[index] = compact_json(value) end
   replace_source(table.concat(values, editor.eol()), first, last)
 end
 

@@ -47,7 +47,7 @@ static void plugin_message(const char *title, const char *text, const char *kind
 
 static int plugin_save_binary(const char *title, const char *defaultName,
                               const char *data, size_t length) {
-    const DWORD capacity = 32768;
+    const DWORD capacity = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(capacity, sizeof(WCHAR));
     WCHAR *wideDefault = to_wide(defaultName);
     WCHAR *wideTitle = to_wide(title);
@@ -104,7 +104,7 @@ static char *plugin_pick_path(const char *title, int folder) {
         free(path);
         return result;
     }
-    WCHAR path[32768] = L"";
+    WCHAR path[LONG_PATH_CAPACITY] = L"";
     WCHAR *wideTitle = to_wide(title);
     OPENFILENAMEW dialog = {0};
     dialog.lStructSize = sizeof(dialog);
@@ -153,6 +153,23 @@ static int queue_plugin_document_action(PluginDocumentActionKind kind, int index
         return 0;
     }
     return 1;
+}
+
+/* WM_APP_PLUGIN_DOCUMENT_ACTION: carries out, and frees, an action that
+   queue_plugin_document_action() posted. */
+static void run_plugin_document_action(PluginDocumentAction *action) {
+    if (!action) return;
+    int validIndex = action->index >= 0 && action->index < g_documentStore.count;
+    switch (action->kind) {
+        case PLUGIN_DOCUMENT_ACTIVATE: if (validIndex) switch_document(action->index); break;
+        case PLUGIN_DOCUMENT_NEW: create_document_tab(); break;
+        case PLUGIN_DOCUMENT_OPEN: if (action->path) open_file_in_tab(action->path); break;
+        case PLUGIN_DOCUMENT_SAVE: do_save(); break;
+        case PLUGIN_DOCUMENT_SAVE_AS: do_saveas(); break;
+        case PLUGIN_DOCUMENT_CLOSE: if (validIndex) do_close_document_at(action->index); break;
+    }
+    free(action->path);
+    free(action);
 }
 
 static int plugin_document_activate(int index) {
@@ -311,7 +328,7 @@ static void install_plugin_editor_metadata(const WCHAR *directory) {
     static const char metadata[] =
         "{\n  \"workspace.library\": [\"types\"],\n  \"diagnostics.globals\": "
         "[\"editor\", \"ui\", \"menu\", \"commands\", \"events\", \"config\", \"app\"]\n}\n";
-    if (luarc && GetFileAttributesW(luarc) == INVALID_FILE_ATTRIBUTES)
+    if (luarc && !file_exists(luarc))
         write_bytes_file(luarc, metadata, sizeof(metadata) - 1);
     free(luarc);
 }
@@ -368,11 +385,10 @@ static char *append_report(char *report, const char *prefix, const char *text) {
 
 /* Loads the user's menu definition, or the built-in one when there's none
    or it fails to load. Unknown command and list names are reported and
-   their items left out. Returns the report, or NULL. */
-static char *load_menu_definition(void) {
-    char *report = NULL;
+   their items left out. Adds any problems to `report` and returns it. */
+static char *load_menu_definition(char *report) {
     WCHAR *path = user_menu_definition_path();
-    if (path && GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
+    if (file_exists(path)) {
         size_t codeLength = 0;
         char *code = read_utf8_text_file_length(path, MENU_DEFINITION_MAX_BYTES, &codeLength);
         char *error = code ? plugin_host_load_menu("menus.lua", code, codeLength) : NULL;
@@ -397,6 +413,58 @@ static char *load_menu_definition(void) {
     if (problems) report = append_report(report, "menus.lua: ", problems);
     free(problems);
     return report;
+}
+
+/* ---- theme colours ---- */
+
+static WCHAR *user_theme_path(void) {
+    return user_settings_item_path(L"themes.lua");
+}
+
+static const char *set_theme_colour(void *context, int dark, const char *name, const char *value) {
+    (void)context;
+    COLORREF colour;
+    if (!theme_parse_colour(value, &colour)) return "the colour must be written \"#RRGGBB\"";
+    if (!theme_set_colour(dark, name, colour)) return "there is no colour with this name";
+    return NULL;
+}
+
+/* Starts from the built-in palettes, then applies %APPDATA%\markedit\
+   themes.lua when there is one. Problems are added to the report; the
+   colours that did load still apply. */
+static char *load_theme_colours(char *report) {
+    theme_reset_palettes();
+    WCHAR *path = user_theme_path();
+    if (file_exists(path)) {
+        size_t length = 0;
+        char *code = read_utf8_text_file_length(path, MENU_DEFINITION_MAX_BYTES, &length);
+        char *problems = code ? plugin_host_load_theme("themes.lua", code, length, set_theme_colour, NULL) : NULL;
+        if (!code) report = append_report(report, "", "themes.lua: could not be read as UTF-8 text (1 MiB at most).");
+        if (problems) report = append_report(report, "", problems);
+        free(problems);
+        free(code);
+    }
+    free(path);
+    return report;
+}
+
+/* Plugins > Customize Theme Colours: opens the user's themes.lua, first
+   writing one that lists every colour with its built-in value. */
+static void customize_theme_colours(void) {
+    WCHAR *path = user_theme_path();
+    if (!path) return;
+    if (!file_exists(path)) {
+        char *text = theme_template_lua();
+        if (!text || !write_bytes_file(path, text, strlen(text))) {
+            show_error(L"Could not create themes.lua in the settings folder.");
+            free(text);
+            free(path);
+            return;
+        }
+        free(text);
+    }
+    open_file_in_tab(path);
+    free(path);
 }
 
 static char *load_builtin_formatting(char *report) {
@@ -446,8 +514,9 @@ static void show_plugin_load_errors(const char *report) {
     if (line > 0) SendMessageA(g_hEdit, SCI_GOTOLINE, (WPARAM)(line - 1), 0);
 }
 
-/* Recreates the Lua state, then loads menus, built-in formatting, bundled
-   extensions and personal extensions in that order. */
+/* Loads the theme colours, then recreates the Lua state and loads menus,
+   built-in formatting, bundled extensions and personal extensions in that
+   order. */
 static void load_menus_and_plugins(void) {
     static const PluginHostCallbacks callbacks = {
         .prompt = plugin_prompt, .choose = plugin_choose, .file_path = plugin_file_path,
@@ -468,7 +537,7 @@ static void load_menus_and_plugins(void) {
     };
     plugin_host_set_callbacks(&callbacks);
     plugin_host_shutdown();
-    char *report = load_builtin_formatting(load_menu_definition());
+    char *report = load_builtin_formatting(load_menu_definition(load_theme_colours(NULL)));
     WCHAR *bundled = bundled_plugin_directory();
     WCHAR *user = user_plugin_directory();
     report = load_plugin_directory(report, bundled, "bundled");
@@ -485,12 +554,11 @@ static void load_menus_and_plugins(void) {
 static void customize_menus(void) {
     WCHAR *path = user_menu_definition_path();
     if (!path) return;
-    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+    if (!file_exists(path)) {
         size_t length;
         const char *code = builtin_script(IDR_DEFAULT_MENUS, &length);
         if (!code || !write_bytes_file(path, code, length)) {
-            MessageBoxW(g_hMainWnd, L"Could not create menus.lua in the settings folder.", L"MarkEdit",
-                        MB_OK | MB_ICONERROR);
+            show_error(L"Could not create menus.lua in the settings folder.");
             free(path);
             return;
         }
@@ -510,9 +578,11 @@ static void open_plugin_folder(void) {
     free(directory);
 }
 
+enum { PLUGIN_FILE_NAME_MAX = 100 };
+
 static int valid_plugin_file_name(const char *name) {
     size_t length = strlen(name);
-    if (!length || length >= 100 || name[0] == '.' || strstr(name, "..")) return 0;
+    if (!length || length >= PLUGIN_FILE_NAME_MAX || name[0] == '.' || strstr(name, "..")) return 0;
     for (size_t i = 0; i < length; i++)
         if (!(isalnum((unsigned char)name[i]) || name[i] == '-' ||
               name[i] == '_' || name[i] == '.')) return 0;
@@ -580,6 +650,7 @@ static char **plugin_choices(int count) {
 
 static void reload_plugin_ui(HWND hwnd, const WCHAR *successMessage) {
     load_menus_and_plugins();
+    refresh_theme(hwnd); /* themes.lua may have changed */
     refresh_menu(hwnd);
     rebuild_main_accelerators();
     if (g_lastPluginLoadSucceeded && successMessage)
@@ -652,6 +723,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
         customize_menus();
         return;
     }
+    if (cmd == IDM_PLUGIN_CUSTOMIZE_THEME) { customize_theme_colours(); return; }
     if (cmd == IDM_PLUGIN_OPEN_FOLDER) { open_plugin_folder(); return; }
     if (cmd == IDM_PLUGIN_NEW) { new_plugin(); return; }
     if (cmd == IDM_PLUGIN_MANAGE) { manage_plugins(); return; }

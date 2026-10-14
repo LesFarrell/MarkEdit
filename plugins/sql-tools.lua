@@ -12,17 +12,45 @@ for word in ("select from where group by order having limit offset fetch union a
   keywords[word] = true
 end
 
+-- Multi-character operators, longest first so the tokenizer matches greedily.
+local operators = {
+  "->>", "#>>", "<->", "<=>", "!~*", "<<=", ">>=", "||/",
+  "->", "#>", "#-", "::", "||", "<=", ">=", "<>", "!=", "<<", ">>", "@>", "<@", "&&",
+  "?|", "?&", "@@", "!~", "~*", ":=", "=>", "|/", "^@"
+}
+
 local function source_range()
   local first, last = editor.get_selection_range()
   if last < first then return editor.get_text(), 1, editor.length() end
   return editor.get_range(first, last), first, last
 end
 
+-- Position just past the quoted value whose opening quote is at `position`,
+-- or nil when it is never closed. Doubled quotes are escapes, except in [].
+local function quoted_end(text, position)
+  local open = text:sub(position, position)
+  local close = open == "[" and "]" or open
+  position = position + 1
+  while position <= #text do
+    if text:sub(position, position) == close then
+      if text:sub(position + 1, position + 1) == close and close ~= "]" then position = position + 2
+      else return position + 1 end
+    else position = position + 1 end
+  end
+  return nil
+end
+
+-- Tokens record where they start and end in `text`, so keyword case can be
+-- changed in place without disturbing the layout around them.
 local function tokenize(text)
   local tokens, position = {}, 1
-  local function add(kind, value) tokens[#tokens + 1] = { kind = kind, value = value } end
+  local start = 1
+  local function add(kind, value)
+    tokens[#tokens + 1] = { kind = kind, value = value, first = start, last = start + #value - 1 }
+  end
   while position <= #text do
     local character, next_character = text:sub(position, position), text:sub(position + 1, position + 1)
+    start = position
     if character:match("%s") then
       position = position + 1
     elseif character == "-" and next_character == "-" then
@@ -33,37 +61,40 @@ local function tokenize(text)
       if not finish then return nil, "Unterminated block comment." end
       add("comment", text:sub(position, finish + 1)); position = finish + 2
     elseif character == "'" or character == '"' or character == "`" or character == "[" then
-      local close = character == "[" and "]" or character
-      local start = position
-      position = position + 1
-      while position <= #text do
-        if text:sub(position, position) == close then
-          if text:sub(position + 1, position + 1) == close and close ~= "]" then position = position + 2
-          else position = position + 1; break end
-        else position = position + 1 end
-      end
-      if text:sub(position - 1, position - 1) ~= close then return nil, "Unterminated quoted value." end
-      add(character == "'" and "string" or "identifier", text:sub(start, position - 1))
+      local finish = quoted_end(text, position)
+      if not finish then return nil, "Unterminated quoted value." end
+      add(character == "'" and "string" or "identifier", text:sub(position, finish - 1)); position = finish
+    elseif character:match("[NnEeBbXx]") and next_character == "'" then
+      -- Prefixed string literals (N'', E'', B'', X'') are one token.
+      local finish = quoted_end(text, position + 1)
+      if not finish then return nil, "Unterminated quoted value." end
+      add("string", text:sub(position, finish - 1)); position = finish
+    elseif character:match("[$@:?]") and next_character:match("[%w_@]")
+        and not text:sub(position - 1, position - 1):match("[%w_:]") then
+      -- Parameters and variables ($1, @name, @@version, :name, ?1) are one
+      -- token, so nothing gets spaced apart from its prefix.
+      local _, finish = text:find("^[$@:?]@?[%w_$]+", position)
+      add("word", text:sub(position, finish)); position = finish + 1
     elseif character:match("[%a_]") then
       local finish = text:find("[^%w_$]", position) or (#text + 1)
       local value = text:sub(position, finish - 1)
       add(keywords[value:lower()] and "keyword" or "word", value); position = finish
-    elseif character:match("%d") then
-      local finish = text:find("[^%w_%.]", position) or (#text + 1)
-      add("number", text:sub(position, finish - 1)); position = finish
+    elseif character:match("%d") or (character == "." and next_character:match("%d")
+        and not text:sub(position - 1, position - 1):match("[%w_\"`%]]")) then
+      -- digits[.digits][e[+-]digits] or .digits; other forms such as 0x1F
+      -- fall back to a run of word characters.
+      local _, finish = text:find("^%d*%.?%d*[eE][+-]?%d+", position)
+      if not finish then finish = (text:find("[^%w_%.]", position) or (#text + 1)) - 1 end
+      add("number", text:sub(position, finish)); position = finish + 1
     else
-      local pair = text:sub(position, position + 1)
-      if pair == "<>" or pair == "!=" or pair == "<=" or pair == ">=" or pair == "||" or pair == "::" then
-        add("symbol", pair); position = position + 2
-      else add("symbol", character); position = position + 1 end
+      local operator = character
+      for _, candidate in ipairs(operators) do
+        if text:sub(position, position + #candidate - 1) == candidate then operator = candidate; break end
+      end
+      add("symbol", operator); position = position + #operator
     end
   end
   return tokens
-end
-
-local function word_like(token)
-  return token and (token.kind == "word" or token.kind == "keyword" or token.kind == "number"
-    or token.kind == "string" or token.kind == "identifier")
 end
 
 local function normalize_tokens(tokens, keyword_case)
@@ -72,7 +103,10 @@ local function normalize_tokens(tokens, keyword_case)
     local value = token.kind == "keyword" and
       (keyword_case == "lower" and token.value:lower() or token.value:upper()) or token.value
     local previous = tokens[index - 1]
-    if #output > 0 then
+    if previous and previous.kind == "comment" and previous.value:sub(1, 2) == "--" then
+      -- A line comment runs to the end of the line, so keep the break after it.
+      output[#output + 1] = editor.eol()
+    elseif #output > 0 then
       local no_space_before = token.value == "," or token.value == ";" or token.value == ")"
         or token.value == "("
         or token.value == "." or token.value == "::"
@@ -88,14 +122,28 @@ end
 local clause_starts = {
   select=true, from=true, where=true, having=true, limit=true, offset=true, returning=true,
   insert=true, update=true, delete=true, values=true, set=true, union=true, with=true,
-  join=true, inner=true, left=true, right=true, full=true, cross=true,
+  join=true, group=true, order=true,
   create=true, alter=true, drop=true, begin=true, commit=true, rollback=true
 }
 
+-- Words that may precede JOIN; the whole phrase (LEFT OUTER JOIN) is one clause.
+local join_qualifiers = { inner=true, left=true, right=true, full=true, cross=true, outer=true }
+
+local function is_qualifier(token)
+  return token and token.kind == "keyword" and join_qualifiers[token.value:lower()]
+end
+
+-- True when the qualifier at index begins a join phrase, not e.g. LEFT(name, 2).
+local function starts_join(tokens, index)
+  if is_qualifier(tokens[index - 1]) then return false end
+  while is_qualifier(tokens[index]) do index = index + 1 end
+  return tokens[index] ~= nil and tokens[index].kind == "keyword" and tokens[index].value:lower() == "join"
+end
+
 local function format_tokens(tokens)
-  local pieces, line, depth = {}, "", 0
+  local pieces, line, depth, line_depth = {}, "", 0, 0
   local function flush()
-    if line ~= "" then pieces[#pieces + 1] = string.rep("  ", depth) .. line; line = "" end
+    if line ~= "" then pieces[#pieces + 1] = string.rep("  ", line_depth) .. line; line = "" end
   end
   local function append(value)
     local no_space_before = value == "," or value == ";" or value == ")" or value == "("
@@ -103,6 +151,7 @@ local function format_tokens(tokens)
     local tail = line:sub(-1)
     local no_space_after = tail == "(" or tail == "." or line:sub(-2) == "::"
     if line ~= "" and not no_space_before and not no_space_after then line = line .. " " end
+    if line == "" then line_depth = depth end
     line = line .. value
   end
   local index = 1
@@ -110,12 +159,19 @@ local function format_tokens(tokens)
     local token = tokens[index]
     local lower = token.value:lower()
     local phrase = lower
-    if token.kind == "keyword" and (lower == "group" or lower == "order") and
-       tokens[index + 1] and tokens[index + 1].value:lower() == "by" then
-      phrase = lower .. " by"; index = index + 1
+    local clause_start = token.kind == "keyword" and (clause_starts[lower] or join_qualifiers[lower])
+    if not clause_start then
+      -- not a clause keyword
+    elseif lower == "group" or lower == "order" then
+      clause_start = tokens[index + 1] ~= nil and tokens[index + 1].value:lower() == "by"
+      if clause_start then phrase = lower .. " by"; index = index + 1 end
+    elseif lower == "join" then
+      clause_start = not is_qualifier(tokens[index - 1])
+    elseif join_qualifiers[lower] then
+      clause_start = starts_join(tokens, index)
     end
     if token.value == ")" then depth = math.max(0, depth - 1) end
-    if token.kind == "keyword" and clause_starts[lower] then flush() end
+    if clause_start then flush() end
     if token.value == "," then
       append(",")
     elseif token.value == ";" then
@@ -134,12 +190,36 @@ local function format_tokens(tokens)
   return table.concat(pieces, editor.eol())
 end
 
+-- Changes the case of keywords only, leaving every other byte - line breaks
+-- and indentation included - exactly as it was.
+local function recase_keywords(text, tokens, keyword_case)
+  local pieces, position = {}, 1
+  for _, token in ipairs(tokens) do
+    if token.kind == "keyword" then
+      pieces[#pieces + 1] = text:sub(position, token.first - 1)
+      pieces[#pieces + 1] = keyword_case == "lower" and token.value:lower() or token.value:upper()
+      position = token.last + 1
+    end
+  end
+  pieces[#pieces + 1] = text:sub(position)
+  return table.concat(pieces)
+end
+
 local function transform(mode)
   local text, first, last = source_range()
   local tokens, problem = tokenize(text)
   if not tokens then ui.message("SQL error: " .. problem, nil, "warning"); return end
+  if mode == "upper" or mode == "lower" then
+    local result = recase_keywords(text, tokens, mode)
+    editor.replace_range(first, last, result)
+    editor.set_selection(first, first + #result - 1)
+    return
+  end
   local result = mode == "format" and format_tokens(tokens)
-    or normalize_tokens(tokens, mode == "lower" and "lower" or "upper")
+    or normalize_tokens(tokens, "upper")
+  -- Keep the line ending that closed the source text.
+  local trailing = text:match("\r\n$") or text:match("[\r\n]$")
+  if trailing and result ~= "" then result = result .. trailing end
   editor.replace_range(first, last, result)
   editor.set_selection(first, first + #result - 1)
 end

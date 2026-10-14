@@ -72,7 +72,7 @@ local function parse_json(text)
         or (byte >= 0xC2 and byte <= 0xDF and 2)
         or (byte >= 0xE0 and byte <= 0xEF and 3)
         or (byte >= 0xF0 and byte <= 0xF4 and 4)
-      local valid = width ~= nil
+      local valid = width and true or false
       for offset = 1, (width or 1) - 1 do valid = valid and continuation(position + offset) end
       local second = text:byte(position + 1)
       if byte == 0xE0 then valid = valid and second >= 0xA0 end
@@ -539,6 +539,11 @@ local function parse_yaml(text)
       if value_text == "" then
         if index <= #lines and lines[index].indent > indent then
           value, index, err = parse_block(index, lines[index].indent)
+          if not value then return nil, index end
+        elseif index <= #lines and lines[index].indent == indent
+            and (lines[index].content == "-" or lines[index].content:match("^%-%s")) then
+          -- A sequence may sit at its key's indent: "key:\n- a\n- b".
+          value, index = parse_block(index, indent)
           if not value then return nil, index end
         else
           value = { kind = "scalar", raw = "null" }

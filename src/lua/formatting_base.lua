@@ -1,5 +1,11 @@
 -- MarkEdit's built-in Markdown and HTML formatting commands, written in Lua.
 --
+-- MarkEdit joins this file, formatting_tables.lua and formatting_text.lua
+-- into one chunk before loading it, so many locals here are only used by the
+-- later files. A language server checking this file on its own reports them
+-- as unused.
+---@diagnostic disable: unused-local, unused-function
+--
 -- What's here (each section below is one of these):
 --   Inline wrapping     Bold, Italic, Strikethrough, Inline Code, HTML tags
 --   Line prefixes       Headings, Blockquote, Bullet/Numbered/Task lists
@@ -53,11 +59,14 @@ end
 -- The first and last lines the selection touches. A selection that ends
 -- exactly at the start of a line (Home, then Shift+Down) leaves that line
 -- out, as the user would expect.
-local function selected_lines()
-  local start, finish = selection()
+local function lines_of(start, finish)
   local first, last = editor.line_at(start), editor.line_at(finish + 1)
   if last > first and finish + 1 == line_start(last) then last = last - 1 end
   return first, last
+end
+
+local function selected_lines()
+  return lines_of(selection())
 end
 
 -- Replaces lines first..last (not their final line ending) with text.
@@ -69,10 +78,72 @@ end
 
 -- ---- inline wrapping: bold, italic, HTML tags ----
 
--- Wraps the selection in open ... close, or unwraps it if it is already
+-- Whether selected is one open ... close pair around its inner text. For a
+-- Markdown marker made of one repeated character, "*" mustn't be half of
+-- "**" ("***" is both, so either unwraps it), and a marker inside the inner
+-- text ("**a** and **b**") shows the ends belong to different pairs.
+local function is_wrapped(selected, open, close)
+  local length = #selected
+  if length < #open + #close or selected:sub(1, #open) ~= open
+    or selected:sub(length - #close + 1) ~= close then
+    return false
+  end
+  local inner = selected:sub(#open + 1, length - #close)
+  local c = open:sub(1, 1)
+  if open ~= close or open ~= c:rep(#open) then
+    return not inner:find(open, 1, true) and not inner:find(close, 1, true)
+  end
+
+  local emphasis = c == "*" or c == "_"
+  local run = "%" .. c .. "+"
+  local leading, trailing = #selected:match("^" .. run), #selected:match(run .. "$")
+  if leading ~= trailing or (leading ~= #open and not (emphasis and leading == 3)) then
+    return false
+  end
+  for marker in inner:gmatch(run) do
+    if #marker == #open or (emphasis and #marker == 3) then return false end
+  end
+  return true
+end
+
+-- The text that replaces selected when wrapping or unwrapping it, and the
+-- first and last positions of the inner text within that replacement.
+local function wrapped_text(selected, open, close)
+  if is_wrapped(selected, open, close) then
+    local inner = selected:sub(#open + 1, #selected - #close)
+    return inner, 1, #inner
+  end
+  return open .. selected .. close, #open + 1, #open + #selected
+end
+
+-- Wraps each selection in open ... close, or unwraps it if it is already
 -- wrapped in exactly that pair, leaving the inner text selected either way.
 -- With no selection, inserts the pair with the caret between the two.
 local function wrap_pair(open, close)
+  if editor.selection_count() > 1 then
+    local texts, order = {}, {}
+    for i, range in ipairs(editor.get_selections()) do
+      local text, innerStart, innerFinish =
+        wrapped_text(editor.get_range(range.start, range.finish), open, close)
+      texts[i] = text
+      order[i] = { start = range.start, length = range.finish - range.start + 1,
+                   text = text, innerStart = innerStart, innerFinish = innerFinish }
+    end
+    editor.replace_selections(texts)
+
+    -- replace_selections leaves one caret per selection, in document order;
+    -- select each inner text, allowing for the edits before it.
+    table.sort(order, function(a, b) return a.start < b.start end)
+    if editor.selection_count() ~= #order then return end
+    local shift = 0
+    for n, item in ipairs(order) do
+      local base = item.start + shift - 1
+      editor.set_selection(base + item.innerStart, base + item.innerFinish, n)
+      shift = shift + #item.text - item.length
+    end
+    return
+  end
+
   local start, finish = selection()
   if is_empty(start, finish) then
     editor.replace_selection(open .. close)
@@ -80,20 +151,9 @@ local function wrap_pair(open, close)
     return
   end
 
-  local selected = editor.get_selection()
-  local length = #selected
-  local alreadyWrapped = length >= #open + #close
-    and selected:sub(1, #open) == open
-    and selected:sub(length - #close + 1) == close
-
-  if alreadyWrapped then
-    local inner = selected:sub(#open + 1, length - #close)
-    editor.replace_selection(inner)
-    editor.set_selection(start, start + #inner - 1)
-  else
-    editor.replace_selection(open .. selected .. close)
-    editor.set_selection(start + #open, start + #open + length - 1)
-  end
+  local text, innerStart, innerFinish = wrapped_text(editor.get_selection(), open, close)
+  editor.replace_selection(text)
+  editor.set_selection(start + innerStart - 1, start + innerFinish - 1)
 end
 
 local function wrap_tag(tag)
@@ -107,12 +167,10 @@ end
 -- stacked ("# " on "- item" gives "# item"), and a line that already has
 -- exactly the prefix has it removed, so each command toggles.
 
--- The number of spaces (at most 3) a line starts with. Markdown allows up
--- to 3 before a marker; 4 would make the line a code block.
+-- The number of spaces and tabs a line starts with. Indentation is kept as
+-- it is, so a nested list item ("    - item") stays nested.
 local function leading_spaces(line)
-  local count = 0
-  while count < #line and count < 3 and line:byte(count + 1) == 32 do count = count + 1 end
-  return count
+  return #line:match("^[ \t]*")
 end
 
 -- A marker ending at byte `last` of text counts only when it is followed by
@@ -168,11 +226,11 @@ local function is_numbered(line)
   return prefix_length(line) > indent and line:sub(indent + 1, indent + 1):match("%d") ~= nil
 end
 
--- Gives every selected line prefix (see the section comment above). With
--- numbered set, prefix is ignored and the lines are numbered 1., 2., ...
--- instead, or un-numbered when every one of them is numbered already.
-local function apply_line_prefix(prefix, numbered)
-  local first, last = selected_lines()
+-- Lines first..last given prefix (see the section comment above), joined
+-- with the document's line ending. With numbered set, prefix is ignored and
+-- the lines are numbered 1., 2., ... instead, or un-numbered when every one
+-- of them is numbered already.
+local function prefixed_lines(first, last, prefix, numbered)
   local lines = {}
   for n = first, last do lines[#lines + 1] = editor.get_line(n) end
 
@@ -208,8 +266,40 @@ local function apply_line_prefix(prefix, numbered)
     local contentStart = existing > 0 and existing or indent
     out[i] = line:sub(1, indent) .. newPrefix .. line:sub(contentStart + 1)
   end
+  return table.concat(out, editor.eol())
+end
 
-  replace_lines(first, last, table.concat(out, editor.eol()))
+-- Gives every selected line prefix, as prefixed_lines() does. With several
+-- selections, the lines of each are done, touching or overlapping blocks
+-- of lines as one, from the last block up so earlier positions stay valid.
+local function apply_line_prefix(prefix, numbered)
+  if editor.selection_count() == 1 then
+    local first, last = selected_lines()
+    replace_lines(first, last, prefixed_lines(first, last, prefix, numbered))
+    return
+  end
+
+  local blocks = {}
+  for _, range in ipairs(editor.get_selections()) do
+    local first, last = lines_of(range.start, range.finish)
+    blocks[#blocks + 1] = { first = first, last = last }
+  end
+  table.sort(blocks, function(a, b) return a.first < b.first end)
+  local merged = {}
+  for _, block in ipairs(blocks) do
+    local previous = merged[#merged]
+    if previous and block.first <= previous.last + 1 then
+      previous.last = math.max(previous.last, block.last)
+    else
+      merged[#merged + 1] = block
+    end
+  end
+  for i = #merged, 1, -1 do
+    local block = merged[i]
+    local _, finish = editor.line_range(block.last)
+    editor.replace_range(line_start(block.first), finish,
+      prefixed_lines(block.first, block.last, prefix, numbered))
+  end
 end
 
 -- ---- snippets: links, images, tables, blocks ----
@@ -291,7 +381,7 @@ local function insert_html_table()
   local function add_row(tag, text)
     lines[#lines + 1] = "  <tr>"
     for column = 1, columns do
-      lines[#lines + 1] = "    <" .. tag .. ">" .. (text or "Column " .. column) .. "</" .. tag .. ">"
+      lines[#lines + 1] = "    <" .. tag .. ">" .. (text or ("Column " .. column)) .. "</" .. tag .. ">"
     end
     lines[#lines + 1] = "  </tr>"
   end
@@ -342,7 +432,10 @@ local function insert_code_block()
 
   local selected = editor.get_selection()
   local open = leading .. "```" .. eol
-  editor.replace_selection(open .. selected .. eol .. "```" .. eol)
+  -- A selection of whole lines already ends with a line ending.
+  local lastChar = selected:sub(-1)
+  local bodyEnd = (lastChar == "\r" or lastChar == "\n") and "" or eol
+  editor.replace_selection(open .. selected .. bodyEnd .. "```" .. eol)
   editor.set_selection(start + #open, start + #open + #selected - 1)
 end
 

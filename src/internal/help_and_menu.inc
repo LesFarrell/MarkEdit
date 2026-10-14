@@ -138,6 +138,14 @@ static void escape_ampersands(const WCHAR *in, WCHAR *out, size_t outSize) {
     out[o] = 0;
 }
 
+/* Menu-bar item metrics, in 96-DPI pixels except the font size (points). */
+enum {
+    MENU_FONT_POINT_SIZE = 9,
+    MENU_ITEM_TEXT_INSET = 7,      /* left and right of each label */
+    MENU_ITEM_SYSTEM_PADDING = 12, /* roughly what Win32 adds to a measured width */
+    MENU_ITEM_EXTRA_HEIGHT = 8,
+};
+
 /* Windows does not recolour the visible, non-client menu bar when an app
    switches its private dark-mode preference at runtime. Draw just those
    top-level items ourselves; the dropdown contents remain native menus and
@@ -148,7 +156,7 @@ static HFONT main_menu_font(void) {
     if (dc) ReleaseDC(g_hMainWnd, dc);
     if (!g_menuFont || dpi != g_menuFontDpi) {
         if (g_menuFont) DeleteObject(g_menuFont);
-        g_menuFont = CreateFontA(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL,
+        g_menuFont = CreateFontA(-MulDiv(MENU_FONT_POINT_SIZE, dpi, 72), 0, 0, 0, FW_NORMAL,
             FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
         g_menuFontDpi = dpi;
@@ -167,12 +175,13 @@ static void measure_main_menu_item(MEASUREITEMSTRUCT *mis) {
     RECT textRect = {0};
     DrawTextA(dc, label, -1, &textRect, DT_SINGLELINE | DT_CALCRECT);
     int dpi = GetDeviceCaps(dc, LOGPIXELSY);
-    /* Win32 adds about 12 DPI-scaled pixels of its own to a menu-bar item's
-       measured width. Offset part of that so the final rectangle retains
-       the seven-pixel inset on each side that draw_main_menu_item uses. */
-    int requestedWidth = textRect.right + MulDiv(2, dpi, 96);
+    /* Win32 adds MENU_ITEM_SYSTEM_PADDING of its own to a menu-bar item's
+       measured width, so ask for only the rest of the inset on each side
+       that draw_main_menu_item uses. */
+    int requestedWidth = textRect.right +
+        MulDiv(2 * MENU_ITEM_TEXT_INSET - MENU_ITEM_SYSTEM_PADDING, dpi, 96);
     mis->itemWidth = (UINT)(requestedWidth > 1 ? requestedWidth : 1);
-    mis->itemHeight = (UINT)(textRect.bottom + MulDiv(8, dpi, 96));
+    mis->itemHeight = (UINT)(textRect.bottom + MulDiv(MENU_ITEM_EXTRA_HEIGHT, dpi, 96));
     SelectObject(dc, oldFont);
     ReleaseDC(g_hMainWnd, dc);
 }
@@ -182,12 +191,9 @@ static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
     if (!label) return;
 
     int active = (dis->itemState & (ODS_SELECTED | ODS_HOTLIGHT)) != 0;
-    COLORREF background = g_editorDarkMode
-        ? (active ? RGB(0x21, 0x26, 0x2D) : THEME_DARK_BG)
-        : (active ? RGB(0xE8, 0xEC, 0xF1) : THEME_LIGHT_BG);
-    COLORREF foreground = (dis->itemState & (ODS_DISABLED | ODS_GRAYED))
-        ? (g_editorDarkMode ? RGB(0x8B, 0x94, 0x9E) : RGB(0x65, 0x6D, 0x76))
-        : theme_fg_color();
+    const ThemePalette *p = theme_palette();
+    COLORREF background = active ? p->highlightBg : p->bg;
+    COLORREF foreground = (dis->itemState & (ODS_DISABLED | ODS_GRAYED)) ? p->menuDisabledFg : p->fg;
 
     fill_rect_color(dis->hDC, &dis->rcItem, background);
 
@@ -196,7 +202,7 @@ static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
     HFONT oldFont = (HFONT)SelectObject(dis->hDC, main_menu_font());
     RECT textRect = dis->rcItem;
     int dpi = GetDeviceCaps(dis->hDC, LOGPIXELSY);
-    textRect.left += MulDiv(7, dpi, 96);
+    textRect.left += MulDiv(MENU_ITEM_TEXT_INSET, dpi, 96);
     UINT flags = DT_SINGLELINE | DT_LEFT | DT_VCENTER;
     if (dis->itemState & ODS_NOACCEL) flags |= DT_HIDEPREFIX;
     DrawTextA(dis->hDC, label, -1, &textRect, flags);

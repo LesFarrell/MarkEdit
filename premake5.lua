@@ -1,4 +1,7 @@
 -- Premake5 script for MarkEdit.
+-- Premake supplies project, files, filter and its other functions as
+-- globals, which a Lua language server doesn't know about.
+---@diagnostic disable: undefined-global, lowercase-global
 -- Alternative to the Zig-based build.bat / test.bat scripts, for three
 -- toolchains (builds markedit.exe, statically linking Lexilla, and the
 -- test programs, then stages dist/ the same way build.bat does):
@@ -218,12 +221,13 @@ project "markedit"
 
     files(sources_from_rsp("markedit-sources.rsp"))
     files {
-        "src/internal/preview.inc", "src/internal/documents.inc", "src/internal/dialogs.inc",
+        "src/internal/editor_view.inc", "src/internal/preview.inc", "src/internal/documents.inc", "src/internal/dialogs.inc",
         "src/internal/help_and_menu.inc", "src/internal/ui_shell.inc", "src/internal/debugger.inc",
         "src/internal/outline_host.inc", "src/internal/editor_input.inc",
         "src/internal/workspace.inc",
         "src/internal/settings_dialog.inc", "src/internal/command_dispatch.inc",
         "src/internal/plugin_bridge.inc", "src/internal/control_theme.inc",
+        "src/internal/spell_check.inc", "src/internal/recovery_host.inc",
         "src/editor_commands.h",
         "src/editor_language.h",
         "src/preview_fallback.h",
@@ -306,138 +310,60 @@ project "markedit"
         postbuildcommands(staging_commands(false))
     filter {}
 
-project "test_parser"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_parser"
-    targetdir "tests"
-    objdir "build/obj/test_parser"
+-- ---- test programs ----
+-- Each one is tests/<name>.c plus the app sources it exercises, built
+-- warning-free like the app itself, mirroring its test.bat line.
+--   sources  the extra source (and header) files
+--   links    the Windows libraries it needs
+--   uses     "plugins" for the plugin host (plugin-sources.rsp and Lua),
+--            "lua" for Lua alone, "cmark" for the Markdown renderer
+function test_project(name, sources, links_list, uses)
+    project(name)
+        kind "ConsoleApp"
+        language "C"
+        cdialect "C11"
+        targetname(name)
+        targetdir "tests"
+        objdir("build/obj/" .. name)
+        files { "tests/" .. name .. ".c" }
+        files(sources)
+        if uses == "plugins" then
+            files(sources_from_rsp("plugin-sources.rsp"))
+            lua_settings()
+        elseif uses == "lua" then
+            lua_settings()
+        elseif uses == "cmark" then
+            cmark_gfm_settings()
+        end
+        includedirs { "." }
+        links(links_list)
+        warnings "Extra"
+        optimize "Size"
+        filter "toolset:gcc or clang"
+            buildoptions { "-Werror" }
+        filter "toolset:msc"
+            buildoptions { "/WX" }
+        filter {}
+end
 
-    files { "tests/test_parser.c", "src/markdown.c" }
-    cmark_gfm_settings()
-
-    includedirs { "." }
-    warnings "Extra"
-    optimize "Size"
-
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_editor_commands"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_editor_commands"
-    targetdir "tests"
-    objdir "build/obj/test_editor_commands"
-    files { "tests/test_editor_commands.c", "src/editor_commands.c", "src/editor_commands.h" }
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_core"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_core"
-    targetdir "tests"
-    objdir "build/obj/test_core"
-    files { "tests/test_core.c", "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c", "src/plugin_settings.c", "src/plugin_settings.h" }
-    includedirs { "." }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_recovery"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_recovery"
-    targetdir "tests"
-    objdir "build/obj/test_recovery"
-    files { "tests/test_recovery.c", "src/recovery.c", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
-    includedirs { "." }
-    links { "ole32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_plugin_host"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_plugin_host"
-    targetdir "tests"
-    objdir "build/obj/test_plugin_host"
-    files { "tests/test_plugin_host.c", "src/plugin_host.h", "src/lua_editor_api.h" }
-    files(sources_from_rsp("plugin-sources.rsp"))
-    lua_settings()
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
--- Run from the repository root: it reads src/menus.lua.
-project "test_menus"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_menus"
-    targetdir "tests"
-    objdir "build/obj/test_menus"
-    files { "tests/test_menus.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h", "src/lua_editor_api.h" }
-    files(sources_from_rsp("plugin-sources.rsp"))
-    lua_settings()
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
--- Run from the repository root: it reads src/lua/formatting_*.lua.
-project "test_formatting"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_formatting"
-    targetdir "tests"
-    objdir "build/obj/test_formatting"
-    files { "tests/test_formatting.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h", "src/lua_editor_api.h" }
-    files(sources_from_rsp("plugin-sources.rsp"))
-    lua_settings()
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
+test_project("test_parser", { "src/markdown.c" }, {}, "cmark")
+test_project("test_editor_commands", { "src/editor_commands.c", "src/editor_commands.h" }, { "user32" })
+test_project("test_language", { "src/editor_language.c", "src/editor_language.h", "src/theme.c" },
+             { "user32", "shlwapi", "gdi32", "uxtheme" })
+test_project("test_outline", { "src/outline_minimap.c", "src/outline_minimap.h", "src/theme.c", "src/text_codec.c" },
+             { "user32", "comctl32", "gdi32" })
+test_project("test_theme", { "src/theme.c", "src/theme.h", "src/plugin_host.h" },
+             { "user32", "gdi32", "uxtheme" }, "plugins")
+test_project("test_core", { "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c",
+                            "src/plugin_settings.c", "src/plugin_settings.h" }, {})
+test_project("test_recovery", { "src/recovery.c", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" },
+             { "ole32" })
+test_project("test_plugin_host", { "src/plugin_host.h", "src/lua_editor_api.h" }, { "user32" }, "plugins")
+test_project("test_assemblers", {}, {}, "lua")
+test_project("test_lua_format", {}, {}, "lua")
+-- These two read src/menus.lua and src/lua/formatting_*.lua, so run them
+-- from the repository root (test.bat does).
+test_project("test_menus", { "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h", "src/lua_editor_api.h" },
+             { "user32" }, "plugins")
+test_project("test_formatting", { "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h",
+                                  "src/lua_editor_api.h" }, { "user32" }, "plugins")

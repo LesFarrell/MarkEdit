@@ -1,6 +1,7 @@
 src/markedit.c
 src/editor_commands.c
 src/editor_language.c
+src/theme.c
 src/preview_fallback.c
 src/path_utils.c
 src/file_io.c

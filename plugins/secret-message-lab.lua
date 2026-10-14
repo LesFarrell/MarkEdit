@@ -204,7 +204,11 @@ local function binary_decode(text)
   for position = 1, #compact, 8 do
     output[#output + 1] = string.char(tonumber(compact:sub(position, position + 7), 2))
   end
-  return table.concat(output)
+  local result = table.concat(output)
+  if not utf8.len(result) or result:find("\0", 1, true) then
+    return nil, "Binary input does not decode to valid UTF-8 text."
+  end
+  return result
 end
 
 local function pig_latin_word(word)

@@ -1,10 +1,9 @@
--- Tools > CSV commands for comma-, semicolon-, tab-, and whitespace-separated
--- files. All transformations share this quote-aware parser, including support
+-- Tools > CSV commands for comma-, semicolon-, and tab-separated files. All transformations share this quote-aware parser, including support
 -- for escaped quotes and line endings inside quoted fields.
 
 local ERROR_INDICATOR = 13
 local ERROR_COLOUR = 0xef5350
-local DELIMITERS = { comma = ",", semicolon = ";", tab = "\t", whitespace = " " }
+local DELIMITERS = { comma = ",", semicolon = ";", tab = "\t" }
 
 -- Every data command uses the main selection when it contains text and falls
 -- back to the whole document only when there is no selection. Replacements
@@ -16,8 +15,7 @@ local function source_range()
 end
 
 local function delimiter_name(delimiter)
-  return delimiter == "," and "comma" or delimiter == ";" and "semicolon"
-    or delimiter == "\t" and "tab" or "whitespace"
+  return delimiter == ";" and "semicolon" or delimiter == "\t" and "tab" or "comma"
 end
 
 local function first_record(text)
@@ -42,22 +40,19 @@ local function delimiter_count(line, delimiter)
     if character == '"' then
       if quoted and line:sub(position + 1, position + 1) == '"' then position = position + 1
       else quoted = not quoted end
-    elseif not quoted then
-      if delimiter == " " and character:match("[ \t]") then
-        count = count + 1
-        repeat position = position + 1 until not line:sub(position, position):match("[ \t]")
-        position = position - 1
-      elseif character == delimiter then count = count + 1 end
+    elseif not quoted and character == delimiter then
+      count = count + 1
     end
     position = position + 1
   end
   return count
 end
 
+-- The separator the first record uses most, comma when it has none.
 local function detect_delimiter(text)
   local line = first_record(text)
-  local best, best_count = ",", -1
-  for _, delimiter in ipairs({ ",", "\t", ";", " " }) do
+  local best, best_count = ",", 0
+  for _, delimiter in ipairs({ ",", "\t", ";" }) do
     local count = delimiter_count(line, delimiter)
     if count > best_count then best, best_count = delimiter, count end
   end
@@ -71,20 +66,25 @@ end
 
 local function parse(text)
   local delimiter = configured_delimiter(text)
-  local whitespace = delimiter == " "
   local rows, row, field = {}, {}, {}
-  local position, quoted, after_quote, field_started = 1, false, false, false
+  -- Each field's source text as written (quotes included, surrounding
+  -- blanks trimmed), for Format Columns to realign without re-quoting.
+  local raw_rows, raw_row, field_begin = {}, {}, 1
+  local position, quoted, after_quote = 1, false, false
   local trailing_eol = false
 
   local function value() return table.concat(field) end
-  local function end_field(force)
-    if force or field_started or after_quote or not whitespace then row[#row + 1] = value() end
-    field, field_started, after_quote = {}, false, false
+  local function end_field()
+    row[#row + 1] = value()
+    raw_row[#raw_row + 1] = text:sub(field_begin, position - 1):match("^%s*(.-)%s*$")
+    field, after_quote = {}, false
+    field_begin = position + 1
   end
   local function end_row()
-    end_field(not whitespace or #row > 0)
+    end_field()
     rows[#rows + 1] = row
-    row = {}
+    raw_rows[#raw_rows + 1] = raw_row
+    row, raw_row = {}, {}
   end
 
   while position <= #text do
@@ -102,11 +102,12 @@ local function parse(text)
       end
     else
       local is_newline = character == "\r" or character == "\n"
-      local is_delimiter = whitespace and character:match("[ \t]") or character == delimiter
+      local is_delimiter = character == delimiter
       if after_quote and not is_newline and not is_delimiter and not character:match("[ \t]") then
         return nil, { position = position, message = "Unexpected text after a closing quote." }
-      elseif not field_started and not after_quote and character == '"' then
-        quoted, field_started = true, true
+      elseif not after_quote and character == '"' and value():match("^[ \t]*$") then
+        -- Blanks before the opening quote, as in a, "b", aren't part of it.
+        field, quoted = {}, true
       elseif character == '"' then
         return nil, { position = position,
           message = "A quoted field must begin with a quote." }
@@ -117,18 +118,11 @@ local function parse(text)
         end
         trailing_eol = position == #text
       elseif is_delimiter then
-        if whitespace then
-          if field_started or after_quote then end_field(false) end
-          repeat position = position + 1 until not text:sub(position, position):match("[ \t]")
-          position = position - 1
-        else
-          end_field(true)
-        end
+        end_field()
       elseif after_quote and character:match("[ \t]") then
-        -- Padding between a quoted field and a non-whitespace delimiter.
+        -- Padding between a quoted field and the next separator.
       else
         field[#field + 1] = character
-        field_started = true
       end
     end
     position = position + 1
@@ -136,15 +130,16 @@ local function parse(text)
   if quoted then
     return nil, { position = math.max(1, #text), message = "Unterminated quoted field." }
   end
-  if field_started or after_quote or #row > 0 or (#text > 0 and not trailing_eol) then end_row() end
-  return { rows = rows, delimiter = delimiter, trailing_eol = trailing_eol }
+  -- A line ending can only be trailing when it's the last character, so
+  -- anything else means the final record has no line ending of its own.
+  if #text > 0 and not trailing_eol then end_row() end
+  return { rows = rows, raw_rows = raw_rows, delimiter = delimiter, trailing_eol = trailing_eol }
 end
 
 local function csv_quote(value, delimiter)
   local must_quote = value:find('"', 1, true) or value:find("\r", 1, true)
     or value:find("\n", 1, true) or value:match("^%s") or value:match("%s$")
-  if delimiter == " " then must_quote = must_quote or value:find("%s")
-  else must_quote = must_quote or value:find(delimiter, 1, true) end
+    or value:find(delimiter, 1, true)
   if not must_quote then return value end
   return '"' .. value:gsub('"', '""') .. '"'
 end
@@ -210,27 +205,28 @@ local function format_columns()
   if not data then return end
   local columns = maximum_columns(data.rows)
   local rendered, widths = {}, {}
-  for row_index, row in ipairs(data.rows) do
+  for row_index, row in ipairs(data.raw_rows) do
     rendered[row_index] = {}
     for column = 1, columns do
-      local quoted = '"' .. (row[column] or ""):gsub('"', '""') .. '"'
-      rendered[row_index][column] = quoted
-      widths[column] = math.max(widths[column] or 0, utf8.len(quoted) or #quoted)
+      -- Each field keeps the text it was written with - quoted or not - so
+      -- only the separators move. The blanks around it were trimmed by the
+      -- parser, which also drops the padding of an earlier Format Columns.
+      local text = row[column] or ""
+      rendered[row_index][column] = text
+      widths[column] = math.max(widths[column] or 0, utf8.len(text) or #text)
     end
   end
   local lines = {}
   for row_index, row in ipairs(rendered) do
     local fields = {}
     for column, value in ipairs(row) do
+      -- The last column has no separator after it to line up, so it isn't
+      -- padded: lines don't end in trailing blanks.
       local width = utf8.len(value) or #value
-      fields[column] = value .. string.rep(" ", widths[column] - width)
+      local padding = column < #row and widths[column] - width or 0
+      fields[column] = value .. string.rep(" ", padding)
     end
-    if data.delimiter == " " then
-      -- At least one separating space is needed after each padded field.
-      lines[row_index] = table.concat(fields, " ")
-    else
-      lines[row_index] = table.concat(fields, data.delimiter)
-    end
+    lines[row_index] = table.concat(fields, data.delimiter)
   end
   local result = table.concat(lines, editor.eol())
   if data.trailing_eol and #lines > 0 then result = result .. editor.eol() end
@@ -269,8 +265,8 @@ local function inspect_data()
 end
 
 local function choose_delimiter()
-  local labels = { "Auto-detect", "Comma (,)", "Semicolon (;)", "Tab", "Whitespace" }
-  local values = { "auto", "comma", "semicolon", "tab", "whitespace" }
+  local labels = { "Auto-detect", "Comma (,)", "Semicolon (;)", "Tab" }
+  local values = { "auto", "comma", "semicolon", "tab" }
   local index = ui.choose(labels, "Separator used when reading data:")
   if index then
     config.set("delimiter", values[index])
@@ -294,14 +290,24 @@ local function sort_rows(descending)
     local value = row[column] or ""
     decorated[index] = { row = row, text = value:lower(), number = tonumber(value), index = index }
   end
-  table.sort(decorated, function(a, b)
-    local before
-    if a.number and b.number then before = a.number < b.number
-    else before = a.text < b.text end
-    if (a.number and b.number and a.number == b.number) or a.text == b.text then
-      return a.index < b.index
+  -- Numbers sort before text, so a column mixing both still has one
+  -- consistent order. Returns nil for equal keys.
+  local function precedes(a, b)
+    if a.number and b.number then
+      if a.number ~= b.number then return a.number < b.number end
+    elseif a.number or b.number then
+      return a.number ~= nil
+    elseif a.text ~= b.text then
+      return a.text < b.text
     end
-    return descending and not before or before
+    return nil
+  end
+  table.sort(decorated, function(a, b)
+    local before = precedes(a, b)
+    -- Equal keys keep their original order in both directions.
+    if before == nil then return a.index < b.index end
+    if descending then return not before end
+    return before
   end)
   data.rows = { header }
   for _, item in ipairs(decorated) do data.rows[#data.rows + 1] = item.row end
@@ -369,7 +375,6 @@ menu.separator("/Tools/CSV")
 menu.add("/Tools/CSV/Convert/To Comma-Separated", function() convert(",") end)
 menu.add("/Tools/CSV/Convert/To Semicolon-Separated", function() convert(";") end)
 menu.add("/Tools/CSV/Convert/To Tab-Separated", function() convert("\t") end)
-menu.add("/Tools/CSV/Convert/To Space-Separated", function() convert(" ") end)
 menu.add("/Tools/CSV/Convert/To JSON Objects", to_json)
 menu.add("/Tools/CSV/Convert/To Markdown Table", to_markdown)
 menu.separator("/Tools/CSV")
@@ -452,7 +457,10 @@ menu.add("/Tools/CSV/Columns/Remove Column...", function()
   if not data then return end
   local column = ask_column("Remove column", maximum_columns(data.rows))
   if not column then return end
-  for _, row in ipairs(data.rows) do table.remove(row, column) end
+  for _, row in ipairs(data.rows) do
+    -- Short (ragged) rows may not have this column at all.
+    if column <= #row then table.remove(row, column) end
+  end
   replace_data(data, first, last)
 end)
 menu.add("/Tools/CSV/Columns/Keep Columns...", function()

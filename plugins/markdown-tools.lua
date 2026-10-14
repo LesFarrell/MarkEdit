@@ -25,16 +25,17 @@ local function plain_heading(text)
 end
 
 -- The anchor GitHub gives a heading: lower case, punctuation other than - and
--- _ removed, spaces as -. UTF-8 characters are kept as they are.
+-- _ removed, spaces as -. UTF-8 characters are kept as they are, except
+-- curly quotes, en/em dashes and ellipses, which are punctuation too.
 local function anchor_for(text)
-  return (text:lower():gsub("[^%w%s%-_\128-\255]", ""):gsub("%s", "-"))
+  return (text:lower():gsub("\226\128[\147\148\152\153\156\157\166]", ""):gsub("[^%w%s%-_\128-\255]", ""):gsub("%s", "-"))
 end
 
 -- Every heading outside code blocks and front matter, as { level, text }.
 -- Both # headings and underlined (=== and ---) headings count.
 local function document_headings()
   local lines = split_lines(editor.get_text(), editor.eol())
-  local headings, fence = {}, nil
+  local headings, fence, code = {}, nil, {}
   local first = 1
   -- YAML front matter: a --- line at the very start, up to the next one.
   if lines[1] == "---" then
@@ -45,6 +46,8 @@ local function document_headings()
   for n = first, #lines do
     local line = lines[n]
     local marker = line:match("^ ? ? ?(```+)") or line:match("^ ? ? ?(~~~+)")
+    -- Fence lines and the code between them, so none of them is underlined.
+    code[n] = fence ~= nil or marker ~= nil
     if fence then
       -- A fence closes with at least as many of the same character.
       if marker and marker:sub(1, 1) == fence:sub(1, 1) and #marker >= #fence
@@ -57,8 +60,11 @@ local function document_headings()
       local hashes, text = line:match("^ ? ? ?(#+)%s+(.-)%s*$")
       if hashes and #hashes <= 6 then
         text = text:gsub("%s+#+$", ""):gsub("^#+$", "")
-        headings[#headings + 1] = { level = #hashes, text = text }
+        if plain_heading(text):find("%S") then
+          headings[#headings + 1] = { level = #hashes, text = text }
+        end
       elseif n > first and lines[n - 1]:find("%S") and not lines[n - 1]:find("^ ? ? ?#")
+          and not code[n - 1] and plain_heading(lines[n - 1]):find("%S")
           and (line:find("^ ? ? ?=+%s*$") or line:find("^ ? ? ?%-+%s*$")) then
         local previous = headings[#headings]
         -- An underline can't itself be underlined: in "Title" / "===" /

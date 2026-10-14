@@ -24,7 +24,10 @@ flowchart TB
         dispatch["command_dispatch.inc<br/>command-family routing"]
         helphost["help_and_menu.inc<br/>help pages · menu owner-draw"]
         bridge["plugin_bridge.inc<br/>plugin service callbacks"]
-        controls["control_theme.inc<br/>owner-drawn tab and list theming"]
+        editorview["editor_view.inc<br/>editor text · theme · lexer · fonts"]
+        controls["control_theme.inc<br/>window · menu · tab and list theming"]
+        spelling["spell_check.inc<br/>Windows spell checking"]
+        recoveryhost["recovery_host.inc<br/>autosave recovery snapshots"]
     end
 
     wndproc --> ui
@@ -41,7 +44,7 @@ flowchart TB
 
     subgraph compiled["Focused compiled modules"]
         registry["menu_commands.c<br/>authoritative command registry"]
-        plugins["plugin_host.c<br/>host entry points · menu definition"]
+        plugins["plugin_host.c<br/>host entry points · menu definition · themes.lua"]
         runtime["plugin_lua_runtime.c<br/>sandboxed state · limits · pcall"]
         pluginreg["plugin_registry.c<br/>plugin API · command/event registries"]
         discovery["plugin_discovery.c<br/>extension discovery · module loader"]
@@ -49,6 +52,7 @@ flowchart TB
         scintillaCfg["scintilla_config.c<br/>Scintilla view setup"]
         outlineMod["outline_minimap.c<br/>outline and minimap subsystem"]
         progress["progress_dialog.c<br/>IProgressDialog wrapper"]
+        themeMod["theme.c<br/>light/dark palettes · colour names"]
         nativeServices["Native services<br/>recovery · codecs · explorer · layout · menus"]
     end
 
@@ -59,6 +63,7 @@ flowchart TB
     plugins --> runtime
     plugins --> pluginreg
     plugins --> discovery
+    plugins --> themeMod
     pluginreg --> editorApi
     editorApi --> scintilla["Scintilla documents and selections"]
 
@@ -100,20 +105,23 @@ they are included into the `markedit.c` translation unit.
 `src/markedit.c` owns startup, the main window procedure and cross-subsystem orchestration. Large implementation components are kept in `src/internal/` and included at the point where their private declarations are available. They cover documents, dialogs, the UI shell, preview, debugger, editor input, outline/minimap, workspace operations, settings and command dispatch. In particular:
 
 - `preview.inc`: WebView2 hosting, preview navigation and preview/editor synchronisation.
-- `documents.inc`: document tabs, file operations, encodings, export and session behaviour.
-- `dialogs.inc`: modal choices, text input, find/replace and help windows.
-- `ui_shell.inc`: menus, toolbar, layout, view toggles and editor presentation.
+- `documents.inc`: document tabs, file operations, encodings, export and session behaviour, plus the background access used to read or change other tabs' documents.
+- `dialogs.inc`: modal choices, text input, find/replace and help windows, and the shared popup-dialog theming and buttons.
+- `ui_shell.inc`: menus, toolbar, status bar, layout, view toggles and editor presentation.
 - `debugger.inc`: source launching, compiler discovery, GDB/Python debugger control and breakpoint persistence.
 - `editor_input.inc`: smart Tab/Enter, paired characters, spelling context actions and editor navigation gestures.
 - `outline_host.inc`, `workspace.inc` and `settings_dialog.inc`: their named UI subsystems.
 - `command_dispatch.inc`: native command-family handlers.
 - `help_and_menu.inc`: help windows, the generated shortcuts page and menu-bar owner-draw.
 - `plugin_bridge.inc`: the service callbacks the plugin host reaches the application through (prompts, message boxes, document actions).
-- `control_theme.inc`: owner-drawn tab and list-item theming.
+- `editor_view.inc`: reading and replacing editor text, and setting up each Scintilla view: theme colours, the language lexer, view options and the editor font. It is included first because every other component uses it.
+- `control_theme.inc`: main window, menu-bar and title-bar theming, splitter painting, and owner-drawn tab and list-item theming. It is included next because the remaining components use it.
+- `spell_check.inc`: native Windows spell checking of Markdown prose.
+- `recovery_host.inc`: autosave recovery snapshots, written through `recovery.c`.
 
 These components deliberately remain in the main translation unit for now. Their Win32 callbacks use substantial private application state; textual extraction improves navigation without replacing that dependency with a large public global interface. New code should not add dependencies across these boundaries. Once a component can be expressed through a small context structure, it can become a separate `.c` file. `outline_minimap.c`, `progress_dialog.c` and `scintilla_config.c` have already crossed that line.
 
-The spell-check code in `markedit.c` has not. It shares a live `ISpellChecker` with the editor's right-click context menu and leans on several shell helpers (`get_edit_text`, `save_layout_settings`, `refresh_menu`, `show_choice_dialog`) plus `g_activeLanguage` and `g_largeFile`, so it presently needs more than a small context to stand alone.
+`spell_check.inc` has not. It shares a live `ISpellChecker` with the editor's right-click context menu and leans on several shell helpers (`get_edit_text`, `save_layout_settings`, `refresh_menu`, `show_choice_dialog`) plus `g_activeLanguage` and `g_largeFile`, so it presently needs more than a small context to stand alone.
 
 `AppWindows` and `DocumentStore` in `markedit.c` group window handles and document ownership respectively. New state should be added to the appropriate structure rather than introduced as another unrelated global. `DocumentStore` is the single owner of the open-document array; the old `g_documents`/`g_documentCount`/`g_activeDocument` macros that shadowed its fields are gone, so edits go through `g_documentStore.<field>` directly.
 
@@ -131,7 +139,7 @@ depend on a UI module.
 | `settings_io.h` | — | Load/save entry points over the values above | `settings_values.h` |
 | `layout_metrics.{h,c}` | `layout_metrics.h` | Explorer geometry values and `explorer_content_x()` | `settings_values.h` |
 | `settings.h` | — | Umbrella over the three headers above, for the app shell only | `settings_values.h`, `settings_io.h`, `find_state.h` |
-| `path_utils.c` | `path_utils.h` | Path manipulation | shlwapi |
+| `path_utils.c` | `path_utils.h` | Path manipulation, `LONG_PATH_CAPACITY`, and the per-user `%LOCALAPPDATA%\MarkEdit` folders | shlwapi |
 | `text_codec.c` | `text_codec.h` | UTF-8/16 and BOM handling | — |
 | `file_io.c` | `file_io.h` | Atomic file read/write helpers | `path_utils.h` |
 | `workspace_text.c` | `workspace_text.h` | Workspace text helpers | — |
@@ -139,12 +147,13 @@ depend on a UI module.
 | `settings.c` | `settings_io.h` | Persistence | `settings_values.h`, `settings_io.h`, `find_state.h`, `layout_metrics.h`, `path_utils.h`, `plugin_settings.h`, `text_codec.h` |
 | `recent_list.c` | `recent_list.h` | Recent-files list | `settings_io.h` |
 | `file_explorer.c` | `file_explorer.h` | Explorer panel and tree | `layout_metrics.h`, `settings_values.h`, `theme.h` |
-| `recovery.c` | `recovery.h` | Crash-recovery snapshots | `file_io.h` |
+| `recovery.c` | `recovery.h` | Crash-recovery snapshots | `file_io.h`, `path_utils.h` |
 | `toolbar_icons.c` / `themed_scrollbar.c` | matching | Owner-drawn UI helpers | windows.h, uxtheme |
-| `outline_minimap.c` | `outline_minimap.h` | Outline panel and minimap, driven through a host struct | `editor_commands.h`, `editor_language.h`, `settings_io.h`, `settings_values.h`, `text_codec.h`, Scintilla |
+| `outline_minimap.c` | `outline_minimap.h` | Outline panel and minimap, driven through a host struct | `editor_commands.h`, `editor_language.h`, `settings_io.h`, `settings_values.h`, `text_codec.h`, `theme.h`, Scintilla |
+| `theme.c` | `theme.h` | The light and dark `ThemePalette`s: every colour by role, its `themes.lua` name and built-in value, and the template Customize Theme Colours writes | `settings_values.h` |
 | `scintilla_config.c` | `scintilla_config.h` | Scintilla view setup: margins, markers, wrap/whitespace/indent, gutter sizing | `editor_commands.h`, `settings_values.h`, `themed_scrollbar.h`, Scintilla |
 | `progress_dialog.c` | `progress_dialog.h` | Marquee progress dialog wrapper (IProgressDialog) | windows.h, shlobj, ole32 |
-| `plugin_host.c` | `plugin_host.h` | Plugin host entry points, menu definition, help page rendering | `plugin_host_internal.h`, `lua_editor_api.h` |
+| `plugin_host.c` | `plugin_host.h` | Plugin host entry points, menu definition, help page rendering, and running a `themes.lua` in a Lua state of its own | `plugin_host_internal.h`, `lua_editor_api.h` |
 | `plugin_lua_runtime.c` | (internal) | Sandboxed `lua_State`, memory/time limits, protected calls | `plugin_host_internal.h` |
 | `plugin_registry.c` | (internal) | `ui`/`menu`/`events`/`commands`/`config`/`app` API and registries | `plugin_host_internal.h` |
 | `plugin_discovery.c` | (internal) | Extension discovery and the folder-local `require` loader | `plugin_host_internal.h`, `file_io.h`, `path_utils.h` |

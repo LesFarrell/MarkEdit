@@ -152,6 +152,7 @@ static const MenuCommand COMMANDS[] = {
 
     {"plugins.reload", IDM_PLUGIN_RELOAD, NULL},
     {"plugins.customize_menus", IDM_PLUGIN_CUSTOMIZE_MENUS, NULL},
+    {"plugins.customize_theme", IDM_PLUGIN_CUSTOMIZE_THEME, NULL},
     {"plugins.open_folder", IDM_PLUGIN_OPEN_FOLDER, NULL},
     {"plugins.new", IDM_PLUGIN_NEW, NULL},
     {"plugins.manage", IDM_PLUGIN_MANAGE, NULL},

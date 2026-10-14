@@ -62,9 +62,11 @@ end
 local WORD_OPERATORS = { ["and"] = "&", ["or"] = "|", xor = "~", ["not"] = "~", shl = "<<", shr = ">>" }
 
 -- Rewrites what Lua doesn't read itself: binary (0b101) and octal (0o17)
--- numbers, and the word operators. Lua reads hex (0xFF) as it is.
+-- numbers, and the word operators. Lua reads hex (0xFF) as it is. Runs of
+-- minus signs are spaced out, as "--" would otherwise start a Lua comment.
 local function to_lua_expression(expression)
   return (expression
+    :gsub("%-%-+", function(minuses) return (minuses:gsub("%-", "- ")) end)
     :gsub("%f[%w_.]0[bB]([01]+)%f[^%w_.]", function(digits) return tostring(tonumber(digits, 2)) end)
     :gsub("%f[%w_.]0[oO]([0-7]+)%f[^%w_.]", function(digits) return tostring(tonumber(digits, 8)) end)
     :gsub("%f[%w_]([%a_][%w_]*)", function(word) return WORD_OPERATORS[word:lower()] end))
@@ -80,6 +82,16 @@ local function calculate_line(line)
   -- and only the names in CALCULATOR mean anything.
   if not expression:find("^[%w%s%.%+%-%*/%%%^%(%),_&|~<>]+$") then
     return nil, "Only numbers, + - * / % ^ // & | ~ << >>, brackets, and functions such as sqrt() can be calculated."
+  end
+  -- Commas only separate function arguments. Outside brackets Lua would read
+  -- "1,000 * 2" as two values and quietly keep the first.
+  local depth = 0
+  for character in expression:gmatch("[(),]") do
+    if character == "(" then depth = depth + 1
+    elseif character == ")" then depth = depth - 1
+    elseif depth <= 0 then
+      return nil, "Commas can only separate function arguments, as in max(1, 2). Write 1000 rather than 1,000."
+    end
   end
   local chunk = load("return " .. to_lua_expression(expression), "=expression", "t", CALCULATOR)
   local ok, value = false, nil

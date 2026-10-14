@@ -22,6 +22,7 @@
 #include "settings_io.h"
 #include "settings_values.h"
 #include "text_codec.h"
+#include "theme.h"
 
 #include "../third_party/lexilla/include/SciLexer.h"
 
@@ -38,7 +39,7 @@ void outline_minimap_init(const OutlineMinimapHost *host) {
 
 /* ---- document outline -------------------------------------------------- */
 
-static int parse_atx_heading(const char *line, int length, int *textStart, int *textLength) {
+int outline_parse_atx_heading(const char *line, int length, int *textStart, int *textLength) {
     int i = 0;
     while (i < length && i < 3 && line[i] == ' ') i++;
     int hashes = 0;
@@ -83,7 +84,7 @@ void update_outline(void) {
         Sci_Position got = (Sci_Position)SendMessageA(*g_host->edit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
         line[got >= 0 && got <= length ? got : length] = 0;
         int start = 0, textLength = 0;
-        int level = parse_atx_heading(line, (int)got, &start, &textLength);
+        int level = outline_parse_atx_heading(line, (int)got, &start, &textLength);
         if (level && textLength > 0) {
             char *heading = (char *)malloc((size_t)textLength + 1);
             if (heading) {
@@ -242,7 +243,7 @@ LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (box.bottom > rc.bottom) box.bottom = rc.bottom;
             if (box.bottom > box.top) {
                 HDC hdc = GetDC(hwnd);
-                HBRUSH brush = CreateSolidBrush(g_editorDarkMode ? RGB(0x6E, 0x76, 0x81) : RGB(0x8B, 0x94, 0x9E));
+                HBRUSH brush = CreateSolidBrush(theme_palette()->minimapFrame);
                 FrameRect(hdc, &box, brush);
                 DeleteObject(brush);
                 ReleaseDC(hwnd, hdc);

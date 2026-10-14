@@ -29,10 +29,15 @@ local function target_lines()
 end
 
 -- Replaces lines first..last with the strings in lines, rejoined with the
--- document's line ending, and selects them.
+-- document's line ending, and selects them. When no lines are left, one
+-- line ending goes too, so removing every line leaves no blank line behind.
 local function replace_lines(first, last, lines)
   local start = editor.line_range(first)
   local _, finish = editor.line_range(last)
+  if #lines == 0 then
+    if last < editor.line_count() then finish = editor.line_range(last + 1) - 1
+    elseif first > 1 then start = select(2, editor.line_range(first - 1)) + 1 end
+  end
   local text = table.concat(lines, editor.eol())
   editor.replace_range(start, finish, text)
   editor.set_selection(start, start + #text - 1)
@@ -53,8 +58,15 @@ end
 -- "Parse HTTP response" all give parse, HTTP/http, response. Bytes of UTF-8
 -- characters count as letters, so accented words stay whole, but only ASCII
 -- letters change case.
+-- Curly quotes, en/em dash, ellipsis and NBSP are punctuation, not parts of
+-- words: they are blanked with the same number of bytes, so positions in the
+-- result still match the original text.
+local function mask_punctuation(text)
+  return (text:gsub("\226\128[\147\148\152\153\156\157\166]", "   "):gsub("\194\160", "  "))
+end
+
 local function split_words(text)
-  text = text:gsub("(%l)(%u)", "%1 %2"):gsub("(%d)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2")
+  text = mask_punctuation(text):gsub("(%l)(%u)", "%1 %2"):gsub("(%d)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2")
   local words = {}
   for word in text:gmatch("[%w\128-\255]+") do words[#words + 1] = word end
   return words
@@ -153,7 +165,7 @@ local function word_at_caret()
   local line = editor.current_line()
   local lineStart = editor.line_range(line)
   local column = editor.get_caret() - lineStart + 1
-  for wordStart, word, wordEnd in editor.get_line(line):gmatch("()(" .. WORD_BYTE .. "+)()") do
+  for wordStart, word, wordEnd in mask_punctuation(editor.get_line(line)):gmatch("()(" .. WORD_BYTE .. "+)()") do
     if wordStart <= column and column <= wordEnd then return word end
   end
   return ""
@@ -167,11 +179,12 @@ local function count_occurrences(text, needle, eol, wholeWord)
   local count, lines, lastLine, line, scanned = 0, 0, 0, 1, 1
   local checkBefore = wholeWord and needle:find("^" .. WORD_BYTE)
   local checkAfter = wholeWord and needle:find(WORD_BYTE .. "$")
+  local masked = wholeWord and mask_punctuation(text) or text
   local position = 1
   while true do
     local first, last = text:find(needle, position, true)
     if not first then break end
-    local before, after = text:sub(first - 1, first - 1), text:sub(last + 1, last + 1)
+    local before, after = masked:sub(first - 1, first - 1), masked:sub(last + 1, last + 1)
     if not (checkBefore and before:find(WORD_BYTE)) and not (checkAfter and after:find(WORD_BYTE)) then
       count = count + 1
       -- Line endings since the last match give this match's line.

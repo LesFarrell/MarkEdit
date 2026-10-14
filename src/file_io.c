@@ -159,7 +159,7 @@ int write_file_atomic_progress(const WCHAR *target, const char *text, size_t len
     if (hasBom && bomLength && !write_all(hFile, bom, bomLength)) ok = FALSE;
     /* `text` is UTF-8; anything else is converted a chunk at a time. */
     TextCodecState codec = { encoding, {0}, 0 };
-    size_t encodedCapacity = text_encode_capacity(1024 * 1024);
+    size_t encodedCapacity = text_encode_capacity(FILE_IO_CHUNK_SIZE);
     char *encoded = encoding == TEXT_ENCODING_UTF8 ? NULL : (char *)malloc(encodedCapacity);
     if (encoding != TEXT_ENCODING_UTF8 && !encoded) ok = FALSE;
     while (ok && total < len) {

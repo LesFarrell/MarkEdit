@@ -1,3 +1,118 @@
+/* Backing storage for the status bar's four segments (0: Ln/Col, 1: Words/
+   Characters, 2: encoding, 3: save state). The strip is fully repainted by
+   StatusSubclassProc below instead of through SB_SETTEXT + owner-draw:
+   comctl32 draws a light 3D bevel between parts by itself regardless of
+   SBT_OWNERDRAW/SBT_NOBORDERS, which reads as bright seams against a dark
+   theme. Parts must own their text for as long as the control might repaint
+   them, so a transient stack buffer would otherwise be read back as a
+   dangling pointer once these functions return. */
+static WCHAR g_statusPartText[4][128];
+
+/* The status bar deliberately computes from Scintilla's UTF-8 document model:
+   character counts are Unicode-aware while columns remain editor columns. */
+/* Ln/Col, encoding, and dirty-status fields only - all O(1) Scintilla
+   queries, safe to call on every caret move or scroll tick. Word/character
+   counts need a full-document scan, so they're left to update_status_bar()
+   and only refreshed when the text can actually have changed. */
+static void update_status_position(void) {
+    if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
+    HWND view = tracked_edit_view();
+    Sci_Position position = (Sci_Position)SendMessageA(view, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position line = (Sci_Position)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
+    Sci_Position column = (Sci_Position)SendMessageA(view, SCI_GETCOLUMN, (WPARAM)position, 0) + 1;
+    swprintf(g_statusPartText[0], 128, L"Ln %lld, Col %lld", (long long)line, (long long)column);
+    int eol = (int)SendMessageA(view, SCI_GETEOLMODE, 0, 0);
+    const WCHAR *eolName = eol == SC_EOL_LF ? L"LF" : eol == SC_EOL_CR ? L"CR" : L"CRLF";
+    WCHAR encodingName[40];
+    switch (g_encoding) {
+        case TEXT_ENCODING_UTF16LE: wcscpy(encodingName, L"UTF-16 LE"); break;
+        case TEXT_ENCODING_UTF16BE: wcscpy(encodingName, L"UTF-16 BE"); break;
+        case TEXT_ENCODING_ANSI:
+            swprintf(encodingName, 40, L"ANSI (CP %u)", text_ansi_code_page());
+            break;
+        default: wcscpy(encodingName, L"UTF-8"); break;
+    }
+    swprintf(g_statusPartText[2], 128, L"%ls%ls   %ls", encodingName, g_hasBom ? L" BOM" : L"", eolName);
+    swprintf(g_statusPartText[3], 128, L"%ls", !g_dirty ? L"Saved"
+             : g_largeFile ? L"Modified" : L"Modified · recovery enabled");
+    InvalidateRect(g_hStatus, NULL, FALSE);
+}
+
+static void update_status_bar(void) {
+    update_status_position();
+    if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
+    if (g_largeFile) {
+        double mib = (double)(Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) / (1024.0 * 1024.0);
+        swprintf(g_statusPartText[1], 128, L"Large file mode   %.1f MB", mib);
+        InvalidateRect(g_hStatus, NULL, FALSE);
+        return;
+    }
+    Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position characters = (Sci_Position)SendMessageA(g_hEdit, SCI_COUNTCHARACTERS, 0, (LPARAM)length);
+    Sci_Position ignored = 0;
+    int words = 0;
+    char *text = get_edit_text(g_hEdit, &ignored);
+    if (text) {
+        int inWord = 0;
+        for (Sci_Position i = 0; i < length; i++) {
+            unsigned char ch = (unsigned char)text[i];
+            int wordChar = ch >= 0x80 || isalnum(ch) || ch == '_' || ch == '\'';
+            if (wordChar && !inWord) words++;
+            inWord = wordChar;
+        }
+        free(text);
+    }
+    swprintf(g_statusPartText[1], 128, L"Words %d   Characters %lld", words, (long long)characters);
+    InvalidateRect(g_hStatus, NULL, FALSE);
+}
+
+static void show_plugin_reload_status(const WCHAR *text) {
+    if (!g_hStatus) return;
+    KillTimer(g_hMainWnd, IDT_STATUS_UPDATE);
+    const size_t capacity = sizeof(g_statusPartText[3]) / sizeof(g_statusPartText[3][0]);
+    wcsncpy(g_statusPartText[3], text, capacity - 1);
+    g_statusPartText[3][capacity - 1] = 0;
+    InvalidateRect(g_hStatus, NULL, FALSE);
+    SetTimer(g_hMainWnd, IDT_PLUGIN_STATUS, PLUGIN_STATUS_DURATION_MS, NULL);
+}
+
+/* Paints the whole status bar strip itself in the app's own GitHub palette:
+   comctl32's default rendering has no opt-in for a custom light/dark palette
+   the way the editor/menu/toolbar do, and (unlike those) drawing only the
+   owner-drawn parts still leaves the control's own bevel between them, which
+   shows up as light seams. SB_SETPARTS (via layout()) still establishes the
+   four part rectangles this reads with SB_GETRECT; nothing else about the
+   control's own painting is used. */
+static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                            UINT_PTR subclassId, DWORD_PTR refData) {
+    (void)subclassId; (void)refData;
+    if (msg == WM_ERASEBKGND) {
+        return 1; /* WM_PAINT fills the whole strip itself. */
+    } else if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client;
+        GetClientRect(hwnd, &client);
+        fill_rect_color(dc, &client, theme_bg_color());
+        SetTextColor(dc, theme_fg_color());
+        SetBkMode(dc, TRANSPARENT);
+        for (int i = 0; i < 4; i++) {
+            RECT partRect = {0};
+            if (!SendMessageW(hwnd, SB_GETRECT, (WPARAM)i, (LPARAM)&partRect)) continue;
+            partRect.left += 4;
+            partRect.right -= 4;
+            DrawTextW(dc, g_statusPartText[i], -1, &partRect,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, StatusSubclassProc, 1);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+
 /* ---- the menu bar ----
    Built from the menu definition (src/menus.lua, built into the exe, or the
    user's copy - see load_menu_definition()). This code adds what the
@@ -142,9 +257,10 @@ static int split_plugin_label(WCHAR *label, WCHAR **parts) {
 /* Compares menu names, ignoring case and '&' mnemonic markers. */
 static int menu_names_match(const WCHAR *a, const WCHAR *b) {
     WCHAR plainA[128], plainB[128];
+    const int maxLength = (int)(sizeof(plainA) / sizeof(plainA[0])) - 1;
     int lengthA = 0, lengthB = 0;
-    for (; *a && lengthA < 127; a++) if (*a != L'&') plainA[lengthA++] = *a;
-    for (; *b && lengthB < 127; b++) if (*b != L'&') plainB[lengthB++] = *b;
+    for (; *a && lengthA < maxLength; a++) if (*a != L'&') plainA[lengthA++] = *a;
+    for (; *b && lengthB < maxLength; b++) if (*b != L'&') plainB[lengthB++] = *b;
     plainA[lengthA] = 0;
     plainB[lengthB] = 0;
     return lstrcmpiW(plainA, plainB) == 0;
@@ -475,6 +591,7 @@ static HMENU build_menu(void) {
             AppendMenuA(menu, MF_STRING, IDM_PLUGIN_OPEN_FOLDER, "Open Plugins &Folder");
             AppendMenuA(menu, MF_STRING, IDM_PLUGIN_MANAGE, "&Manage Plugins...");
             AppendMenuA(menu, MF_STRING, IDM_PLUGIN_CUSTOMIZE_MENUS, "&Customize Menus...");
+            AppendMenuA(menu, MF_STRING, IDM_PLUGIN_CUSTOMIZE_THEME, "Customize &Theme Colours...");
             if (!add_menu_bar_menu(menuBar, entries, &entryCount, L"&Plugins", menu, 0)) DestroyMenu(menu);
         }
     }
@@ -618,7 +735,7 @@ static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
     if (index < 0 || !TOOLBAR_BUTTONS[index].paint) return;
 
     COLORREF fg = theme_fg_color();
-    COLORREF pressedBg = g_editorDarkMode ? THEME_DARK_BORDER : RGB(0xE1, 0xE7, 0xEC);
+    COLORREF pressedBg = theme_palette()->pressedBg;
 
     int pressed = (dis->itemState & ODS_SELECTED) != 0;
     fill_rect_color(dis->hDC, &dis->rcItem, pressed ? pressedBg : theme_bg_color());
@@ -725,12 +842,8 @@ static LRESULT CALLBACK DebugHeaderSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
 static void draw_debug_panel_button(const DRAWITEMSTRUCT *dis) {
     int pressed = (dis->itemState & ODS_SELECTED) != 0;
     int disabled = (dis->itemState & ODS_DISABLED) != 0;
-    COLORREF fill = pressed
-        ? (g_editorDarkMode ? THEME_DARK_BORDER : RGB(0xE1, 0xE7, 0xEC))
-        : theme_bg_color();
-    COLORREF text = disabled
-        ? (g_editorDarkMode ? RGB(0x7D, 0x85, 0x90) : RGB(0x8C, 0x95, 0x9F))
-        : theme_fg_color();
+    COLORREF fill = pressed ? theme_palette()->pressedBg : theme_bg_color();
+    COLORREF text = disabled ? theme_palette()->disabledFg : theme_fg_color();
     fill_rect_color(dis->hDC, &dis->rcItem, fill);
 
     HPEN pen = CreatePen(PS_SOLID, 1, theme_border_color());
@@ -763,17 +876,17 @@ static LRESULT CALLBACK DebugPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPara
         RECT rc;
         GetClientRect(hwnd, &rc);
         int dpi = GetDpiForWindow(hwnd);
-        int pad = MulDiv(8, dpi, 96);
-        int row = MulDiv(26, dpi, 96);
-        int buttonWidth = MulDiv(112, dpi, 96);
-        int closeWidth = MulDiv(30, dpi, 96);
+        int pad = MulDiv(DEBUG_PANEL_PADDING, dpi, 96);
+        int row = MulDiv(DEBUG_PANEL_ROW_HEIGHT, dpi, 96);
+        int buttonWidth = MulDiv(DEBUG_BUTTON_WIDTH, dpi, 96);
+        int closeWidth = MulDiv(DEBUG_CLOSE_BUTTON_WIDTH, dpi, 96);
         int availableForButtons = rc.right - closeWidth - pad * 7;
         if (availableForButtons > 0 && buttonWidth * 4 > availableForButtons)
             buttonWidth = availableForButtons / 4;
         /* A panel too narrow for legible buttons hides them rather than
            honouring the minimum width, which would push the leftmost button's
            coordinates off the panel entirely. */
-        int showButtons = buttonWidth >= MulDiv(48, dpi, 96);
+        int showButtons = buttonWidth >= MulDiv(DEBUG_BUTTON_MIN_WIDTH, dpi, 96);
         HWND buttons[] = { g_hDebugContinue, g_hDebugStepOver,
                            g_hDebugStepInto, g_hDebugStepOut };
         int x = rc.right - pad - closeWidth;
@@ -789,7 +902,7 @@ static LRESULT CALLBACK DebugPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPara
         } else {
             for (int i = 0; i < 4; i++) ShowWindow(buttons[i], SW_HIDE);
         }
-        if (showButtons && statusWidth > MulDiv(40, dpi, 96)) {
+        if (showButtons && statusWidth > MulDiv(DEBUG_STATUS_MIN_WIDTH, dpi, 96)) {
             MoveWindow(g_hDebugStatus, pad, pad / 2, statusWidth, row, TRUE);
             ShowWindow(g_hDebugStatus, SW_SHOW);
         } else {
@@ -823,8 +936,8 @@ static LRESULT CALLBACK DebugPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPara
         RECT border = { rc.left, rc.top, rc.right, rc.top + 1 };
         fill_rect_color((HDC)wParam, &border, theme_border_color());
         int dpi = GetDpiForWindow(hwnd);
-        int pad = MulDiv(8, dpi, 96);
-        int top = MulDiv(26, dpi, 96) + pad;
+        int pad = MulDiv(DEBUG_PANEL_PADDING, dpi, 96);
+        int top = MulDiv(DEBUG_PANEL_ROW_HEIGHT, dpi, 96) + pad;
         RECT edge = { pad, top, rc.right - pad, top + 1 };
         fill_rect_color((HDC)wParam, &edge, theme_border_color());
         edge = (RECT){ pad, rc.bottom - pad - 1, rc.right - pad, rc.bottom - pad };
@@ -951,101 +1064,114 @@ static void layout_editor_with_minimap(HWND hwnd, int x, int y, int width, int h
     }
 }
 
-static void layout(HWND hwnd) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    int w = rc.right, h = rc.bottom;
-    g_splitterRect = (RECT){0, 0, 0, 0}; /* only the "both visible" branch below sets this */
+/* The part of the main window's client area not yet given to a panel.
+   layout() hands it to each panel in turn, and each one takes its share
+   from one edge. */
+typedef struct LayoutArea {
+    int x, y, width, height;
+} LayoutArea;
 
-    if (g_hStatus) {
-        int statusHeight = 22;
-        MoveWindow(g_hStatus, 0, h - statusHeight, w, statusHeight, TRUE);
-        int parts[4] = { MulDiv(150, w > 0 ? GetDpiForWindow(hwnd) : 96, 96),
-                         MulDiv(345, w > 0 ? GetDpiForWindow(hwnd) : 96, 96),
-                         MulDiv(510, w > 0 ? GetDpiForWindow(hwnd) : 96, 96), -1 };
-        SendMessageW(g_hStatus, SB_SETPARTS, 4, (LPARAM)parts);
-        /* StatusSubclassProc paints from these part rectangles via
-           SB_GETRECT, so a resize needs a repaint to match the new sizes.
-           Resizing can't change the text, so the full-document word count
-           only runs the first time (before any part text exists), not on
-           every WM_SIZE or splitter-drag mouse move. */
-        if (g_statusPartText[1][0]) InvalidateRect(g_hStatus, NULL, FALSE);
-        else update_status_bar();
-        h -= statusHeight;
-    }
+/* The status bar along the bottom edge. */
+static void layout_status_bar(HWND hwnd, LayoutArea *area) {
+    if (!g_hStatus) return;
+    int statusHeight = STATUS_BAR_HEIGHT;
+    MoveWindow(g_hStatus, 0, area->height - statusHeight, area->width, statusHeight, TRUE);
+    int dpi = area->width > 0 ? GetDpiForWindow(hwnd) : 96;
+    int parts[4] = { MulDiv(STATUS_POSITION_PART_RIGHT, dpi, 96), MulDiv(STATUS_COUNT_PART_RIGHT, dpi, 96),
+                     MulDiv(STATUS_ENCODING_PART_RIGHT, dpi, 96), -1 };
+    SendMessageW(g_hStatus, SB_SETPARTS, 4, (LPARAM)parts);
+    /* StatusSubclassProc paints from these part rectangles via SB_GETRECT,
+       so a resize needs a repaint to match the new sizes. Resizing can't
+       change the text, so the full-document word count only runs the first
+       time (before any part text exists), not on every WM_SIZE or
+       splitter-drag mouse move. */
+    if (g_statusPartText[1][0]) InvalidateRect(g_hStatus, NULL, FALSE);
+    else update_status_bar();
+    area->height -= statusHeight;
+}
 
-    /* The formatting toolbar and tab strip span the full window width, above
-       both the file explorer panel and the editor/preview - the explorer
-       panel is docked below them, not beside them. The toolbar sits directly
-       under the menu bar, with the tab strip below it. The formatting toolbar
-       edits Markdown source, so it's only useful (and only shown) while the
-       editor pane is visible. */
-    int y = 0;
-    for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {
-        if (g_hToolbarButtons[i])
-            ShowWindow(g_hToolbarButtons[i], g_editorVisible && !g_focusMode ? SW_SHOW : SW_HIDE);
-    }
-    if (g_editorVisible && !g_focusMode) y = layout_toolbar_at(w, y);
+/* The formatting toolbar and tab strip span the full window width, above
+   both the file explorer panel and the editor/preview - the explorer panel
+   is docked below them, not beside them. The toolbar sits directly under
+   the menu bar, with the tab strip below it. The formatting toolbar edits
+   Markdown source, so it's only useful (and only shown) while the editor
+   pane is visible. */
+static void layout_toolbar_and_tabs(LayoutArea *area) {
+    int showToolbar = g_editorVisible && !g_focusMode;
+    for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++)
+        if (g_hToolbarButtons[i]) ShowWindow(g_hToolbarButtons[i], showToolbar ? SW_SHOW : SW_HIDE);
+    int y = showToolbar ? layout_toolbar_at(area->width, 0) : 0;
     ShowWindow(g_hTabs, g_focusMode ? SW_HIDE : SW_SHOW);
     if (!g_focusMode) {
-        MoveWindow(g_hTabs, 0, y, w, TAB_HEIGHT, TRUE);
+        MoveWindow(g_hTabs, 0, y, area->width, TAB_HEIGHT, TRUE);
         y += TAB_HEIGHT;
     }
-    h -= y;
-    if (h < 0) h = 0;
+    area->y = y;
+    area->height -= y;
+    if (area->height < 0) area->height = 0;
+}
 
-    /* File explorer panel: docked at the left edge of the remaining content
-       area (below the tab strip/toolbar, above the status bar), opposite
-       side from the outline pane. Everything to its right shifts its
-       x-origin by contentX and lays out into the now-narrower w, the same
-       way the outline pane's own paneWidth carve-out works at the other
-       end. */
-    int contentX = 0;
-    if (g_hExplorerTree && g_explorerVisible && !g_focusMode) {
-        int dpi = GetDpiForWindow(hwnd);
-        if (g_explorerWidth < 0)
-            g_explorerWidth = MulDiv(w, g_explorerWidthRatio, 1000);
-        int minWidth = MulDiv(120, dpi, 96);
-        int maxWidth = w * 2 / 3;
-        if (g_explorerWidth < minWidth) g_explorerWidth = minWidth;
-        if (maxWidth > minWidth && g_explorerWidth > maxWidth) g_explorerWidth = maxWidth;
-        g_explorerSplitterRect = (RECT){ g_explorerWidth, y, g_explorerWidth + SPLITTER_WIDTH, y + h };
-        MoveWindow(g_hExplorerTree, 0, y, g_explorerWidth, h, TRUE);
-        ShowWindow(g_hExplorerTree, SW_SHOW);
-        contentX = g_explorerWidth + SPLITTER_WIDTH;
-    } else {
+/* File explorer panel: docked at the left edge of the remaining content
+   area (below the tab strip/toolbar, above the status bar), opposite side
+   from the outline pane. */
+static void layout_explorer(HWND hwnd, LayoutArea *area) {
+    if (!g_hExplorerTree || !g_explorerVisible || g_focusMode) {
         g_explorerSplitterRect = (RECT){0, 0, 0, 0};
         if (g_hExplorerTree) ShowWindow(g_hExplorerTree, SW_HIDE);
+        return;
     }
-    w -= contentX;
-    if (w < 0) w = 0;
+    int dpi = GetDpiForWindow(hwnd);
+    if (g_explorerWidth < 0)
+        g_explorerWidth = MulDiv(area->width, g_explorerWidthRatio, 1000);
+    int minWidth = MulDiv(EXPLORER_MIN_WIDTH, dpi, 96);
+    int maxWidth = area->width * 2 / 3;
+    if (g_explorerWidth < minWidth) g_explorerWidth = minWidth;
+    if (maxWidth > minWidth && g_explorerWidth > maxWidth) g_explorerWidth = maxWidth;
+    g_explorerSplitterRect = (RECT){ g_explorerWidth, area->y,
+                                     g_explorerWidth + SPLITTER_WIDTH, area->y + area->height };
+    MoveWindow(g_hExplorerTree, 0, area->y, g_explorerWidth, area->height, TRUE);
+    ShowWindow(g_hExplorerTree, SW_SHOW);
+    area->x = g_explorerWidth + SPLITTER_WIDTH;
+    area->width -= area->x;
+    if (area->width < 0) area->width = 0;
+}
 
-    /* A debug session owns a docked strip beneath the editor/preview area.
-       The explorer remains full-height, while code, preview, and outline all
-       give up the same amount of vertical space so their bottoms stay level. */
-    if (g_hDebugPanel && g_debugPanelVisible && !g_focusMode && h >= 160) {
-        int debugHeight = MulDiv(190, GetDpiForWindow(hwnd), 96);
-        if (debugHeight > h / 2) debugHeight = h / 2;
-        MoveWindow(g_hDebugPanel, contentX, y + h - debugHeight, w, debugHeight, TRUE);
-        ShowWindow(g_hDebugPanel, SW_SHOW);
-        h -= debugHeight;
-    } else if (g_hDebugPanel) {
+/* A debug session owns a docked strip beneath the editor/preview area. The
+   explorer remains full-height, while code, preview, and outline all give
+   up the same amount of vertical space so their bottoms stay level. */
+static void layout_debug_panel(HWND hwnd, LayoutArea *area) {
+    if (!g_hDebugPanel) return;
+    if (!g_debugPanelVisible || g_focusMode || area->height < DEBUG_PANEL_MIN_SPACE) {
         ShowWindow(g_hDebugPanel, SW_HIDE);
+        return;
     }
+    int debugHeight = MulDiv(DEBUG_PANEL_HEIGHT, GetDpiForWindow(hwnd), 96);
+    if (debugHeight > area->height / 2) debugHeight = area->height / 2;
+    MoveWindow(g_hDebugPanel, area->x, area->y + area->height - debugHeight, area->width, debugHeight, TRUE);
+    ShowWindow(g_hDebugPanel, SW_SHOW);
+    area->height -= debugHeight;
+}
 
-    int paneWidth = w;
-    if (g_hOutline && g_outlineVisible && g_editorVisible && !g_focusMode) {
-        int outlineWidth = MulDiv(230, GetDpiForWindow(hwnd), 96);
-        if (outlineWidth > w / 3) outlineWidth = w / 3;
-        paneWidth = w - outlineWidth;
-        MoveWindow(g_hOutline, contentX + paneWidth, y, outlineWidth, h, TRUE);
-        ShowWindow(g_hOutline, SW_SHOW);
-    } else if (g_hOutline) {
+/* The outline pane, docked at the right edge. */
+static void layout_outline(HWND hwnd, LayoutArea *area) {
+    if (!g_hOutline) return;
+    if (!g_outlineVisible || !g_editorVisible || g_focusMode) {
         ShowWindow(g_hOutline, SW_HIDE);
+        return;
     }
+    int outlineWidth = MulDiv(OUTLINE_WIDTH, GetDpiForWindow(hwnd), 96);
+    if (outlineWidth > area->width / 3) outlineWidth = area->width / 3;
+    area->width -= outlineWidth;
+    MoveWindow(g_hOutline, area->x + area->width, area->y, outlineWidth, area->height, TRUE);
+    ShowWindow(g_hOutline, SW_SHOW);
+}
 
+/* The editor and the preview, alone or side by side with the splitter
+   between them, fill whatever the panels above left over. */
+static void layout_editor_and_preview(HWND hwnd, const LayoutArea *area) {
+    int x = area->x, y = area->y, width = area->width, h = area->height;
     if (g_editorVisible && !g_previewVisible) {
-        layout_editor_with_minimap(hwnd, contentX, y, paneWidth, h);
+        layout_editor_with_minimap(hwnd, x, y, width, h);
         ShowWindow(g_hPreview, SW_HIDE);
         RECT zero = { 0, 0, 0, 0 };
         set_webview_bounds(zero, FALSE);
@@ -1057,35 +1183,48 @@ static void layout(HWND hwnd) {
         if (g_hMinimap) ShowWindow(g_hMinimap, SW_HIDE);
         if (g_hSplitEdit) ShowWindow(g_hSplitEdit, SW_HIDE);
         ShowWindow(g_hPreview, SW_SHOW);
-        MoveWindow(g_hPreview, contentX, y, paneWidth, h, TRUE);
+        MoveWindow(g_hPreview, x, y, width, h, TRUE);
         /* WebView2 controller bounds are relative to g_hPreview's own client
            origin (which MoveWindow already positioned), not the main window. */
-        RECT wvRc = { 0, 0, paneWidth, h };
+        RECT wvRc = { 0, 0, width, h };
         set_webview_bounds(wvRc, TRUE);
         return;
     }
 
     /* both visible (the !g_editorVisible && !g_previewVisible case is prevented by the toggle handlers) */
     if (g_splitterPos < 0)
-        g_splitterPos = MulDiv(paneWidth - SPLITTER_WIDTH, g_splitterRatio, 1000);
-    if (g_splitterPos < 100) g_splitterPos = 100;
-    if (g_splitterPos > paneWidth - 100)
-        g_splitterPos = (paneWidth - 100 > 100) ? paneWidth - 100 : 100;
+        g_splitterPos = MulDiv(width - SPLITTER_WIDTH, g_splitterRatio, 1000);
+    if (g_splitterPos < MIN_PANE_WIDTH) g_splitterPos = MIN_PANE_WIDTH;
+    if (g_splitterPos > width - MIN_PANE_WIDTH)
+        g_splitterPos = (width - MIN_PANE_WIDTH > MIN_PANE_WIDTH) ? width - MIN_PANE_WIDTH : MIN_PANE_WIDTH;
 
     ShowWindow(g_hPreview, SW_SHOW);
-    g_splitterRect = (RECT){ contentX + g_splitterPos, y, contentX + g_splitterPos + SPLITTER_WIDTH, y + h };
-    int rightWidth = paneWidth - g_splitterPos - SPLITTER_WIDTH;
+    g_splitterRect = (RECT){ x + g_splitterPos, y, x + g_splitterPos + SPLITTER_WIDTH, y + h };
+    int rightWidth = width - g_splitterPos - SPLITTER_WIDTH;
     RECT wvRc;
     if (g_previewOnLeft) {
-        MoveWindow(g_hPreview, contentX, y, g_splitterPos, h, TRUE);
-        layout_editor_with_minimap(hwnd, contentX + g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h);
+        MoveWindow(g_hPreview, x, y, g_splitterPos, h, TRUE);
+        layout_editor_with_minimap(hwnd, x + g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h);
         wvRc = (RECT){ 0, 0, g_splitterPos, h };
     } else {
-        layout_editor_with_minimap(hwnd, contentX, y, g_splitterPos, h);
-        MoveWindow(g_hPreview, contentX + g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
+        layout_editor_with_minimap(hwnd, x, y, g_splitterPos, h);
+        MoveWindow(g_hPreview, x + g_splitterPos + SPLITTER_WIDTH, y, rightWidth, h, TRUE);
         wvRc = (RECT){ 0, 0, rightWidth, h };
     }
     set_webview_bounds(wvRc, TRUE);
+}
+
+static void layout(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    LayoutArea area = { 0, 0, rc.right, rc.bottom };
+    g_splitterRect = (RECT){0, 0, 0, 0}; /* only the side-by-side layout sets this */
+    layout_status_bar(hwnd, &area);
+    layout_toolbar_and_tabs(&area);
+    layout_explorer(hwnd, &area);
+    layout_debug_panel(hwnd, &area);
+    layout_outline(hwnd, &area);
+    layout_editor_and_preview(hwnd, &area);
 }
 
 /* Check marks and enabled states change without the menu being rebuilt;

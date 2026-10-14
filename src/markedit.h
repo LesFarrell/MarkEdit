@@ -34,6 +34,26 @@
 #define IDT_PLUGIN_SELECTION 13
 #define IDT_PLUGIN_DEFER_BASE 1000
 
+/* ---- timer intervals, in milliseconds ----
+   The debounce delays let a burst of typing, scrolling or file changes
+   settle into one update; the intervals poll. */
+#define PREVIEW_UPDATE_DELAY_MS 150
+#define FILE_WATCH_INTERVAL_MS 1500
+#define SCROLL_SYNC_DELAY_MS 35              /* after the editor scrolls */
+#define SCROLL_SYNC_AFTER_RENDER_DELAY_MS 40 /* after the preview re-renders */
+#define SPELL_CHECK_DELAY_MS 350
+#define AUTOSAVE_INTERVAL_MS 5000
+#define OUTLINE_UPDATE_DELAY_MS 500
+#define PRINT_PREVIEW_DELAY_MS 300           /* lets the preview render before printing */
+#define DEBUG_LOCATION_POLL_MS 150
+#define STATUS_UPDATE_DELAY_MS 200
+#define EXPLORER_REFRESH_DELAY_MS 400
+#define HTML_EXPORT_TIMEOUT_MS 30000
+#define PLUGIN_STATUS_DURATION_MS 1800       /* how long a plugin reload message shows */
+#define PLUGIN_SELECTION_DELAY_MS 100
+#define PLUGIN_DEFER_RETRY_MS 50             /* retry while a plugin is still running */
+#define DEBUGGER_EXIT_WAIT_MS 1000           /* for a stopped debugger to release its files */
+
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
 #define WM_APP_DEFERRED_INIT (WM_APP + 2)
@@ -43,9 +63,37 @@
 #define WM_APP_PLUGIN_DOCUMENT_ACTION (WM_APP + 6)
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
+#define TAB_ITEM_WIDTH 120 /* each document tab, in 96-DPI pixels like the sizes below */
+#define TAB_ITEM_HEIGHT 22
+#define TAB_TOOLTIP_MAX_WIDTH 700 /* the full-path tooltip wraps past this */
+#define DEFAULT_WINDOW_WIDTH 1100  /* first run, before a size is saved */
+#define DEFAULT_WINDOW_HEIGHT 750
+#define DEBUG_LINE_ALPHA 110       /* the current-line highlight while debugging (0-255) */
 #define MINIMAP_WIDTH 120
 #define MINIMAP_SPLITTER_WIDTH 1
 #define SPLIT_EDITOR_SPLITTER_SIZE 4
+#define STATUS_BAR_HEIGHT 22
+/* Right edges of the status bar's Ln/Col, word count and encoding parts;
+   the save-state part fills the rest. */
+#define STATUS_POSITION_PART_RIGHT 150
+#define STATUS_COUNT_PART_RIGHT 345
+#define STATUS_ENCODING_PART_RIGHT 510
+#define EXPLORER_MIN_WIDTH 120
+#define OUTLINE_WIDTH 230      /* at most a third of the content width */
+#define MIN_PANE_WIDTH 100     /* the narrowest the editor or preview gets beside the other */
+#define DEBUG_PANEL_HEIGHT 190 /* at most half the content height */
+#define DEBUG_PANEL_MIN_SPACE 160 /* below this much height the panel stays hidden */
+#define DEBUG_PANEL_PADDING 8
+#define DEBUG_PANEL_ROW_HEIGHT 26
+#define DEBUG_BUTTON_WIDTH 112
+#define DEBUG_BUTTON_MIN_WIDTH 48 /* narrower than this, the buttons hide */
+#define DEBUG_CLOSE_BUTTON_WIDTH 30
+#define DEBUG_STATUS_MIN_WIDTH 40
+#define DEBUG_NAME_COLUMN_WIDTH 220
+#define DEBUG_VALUE_COLUMN_WIDTH 640
+
+/* Larger custom preview stylesheets are refused rather than loaded. */
+#define CUSTOM_CSS_MAX_BYTES (4 * 1024 * 1024)
 
 #include "command_ids.h"
 
@@ -89,6 +137,8 @@ static void update_document_mapping(void);
 static void update_title(void);
 static void set_dirty(int dirty);
 static void update_tab_label(int index);
+struct Document;
+static void format_document_label(const struct Document *doc, WCHAR *label, size_t capacity);
 static void switch_document(int index);
 static int create_document_tab(void);
 static int active_document_is_reusable(void);

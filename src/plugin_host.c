@@ -403,6 +403,99 @@ char *plugin_host_render_page(const char *name, const char *code, size_t length,
     return error;
 }
 
+/* ---- themes.lua ----
+   Runs in its own Lua state, like the shortcuts page: a colour file needs
+   nothing but tables and strings, and must not see or change plugin state. */
+
+typedef struct ThemeJob {
+    const char *name, *code;
+    size_t length;
+    PluginThemeColourFn setColour;
+    void *context;
+    char *report;
+} ThemeJob;
+
+/* Stops a themes.lua that never finishes, after about ten million
+   instructions - far more than building a table of colours needs. */
+enum { THEME_HOOK_INTERVAL = 10000, THEME_HOOK_LIMIT = 1000 };
+static int s_themeHookCalls;
+
+static void theme_instruction_limit(lua_State *L, lua_Debug *ar) {
+    (void)ar;
+    if (++s_themeHookCalls > THEME_HOOK_LIMIT) luaL_error(L, "stopped because it did not finish");
+}
+
+static void add_theme_problem(ThemeJob *job, const char *theme, const char *key, const char *problem) {
+    char line[256];
+    snprintf(line, sizeof(line), "%s: %s%s%s: %s", job->name, theme, key ? "." : "", key ? key : "", problem);
+    size_t used = job->report ? strlen(job->report) : 0;
+    char *grown = (char *)realloc(job->report, used + strlen(line) + 2);
+    if (!grown) return;
+    if (used) grown[used++] = '\n';
+    strcpy(grown + used, line);
+    job->report = grown;
+}
+
+/* Passes each colour of one theme's table (at the top of the stack) to the
+   callback, noting anything that isn't a "name = string" pair. */
+static void read_theme_colours(lua_State *L, ThemeJob *job, const char *theme, int dark) {
+    lua_pushnil(L);
+    while (lua_next(L, -2)) {
+        if (lua_type(L, -2) != LUA_TSTRING) {
+            add_theme_problem(job, theme, NULL, "colour names must be strings");
+        } else if (lua_type(L, -1) != LUA_TSTRING) {
+            add_theme_problem(job, theme, lua_tostring(L, -2), "the colour must be a string like \"#1F2328\"");
+        } else {
+            const char *problem = job->setColour(job->context, dark, lua_tostring(L, -2), lua_tostring(L, -1));
+            if (problem) add_theme_problem(job, theme, lua_tostring(L, -2), problem);
+        }
+        lua_pop(L, 1);
+    }
+}
+
+static int run_theme_file(lua_State *L) {
+    ThemeJob *job = (ThemeJob *)lua_touserdata(L, 1);
+    luaL_requiref(L, LUA_GNAME, luaopen_base, 1);
+    luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
+    lua_pop(L, 2);
+    char chunkName[260];
+    snprintf(chunkName, sizeof(chunkName), "=%s", job->name);
+    if (luaL_loadbufferx(L, job->code, job->length, chunkName, "t") != LUA_OK) return lua_error(L);
+    lua_call(L, 0, 1);
+    if (!lua_istable(L, -1)) return luaL_error(L, "%s must return a table of themes", job->name);
+    lua_pushnil(L);
+    while (lua_next(L, -2)) {
+        const char *theme = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
+        int dark = theme && strcmp(theme, "dark") == 0;
+        if (!theme || (!dark && strcmp(theme, "light") != 0))
+            add_theme_problem(job, theme ? theme : "?", NULL, "only \"light\" and \"dark\" themes exist");
+        else if (!lua_istable(L, -1))
+            add_theme_problem(job, theme, NULL, "must be a table of colours");
+        else
+            read_theme_colours(L, job, theme, dark);
+        lua_pop(L, 1);
+    }
+    return 0;
+}
+
+char *plugin_host_load_theme(const char *name, const char *code, size_t length,
+                             PluginThemeColourFn setColour, void *context) {
+    lua_State *L = luaL_newstate();
+    if (!L) return dup_string("Lua could not start: out of memory");
+    ThemeJob job = { name, code, length, setColour, context, NULL };
+    s_themeHookCalls = 0;
+    lua_sethook(L, theme_instruction_limit, LUA_MASKCOUNT, THEME_HOOK_INTERVAL);
+    lua_pushcfunction(L, run_theme_file);
+    lua_pushlightuserdata(L, &job);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        const char *message = lua_tostring(L, -1);
+        free(job.report);
+        job.report = dup_string(message ? message : "the theme file failed");
+    }
+    lua_close(L);
+    return job.report;
+}
+
 void plugin_host_shutdown(void) {
     if (s_busy) return;
     for (int i = 0; i < PLUGIN_MAX_DEFERRED; i++) {

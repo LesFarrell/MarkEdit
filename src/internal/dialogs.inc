@@ -1,4 +1,113 @@
+/* One shared background brush for whichever of these popup dialogs
+   (show_goto_line_dialog()/show_choice_dialog()/show_text_input()/the
+   Find & Replace review list/the Settings dialog) are currently open. Most
+   of them run their own modal message loop and never nest, but the Settings
+   dialog's Compiler category and its spell-check language picker (Choose...)
+   can open one of these ON TOP of another already-open one (Settings itself
+   opening the Choice dialog) - g_popupThemeDepth counts how many are
+   currently open so the brush is only actually torn down once the last one
+   closes, rather than being pulled out from under a still-open outer dialog
+   the moment a nested one exits. popup_dialog_theme_created() itself stays a
+   plain "make sure the themed brush exists right now" call with no bearing
+   on that count, since refresh_settings_dialog_theme() also calls it to
+   recolor an already-open dialog's brush without opening a new one. */
+static HBRUSH g_popupBkBrush = NULL;
+static int g_popupThemeDepth = 0;
+
+static void popup_dialog_theme_created(HWND hwnd) {
+    apply_popup_titlebar_theme(hwnd, g_editorDarkMode);
+    if (g_popupBkBrush) DeleteObject(g_popupBkBrush);
+    g_popupBkBrush = CreateSolidBrush(theme_bg_color());
+}
+
+/* Call once per popup window actually opened (WM_CREATE), paired with
+   popup_dialog_theme_destroyed() at that same window's WM_NCDESTROY. */
+static void popup_dialog_theme_opened(HWND hwnd) {
+    g_popupThemeDepth++;
+    popup_dialog_theme_created(hwnd);
+}
+
+static void popup_dialog_theme_destroyed(void) {
+    if (g_popupThemeDepth > 0) g_popupThemeDepth--;
+    if (g_popupThemeDepth == 0 && g_popupBkBrush) {
+        DeleteObject(g_popupBkBrush);
+        g_popupBkBrush = NULL;
+    }
+}
+
+/* Shared WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLORBTN/WM_CTLCOLOREDIT/
+   WM_CTLCOLORLISTBOX handling for the popup dialogs below - factored out since they all need
+   identical theming for their STATIC labels, EDIT fields, and checkbox/radio
+   buttons. Returns the brush/TRUE the caller should return from its WndProc,
+   or 0 if msg wasn't handled. */
+static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LRESULT *handled) {
+    *handled = 1;
+    if (msg == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wParam, &rc, g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        return 1;
+    }
+    /* Checkboxes send WM_CTLCOLORSTATIC for their label; radio buttons send
+       WM_CTLCOLORBTN instead - both need the same themed text colour, or the
+       radio labels stay stuck at the system default (near-black) in dark mode. */
+    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, theme_fg_color());
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+    }
+    /* Owner-drawn listboxes still ask for WM_CTLCOLORLISTBOX to paint
+       whatever their items don't cover - the blank area below the last row,
+       or the whole box when there are only a few rows - so without it that
+       space stays the default white regardless of theme. */
+    if (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX) {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, theme_fg_color());
+        SetBkColor(hdc, theme_bg_color());
+        return (LRESULT)(g_popupBkBrush ? g_popupBkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+    }
+    *handled = 0;
+    return 0;
+}
+
+/* Owner-drawn OK/Cancel-style push button matching the popup dialogs'
+   theme - standard BUTTON controls are visual-styles-drawn regardless of
+   WM_CTLCOLORBTN, so getting a themed fill/border needs BS_OWNERDRAW. */
+static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
+    int pressed = (dis->itemState & ODS_SELECTED) != 0;
+    int isDefault = (GetWindowLongW(dis->hwndItem, GWL_STYLE) & BS_DEFPUSHBUTTON) != 0;
+    COLORREF fill = pressed ? theme_palette()->pressedBg : theme_palette()->subtleBg;
+    fill_rect_color(dis->hDC, &dis->rcItem, fill);
+
+    HPEN pen = CreatePen(PS_SOLID, isDefault ? 2 : 1, isDefault ? theme_accent_color() : theme_border_color());
+    HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
+    SelectObject(dis->hDC, oldBrush);
+    SelectObject(dis->hDC, oldPen);
+    DeleteObject(pen);
+
+    WCHAR text[128];
+    GetWindowTextW(dis->hwndItem, text, 128);
+    SetTextColor(dis->hDC, theme_fg_color());
+    SetBkMode(dis->hDC, TRANSPARENT);
+    RECT textRect = dis->rcItem;
+    DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+
 /* ---- small modal dialogs: Go to Line, choices, and text input ---- */
+
+/* Control IDs for the popup dialogs below. IDs only need to be unique within
+   one dialog, so the numbers overlap between dialogs. */
+enum {
+    ID_GOTO_LINE = 10,
+    ID_CHOICE_FILTER = 10, ID_CHOICE_LIST = 11,
+    ID_TEXT_INPUT = 10,
+    ID_REPLACE_LIST = 11, ID_REPLACE_SELECT_ALL = 12, ID_REPLACE_SELECT_NONE = 13,
+};
+
 static HWND g_hGotoEdit = NULL;
 
 static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -9,7 +118,7 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 12, 14, 90, 20, hwnd, NULL, GetModuleHandleA(NULL), NULL);
             g_hGotoEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
-                104, 11, 105, 24, hwnd, (HMENU)10, GetModuleHandleA(NULL), NULL);
+                104, 11, 105, 24, hwnd, (HMENU)ID_GOTO_LINE, GetModuleHandleA(NULL), NULL);
             CreateWindowExA(0, "BUTTON", "Go to",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                 48, 50, 76, 25, hwnd, (HMENU)IDOK, GetModuleHandleA(NULL), NULL);
@@ -64,7 +173,20 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             popup_dialog_theme_destroyed();
             break;
     }
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/* Registers the window class for one of the popup dialogs. Safe to call
+   every time the dialog opens: a class that already exists counts as
+   registered. Returns 0 only if the class can't be registered at all. */
+static int register_popup_class(const WCHAR *className, WNDPROC windowProc) {
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = windowProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = className;
+    return RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
 
 /* Shows a popup dialog centred over the main window and runs its modal
@@ -93,20 +215,10 @@ static void run_modal_popup(HWND dialog) {
 }
 
 static void show_goto_line_dialog(void) {
-    static int classRegistered = 0;
-    if (!classRegistered) {
-        WNDCLASSA wc = {0};
-        wc.lpfnWndProc = GotoLineWndProc;
-        wc.hInstance = GetModuleHandleA(NULL);
-        wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = "MarkEditGotoLine";
-        if (!RegisterClassA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
-        classRegistered = 1;
-    }
-    HWND dialog = CreateWindowExA(WS_EX_DLGMODALFRAME, "MarkEditGotoLine", "Go to Line",
+    if (!register_popup_class(L"MarkEditGotoLine", GotoLineWndProc)) return;
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditGotoLine", L"Go to Line",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 238, 118, g_hMainWnd, NULL, GetModuleHandleA(NULL), NULL);
+        CW_USEDEFAULT, CW_USEDEFAULT, 238, 118, g_hMainWnd, NULL, GetModuleHandleW(NULL), NULL);
     if (!dialog) return;
     run_modal_popup(dialog);
     SetFocus(g_hEdit);
@@ -147,11 +259,11 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             12, 10, 556, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-            12, 32, 556, 25, hwnd, (HMENU)10, GetModuleHandleW(NULL), NULL);
+            12, 32, 556, 25, hwnd, (HMENU)ID_CHOICE_FILTER, GetModuleHandleW(NULL), NULL);
         state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
-            12, 64, 556, 286, hwnd, (HMENU)11, GetModuleHandleW(NULL), NULL);
+            12, 64, 556, 286, hwnd, (HMENU)ID_CHOICE_LIST, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", state->okLabel,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             404, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
@@ -189,12 +301,12 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             popup_dialog_theme_destroyed();
             break;
         case WM_COMMAND:
-            if (LOWORD(wParam) == 10 && HIWORD(wParam) == EN_CHANGE) {
+            if (LOWORD(wParam) == ID_CHOICE_FILTER && HIWORD(wParam) == EN_CHANGE) {
                 refill_choice_list(state);
                 return 0;
             }
             if (LOWORD(wParam) == IDOK ||
-                (LOWORD(wParam) == 11 && HIWORD(wParam) == LBN_DBLCLK)) {
+                (LOWORD(wParam) == ID_CHOICE_LIST && HIWORD(wParam) == LBN_DBLCLK)) {
                 int row = (int)SendMessageW(state->list, LB_GETCURSEL, 0, 0);
                 if (row != LB_ERR)
                     state->result = (int)SendMessageW(state->list, LB_GETITEMDATA, (WPARAM)row, 0);
@@ -217,17 +329,7 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
                               WCHAR **labels, int count, const WCHAR *okLabel) {
     if (!labels || count <= 0) return -1;
-    static int registered = 0;
-    if (!registered) {
-        WNDCLASSW wc = {0};
-        wc.lpfnWndProc = ChoiceWndProc;
-        wc.hInstance = GetModuleHandleW(NULL);
-        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"MarkEditChoiceDialog";
-        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return -1;
-        registered = 1;
-    }
+    if (!register_popup_class(L"MarkEditChoiceDialog", ChoiceWndProc)) return -1;
     ChoiceDialogState state = { labels, count, -1, prompt, okLabel, NULL, NULL };
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditChoiceDialog", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
@@ -256,7 +358,7 @@ static LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             12, 14, 396, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->initial,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-            12, 38, 396, 25, hwnd, (HMENU)10, GetModuleHandleW(NULL), NULL);
+            12, 38, 396, 25, hwnd, (HMENU)ID_TEXT_INPUT, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             244, 76, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
@@ -292,17 +394,7 @@ static LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 static int show_text_input(const WCHAR *title, const WCHAR *prompt,
                            const WCHAR *initial, WCHAR *output, int outputCapacity) {
-    static int registered = 0;
-    if (!registered) {
-        WNDCLASSW wc = {0};
-        wc.lpfnWndProc = TextInputWndProc;
-        wc.hInstance = GetModuleHandleW(NULL);
-        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"MarkEditTextInput";
-        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 0;
-        registered = 1;
-    }
+    if (!register_popup_class(L"MarkEditTextInput", TextInputWndProc)) return 0;
     TextInputState state = { prompt, initial ? initial : L"", output, outputCapacity, 0, NULL };
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditTextInput", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
@@ -408,11 +500,11 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
-            12, 34, 556, 316, hwnd, (HMENU)11, GetModuleHandleW(NULL), NULL);
+            12, 34, 556, 316, hwnd, (HMENU)ID_REPLACE_LIST, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Select All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            12, 360, 96, 26, hwnd, (HMENU)12, GetModuleHandleW(NULL), NULL);
+            12, 360, 96, 26, hwnd, (HMENU)ID_REPLACE_SELECT_ALL, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Select None", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            114, 360, 96, 26, hwnd, (HMENU)13, GetModuleHandleW(NULL), NULL);
+            114, 360, 96, 26, hwnd, (HMENU)ID_REPLACE_SELECT_NONE, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Replace",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             412, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
@@ -451,16 +543,16 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             popup_dialog_theme_destroyed();
             break;
         case WM_COMMAND:
-            if (LOWORD(wParam) == 11 && HIWORD(wParam) == LBN_DBLCLK) {
+            if (LOWORD(wParam) == ID_REPLACE_LIST && HIWORD(wParam) == LBN_DBLCLK) {
                 toggle_replace_row(state, (int)SendMessageW(state->list, LB_GETCURSEL, 0, 0));
                 return 0;
             }
-            if (LOWORD(wParam) == 12) { /* Select All */
+            if (LOWORD(wParam) == ID_REPLACE_SELECT_ALL) {
                 for (int i = 0; i < state->count; i++) state->matches[i].accepted = 1;
                 refill_replace_list(state);
                 return 0;
             }
-            if (LOWORD(wParam) == 13) { /* Select None */
+            if (LOWORD(wParam) == ID_REPLACE_SELECT_NONE) {
                 for (int i = 0; i < state->count; i++) state->matches[i].accepted = 0;
                 refill_replace_list(state);
                 return 0;
@@ -487,17 +579,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
    is edited in place (accepted flags) and the function returns 1 if the
    user clicked Replace, 0 if they cancelled. */
 static int show_replace_review_dialog(ReplaceMatch *matches, int count) {
-    static int registered = 0;
-    if (!registered) {
-        WNDCLASSW wc = {0};
-        wc.lpfnWndProc = ReplaceReviewWndProc;
-        wc.hInstance = GetModuleHandleW(NULL);
-        wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"MarkEditReplaceDialog";
-        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 0;
-        registered = 1;
-    }
+    if (!register_popup_class(L"MarkEditReplaceDialog", ReplaceReviewWndProc)) return 0;
     ReplaceReviewState state = { matches, count, NULL, NULL, 0 };
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditReplaceDialog", L"Replace in Folder",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
@@ -709,7 +791,7 @@ static void do_choose_font(void) {
 }
 
 static void do_choose_custom_css(void) {
-    DWORD cap = 32768;
+    DWORD cap = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return;
     if (g_customCssPath) wcsncpy(path, g_customCssPath, cap - 1);
@@ -722,11 +804,9 @@ static void do_choose_custom_css(void) {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     ofn.lpstrDefExt = L"css";
     if (GetOpenFileNameW(&ofn)) {
-        char *css = read_utf8_text_file(path, 4 * 1024 * 1024);
+        char *css = read_utf8_text_file(path, CUSTOM_CSS_MAX_BYTES);
         if (!css) {
-            MessageBoxW(g_hMainWnd,
-                L"The stylesheet must be a readable UTF-8 CSS file smaller than 4 MB.",
-                L"MarkEdit", MB_OK | MB_ICONERROR);
+            show_error(L"The stylesheet must be a readable UTF-8 CSS file smaller than 4 MB.");
         } else {
             free(css);
             WCHAR *full = absolute_path(path);
