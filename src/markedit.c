@@ -177,6 +177,7 @@ typedef struct Document {
     int encodingForced; /* chosen with Reopen with Encoding, so reloads keep it */
     FileFollowState followFile; /* exact raw disk revision represented by this document */
     TextCodecState followCodec; /* incomplete encoded character at an append boundary */
+    int followNeedsReload; /* initial snapshot ended inside an encoded character */
     int externalChanged;
     int externalDeleted;
     int following;

@@ -54,6 +54,10 @@ size_t text_encode_capacity(size_t inputLength);
    the last call. Inputs are expected in pieces of a few MiB at most. */
 int text_decode(TextCodecState *state, const char *input, size_t inputLength, int final,
                 char *output, size_t outputCapacity, size_t *outLength);
+/* True when appending more source bytes could complete the final encoded
+   character. UTF-8 is stored byte-for-byte, so only UTF-16 and ANSI carry. */
+int text_encoding_has_incomplete_suffix(TextEncoding encoding,
+                                        const char *input, size_t inputLength);
 int text_encode(TextCodecState *state, const char *input, size_t inputLength, int final,
                 char *output, size_t outputCapacity, size_t *outLength, int *outLossy);
 /* Whole-buffer decode to a NUL-terminated UTF-8 heap string. */

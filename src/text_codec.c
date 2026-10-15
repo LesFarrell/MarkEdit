@@ -347,6 +347,33 @@ int text_decode(TextCodecState *state, const char *input, size_t inputLength, in
     return ok;
 }
 
+int text_encoding_has_incomplete_suffix(TextEncoding encoding,
+                                        const char *input, size_t inputLength) {
+    if (!input && inputLength) return 0;
+    const unsigned char *bytes = (const unsigned char *)input;
+    if (encoding == TEXT_ENCODING_UTF16LE || encoding == TEXT_ENCODING_UTF16BE) {
+        if (inputLength & 1) return 1;
+        if (inputLength < 2) return 0;
+        size_t last = inputLength - 2;
+        unsigned unit = encoding == TEXT_ENCODING_UTF16BE
+            ? (unsigned)(bytes[last] << 8 | bytes[last + 1])
+            : (unsigned)(bytes[last + 1] << 8 | bytes[last]);
+        return unit >= 0xD800 && unit <= 0xDBFF;
+    }
+    if (encoding != TEXT_ENCODING_ANSI) return 0;
+    UINT codePage = text_ansi_code_page();
+    size_t offset = 0;
+    while (offset < inputLength) {
+        if (IsDBCSLeadByteEx(codePage, bytes[offset])) {
+            if (offset + 1 == inputLength) return 1;
+            offset += 2;
+        } else {
+            offset++;
+        }
+    }
+    return 0;
+}
+
 int text_encode(TextCodecState *state, const char *input, size_t inputLength, int final,
                 char *output, size_t outputCapacity, size_t *outLength, int *outLossy) {
     *outLength = 0;

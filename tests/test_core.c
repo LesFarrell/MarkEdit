@@ -206,7 +206,10 @@ static void test_file_following(void) {
     DWORD pathLength = GetTempPathW(MAX_PATH, directory);
     CHECK(pathLength && pathLength < MAX_PATH);
     if (!pathLength || pathLength >= MAX_PATH) return;
-    CHECK(GetTempFileNameW(directory, L"mff", 0, path) != 0);
+    if (!GetTempFileNameW(directory, L"mff", 0, path)) {
+        CHECK(0);
+        return;
+    }
     CHECK(write_bytes_file(path, "old", 3));
 
     HANDLE loaded = open_follow_test_file(path, GENERIC_READ, OPEN_EXISTING);
@@ -230,6 +233,16 @@ static void test_file_following(void) {
     ULONGLONG size = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
     CHECK(size == 6);
     CHECK(file_follow_check_growth(&state, loaded, &info, size) == FILE_FOLLOW_APPEND);
+
+    FileFollowState rolling = state;
+    char growth[100];
+    for (size_t i = 0; i < sizeof(growth); i++) growth[i] = (char)i;
+    file_follow_commit_bytes(&rolling, growth, 37);
+    file_follow_commit_bytes(&rolling, growth + 37, sizeof(growth) - 37);
+    CHECK(rolling.size == state.size + sizeof(growth));
+    CHECK(rolling.tailLength == FILE_FOLLOW_TAIL_SIZE);
+    CHECK(memcmp(rolling.tail, growth + sizeof(growth) - FILE_FOLLOW_TAIL_SIZE,
+                 FILE_FOLLOW_TAIL_SIZE) == 0);
 
     /* A same-file copytruncate/regrow can still be larger than the old offset;
        changing the signature must force a reload instead of an append. */
@@ -282,6 +295,9 @@ static void test_file_following(void) {
     CHECK(produced == 0 && codec.carryLength == 1);
     CHECK(text_decode(&codec, "\0", 1, 0, decoded, sizeof(decoded), &produced));
     CHECK(produced == 1 && decoded[0] == 'A' && codec.carryLength == 0);
+    CHECK(text_encoding_has_incomplete_suffix(TEXT_ENCODING_UTF16LE, "A", 1));
+    CHECK(!text_encoding_has_incomplete_suffix(TEXT_ENCODING_UTF16LE, "A\0", 2));
+    CHECK(text_encoding_has_incomplete_suffix(TEXT_ENCODING_UTF16LE, "\x3d\xd8", 2));
 
     CHECK(DeleteFileW(path));
 }

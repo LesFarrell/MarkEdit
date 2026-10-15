@@ -100,6 +100,7 @@ static void restore_document_view(HWND hEdit, const Document *doc) {
 static void clear_document_disk_state(Document *doc) {
     file_follow_clear(&doc->followFile);
     doc->followCodec = (TextCodecState){ (TextEncoding)doc->encoding, {0}, 0 };
+    doc->followNeedsReload = 0;
 }
 
 static void finish_recording_document_disk_state(Document *doc) {
@@ -339,8 +340,9 @@ struct SciLoader { const SciLoaderVtbl *lpVtbl; };
    set when Scintilla couldn't allocate the text. */
 static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEncoding,
                                        int *outEncoding, int *outHasBom, int *outOfMemory,
-                                       LargeOperationProgress *progress) {
+                                       int *outIncomplete, LargeOperationProgress *progress) {
     *outOfMemory = 0;
+    *outIncomplete = 0;
     char *chunk = (char *)malloc(LARGE_FILE_READ_CHUNK);
     char *decoded = (char *)malloc(text_decode_capacity(LARGE_FILE_READ_CHUNK));
     if (!chunk || !decoded) {
@@ -350,6 +352,7 @@ static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEnc
     }
     sptr_t result = 0;
     for (int attempt = 0; attempt < 2; attempt++) {
+        *outIncomplete = 0;
         LARGE_INTEGER start = {0};
         if (attempt && !SetFilePointerEx(file, start, NULL, FILE_BEGIN)) break;
         if (!large_operation_progress_update(progress, 0, length)) break;
@@ -387,6 +390,15 @@ static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEnc
             if (validating && !utf8_validator_feed(&validator, data, dataLength)) { restart = 1; break; }
             if (codec.encoding != TEXT_ENCODING_UTF8) {
                 size_t produced = 0;
+                if (total == length) {
+                    TextCodecState probe = codec;
+                    if (!text_decode(&probe, data, dataLength, 0, decoded,
+                                     text_decode_capacity(LARGE_FILE_READ_CHUNK), &produced)) {
+                        ok = 0;
+                        break;
+                    }
+                    *outIncomplete = probe.carryLength != 0;
+                }
                 if (!text_decode(&codec, data, dataLength, total == length, decoded,
                                  text_decode_capacity(LARGE_FILE_READ_CHUNK), &produced)) { ok = 0; break; }
                 data = decoded;
@@ -423,7 +435,7 @@ typedef enum {
    read_large_file_document()). Automatic follow reloads pass showProgress=0
    so a growing log never opens a modal progress window on watcher ticks. */
 static LoadResult load_large_file(HANDLE file, size_t length, int forcedEncoding,
-                                  int showProgress) {
+                                  int showProgress, int *outIncomplete) {
     /* SCI_CREATELOADER resets g_hEdit's per-view line state as a side
        effect (Editor.cxx's CreateLoader). A successful load swaps in the
        new document, which rebuilds it; a failed one re-attaches the
@@ -436,7 +448,7 @@ static LoadResult load_large_file(HANDLE file, size_t length, int forcedEncoding
     if (showProgress)
         large_operation_progress_begin(&progress, L"Opening large file", L"Loading text...");
     sptr_t sciDoc = read_large_file_document(file, length, forcedEncoding, &encoding,
-                                             &hasBom, &outOfMemory, &progress);
+                                             &hasBom, &outOfMemory, outIncomplete, &progress);
     int cancelled = progress.cancelled;
     if (showProgress) large_operation_progress_end(&progress);
     SetCursor(oldCursor);
@@ -504,7 +516,8 @@ static void set_loaded_text(const char *content, size_t contentLength, int hasBo
 
 /* Reads all of `file` into memory, converts it to UTF-8, and loads it into
    the active tab. */
-static LoadResult load_ordinary_file(HANDLE file, size_t length, int forcedEncoding) {
+static LoadResult load_ordinary_file(HANDLE file, size_t length, int forcedEncoding,
+                                     int *outIncomplete) {
     char *buf = (char *)malloc(length + 1);
     if (!buf) return LOAD_OUT_OF_MEMORY;
     size_t total = 0;
@@ -527,6 +540,7 @@ static LoadResult load_ordinary_file(HANDLE file, size_t length, int forcedEncod
     char *decoded = NULL;
     const char *content = buf + bom;
     size_t contentLength = length - bom;
+    *outIncomplete = text_encoding_has_incomplete_suffix(encoding, content, contentLength);
     if (encoding != TEXT_ENCODING_UTF8) {
         decoded = text_decode_all(encoding, content, contentLength, &contentLength);
         if (!decoded) result = LOAD_OUT_OF_MEMORY;
@@ -593,21 +607,25 @@ static int load_file_as_internal(const WCHAR *path, int forcedEncoding, int repo
     }
     LARGE_INTEGER size;
     LoadResult result = LOAD_READ_FAILED;
+    int incomplete = 0;
     if (GetFileSizeEx(file, &size) && size.QuadPart >= 0) {
         /* Past INT_MAX a file has to open in large-file mode whatever the
            threshold is set to: only a large-file document has 64-bit positions. */
         int largeFile = size.QuadPart >= large_file_threshold_bytes() ||
                         size.QuadPart > INT_MAX;
         result = largeFile ? load_large_file(file, (size_t)size.QuadPart, forcedEncoding,
-                                             reportErrors)
-                           : load_ordinary_file(file, (size_t)size.QuadPart, forcedEncoding);
+                                             reportErrors, &incomplete)
+                           : load_ordinary_file(file, (size_t)size.QuadPart, forcedEncoding,
+                                                &incomplete);
     }
     /* Capture the exact byte boundary loaded from this handle before closing
        it. A live log may already be longer; the watcher will append that
        growth instead of incorrectly treating it as present in the editor. */
-    if (result == LOAD_OK)
+    if (result == LOAD_OK) {
         record_loaded_document_disk_state(g_documentStore.active, file,
                                           (ULONGLONG)size.QuadPart);
+        g_documentStore.documents[g_documentStore.active].followNeedsReload = incomplete;
+    }
     CloseHandle(file);
     if (result != LOAD_OK) {
         if (failure) *failure = result;
@@ -641,6 +659,10 @@ typedef enum FollowAppendResult {
    and same-size rewrites fall back to the normal full reload path. */
 static FollowAppendResult append_followed_growth(const WCHAR *path) {
     Document *doc = &g_documentStore.documents[g_documentStore.active];
+    /* The initial load rendered a replacement character for a partial encoded
+       character. Reload once the remaining source bytes exist so the complete
+       character replaces that placeholder instead of being appended to it. */
+    if (doc->followNeedsReload) return FOLLOW_APPEND_FALLBACK;
     WCHAR *ioPath = extended_path(path);
     HANDLE file = ioPath ? CreateFileW(ioPath, GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
