@@ -4,8 +4,9 @@
 ;   Tools -> 6502 Assembler -> Compile C64 PRG
 ; and save the .prg file. In a C64 (or emulator):
 ;   LOAD "HELLO",8,1
-;   SYS 49152
-; 49152 is the default ORG, $C000. The KERNAL CHROUT routine at $FFD2 prints
+;   RUN
+; The PRG's BASIC loader relocates this code to the default ORG, $C000, and
+; jumps to it. The KERNAL CHROUT routine at $FFD2 prints
 ; the PETSCII character in A.
 
         ORG  $C000

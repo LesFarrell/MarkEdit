@@ -1,0 +1,11 @@
+Mermaid 11.16.0
+Source: https://github.com/mermaid-js/mermaid/releases/tag/mermaid@11.16.0
+Licence: https://github.com/mermaid-js/mermaid/blob/mermaid@11.16.0/LICENSE
+
+The version is the one mermaid.min.js reports (mermaid.version()).
+
+Vendored files:
+- mermaid.min.js
+
+SHA-256:
+- mermaid.min.js: 74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b

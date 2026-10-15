@@ -28,6 +28,7 @@ commands = {}
 ---@param fn fun()
 ---@param title? string
 function commands.register(name, fn, title) end
+---Raises an error for the run.* commands, which plugins can't execute.
 ---@param name string
 ---@return boolean queued
 function commands.execute(name) end
@@ -125,6 +126,7 @@ function documents.active() end
 function documents.activate(index) end
 ---@return boolean
 function documents.new() end
+---Asks the user first unless the file is already open in a tab.
 ---@param path string
 ---@return boolean
 function documents.open(path) end
@@ -140,6 +142,11 @@ function documents.path(index) end
 ---@param index? integer
 ---@return boolean
 function documents.modified(index) end
+---Gets or changes whether the active document automatically follows external file updates.
+---Transient access/read failures remain pending and are retried quietly.
+---@param enabled? boolean
+---@return boolean following
+function documents.follow(enabled) end
 ---@overload fun(): MarkEditEncoding
 ---@param value MarkEditEncoding
 ---@return boolean success

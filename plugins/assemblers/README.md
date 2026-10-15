@@ -7,7 +7,7 @@ an emulator. Each is on the **Tools** menu:
 |---|---|---|---|
 | **Z80 Assembler → Compile** | Z80 | ZX Spectrum `.tap` with an auto-running BASIC loader | `$8000` |
 | **CHIP-8 Assembler → Compile** | CHIP-8 and SUPER-CHIP 1.1 | `.ch8` program | `$200` |
-| **6502 Assembler → Compile C64 PRG** | MOS 6502 | Commodore 64 `.prg` | `$C000` |
+| **6502 Assembler → Compile C64 PRG** | MOS 6502 | Self-starting Commodore 64 `.prg` | `$C000` |
 | **6502 Assembler → Compile Raw Binary** | MOS 6502 | `.bin` with no header, for other 6502 machines | `$C000` |
 
 If the source has an error, a message gives its line and the line is
@@ -142,10 +142,12 @@ further down gets the absolute form even if it turns out to be in zero page,
 as in most 6502 assemblers, because the instruction's size has to be fixed
 before that label's address is known.
 
-**Compile C64 PRG** saves a `.prg`: the 2-byte load address followed by the
-code. Load it with `LOAD "NAME",8,1` and start it with `SYS 49152` (for the
-default `ORG $C000`). **Compile Raw Binary** saves just the bytes, for other
-6502 systems and emulators.
+**Compile C64 PRG** saves a compact BASIC program containing a `SYS` loader,
+a relocation routine, and the machine code. Load it with `LOAD "NAME",8,1`
+and type `RUN`; the loader copies the code to its `ORG` address and jumps to
+`ENTRY` (or the first byte when no entry is declared). Emulator autostart
+commands normally issue `RUN` automatically. **Compile Raw Binary** saves just
+the bytes, for other 6502 systems and emulators.
 
 ## Examples
 
@@ -156,7 +158,7 @@ MarkEdit and use that CPU's **Compile** command:
 |---|---|---|
 | `examples/z80-hello.asm` | ZX Spectrum | The saved `.tap`, with `LOAD ""`. |
 | `examples/chip8-hello.asm` | CHIP-8 / SUPER-CHIP | The saved `.ch8` in any interpreter. |
-| `examples/c64-hello.asm` | 6502 (Commodore 64) | The saved `.prg`, with `SYS 49152`. |
+| `examples/c64-hello.asm` | 6502 (Commodore 64) | The saved `.prg`, with `RUN`. |
 
 The `examples` folder has no `init.lua`, so MarkEdit doesn't load it as a
 plugin.
@@ -168,7 +170,7 @@ plugin.
 | `init.lua` | The menu commands and output formats |
 | `core.lua` | The shared front end and two-pass layout |
 | `z80.lua`, `chip8.lua`, `mos6502.lua` | Instruction encoding for each CPU |
-| `tap.lua` | The ZX Spectrum TAP format |
+| `tap.lua`, `c64_prg.lua` | Runnable ZX Spectrum and Commodore 64 containers |
 | `examples/` | A hello-world program for each assembler |
 
 A new CPU is a module returning `{ name, default_origin, memory_size,

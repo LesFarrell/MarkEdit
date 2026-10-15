@@ -10,6 +10,108 @@
 
 enum { FILE_IO_CHUNK_SIZE = 1024 * 1024 };
 
+void file_follow_clear(FileFollowState *state) {
+    if (state) memset(state, 0, sizeof(*state));
+}
+
+int file_follow_capture(FileFollowState *state, HANDLE file, ULONGLONG representedSize) {
+    if (!state || file == INVALID_HANDLE_VALUE) return 0;
+    file_follow_clear(state);
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(file, &info)) return 0;
+    ULONGLONG diskSize = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    state->writeTime = info.ftLastWriteTime;
+    state->hasTime = 1;
+    state->size = representedSize;
+    if (representedSize > diskSize) return 0;
+    state->volumeSerial = info.dwVolumeSerialNumber;
+    state->fileIndexHigh = info.nFileIndexHigh;
+    state->fileIndexLow = info.nFileIndexLow;
+    state->hasIdentity = 1;
+
+    DWORD wanted = representedSize < sizeof(state->tail)
+        ? (DWORD)representedSize : (DWORD)sizeof(state->tail);
+    LARGE_INTEGER offset;
+    offset.QuadPart = (LONGLONG)(representedSize - wanted);
+    DWORD got = 0;
+    if (!SetFilePointerEx(file, offset, NULL, FILE_BEGIN) ||
+        (wanted && (!ReadFile(file, state->tail, wanted, &got, NULL) || got != wanted))) {
+        state->hasIdentity = 0;
+        state->tailLength = 0;
+        return 0;
+    }
+    state->tailLength = got;
+    return 1;
+}
+
+static int file_follow_same_identity(const FileFollowState *state,
+                                     const BY_HANDLE_FILE_INFORMATION *info) {
+    return state->hasIdentity &&
+           state->volumeSerial == info->dwVolumeSerialNumber &&
+           state->fileIndexHigh == info->nFileIndexHigh &&
+           state->fileIndexLow == info->nFileIndexLow;
+}
+
+FileFollowAction file_follow_check_growth(const FileFollowState *state, HANDLE file,
+                                          const BY_HANDLE_FILE_INFORMATION *info,
+                                          ULONGLONG size) {
+    if (!state || file == INVALID_HANDLE_VALUE || !info) return FILE_FOLLOW_RETRY;
+    if (!file_follow_same_identity(state, info) || size <= state->size)
+        return FILE_FOLLOW_RELOAD;
+    if (!state->tailLength) return FILE_FOLLOW_APPEND;
+    if (state->tailLength > state->size) return FILE_FOLLOW_RELOAD;
+
+    unsigned char diskTail[FILE_FOLLOW_TAIL_SIZE];
+    LARGE_INTEGER offset;
+    offset.QuadPart = (LONGLONG)(state->size - state->tailLength);
+    DWORD got = 0;
+    if (!SetFilePointerEx(file, offset, NULL, FILE_BEGIN) ||
+        !ReadFile(file, diskTail, (DWORD)state->tailLength, &got, NULL))
+        return FILE_FOLLOW_RETRY;
+    if (got != state->tailLength || memcmp(diskTail, state->tail, state->tailLength) != 0)
+        return FILE_FOLLOW_RELOAD;
+    return FILE_FOLLOW_APPEND;
+}
+
+void file_follow_commit_bytes(FileFollowState *state, const char *bytes, size_t length) {
+    if (!state || (!bytes && length)) return;
+    size_t capacity = sizeof(state->tail);
+    if (length >= capacity) {
+        memcpy(state->tail, bytes + length - capacity, capacity);
+        state->tailLength = capacity;
+    } else {
+        size_t keep = state->tailLength < capacity - length
+            ? state->tailLength : capacity - length;
+        if (keep)
+            memmove(state->tail, state->tail + state->tailLength - keep, keep);
+        if (length) memcpy(state->tail + keep, bytes, length);
+        state->tailLength = keep + length;
+    }
+    state->size += length;
+}
+
+void file_follow_complete(FileFollowState *state, const BY_HANDLE_FILE_INFORMATION *info) {
+    if (!state || !info) return;
+    state->writeTime = info->ftLastWriteTime;
+    state->hasTime = 1;
+    state->retryBlocked = 0;
+}
+
+void file_follow_block_retry(FileFollowState *state, ULONGLONG size, FILETIME writeTime) {
+    if (!state) return;
+    state->blockedSize = size;
+    state->blockedWriteTime = writeTime;
+    state->retryBlocked = 1;
+}
+
+int file_follow_retry_blocked(FileFollowState *state, ULONGLONG size, FILETIME writeTime) {
+    if (!state || !state->retryBlocked) return 0;
+    if (state->blockedSize == size &&
+        CompareFileTime(&state->blockedWriteTime, &writeTime) == 0) return 1;
+    state->retryBlocked = 0;
+    return 0;
+}
+
 static int write_all(HANDLE file, const char *bytes, size_t length) {
     size_t offset = 0;
     while (offset < length) {

@@ -155,6 +155,23 @@ static int queue_plugin_document_action(PluginDocumentActionKind kind, int index
     return 1;
 }
 
+/* Plugins have no file access of their own, but a document they open
+   becomes readable, writable and runnable through the editor and command
+   APIs. So opening a file that isn't already in a tab needs the user's say. */
+static int confirm_plugin_open(const WCHAR *path) {
+    WCHAR *full = absolute_path(path);
+    int alreadyOpen = full && find_open_document_for_path(full) >= 0;
+    free(full);
+    if (alreadyOpen) return 1;
+    size_t capacity = wcslen(path) + 64;
+    WCHAR *prompt = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!prompt) return 0;
+    swprintf(prompt, capacity, L"A plugin wants to open this file:\n\n%ls\n\nOpen it?", path);
+    int allowed = MessageBoxW(g_hMainWnd, prompt, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES;
+    free(prompt);
+    return allowed;
+}
+
 /* WM_APP_PLUGIN_DOCUMENT_ACTION: carries out, and frees, an action that
    queue_plugin_document_action() posted. */
 static void run_plugin_document_action(PluginDocumentAction *action) {
@@ -163,7 +180,9 @@ static void run_plugin_document_action(PluginDocumentAction *action) {
     switch (action->kind) {
         case PLUGIN_DOCUMENT_ACTIVATE: if (validIndex) switch_document(action->index); break;
         case PLUGIN_DOCUMENT_NEW: create_document_tab(); break;
-        case PLUGIN_DOCUMENT_OPEN: if (action->path) open_file_in_tab(action->path); break;
+        case PLUGIN_DOCUMENT_OPEN:
+            if (action->path && confirm_plugin_open(action->path)) open_file_in_tab(action->path);
+            break;
         case PLUGIN_DOCUMENT_SAVE: do_save(); break;
         case PLUGIN_DOCUMENT_SAVE_AS: do_saveas(); break;
         case PLUGIN_DOCUMENT_CLOSE: if (validIndex) do_close_document_at(action->index); break;
@@ -196,6 +215,11 @@ static char *plugin_document_path(int index) {
 }
 static int plugin_document_modified(int index) {
     return index >= 0 && index < g_documentStore.count && g_documentStore.documents[index].dirty;
+}
+static int plugin_document_follow(int set, int enabled) {
+    return set ? set_active_document_following(enabled)
+               : (g_documentStore.count > 0 &&
+                  g_documentStore.documents[g_documentStore.active].following);
 }
 static const char *plugin_document_encoding(void) {
     static const char *const names[] = { "utf-8", "utf-16le", "utf-16be", "ansi" };
@@ -530,12 +554,16 @@ static void load_menus_and_plugins(void) {
         .document_open = plugin_document_open, .document_save = plugin_document_save,
         .document_close = plugin_document_close, .document_path = plugin_document_path,
         .document_modified = plugin_document_modified,
+        .document_follow = plugin_document_follow,
         .document_encoding = plugin_document_encoding,
         .document_set_encoding = plugin_document_set_encoding,
         .workspace_path = plugin_workspace_path,
         .schedule_deferred = plugin_schedule_deferred,
     };
     plugin_host_set_callbacks(&callbacks);
+    /* Follow mode belongs to the Lua plugin, so reloading or disabling that
+       plugin must not leave native automatic reloads running without it. */
+    stop_following_all_documents();
     plugin_host_shutdown();
     char *report = load_builtin_formatting(load_menu_definition(load_theme_colours(NULL)));
     WCHAR *bundled = bundled_plugin_directory();
@@ -629,25 +657,6 @@ static void new_plugin(void) {
     free(answer);
 }
 
-static void free_plugin_choices(char **items, int count) {
-    if (items) for (int i = 0; i < count; i++) free(items[i]);
-    free(items);
-}
-
-static char **plugin_choices(int count) {
-    char **items = (char **)calloc((size_t)count, sizeof(*items));
-    for (int i = 0; items && i < count; i++) {
-        const char *name = plugin_host_extension_name(i);
-        const char *scope = plugin_host_extension_scope(i);
-        size_t size = strlen(name) + strlen(scope) + 16;
-        items[i] = (char *)malloc(size);
-        if (!items[i]) { free_plugin_choices(items, count); return NULL; }
-        snprintf(items[i], size, "[%c] %s / %s",
-                 plugin_host_extension_is_enabled(i) ? 'x' : ' ', scope, name);
-    }
-    return items;
-}
-
 static void reload_plugin_ui(HWND hwnd, const WCHAR *successMessage) {
     load_menus_and_plugins();
     refresh_theme(hwnd); /* themes.lua may have changed */
@@ -657,16 +666,165 @@ static void reload_plugin_ui(HWND hwnd, const WCHAR *successMessage) {
         show_plugin_reload_status(successMessage);
 }
 
-static void toggle_plugin(int index) {
-    const char *name = plugin_host_extension_name(index);
-    const char *scope = plugin_host_extension_scope(index);
-    int enable = !plugin_host_extension_is_enabled(index);
-    if (!set_plugin_enabled(scope, name, enable)) {
-        MessageBoxW(g_hMainWnd, L"Could not save the plugin state.", L"Manage Plugins",
-                    MB_OK | MB_ICONERROR);
-        return;
+/* ---- Plugins > Manage Plugins: a checklist of every discovered plugin ----
+   Ticks are only recorded while the dialog is open; OK saves the ones that
+   changed and reloads the plugins once, Cancel discards them. */
+enum {
+    ID_PLUGINS_LIST = 11, ID_PLUGINS_ENABLE_ALL = 12, ID_PLUGINS_DISABLE_ALL = 13,
+    ID_PLUGINS_OPEN_FOLDER = 14,
+};
+
+typedef struct ManagePluginsState {
+    int count;
+    int *enabled;       /* the ticks, indexed like plugin_host_extension_*() */
+    Checklist checklist;
+    HWND countLabel;
+    int confirmed;
+} ManagePluginsState;
+
+static void update_plugin_count_label(ManagePluginsState *state) {
+    int enabled = 0;
+    for (int i = 0; i < state->count; i++) if (state->enabled[i]) enabled++;
+    WCHAR text[64];
+    swprintf(text, 64, L"%d of %d enabled", enabled, state->count);
+    SetWindowTextW(state->countLabel, text);
+}
+
+static void toggle_plugin_tick(void *context, int index) {
+    ManagePluginsState *state = (ManagePluginsState *)context;
+    if (index < 0 || index >= state->count) return;
+    state->enabled[index] = !state->enabled[index];
+    update_plugin_count_label(state);
+}
+
+static void set_all_plugin_ticks(ManagePluginsState *state, int enabled) {
+    for (int i = 0; i < state->count; i++) state->enabled[i] = enabled;
+    InvalidateRect(state->checklist.list, NULL, FALSE);
+    update_plugin_count_label(state);
+}
+
+/* The list fills the window above a row of buttons: the bulk actions on
+   the left, OK and Cancel on the right. */
+static void layout_manage_plugins(HWND hwnd, ManagePluginsState *state, int width, int height) {
+    int buttonTop = height - 38;
+    MoveWindow(state->countLabel, width - 136, 12, 124, 20, TRUE);
+    MoveWindow(state->checklist.list, 12, 36, width - 24, buttonTop - 46, TRUE);
+    MoveWindow(GetDlgItem(hwnd, ID_PLUGINS_ENABLE_ALL), 12, buttonTop, 90, 26, TRUE);
+    MoveWindow(GetDlgItem(hwnd, ID_PLUGINS_DISABLE_ALL), 108, buttonTop, 90, 26, TRUE);
+    MoveWindow(GetDlgItem(hwnd, ID_PLUGINS_OPEN_FOLDER), 204, buttonTop, 120, 26, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDOK), width - 180, buttonTop, 80, 26, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDCANCEL), width - 92, buttonTop, 80, 26, TRUE);
+}
+
+static LRESULT CALLBACK ManagePluginsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    ManagePluginsState *state = (ManagePluginsState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_CREATE) {
+        state = (ManagePluginsState *)((CREATESTRUCTW *)lParam)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+        HINSTANCE instance = GetModuleHandleW(NULL);
+        CreateWindowExW(0, L"STATIC", L"Ticked plugins load. Changes apply when you click OK.",
+            WS_CHILD | WS_VISIBLE, 12, 12, 360, 20, hwnd, NULL, instance, NULL);
+        state->countLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            0, 0, 0, 0, hwnd, NULL, instance, NULL);
+        state->checklist.toggle = toggle_plugin_tick;
+        state->checklist.context = state;
+        create_checklist(&state->checklist, hwnd, ID_PLUGINS_LIST);
+        CreateWindowExW(0, L"BUTTON", L"Enable All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            0, 0, 0, 0, hwnd, (HMENU)ID_PLUGINS_ENABLE_ALL, instance, NULL);
+        CreateWindowExW(0, L"BUTTON", L"Disable All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            0, 0, 0, 0, hwnd, (HMENU)ID_PLUGINS_DISABLE_ALL, instance, NULL);
+        CreateWindowExW(0, L"BUTTON", L"Open Plugins Folder", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            0, 0, 0, 0, hwnd, (HMENU)ID_PLUGINS_OPEN_FOLDER, instance, NULL);
+        CreateWindowExW(0, L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+            0, 0, 0, 0, hwnd, (HMENU)IDOK, instance, NULL);
+        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            0, 0, 0, 0, hwnd, (HMENU)IDCANCEL, instance, NULL);
+        use_gui_font(hwnd);
+        /* Sized before it's filled: selecting a row in a list that is still
+           0 pixels tall scrolls it, which would hide the first plugin. */
+        RECT client;
+        GetClientRect(hwnd, &client);
+        layout_manage_plugins(hwnd, state, client.right, client.bottom);
+        /* "csv-tools", not "csv-tools.lua", to match folder plugins. */
+        for (int i = 0; i < state->count; i++) {
+            WCHAR *name = to_wide(plugin_host_extension_name(i));
+            if (!name) continue;
+            WCHAR *extension = PathFindExtensionW(name);
+            if (_wcsicmp(extension, L".lua") == 0) *extension = 0;
+            checklist_add(&state->checklist, name, i);
+            free(name);
+        }
+        SendMessageW(state->checklist.list, LB_SETCURSEL, 0, 0);
+        update_plugin_count_label(state);
+        SetFocus(state->checklist.list);
+        popup_dialog_theme_opened(hwnd);
+        return 0;
     }
-    reload_plugin_ui(g_hMainWnd, enable ? L"Plugin enabled" : L"Plugin disabled");
+    if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    switch (msg) {
+        case WM_ERASEBKGND: case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: {
+            LRESULT handled = 0;
+            LRESULT result = popup_dialog_theme_message(hwnd, msg, wParam, &handled);
+            if (handled) return result;
+            break;
+        }
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
+            if (mis->CtlType == ODT_LISTBOX) { measure_themed_listbox_item(state->checklist.list, mis); return TRUE; }
+            break;
+        }
+        case WM_DRAWITEM: {
+            const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+            if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
+            if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == state->checklist.list) {
+                int index = (int)dis->itemData;
+                if (index < 0 || index >= state->count) return TRUE;
+                const char *scope = plugin_host_extension_scope(index);
+                draw_checklist_item(&state->checklist, dis, state->enabled[index],
+                                    strcmp(scope, "user") == 0 ? L"Personal" : L"Bundled");
+                return TRUE;
+            }
+            break;
+        }
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case ID_PLUGINS_ENABLE_ALL: set_all_plugin_ticks(state, 1); return 0;
+                case ID_PLUGINS_DISABLE_ALL: set_all_plugin_ticks(state, 0); return 0;
+                case ID_PLUGINS_OPEN_FOLDER: open_plugin_folder(); return 0;
+                case IDOK: state->confirmed = 1; DestroyWindow(hwnd); return 0;
+                case IDCANCEL: DestroyWindow(hwnd); return 0;
+            }
+            break;
+        case WM_SIZE:
+            layout_manage_plugins(hwnd, state, LOWORD(lParam), HIWORD(lParam));
+            return 0;
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO *info = (MINMAXINFO *)lParam;
+            info->ptMinTrackSize.x = 560;
+            info->ptMinTrackSize.y = 260;
+            return 0;
+        }
+        case WM_NCDESTROY:
+            popup_dialog_theme_destroyed();
+            break;
+        case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/* Saves the ticks that differ from each plugin's current state. Returns how
+   many changed, or -1 if one couldn't be saved. */
+static int apply_plugin_ticks(const ManagePluginsState *state) {
+    int changed = 0;
+    for (int i = 0; i < state->count; i++) {
+        if (state->enabled[i] == plugin_host_extension_is_enabled(i)) continue;
+        if (!set_plugin_enabled(plugin_host_extension_scope(i), plugin_host_extension_name(i),
+                                state->enabled[i]))
+            return -1;
+        changed++;
+    }
+    return changed;
 }
 
 static void manage_plugins(void) {
@@ -676,12 +834,25 @@ static void manage_plugins(void) {
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    char **items = plugin_choices(count);
-    const char **choices = (const char **)items;
-    int selected = items ? plugin_choose("Manage Plugins",
-        "Choose a plugin to enable or disable:", choices, count) : -1;
-    if (selected >= 0 && selected < count) toggle_plugin(selected);
-    free_plugin_choices(items, count);
+    if (!register_popup_class(L"MarkEditManagePlugins", ManagePluginsWndProc)) return;
+    ManagePluginsState state = { count, (int *)calloc((size_t)count, sizeof(int)), {0}, NULL, 0 };
+    if (!state.enabled) return;
+    for (int i = 0; i < count; i++) state.enabled[i] = plugin_host_extension_is_enabled(i);
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditManagePlugins", L"Manage Plugins",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+        CW_USEDEFAULT, CW_USEDEFAULT, 580, 500, g_hMainWnd, NULL, GetModuleHandleW(NULL), &state);
+    if (dialog) run_modal_popup(dialog);
+    if (state.confirmed) {
+        int changed = apply_plugin_ticks(&state);
+        if (changed < 0) {
+            MessageBoxW(g_hMainWnd, L"Could not save the plugin state.", L"Manage Plugins",
+                        MB_OK | MB_ICONERROR);
+        }
+        /* Reload even after a failed save: earlier changes may have been saved. */
+        if (changed != 0)
+            reload_plugin_ui(g_hMainWnd, changed == 1 ? L"1 plugin changed" : L"Plugins changed");
+    }
+    free(state.enabled);
 }
 
 /* Lua commands act on the pane being edited: the split editor's when it

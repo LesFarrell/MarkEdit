@@ -5,6 +5,11 @@ local FORBIDDEN_INDICATOR = 14
 local SENTENCE_INDICATOR = 15
 local STYLE_INDICATOR = 16
 
+-- Live highlighting skips documents larger than this (about 40,000 words of
+-- prose), so typing in a very large file stays responsive; the commands
+-- still handle them.
+local LIVE_LIMIT = 256 * 1024
+
 -- Bytes 128-255 count as word characters so non-ASCII letters work, which
 -- would include common UTF-8 punctuation: curly quotes, en/em dashes, the
 -- ellipsis and no-break space. Those become spaces of the same byte length,
@@ -170,8 +175,12 @@ local function highlight_document()
   apply_highlights(inspect(editor.get_text(), 0))
 end
 
+local function live_highlight()
+  if editor.length() <= LIVE_LIMIT then highlight_document() else clear_highlights() end
+end
+
 local function refresh_if_live()
-  if config.get("live_highlighting", false) then highlight_document() end
+  if config.get("live_highlighting", false) then live_highlight() end
 end
 
 local function plural(count, singular, plural_form)
@@ -307,10 +316,8 @@ end)
 menu.separator("Constraint Writer")
 
 menu.checkbox("Constraint Writer/Live Highlighting", "live_highlighting", false, function(checked)
-  if checked then highlight_document() else clear_highlights() end
+  if checked then live_highlight() else clear_highlights() end
 end)
 
-events.on("text_changed", function()
-  if config.get("live_highlighting", false) then highlight_document() end
-end)
+events.on("text_changed", refresh_if_live)
 

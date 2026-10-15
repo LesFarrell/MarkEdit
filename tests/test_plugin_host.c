@@ -132,6 +132,7 @@ static char s_binaryName[64], s_binaryData[256];
 static size_t s_binaryLength;
 static int s_deferredToken;
 static char s_documentEncoding[16] = "utf-8";
+static int s_documentFollowing;
 static const char *s_calculatorExpression =
     "0x10 + 0b11 + (5 << 1) + min(4, 9)";
 
@@ -230,6 +231,11 @@ static int fake_document_set_encoding(const char *encoding) {
     return 1;
 }
 
+static int fake_document_follow(int set, int enabled) {
+    if (set) s_documentFollowing = enabled;
+    return s_documentFollowing;
+}
+
 static int run_ok(int index, HWND editor) {
     char *error = plugin_host_run(index, editor);
     if (error) fprintf(stderr, "%s\n", error);
@@ -250,6 +256,16 @@ static void test_checkboxes_and_config(HWND editor) {
         "  config.set('options', {enabled=true, names={'one','two'}, nested={count=3}})\n"
         "  local value = config.get('options', {})\n"
         "  assert(value.enabled and value.names[2] == 'two' and value.nested.count == 3)\n"
+        "  -- Large enough to grow the encoder's buffers, and nested near the\n"
+        "  -- depth limit, so stack misuse in the encoder or decoder shows up.\n"
+        "  local deep = 'bottom'\n"
+        "  for _ = 1, 30 do deep = { deep } end\n"
+        "  config.set('big', { text = string.rep('x', 1000), list = { string.rep('y', 600) }, deep = deep })\n"
+        "  local big = config.get('big', {})\n"
+        "  assert(big.text == string.rep('x', 1000) and big.list[1] == string.rep('y', 600))\n"
+        "  for _ = 1, 30 do big.deep = big.deep[1] end\n"
+        "  assert(big.deep == 'bottom')\n"
+        "  config.set('options', {enabled=true, names={'one','two'}, nested={count=3}})\n"
         "end)\n");
     expect(plugin_host_command_is_checkable(first), "checkbox command is checkable");
     expect(!plugin_host_command_is_checked(first), "checkbox uses its default state");
@@ -322,6 +338,11 @@ static void test_editor_api(HWND editor) {
         "  assert(editor.selection_count() == 1 and editor.get_main_selection() == 1)\n"
         "  assert(not pcall(editor.drop_selection, 1), 'cannot drop only selection')\n"
         "  assert(not pcall(editor.get_caret, 2), 'selection past the end')\n"
+        "end)\n"
+        "menu.add('Follow', function()\n"
+        "  assert(documents.follow() == false)\n"
+        "  assert(documents.follow(true) == true and documents.follow() == true)\n"
+        "  assert(documents.follow(false) == false)\n"
         "end)\n");
 
     SendMessageA(editor, SCI_SETEOLMODE, SC_EOL_LF, 0);
@@ -341,6 +362,9 @@ static void test_editor_api(HWND editor) {
     set_document(editor, "zero one two");
     expect(run_ok(first + 5, editor) && document_is(editor, "zero one TWO"),
            "multiple selections and carets through the Lua API");
+    s_documentFollowing = 0;
+    expect(run_ok(first + 6, editor) && !s_documentFollowing,
+           "documents.follow gets and changes native follow state");
 
     int bulk = load_ok("bulk-selections.lua",
         "menu.add('Bulk selections', function()\n"
@@ -538,17 +562,19 @@ static void test_environment(void) {
         "assert(load('return 1')() == 1)\n"
         "assert(load('return string.upper(\"a\")')() == 'A', 'load keeps the globals without an env')\n"
         "assert(load(string.dump(function() end)) == nil, 'binary chunks refused')\n"
-        "assert(not pcall(require, 'outside'), 'single-file plugins cannot require files')\n");
+        "assert(not pcall(require, 'outside'), 'single-file plugins cannot require files')\n"
+        "local ok, err = pcall(commands.execute, 'run.run_file')\n"
+        "assert(not ok and err:find('can\\'t run'), 'plugins cannot run or debug files')\n");
 
     load_ok("clock.lua",
         "assert(app.date():match('^%d%d%d%d%-%d%d%-%d%d$'))\n"
         "assert(app.time():match('^%d%d:%d%d:%d%d$'))\n"
         "assert(app.date_time():match('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$'))\n");
     load_ok("metadata.lua",
-        "assert(app.api_version() >= 3 and app.platform() == 'windows')\n"
+        "assert(app.api_version() >= 4 and app.platform() == 'windows')\n"
         "assert(type(app.version()) == 'string' and app.memory_used() > 0)\n"
         "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require)\n"
-        "assert(c.eol_conversion and c.save_encoding and c.tab_width)\n");
+        "assert(c.eol_conversion and c.save_encoding and c.tab_width and c.tail_follow)\n");
 }
 
 static void test_isolation(HWND editor) {
@@ -562,6 +588,17 @@ static void test_isolation(HWND editor) {
         "menu.add('Isolated B', function() assert(private_value == 'b') end)");
     expect(run_ok(first, editor) && run_ok(second, editor),
            "plugins have isolated globals and library tables");
+
+    load_ok("string-a.lua",
+        "string.upper = function() return 'changed' end\n"
+        "assert(getmetatable('') == false, 'the string metatable is hidden')\n"
+        "assert(not pcall(function() getmetatable('').__index.upper = string.upper end))\n"
+        "assert(('x'):upper() == 'X', 'string methods use the original library')\n");
+    int third = load_ok("string-b.lua",
+        "menu.add('String B', function()\n"
+        "  assert(string.upper('x') == 'X' and ('x'):upper() == 'X')\n"
+        "end)");
+    expect(run_ok(third, editor), "a plugin can't change the string library for others");
 }
 
 static void test_time_limit(void) {
@@ -686,6 +723,7 @@ static void test_bundled_plugins(HWND editor) {
         .status = fake_status,
         .document_encoding = fake_document_encoding,
         .document_set_encoding = fake_document_set_encoding,
+        .document_follow = fake_document_follow,
         .schedule_deferred = fake_schedule_deferred
     };
     plugin_host_set_callbacks(&fakes);
@@ -696,6 +734,7 @@ static void test_bundled_plugins(HWND editor) {
     free(report);
 
     int encode64 = find_command("Developer Tools/Base64 Encode");
+    int tailFollow = find_command("/Tools/Logs/Tail/Follow Current File");
     int decode64 = find_command("Developer Tools/Base64 Decode");
     int encodeUrl = find_command("Developer Tools/URL Encode");
     int decodeUrl = find_command("Developer Tools/URL Decode");
@@ -712,7 +751,6 @@ static void test_bundled_plugins(HWND editor) {
     int csvTranspose = find_command("/Tools/CSV/Columns/Transpose Rows and Columns");
     int jsonPretty = find_command("/Tools/JSON/Format JSON");
     int jsonMinify = find_command("/Tools/JSON/Minify JSON");
-    int jsonValidate = find_command("/Tools/JSON/Validate");
     int jsonSort = find_command("/Tools/JSON/Sort Object Keys");
     int jsonToYaml = find_command("/Tools/JSON/Convert JSON to YAML");
     int yamlToJson = find_command("/Tools/JSON/Convert YAML to JSON");
@@ -757,6 +795,8 @@ static void test_bundled_plugins(HWND editor) {
     int grammarCheck = find_command("/Tools/Grammar Checker/Check");
     int grammarHighlight = find_command("/Tools/Grammar Checker/Highlight Issues");
     int grammarFix = find_command("/Tools/Grammar Checker/Fix Safe Issues");
+    int grammarLive = find_command("/Tools/Grammar Checker/Live Highlighting");
+    int encodingDecode64 = find_command("Encode/Base64 Decode");
     int rot13 = find_command("Secret Message Lab/ROT13");
     int atbash = find_command("Secret Message Lab/Atbash");
     int encodeMorse = find_command("Secret Message Lab/Morse Code/Encode");
@@ -778,13 +818,13 @@ static void test_bundled_plugins(HWND editor) {
     int sortLines = find_command("Line Tools/Order/Sort A to Z");
     int sortLength = find_command("Line Tools/Order/Sort by Length");
     int shuffle = find_command("Line Tools/Order/Shuffle");
-    int buildTap = find_command("Z80 Assembler/Compile");
-    if (buildTap < 0) buildTap = find_command("/Tools/Z80 Assembler/Compile");
+    int buildTap = find_command("/Tools/Assemblers/Z80 Assembler/Compile");
+    int lintLua = find_command("/Tools/Lint Lua");
     expect(encode64 >= 0 && decode64 >= 0 && encodeUrl >= 0 && decodeUrl >= 0 &&
            encodeHex >= 0 && decodeHex >= 0 && encodeHtml >= 0 && decodeHtml >= 0 &&
            csvInspect >= 0 && csvFormat >= 0 && csvToComma >= 0 && csvToTab >= 0 && csvToJson >= 0 &&
            csvDedupe >= 0 && csvTranspose >= 0 &&
-           jsonPretty >= 0 && jsonMinify >= 0 && jsonValidate >= 0 && jsonSort >= 0 &&
+           jsonPretty >= 0 && jsonMinify >= 0 && jsonSort >= 0 &&
            jsonToYaml >= 0 && yamlToJson >= 0 && jsonEscape >= 0 && jsonUnescape >= 0 &&
            editUpper >= 0 && editLower >= 0 && editTitle >= 0 && editSort >= 0 &&
            editSortDescending >= 0 && editDedupe >= 0 && editTabs >= 0 && editSpaces >= 0 &&
@@ -796,15 +836,35 @@ static void test_bundled_plugins(HWND editor) {
            jsonArrayToLines >= 0 && queryToJson >= 0 && clefFormat >= 0 &&
            clefWarnings >= 0 && clefFormatProperties >= 0 && clefInspect >= 0 &&
            clefLevel >= 0 && clefSearch >= 0 && clefSort >= 0 && clefExceptions >= 0 &&
-           grammarCheck >= 0 && grammarHighlight >= 0 && grammarFix >= 0 &&
+           grammarCheck >= 0 && grammarHighlight >= 0 && grammarFix >= 0 && grammarLive >= 0 &&
+           encodingDecode64 >= 0 &&
            rot13 >= 0 && atbash >= 0 && encodeMorse >= 0 && decodeMorse >= 0 &&
            encodeNato >= 0 && decodeNato >= 0 && encodeBinary >= 0 &&
            decodeBinary >= 0 && pigLatin >= 0 &&
            personality >= 0 && clearPersonality >= 0 &&
            checkConstraints >= 0 && highlightConstraints >= 0 && clearConstraints >= 0 &&
            toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
-           sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0,
+           sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0 && lintLua >= 0 &&
+           tailFollow >= 0 && plugin_host_command_is_checkable(tailFollow),
            "bundled plugin commands are registered");
+
+    set_document(editor, "old\nnew\n");
+    SendMessageA(editor, SCI_GOTOPOS, 0, 0);
+    s_documentFollowing = 0;
+    expect(run_ok(tailFollow, editor) && s_documentFollowing &&
+           plugin_host_command_is_checked(tailFollow) &&
+           SendMessageA(editor, SCI_GETCURRENTPOS, 0, 0) == 8,
+           "tail plugin starts following and moves to the end");
+    expect(run_ok(tailFollow, editor) && !s_documentFollowing &&
+           !plugin_host_command_is_checked(tailFollow),
+           "tail plugin checkbox stops following");
+
+    set_document(editor, "local x = 1\nif x then\n  return x\n");
+    s_lastMessage[0] = 0;
+    expect(run_ok(lintLua, editor) && strstr(s_lastMessage, "Line 4:") &&
+           SendMessageA(editor, SCI_LINEFROMPOSITION,
+                        SendMessageA(editor, SCI_GETSELECTIONSTART, 0, 0), 0) == 3,
+           "Lua linter reports and selects the syntax-error line");
 
     set_document(editor, "one two three");
     SendMessageA(editor, SCI_SETSEL, 4, 7);
@@ -833,6 +893,15 @@ static void test_bundled_plugins(HWND editor) {
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     expect(run_ok(editDedupe, editor) && document_is(editor, "b\r\na\r\n"),
            "Edit Convert removes duplicate selected lines");
+    set_document(editor, "b\r\nB\r\na\r\n");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(editSort, editor) && document_is(editor, "a\r\nb\r\nB\r\n"),
+           "Edit Convert sorts ignoring case, keeping equal lines in order");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_lastMessage[0] = 0;
+    expect(run_ok(editSort, editor) && document_is(editor, "a\r\nb\r\nB\r\n") &&
+           strstr(s_lastMessage, "Select one or more lines"),
+           "Edit Convert sort says so when nothing is selected");
 
     SendMessageA(editor, SCI_SETTABWIDTH, 4, 0);
     set_document(editor, "\tx\n  \ty\ninside\ttext");
@@ -1022,6 +1091,28 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(grammarFix, editor) && document_is(editor, "This is badly, spaced!"),
            "grammar checker fixes safe spacing and repeated-word issues");
 
+    /* Live highlighting checks the whole document, not the selection,
+       because each update clears highlights everywhere. */
+    set_document(editor, "this is is a error.\nFine words here.");
+    SendMessageA(editor, SCI_SETSEL, 20, 36);
+    expect(run_ok(grammarLive, editor) && SendMessageA(editor, SCI_INDICATORVALUEAT, 12, 0) &&
+           plugin_host_fire("text_changed", NULL, editor) == NULL &&
+           SendMessageA(editor, SCI_INDICATORVALUEAT, 12, 0),
+           "grammar checker live highlighting ignores the selection");
+    size_t largeLength = 300 * 1024;
+    char *large = (char *)malloc(largeLength + 1);
+    if (large) {
+        memset(large, 'x', largeLength);
+        memcpy(large, "this is is a error. ", 20);
+        large[largeLength] = 0;
+        set_document(editor, large);
+        free(large);
+        expect(plugin_host_fire("text_changed", NULL, editor) == NULL &&
+               !SendMessageA(editor, SCI_INDICATORVALUEAT, 12, 0),
+               "grammar checker live highlighting skips very large documents");
+    }
+    expect(run_ok(grammarLive, editor), "grammar checker live highlighting turns off");
+
     set_document(editor, "ORG $8000\nstart: LD A,42\nLD ($9000),A\nJR start\n");
     s_binaryLength = 0;
     expect(buildTap >= 0 && run_ok(buildTap, editor) &&
@@ -1126,6 +1217,16 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(decode64, editor) && document_is(editor, "AAEC/w==") &&
            strstr(s_lastMessage, "binary data"),
            "bundled Base64 decoder refuses to insert binary data");
+    set_document(editor, "AB==");
+    SendMessageA(editor, SCI_SETSEL, 0, 4);
+    s_lastMessage[0] = 0;
+    expect(run_ok(encodingDecode64, editor) && document_is(editor, "AB==") &&
+           strstr(s_lastMessage, "isn't valid Base64"),
+           "Encode > Base64 Decode rejects non-canonical padding bits");
+    set_document(editor, "aGk=");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    expect(run_ok(encodingDecode64, editor) && document_is(editor, "hi"),
+           "Encode > Base64 Decode still decodes canonical padded text");
     set_document(editor, "ff fe");
     SendMessageA(editor, SCI_SETSEL, 0, 5);
     s_lastMessage[0] = 0;
@@ -1226,6 +1327,11 @@ static void test_bundled_plugins(HWND editor) {
            strstr(s_lastMessage, "line 2, column 7") &&
            strstr(s_lastMessage, "quoted field must begin"),
            "bundled CSV plugin rejects quotes inside unquoted fields");
+    set_document(editor, "x\ry\rname,note\rAda,un\"quoted");
+    SendMessageA(editor, SCI_SETSEL, 4, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    s_lastMessage[0] = 0;
+    expect(run_ok(csvInspect, editor) && strstr(s_lastMessage, "line 4, column 7"),
+           "CSV errors in a selection are reported at their document line, with CR endings");
 
     set_document(editor, "name,age\nAlexandra,9\nBo,12");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
@@ -1289,9 +1395,9 @@ static void test_bundled_plugins(HWND editor) {
     set_document(editor, "[1,]");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
     s_lastMessage[0] = 0;
-    expect(run_ok(jsonValidate, editor) && document_is(editor, "[1,]") &&
+    expect(run_ok(jsonPretty, editor) && document_is(editor, "[1,]") &&
            strstr(s_lastMessage, "line 1, column 4") && strstr(s_lastMessage, "Trailing commas"),
-           "bundled JSON plugin reports the precise validation error without changing text");
+           "bundled JSON plugin reports the precise error without changing text");
     expect(SendMessageA(editor, SCI_INDICATORVALUEAT, 17, 3) != 0,
            "bundled JSON plugin highlights the invalid token");
 
@@ -1305,10 +1411,23 @@ static void test_bundled_plugins(HWND editor) {
         set_document(editor, invalidJson[i]);
         SendMessageA(editor, SCI_SETSEL, 0, 0);
         s_lastMessage[0] = 0;
-        invalidJsonRejected = invalidJsonRejected && run_ok(jsonValidate, editor) &&
+        invalidJsonRejected = invalidJsonRejected && run_ok(jsonPretty, editor) &&
             strstr(s_lastMessage, "Invalid JSON") != NULL && document_is(editor, invalidJson[i]);
     }
     expect(invalidJsonRejected, "bundled JSON plugin rejects malformed JSON forms");
+
+    /* Errors are reported at their document line, not the line within the
+       selection or code block, whatever the line endings. */
+    set_document(editor, "a\rb\r[1,]");
+    SendMessageA(editor, SCI_SETSEL, 4, 8);
+    s_lastMessage[0] = 0;
+    expect(run_ok(jsonPretty, editor) && strstr(s_lastMessage, "line 3, column 4"),
+           "JSON errors in a selection are reported at their document line, with CR endings");
+    set_document(editor, "before\n```json\n[1,]\n```");
+    SendMessageA(editor, SCI_SETSEL, 16, 16);
+    s_lastMessage[0] = 0;
+    expect(run_ok(jsonPretty, editor) && strstr(s_lastMessage, "line 3, column 4"),
+           "JSON errors in a fenced block are reported at their document line");
 
     set_document(editor, "before\n```json\n{\"a\":1}\n```\nafter");
     SendMessageA(editor, SCI_SETSEL, 18, 18);
@@ -1442,6 +1561,7 @@ int main(void) {
         .prompt = fake_prompt, .choose = fake_choose, .file_path = fake_file_path,
         .language = fake_language, .message = fake_message, .config_get = fake_config_get,
         .config_set = fake_config_set, .save_binary = fake_save_binary,
+        .document_follow = fake_document_follow,
         .schedule_deferred = fake_schedule_deferred
     };
     plugin_host_set_callbacks(&fakes);

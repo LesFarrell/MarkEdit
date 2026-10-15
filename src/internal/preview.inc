@@ -508,6 +508,46 @@ static void open_wikilink_target(const WCHAR *encoded) {
     free(full);
 }
 
+/* Opens a document-relative link clicked in the preview. Handing every such
+   link to ShellExecuteW would let a cloned README run [Setup](install.bat)
+   in one click, so: file types the editor knows open in a tab (scripts
+   included, as text); folders open in Explorer; types Windows itself treats
+   as dangerous to open are refused; anything else (images, PDFs) opens in
+   its default program only after the user confirms. */
+static void open_local_link(const WCHAR *path) {
+    DWORD attrs = GetFileAttributesW(path);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+        return;
+    }
+    const WCHAR *extension = PathFindExtensionW(path);
+    for (int i = 0; attrs != INVALID_FILE_ATTRIBUTES && *extension && i < LANGUAGE_COUNT; i++) {
+        if (extension_in_list(extension, LANGUAGES[i].extensions)) {
+            push_wiki_back();
+            open_file_in_tab(path);
+            refresh_menu(g_hMainWnd);
+            return;
+        }
+    }
+    const WCHAR *fileName = PathFindFileNameW(path);
+    size_t capacity = wcslen(fileName) + 80;
+    WCHAR *message = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!message) return;
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        swprintf(message, capacity, L"\"%ls\" doesn't exist.", fileName);
+        show_error(message);
+    } else if (AssocIsDangerous(path)) {
+        swprintf(message, capacity,
+                 L"\"%ls\" is a program or script, so MarkEdit won't open it from the preview.", fileName);
+        show_error(message);
+    } else {
+        swprintf(message, capacity, L"Open \"%ls\" with its default program?", fileName);
+        if (MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES)
+            ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+    }
+    free(message);
+}
+
 /* NavigationStarting handler: links clicked inside the preview (Markdown links,
    images-as-links, etc.) should open in the user's default browser instead of
    navigating the embedded WebView away from the preview shell. Our own shell
@@ -518,8 +558,9 @@ static void open_wikilink_target(const WCHAR *encoded) {
    previewed (g_expectedHtmlPreviewUrl, consumed here so it only ever allows
    that one navigation through: a click on a link inside the previewed page
    itself, even to that exact same URL, still gets redirected out below,
-   same as every other link in the preview). Anything else is cancelled here
-   and handed to ShellExecuteW instead. */
+   same as every other link in the preview). Anything else is cancelled here:
+   document-relative links go to open_local_link(), and http(s)/mailto links
+   to ShellExecuteW. */
 static HRESULT STDMETHODCALLTYPE NavStarting_Invoke(ICoreWebView2NavigationStartingEventHandler *this_, ICoreWebView2 *sender, ICoreWebView2NavigationStartingEventArgs *args) {
     (void)this_; (void)sender;
     LPWSTR uri = NULL;
@@ -533,7 +574,7 @@ static HRESULT STDMETHODCALLTYPE NavStarting_Invoke(ICoreWebView2NavigationStart
             ICoreWebView2NavigationStartingEventArgs_put_Cancel(args, TRUE);
             WCHAR *localPath = decode_document_url(uri);
             if (localPath) {
-                ShellExecuteW(NULL, L"open", localPath, NULL, NULL, SW_SHOWNORMAL);
+                open_local_link(localPath);
                 free(localPath);
             } else if (_wcsnicmp(uri, L"https://", 8) == 0 ||
                        _wcsnicmp(uri, L"http://", 7) == 0 ||
@@ -597,10 +638,19 @@ static void reveal_in_explorer(void) {
     reveal_path_in_explorer(g_currentFile);
 }
 
+/* Sends the preview's light/dark choice, and the scrollbar colours from the
+   matching palette - themes.lua may have changed them - so the page's bars
+   match the app's own (see the scrollbar rules in preview_shell.html). */
 static void apply_preview_theme(void) {
     if (!g_webviewReady || !g_webview || g_previewShowingRawHtml) return;
-    char script[64];
-    wsprintfA(script, "window.setTheme('%s');", g_previewDarkMode ? "dark" : "light");
+    const ThemePalette *palette = preview_palette();
+    const COLORREF thumbs[3] = { palette->scrollThumb, palette->scrollThumbHot, palette->scrollThumbDrag };
+    char colours[3][8];
+    for (int i = 0; i < 3; i++)
+        wsprintfA(colours[i], "#%02x%02x%02x", GetRValue(thumbs[i]), GetGValue(thumbs[i]), GetBValue(thumbs[i]));
+    char script[128];
+    wsprintfA(script, "window.setTheme('%s', ['%s', '%s', '%s']);", g_previewDarkMode ? "dark" : "light",
+              colours[0], colours[1], colours[2]);
     execute_webview_script(script, &g_scriptHandler);
 }
 

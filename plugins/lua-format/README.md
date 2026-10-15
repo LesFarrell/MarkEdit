@@ -1,13 +1,20 @@
-# Lua formatting
+# Lua formatting and linting
 
-Reindent the active Lua document from **Tools → Format Lua**. When lines are
-selected, only those lines are reindented; the rest of the file is left alone.
+Reindent the active Lua document from **Tools → Format Lua**, or validate its
+syntax with **Tools → Lint Lua**. When lines are selected for formatting, only
+those lines are reindented; the rest of the file is left alone.
 
 The formatter is deliberately conservative. It rewrites only the whitespace at
 the start of each line and removes trailing spaces and tabs. Code, strings and
 comments are copied through byte for byte, so running it can never change what
 a document means. Everything else a plugin's time budget allows is left to
 more thorough tools.
+
+The linter compiles the document with MarkEdit's embedded Lua parser but never
+runs it. A syntax error is reported with the parser's message and its line is
+selected in the editor. A valid document produces a short status message. It
+checks syntax rather than style or undefined globals, so lint results match the
+exact Lua version used to run MarkEdit plugins.
 
 ## What it does
 
@@ -54,10 +61,13 @@ end
 
 | File | Contents |
 |---|---|
-| `init.lua` | The **Tools → Format Lua** command and caret handling |
+| `init.lua` | The Format and Lint commands, caret handling and diagnostics |
 | `format.lua` | The tokenizer and reindenter, which has no editor dependency |
+| `lint.lua` | Non-executing syntax validation and diagnostic parsing |
 
 `format.format(text, options)` is a pure function: it takes a string and
 returns the formatted string. `options.first` and `options.last` limit the
 1-based lines that change, and `options.indent` sets the indentation unit
-(default two spaces). The tests are in `tests/test_lua_format.lua`.
+(default two spaces). `lint.check(text, name)` returns `nil` for valid Lua or a
+table containing `line` and `message` for the syntax error. The tests are in
+`tests/test_lua_format.lua`.

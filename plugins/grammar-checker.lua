@@ -4,6 +4,11 @@
 local INDICATOR = 12
 local COLOUR = 0xffa726
 
+-- Live Highlighting skips documents larger than this (about 40,000 words of
+-- prose), so typing in a very large file stays responsive; the commands
+-- still handle them.
+local LIVE_LIMIT = 256 * 1024
+
 local function source_range()
   local text = editor.get_selection()
   if text ~= "" then
@@ -164,16 +169,26 @@ local function clear()
   editor.clear_indicator(INDICATOR)
 end
 
-local function highlight(quiet)
-  local text, first = source_range()
+-- Replaces the highlights with the issues in text, which starts at document
+-- position first. Returns the number of issues.
+local function mark(text, first)
   local issues = inspect(text, first - 1)
   clear()
   for _, issue in ipairs(issues) do
     editor.indicator(issue.first, issue.last, INDICATOR, COLOUR)
   end
-  if not quiet then ui.status(string.format("Grammar checker highlighted %d issue%s.",
-    #issues, #issues == 1 and "" or "s")) end
-  return issues
+  return #issues
+end
+
+local function highlight()
+  local count = mark(source_range())
+  ui.status(string.format("Grammar checker highlighted %d issue%s.", count, count == 1 and "" or "s"))
+end
+
+-- Live Highlighting always checks the whole document, as clear() removes
+-- highlights everywhere; the selection is just where the user is typing.
+local function live_highlight()
+  if editor.length() <= LIVE_LIMIT then mark(editor.get_text(), 1) else clear() end
 end
 
 local function check()
@@ -218,14 +233,14 @@ local function fix_safe()
 end
 
 menu.add("/Tools/Grammar Checker/Check", check)
-menu.add("/Tools/Grammar Checker/Highlight Issues", function() highlight(false) end)
+menu.add("/Tools/Grammar Checker/Highlight Issues", highlight)
 menu.add("/Tools/Grammar Checker/Fix Safe Issues", fix_safe)
 menu.add("/Tools/Grammar Checker/Clear Highlights", clear)
 menu.separator("/Tools/Grammar Checker")
 menu.checkbox("/Tools/Grammar Checker/Live Highlighting", "live", false, function(checked)
-  if checked then highlight(true) else clear() end
+  if checked then live_highlight() else clear() end
 end)
 
 events.on("text_changed", function()
-  if config.get("live", false) then highlight(true) end
+  if config.get("live", false) then live_highlight() end
 end)

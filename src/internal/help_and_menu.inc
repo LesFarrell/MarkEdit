@@ -156,16 +156,16 @@ static HFONT main_menu_font(void) {
     if (dc) ReleaseDC(g_hMainWnd, dc);
     if (!g_menuFont || dpi != g_menuFontDpi) {
         if (g_menuFont) DeleteObject(g_menuFont);
-        g_menuFont = CreateFontA(-MulDiv(MENU_FONT_POINT_SIZE, dpi, 72), 0, 0, 0, FW_NORMAL,
-            FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
+        g_menuFont = CreateFontW(-MulDiv(MENU_FONT_POINT_SIZE, dpi, 72), 0, 0, 0, FW_NORMAL,
+            FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         g_menuFontDpi = dpi;
     }
     return g_menuFont;
 }
 
 static void measure_main_menu_item(MEASUREITEMSTRUCT *mis) {
-    const char *label = (const char *)(UINT_PTR)mis->itemData;
+    const WCHAR *label = (const WCHAR *)(UINT_PTR)mis->itemData;
     HDC dc = GetDC(g_hMainWnd);
     if (!dc || !label) {
         if (dc) ReleaseDC(g_hMainWnd, dc);
@@ -173,7 +173,7 @@ static void measure_main_menu_item(MEASUREITEMSTRUCT *mis) {
     }
     HFONT oldFont = (HFONT)SelectObject(dc, main_menu_font());
     RECT textRect = {0};
-    DrawTextA(dc, label, -1, &textRect, DT_SINGLELINE | DT_CALCRECT);
+    DrawTextW(dc, label, -1, &textRect, DT_SINGLELINE | DT_CALCRECT);
     int dpi = GetDeviceCaps(dc, LOGPIXELSY);
     /* Win32 adds MENU_ITEM_SYSTEM_PADDING of its own to a menu-bar item's
        measured width, so ask for only the rest of the inset on each side
@@ -187,7 +187,7 @@ static void measure_main_menu_item(MEASUREITEMSTRUCT *mis) {
 }
 
 static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
-    const char *label = (const char *)(UINT_PTR)dis->itemData;
+    const WCHAR *label = (const WCHAR *)(UINT_PTR)dis->itemData;
     if (!label) return;
 
     int active = (dis->itemState & (ODS_SELECTED | ODS_HOTLIGHT)) != 0;
@@ -205,7 +205,7 @@ static void draw_main_menu_item(const DRAWITEMSTRUCT *dis) {
     textRect.left += MulDiv(MENU_ITEM_TEXT_INSET, dpi, 96);
     UINT flags = DT_SINGLELINE | DT_LEFT | DT_VCENTER;
     if (dis->itemState & ODS_NOACCEL) flags |= DT_HIDEPREFIX;
-    DrawTextA(dis->hDC, label, -1, &textRect, flags);
+    DrawTextW(dis->hDC, label, -1, &textRect, flags);
     SelectObject(dis->hDC, oldFont);
     SetTextColor(dis->hDC, oldText);
     SetBkMode(dis->hDC, oldBkMode);

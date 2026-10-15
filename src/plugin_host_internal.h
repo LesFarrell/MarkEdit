@@ -100,12 +100,17 @@ const char *optional_cstring(lua_State *L, int index, const char *fallback,
 char *append_line(char *report, char *line);
 char *protected_call(int argumentCount);
 void restart_time_limit(void);
+lua_State *plugin_lua_new_state(LuaMemory *memory);
 lua_State *plugin_lua_start(void);
+void plugin_lua_protect_string_metatable(lua_State *L);
 void plugin_lua_install_hook(lua_State *L);
 
 /* ---- plugin_registry.c ---- */
 
 void discard_commands_from(int firstIndex);
+PluginCommand *append_command(lua_State *L, const char *label, int functionIndex,
+                              const char *defaultOwner);
+void keep_command_string(lua_State *L, char **field, const char *value);
 void discard_handlers_from(int firstIndex);
 void plugin_registry_open(lua_State *L);
 

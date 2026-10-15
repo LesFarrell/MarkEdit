@@ -1,5 +1,7 @@
 -- Tools > JSON commands. The plugin owns strict JSON parsing, formatting,
--- validation/error highlighting, JSON string tools, and JSON/YAML conversion.
+-- JSON string tools, and JSON/YAML conversion. Checking JSON, and
+-- highlighting errors as you type, is json-check.lua's job; these commands
+-- only point out the error that stops them.
 
 local ERROR_INDICATOR = 17
 local ERROR_COLOUR = 0xef5350
@@ -49,14 +51,14 @@ local function source_range()
   return editor.get_range(first, last), first, last
 end
 
-local function location(text, position)
-  local before = text:sub(1, math.max(0, position - 1))
-  local line = 1
-  for _ in before:gmatch("\n") do line = line + 1 end
-  local line_start = before:match(".*\n()") or 1
-  local column_text = text:sub(line_start, math.max(line_start - 1, position - 1))
-  local column = utf8.len(column_text) or #column_text
-  return line, column + 1
+-- The document line and column (in characters) of position, so an error in
+-- a selection or code block is reported where the user sees it, whatever
+-- the line endings.
+local function location(position)
+  local line = editor.line_at(position)
+  local line_start = editor.line_range(line)
+  local before = editor.get_range(line_start, position - 1)
+  return line, (utf8.len(before) or #before) + 1
 end
 
 local function parse_json(text)
@@ -86,7 +88,6 @@ local function parse_json(text)
   end
 
   local position, length = 1, #text
-  local duplicate_keys = {}
 
   local function fail(message, at)
     return nil, { position = at or position, message = message }
@@ -228,18 +229,12 @@ local function parse_json(text)
 
   local function read_object(depth)
     local node = { kind = "object", members = {} }
-    local seen = {}
     position = position + 1
     skip_space()
     if text:sub(position, position) == "}" then position = position + 1; return node end
     while true do
-      local key_position = position
       local key, err = read_string()
       if not key then return nil, err end
-      if seen[key.decoded] then
-        duplicate_keys[#duplicate_keys + 1] = { position = key_position, key = key.decoded }
-      end
-      seen[key.decoded] = true
       skip_space()
       if text:sub(position, position) ~= ":" then return fail("Expected ':' after object key.") end
       position = position + 1
@@ -282,7 +277,7 @@ local function parse_json(text)
   if not root then return nil, err end
   skip_space()
   if position <= length then return fail("Unexpected content after the JSON value.") end
-  return root, nil, duplicate_keys
+  return root
 end
 
 local function render(node, pretty, eol, depth, sort_keys)
@@ -319,41 +314,31 @@ local function clear_error()
   editor.clear_indicator(ERROR_INDICATOR)
 end
 
-local function show_error(text, base, err, quiet, format_name)
+-- Highlights err, a parse error in the text starting at document position
+-- base, moves the caret there and says what's wrong.
+local function show_error(base, err, format_name)
   clear_error()
   local absolute = base + err.position - 1
   local highlight = math.min(absolute, editor.length())
   if highlight >= 1 then
     editor.indicator(highlight, highlight, ERROR_INDICATOR, ERROR_COLOUR)
   end
-  if not quiet then
-    editor.set_caret(math.min(absolute, editor.length() + 1))
-    editor.scroll_to(math.min(absolute, editor.length() + 1))
-  end
-  local line, column = location(text, err.position)
-  local message = string.format("Invalid %s at line %d, column %d: %s",
-    format_name or "JSON", line, column, err.message)
-  if quiet then ui.status(message) else ui.message(message, nil, "error") end
+  local caret = math.min(absolute, editor.length() + 1)
+  editor.set_caret(caret)
+  editor.scroll_to(caret)
+  local line, column = location(caret)
+  ui.message(string.format("Invalid %s at line %d, column %d: %s",
+    format_name or "JSON", line, column, err.message), nil, "error")
 end
 
 local function transform(pretty, sort_keys)
   local text, first, last = source_range()
   local root, err = parse_json(text)
-  if not root then show_error(text, first, err, false); return end
+  if not root then show_error(first, err); return end
   clear_error()
   local result = render(root, pretty, editor.eol(), 0, sort_keys)
   editor.replace_range(first, last, result)
   editor.set_selection(first, first + #result - 1)
-end
-
-local function validate()
-  local text, first = source_range()
-  local root, err, duplicates = parse_json(text)
-  if not root then show_error(text, first, err, false); return end
-  clear_error()
-  local suffix = #duplicates == 0 and "" or string.format(" Warning: %d duplicate object key%s found.",
-    #duplicates, #duplicates == 1 and "" or "s")
-  ui.message("Valid JSON." .. suffix, nil, #duplicates == 0 and "info" or "warning")
 end
 
 local function escape_string(text)
@@ -612,7 +597,7 @@ end
 local function convert_json_to_yaml()
   local text, first, last = source_range()
   local root, err = parse_json(text)
-  if not root then show_error(text, first, err, false); return end
+  if not root then show_error(first, err); return end
   clear_error()
   local result = render_yaml(root, editor.eol(), 0)
   editor.replace_range(first, last, result)
@@ -622,7 +607,7 @@ end
 local function convert_yaml_to_json()
   local text, first, last = source_range()
   local root, err = parse_yaml(text)
-  if not root then show_error(text, first, err, false, "YAML"); return end
+  if not root then show_error(first, err, "YAML"); return end
   clear_error()
   local result = render(root, true, editor.eol(), 0, false)
   editor.replace_range(first, last, result)
@@ -641,7 +626,7 @@ local function unescape_selection()
   local node, err = parse_json(text)
   if not node then
     local first = editor.get_selection_range()
-    show_error(text, first, err, false)
+    show_error(first, err)
     return
   end
   if node.kind ~= "string" then
@@ -652,20 +637,13 @@ local function unescape_selection()
   editor.replace_selection(node.decoded)
 end
 
-local function live_validate()
-  if not config.get("validate_on_change", false) or editor.language() ~= "json" then return end
-  local text = editor.get_text()
-  if text:match("^%s*$") then clear_error(); return end
-  local root, err = parse_json(text)
-  if root then clear_error() else show_error(text, 1, err, true) end
-end
-
 local function format_json() transform(true, false) end
 local function minify_json() transform(false, false) end
 
+-- json-check.lua's items come first; this keeps them in their own group.
+menu.separator("/Tools/JSON")
 menu.add("/Tools/JSON/Format JSON", format_json, "Ctrl+Alt+J")
 menu.add("/Tools/JSON/Minify JSON", minify_json)
-menu.add("/Tools/JSON/Validate", validate, "Ctrl+Alt+V")
 menu.add("/Tools/JSON/Sort Object Keys", function() transform(true, true) end)
 menu.separator("/Tools/JSON")
 menu.add("/Tools/JSON/Convert JSON to YAML", convert_json_to_yaml)
@@ -673,12 +651,3 @@ menu.add("/Tools/JSON/Convert YAML to JSON", convert_yaml_to_json)
 menu.separator("/Tools/JSON")
 menu.add("/Tools/JSON/Escape Selection as JSON String", escape_selection)
 menu.add("/Tools/JSON/Unescape JSON String", unescape_selection)
-menu.separator("/Tools/JSON")
-menu.add("/Tools/JSON/Clear Error Highlight", clear_error)
-menu.checkbox("/Tools/JSON/Validate on Change", "validate_on_change", false, function(checked)
-  if checked then live_validate() else clear_error() end
-end)
-
-events.on("text_changed", live_validate)
-events.on("open", live_validate)
-events.on("tab_changed", live_validate)

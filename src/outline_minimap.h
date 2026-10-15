@@ -52,6 +52,18 @@ void outline_minimap_init(const OutlineMinimapHost *host);
    success, *textStart and *textLength give the title without its markers. */
 int outline_parse_atx_heading(const char *line, int length, int *textStart, int *textLength);
 
+/* Tracks fenced code blocks (``` or ~~~) while a document is fed to
+   outline_scan_line() one line at a time, so a "# comment" inside one isn't
+   taken for a heading. Start from {0}. */
+typedef struct OutlineScan {
+    char fence;       /* the open fence's character, 0 outside a fence */
+    int fenceLength;  /* its run length; a closing fence needs at least this */
+} OutlineScan;
+
+/* The heading level of the next line (given without its line ending), or 0
+   when it isn't a heading or sits inside a fenced code block. */
+int outline_scan_line(OutlineScan *scan, const char *line, int length, int *textStart, int *textLength);
+
 /* Rebuilds the outline listbox from the active document's headings. */
 void update_outline(void);
 

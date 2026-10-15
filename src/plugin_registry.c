@@ -35,6 +35,12 @@ int s_nextDeferredToken = 1;
 
 static const char *current_owner(lua_State *L);
 
+/* Whether a stored config value reads as true: "1", "true", "yes" or "on". */
+static int config_value_is_true(const char *value) {
+    return strcmp(value, "1") == 0 || _stricmp(value, "true") == 0 ||
+           _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0;
+}
+
 void discard_commands_from(int first) {
     for (int i = first; i < s_commandCount; i++) {
         if (s_lua) luaL_unref(s_lua, LUA_REGISTRYINDEX, s_commands[i].ref);
@@ -46,6 +52,48 @@ void discard_commands_from(int first) {
         memset(&s_commands[i], 0, sizeof(s_commands[i]));
     }
     if (first < s_commandCount) s_commandCount = first;
+}
+
+/* Appends a command called label, owned by the loading script (or
+   defaultOwner), that runs the function at functionIndex - or nothing, for
+   a separator, when functionIndex is 0. Raises a Lua error, appending
+   nothing, when there's no room or memory. Callers set the remaining fields,
+   copying strings with keep_command_string(). */
+PluginCommand *append_command(lua_State *L, const char *label, int functionIndex,
+                              const char *defaultOwner) {
+    if (s_commandCount >= PLUGIN_MAX_COMMANDS)
+        luaL_error(L, "too many plugin commands (the limit is %d)", PLUGIN_MAX_COMMANDS);
+    int ref = LUA_NOREF;
+    if (functionIndex) {
+        lua_pushvalue(L, functionIndex);
+        ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    char *copy = dup_string(label);
+    char *owner = dup_string(s_loadingName ? s_loadingName : defaultOwner);
+    if (!copy || !owner) {
+        free(copy);
+        free(owner);
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        luaL_error(L, "out of memory");
+    }
+    PluginCommand *command = &s_commands[s_commandCount++];
+    memset(command, 0, sizeof(*command));
+    command->label = copy;
+    command->ref = ref;
+    command->owner = owner;
+    command->builtIn = s_loadingBuiltIn;
+    command->separator = !functionIndex;
+    return command;
+}
+
+/* Sets one of the newest command's strings to a copy of value, discarding
+   the command when memory runs out. */
+void keep_command_string(lua_State *L, char **field, const char *value) {
+    *field = dup_string(value);
+    if (!*field) {
+        discard_commands_from(s_commandCount - 1);
+        luaL_error(L, "out of memory");
+    }
 }
 
 void discard_handlers_from(int first) {
@@ -203,60 +251,38 @@ static int parse_shortcut(const char *value, BYTE *flags, WORD *key) {
     return ctrlOrAlt && *key;
 }
 
-static char *checked_shortcut(lua_State *L, int index, BYTE *flags, WORD *key) {
+/* The validated shortcut text at index, or NULL when it's omitted. */
+static const char *checked_shortcut(lua_State *L, int index, BYTE *flags, WORD *key) {
     if (lua_isnoneornil(L, index)) return NULL;
     const char *value = checked_cstring(L, index, "shortcut");
     size_t length = strlen(value);
     if (!length || length > 48) luaL_argerror(L, index, "shortcut must be 1 to 48 characters");
     if (!parse_shortcut(value, flags, key))
         luaL_argerror(L, index, "shortcut needs Ctrl or Alt, optional Shift, and one supported key");
-    char *copy = dup_string(value);
-    if (!copy) luaL_error(L, "out of memory");
-    return copy;
+    return value;
 }
 
-static int add_labelled_command(lua_State *L, const char *label, int functionIndex,
-                                int separator, int shortcutIndex) {
-    if (s_commandCount >= PLUGIN_MAX_COMMANDS)
-        return luaL_error(L, "too many plugin commands (the limit is %d)", PLUGIN_MAX_COMMANDS);
+/* A command placed by its label, running the function at functionIndex,
+   with the optional shortcut at shortcutIndex. */
+static PluginCommand *add_labelled_command(lua_State *L, const char *label, int functionIndex,
+                                           int shortcutIndex) {
     BYTE shortcutFlags = 0;
     WORD shortcutKey = 0;
-    char *shortcut = shortcutIndex
-        ? checked_shortcut(L, shortcutIndex, &shortcutFlags, &shortcutKey) : NULL;
-    int ref = LUA_NOREF;
-    if (!separator) {
-        lua_pushvalue(L, functionIndex);
-        ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    const char *shortcut = checked_shortcut(L, shortcutIndex, &shortcutFlags, &shortcutKey);
+    PluginCommand *command = append_command(L, label, functionIndex, "plugin");
+    if (shortcut) {
+        keep_command_string(L, &command->shortcut, shortcut);
+        command->shortcutFlags = shortcutFlags;
+        command->shortcutKey = shortcutKey;
     }
-    char *copy = dup_string(label);
-    char *owner = dup_string(s_loadingName ? s_loadingName : "plugin");
-    if (!copy || !owner) {
-        free(copy);
-        free(owner);
-        free(shortcut);
-        luaL_unref(L, LUA_REGISTRYINDEX, ref);
-        return luaL_error(L, "out of memory");
-    }
-    s_commands[s_commandCount].label = copy;
-    s_commands[s_commandCount].ref = ref;
-    s_commands[s_commandCount].placed = 0;
-    s_commands[s_commandCount].overrides = NULL;
-    s_commands[s_commandCount].builtIn = s_loadingBuiltIn;
-    s_commands[s_commandCount].separator = separator;
-    s_commands[s_commandCount].owner = owner;
-    s_commands[s_commandCount].configKey = NULL;
-    s_commands[s_commandCount].checkDefault = 0;
-    s_commands[s_commandCount].shortcut = shortcut;
-    s_commands[s_commandCount].shortcutFlags = shortcutFlags;
-    s_commands[s_commandCount].shortcutKey = shortcutKey;
-    s_commandCount++;
-    return 0;
+    return command;
 }
 
 static int menu_add(lua_State *L) {
     const char *label = checked_cstring(L, 1, "menu label");
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    return add_labelled_command(L, label, 2, 0, 3);
+    add_labelled_command(L, label, 2, 3);
+    return 0;
 }
 
 static const char *checked_config_key(lua_State *L, int index) {
@@ -277,15 +303,9 @@ static int menu_checkbox(lua_State *L) {
     const char *key = checked_config_key(L, 2);
     luaL_checktype(L, 3, LUA_TBOOLEAN);
     luaL_checktype(L, 4, LUA_TFUNCTION);
-    int index = s_commandCount;
-    add_labelled_command(L, label, 4, 0, 5);
-    char *copy = dup_string(key);
-    if (!copy) {
-        discard_commands_from(index);
-        return luaL_error(L, "out of memory");
-    }
-    s_commands[index].configKey = copy;
-    s_commands[index].checkDefault = lua_toboolean(L, 3);
+    PluginCommand *command = add_labelled_command(L, label, 4, 5);
+    keep_command_string(L, &command->configKey, key);
+    command->checkDefault = lua_toboolean(L, 3);
     return 0;
 }
 
@@ -295,7 +315,8 @@ static int menu_checkbox(lua_State *L) {
    submenu of a menu-bar menu. */
 static int menu_separator(lua_State *L) {
     const char *path = optional_cstring(L, 1, "", "menu path");
-    return add_labelled_command(L, path, 0, 1, 0);
+    append_command(L, path, 0, "plugin");
+    return 0;
 }
 
 /* commands.register(name, fn [, title]): fn runs in place of the built-in
@@ -306,33 +327,9 @@ static int commands_register(lua_State *L) {
     const char *name = checked_cstring(L, 1, "command name");
     luaL_checktype(L, 2, LUA_TFUNCTION);
     const char *title = optional_cstring(L, 3, "MarkEdit", "command title");
-    if (s_commandCount >= PLUGIN_MAX_COMMANDS)
-        return luaL_error(L, "too many plugin commands (the limit is %d)", PLUGIN_MAX_COMMANDS);
-    char *label = dup_string(title);
-    char *overrides = dup_string(name);
-    if (!label || !overrides) {
-        free(label);
-        free(overrides);
-        return luaL_error(L, "out of memory");
-    }
-    lua_pushvalue(L, 2);
-    PluginCommand *command = &s_commands[s_commandCount++];
-    command->label = label;
-    command->ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    PluginCommand *command = append_command(L, title, 2, "plugin");
     command->placed = 1;
-    command->overrides = overrides;
-    command->builtIn = s_loadingBuiltIn;
-    command->separator = 0;
-    command->owner = dup_string(s_loadingName ? s_loadingName : "plugin");
-    command->configKey = NULL;
-    command->checkDefault = 0;
-    command->shortcut = NULL;
-    command->shortcutFlags = 0;
-    command->shortcutKey = 0;
-    if (!command->owner) {
-        discard_commands_from(s_commandCount - 1);
-        return luaL_error(L, "out of memory");
-    }
+    keep_command_string(L, &command->overrides, name);
     return 0;
 }
 
@@ -396,13 +393,31 @@ static const char *current_owner(lua_State *L) {
 #define CONFIG_TABLE_PREFIX "@ME1:"
 #define CONFIG_MAX_DEPTH 32
 
-static void encode_config_value(lua_State *L, int index, luaL_Buffer *buffer, int depth) {
+/* The encoder walks the table with lua_next/lua_rawgeti, which push values,
+   so it can't write into a luaL_Buffer as it goes: a buffer requires the
+   stack to stay balanced between its calls, and once it grows its box sits
+   at the top. Each piece is stored in a Lua table instead (GC-owned, so a
+   luaL_error mid-walk leaks nothing) and joined once at the end. */
+typedef struct {
+    lua_State *L;
+    int parts;          /* absolute stack index of the pieces table */
+    lua_Integer count;
+} ConfigEncoder;
+
+static void add_config_piece(ConfigEncoder *encoder, const char *text, size_t length) {
+    lua_pushlstring(encoder->L, text, length);
+    lua_rawseti(encoder->L, encoder->parts, ++encoder->count);
+}
+
+static void encode_config_value(ConfigEncoder *encoder, int index, int depth) {
+    lua_State *L = encoder->L;
     if (depth > CONFIG_MAX_DEPTH) luaL_error(L, "config table is nested too deeply");
+    luaL_checkstack(L, 4, "config table is nested too deeply");
     index = lua_absindex(L, index);
     switch (lua_type(L, index)) {
-        case LUA_TNIL: luaL_addchar(buffer, 'N'); return;
+        case LUA_TNIL: add_config_piece(encoder, "N", 1); return;
         case LUA_TBOOLEAN:
-            luaL_addstring(buffer, lua_toboolean(L, index) ? "B1" : "B0"); return;
+            add_config_piece(encoder, lua_toboolean(L, index) ? "B1" : "B0", 2); return;
         case LUA_TNUMBER: {
             char number[64];
             if (lua_isinteger(L, index))
@@ -412,18 +427,23 @@ static void encode_config_value(lua_State *L, int index, luaL_Buffer *buffer, in
                 if (!isfinite(value)) luaL_error(L, "config numbers must be finite");
                 snprintf(number, sizeof(number), "D%.17g;", value);
             }
-            luaL_addstring(buffer, number); return;
+            add_config_piece(encoder, number, strlen(number)); return;
         }
         case LUA_TSTRING: {
             static const char HEX[] = "0123456789abcdef";
             size_t length;
             const unsigned char *value = (const unsigned char *)lua_tolstring(L, index, &length);
             char size[32]; snprintf(size, sizeof(size), "S%zu:", length);
-            luaL_addstring(buffer, size);
+            add_config_piece(encoder, size, strlen(size));
+            /* Nothing else is pushed while this buffer is open. */
+            luaL_Buffer buffer;
+            char *hex = luaL_buffinitsize(L, &buffer, length * 2);
             for (size_t i = 0; i < length; i++) {
-                luaL_addchar(buffer, HEX[value[i] >> 4]);
-                luaL_addchar(buffer, HEX[value[i] & 15]);
+                hex[i * 2] = HEX[value[i] >> 4];
+                hex[i * 2 + 1] = HEX[value[i] & 15];
             }
+            luaL_pushresultsize(&buffer, length * 2);
+            lua_rawseti(L, encoder->parts, ++encoder->count);
             return;
         }
         case LUA_TTABLE: {
@@ -442,21 +462,21 @@ static void encode_config_value(lua_State *L, int index, luaL_Buffer *buffer, in
             }
             if (array && count == arrayLength) {
                 char header[32]; snprintf(header, sizeof(header), "A%zu;", arrayLength);
-                luaL_addstring(buffer, header);
+                add_config_piece(encoder, header, strlen(header));
                 for (size_t i = 1; i <= arrayLength; i++) {
                     lua_rawgeti(L, index, (lua_Integer)i);
-                    encode_config_value(L, -1, buffer, depth + 1);
+                    encode_config_value(encoder, -1, depth + 1);
                     lua_pop(L, 1);
                 }
             } else {
                 char header[32]; snprintf(header, sizeof(header), "O%zu;", count);
-                luaL_addstring(buffer, header);
+                add_config_piece(encoder, header, strlen(header));
                 lua_pushnil(L);
                 while (lua_next(L, index)) {
                     if (lua_type(L, -2) != LUA_TSTRING)
                         luaL_error(L, "config object keys must be strings");
-                    encode_config_value(L, -2, buffer, depth + 1);
-                    encode_config_value(L, -1, buffer, depth + 1);
+                    encode_config_value(encoder, -2, depth + 1);
+                    encode_config_value(encoder, -1, depth + 1);
                     lua_pop(L, 1);
                 }
             }
@@ -481,6 +501,9 @@ static int decode_size(const char **cursor, const char *end, char delimiter, siz
 
 static int decode_config_value(lua_State *L, const char **cursor, const char *end, int depth) {
     if (depth > CONFIG_MAX_DEPTH || *cursor >= end) return 0;
+    /* Each level holds its table and a key, more than LUA_MINSTACK allows
+       across CONFIG_MAX_DEPTH levels. */
+    luaL_checkstack(L, 3, "config table is nested too deeply");
     char type = *(*cursor)++;
     if (type == 'N') { lua_pushnil(L); return 1; }
     if (type == 'B' && *cursor < end && (**cursor == '0' || **cursor == '1')) {
@@ -555,8 +578,7 @@ static int config_get(lua_State *L) {
             lua_pushvalue(L, 2);
         }
     } else if (lua_type(L, 2) == LUA_TBOOLEAN) {
-        lua_pushboolean(L, strcmp(value, "1") == 0 || _stricmp(value, "true") == 0 ||
-                           _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0);
+        lua_pushboolean(L, config_value_is_true(value));
     } else if (lua_type(L, 2) == LUA_TNUMBER) {
         char *end = NULL;
         double number = strtod(value, &end);
@@ -583,12 +605,20 @@ static int config_set(lua_State *L) {
             break;
         case LUA_TSTRING: value = checked_cstring(L, 2, "config value"); break;
         case LUA_TTABLE: {
+            lua_newtable(L);
+            ConfigEncoder encoder = { L, lua_gettop(L), 0 };
+            add_config_piece(&encoder, CONFIG_TABLE_PREFIX, sizeof(CONFIG_TABLE_PREFIX) - 1);
+            encode_config_value(&encoder, 2, 0);
+            /* luaL_addvalue takes the value just above the buffer, which is
+               the one stack use a luaL_Buffer allows. */
             luaL_Buffer buffer; luaL_buffinit(L, &buffer);
-            luaL_addstring(&buffer, CONFIG_TABLE_PREFIX);
-            encode_config_value(L, 2, &buffer, 0);
+            for (lua_Integer i = 1; i <= encoder.count; i++) {
+                lua_rawgeti(L, encoder.parts, i);
+                luaL_addvalue(&buffer);
+            }
             luaL_pushresult(&buffer);
             structured = dup_string(lua_tostring(L, -1));
-            lua_pop(L, 1);
+            lua_pop(L, 2); /* the joined string and the pieces table */
             if (!structured) return luaL_error(L, "out of memory");
             value = structured;
             break;
@@ -657,7 +687,7 @@ static int app_capabilities(lua_State *L) {
     static const char *const names[] = {
         "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
         "documents", "command_execution", "path_picker", "status", "logging", "defer",
-        "eol_conversion", "save_encoding", "tab_width"
+        "eol_conversion", "save_encoding", "tab_width", "tail_follow"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -713,6 +743,10 @@ static int app_cancel(lua_State *L) {
 
 static int commands_execute(lua_State *L) {
     const char *name = checked_cstring(L, 1, "command name");
+    /* The run.* commands execute the active document; with editor.set_text
+       and documents.save that would let a plugin run code of its choosing. */
+    if (strncmp(name, "run.", 4) == 0)
+        return luaL_error(L, "commands.execute can't run, debug or step through files");
     if (!s_callbacks.invoke_command)
         return luaL_error(L, "commands.execute is not available here");
     lua_pushboolean(L, s_callbacks.invoke_command(name));
@@ -732,6 +766,11 @@ static int checked_document_index(lua_State *L, int argument) {
     lua_Integer index = luaL_checkinteger(L, argument);
     luaL_argcheck(L, index >= 1 && index <= count, argument, "document index out of range");
     return (int)index - 1;
+}
+/* The document at the optional index argument, or the active one. */
+static int optional_document_index(lua_State *L, int argument) {
+    if (!lua_isnoneornil(L, argument)) return checked_document_index(L, argument);
+    return s_callbacks.document_active ? s_callbacks.document_active() : 0;
 }
 static int documents_activate(lua_State *L) {
     int index = checked_document_index(L, 1);
@@ -757,27 +796,29 @@ static int documents_save(lua_State *L) {
     return 1;
 }
 static int documents_close(lua_State *L) {
-    int index = lua_isnoneornil(L, 1)
-        ? (s_callbacks.document_active ? s_callbacks.document_active() : 0)
-        : checked_document_index(L, 1);
+    int index = optional_document_index(L, 1);
     if (!s_callbacks.document_close) return luaL_error(L, "documents.close is not available here");
     lua_pushboolean(L, s_callbacks.document_close(index));
     return 1;
 }
 static int documents_path(lua_State *L) {
-    int index = lua_isnoneornil(L, 1)
-        ? (s_callbacks.document_active ? s_callbacks.document_active() : 0)
-        : checked_document_index(L, 1);
+    int index = optional_document_index(L, 1);
     char *path = s_callbacks.document_path ? s_callbacks.document_path(index) : NULL;
     if (path) lua_pushstring(L, path); else lua_pushnil(L);
     free(path);
     return 1;
 }
 static int documents_modified(lua_State *L) {
-    int index = lua_isnoneornil(L, 1)
-        ? (s_callbacks.document_active ? s_callbacks.document_active() : 0)
-        : checked_document_index(L, 1);
+    int index = optional_document_index(L, 1);
     lua_pushboolean(L, s_callbacks.document_modified && s_callbacks.document_modified(index));
+    return 1;
+}
+static int documents_follow(lua_State *L) {
+    if (!s_callbacks.document_follow)
+        return luaL_error(L, "documents.follow is not available here");
+    int set = !lua_isnoneornil(L, 1);
+    if (set) luaL_checktype(L, 1, LUA_TBOOLEAN);
+    lua_pushboolean(L, s_callbacks.document_follow(set, set && lua_toboolean(L, 1)));
     return 1;
 }
 static int documents_encoding(lua_State *L) {
@@ -830,7 +871,8 @@ static const luaL_Reg documents_functions[] = {
     {"count", documents_count}, {"active", documents_active},
     {"activate", documents_activate}, {"new", documents_new}, {"open", documents_open},
     {"save", documents_save}, {"close", documents_close}, {"path", documents_path},
-    {"modified", documents_modified}, {"encoding", documents_encoding}, {NULL, NULL}
+    {"modified", documents_modified}, {"follow", documents_follow},
+    {"encoding", documents_encoding}, {NULL, NULL}
 };
 
 void plugin_registry_open(lua_State *L) {
@@ -884,9 +926,7 @@ int plugin_host_command_is_checkable(int index) {
 static int stored_checkbox_state(const PluginCommand *command) {
     char *value = s_callbacks.config_get
         ? s_callbacks.config_get(command->owner, command->configKey) : NULL;
-    int checked = value ? (strcmp(value, "1") == 0 || _stricmp(value, "true") == 0 ||
-                           _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0)
-                        : command->checkDefault;
+    int checked = value ? config_value_is_true(value) : command->checkDefault;
     free(value);
     return checked;
 }

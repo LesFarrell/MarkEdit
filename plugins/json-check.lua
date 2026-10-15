@@ -460,7 +460,9 @@ local function plural(count, one, many)
   return count .. " " .. (count == 1 and one or many)
 end
 
--- After the built-in Format JSON and Minify JSON.
+-- Plugins load in alphabetical order, so these items come before
+-- json-tools.lua's Format, Minify and conversion commands. The separator
+-- only shows when something earlier has already added to Tools > JSON.
 menu.separator("/Tools/JSON")
 
 menu.add("/Tools/JSON/Check JSON &Syntax", function()

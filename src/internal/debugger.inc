@@ -331,8 +331,14 @@ static WCHAR *find_python_interpreter(const WCHAR *scriptPath) {
     return NULL;
 }
 
-/* A PowerShell single-quoted literal only treats another apostrophe specially;
-   doubling it gives us safe arguments even for paths containing shell syntax. */
+/* A PowerShell single-quoted literal only treats a single quote specially;
+   doubling it gives us safe arguments even for paths containing shell syntax.
+   PowerShell counts the typographic quotes U+2018-U+201B as single quotes
+   too, so a file named x’;calc;’.c would otherwise end the literal early. */
+static int is_powershell_single_quote(WCHAR c) {
+    return c == L'\'' || (c >= 0x2018 && c <= 0x201B);
+}
+
 static WCHAR *powershell_literal(const WCHAR *value) {
     size_t length = wcslen(value);
     WCHAR *literal = (WCHAR *)malloc((length * 2 + 3) * sizeof(WCHAR));
@@ -340,7 +346,7 @@ static WCHAR *powershell_literal(const WCHAR *value) {
     size_t output = 0;
     literal[output++] = L'\'';
     for (size_t i = 0; i < length; i++) {
-        if (value[i] == L'\'') literal[output++] = L'\'';
+        if (is_powershell_single_quote(value[i])) literal[output++] = value[i];
         literal[output++] = value[i];
     }
     literal[output++] = L'\'';
@@ -348,27 +354,31 @@ static WCHAR *powershell_literal(const WCHAR *value) {
     return literal;
 }
 
-typedef enum { FLAG_QUOTE_POWERSHELL, FLAG_QUOTE_CMD } FlagQuoteStyle;
+typedef enum { FLAG_QUOTE_POWERSHELL, FLAG_QUOTE_ARGV } FlagQuoteStyle;
 
-/* Re-quotes one already-tokenized extra-compiler-flag for the target build
-   command's shell: powershell_literal() above for the PowerShell console
-   launch_native_file() builds, or cmd.exe's own quoting (double quotes,
-   backslash-escaped) for the cmd /k chain launch_msvc_file() builds. */
+/* Re-quotes one already-tokenized extra-compiler-flag for its target:
+   powershell_literal() above for the PowerShell console launch_native_file()
+   builds, or the Microsoft C runtime's argv rules for cl.exe, which
+   launch_msvc_file() hands the flags through an environment variable so
+   cmd.exe never parses them. Under those rules backslashes are literal
+   except in a run that ends at a double quote, so such a run is doubled
+   and the quote itself escaped. */
 static WCHAR *quote_token_for_shell(const WCHAR *token, FlagQuoteStyle style) {
     if (style == FLAG_QUOTE_POWERSHELL) return powershell_literal(token);
     size_t length = wcslen(token);
-    int needsQuotes = length == 0;
-    for (size_t i = 0; i < length && !needsQuotes; i++)
-        if (token[i] == L' ' || token[i] == L'\t' || token[i] == L'"') needsQuotes = 1;
-    if (!needsQuotes) return wcsdup_heap(token);
+    if (length && !wcspbrk(token, L" \t\"")) return wcsdup_heap(token);
     WCHAR *quoted = (WCHAR *)malloc((length * 2 + 3) * sizeof(WCHAR));
     if (!quoted) return NULL;
-    size_t out = 0;
+    size_t out = 0, backslashes = 0;
     quoted[out++] = L'"';
     for (size_t i = 0; i < length; i++) {
-        if (token[i] == L'"') quoted[out++] = L'\\';
+        if (token[i] == L'"') {
+            for (size_t j = 0; j <= backslashes; j++) quoted[out++] = L'\\';
+        }
+        backslashes = token[i] == L'\\' ? backslashes + 1 : 0;
         quoted[out++] = token[i];
     }
+    while (backslashes--) quoted[out++] = L'\\';
     quoted[out++] = L'"';
     quoted[out] = 0;
     return quoted;
@@ -377,9 +387,10 @@ static WCHAR *quote_token_for_shell(const WCHAR *token, FlagQuoteStyle style) {
 /* Splits the free-form "extra compiler flags" text from Settings > Compiler
    the way a shell would - via CommandLineToArgvW, so a quoted flag like
    -D"FOO=bar baz" keeps its embedded space instead of being cut in two - and
-   re-quotes each token for the target command shell, so the text can't break
-   out of the generated build command. Returns NULL when there's nothing to
-   add, so callers can treat that the same as "no extra flags configured". */
+   re-quotes each token for its target (see quote_token_for_shell()), so the
+   text can't break out of the generated build command. Returns NULL when
+   there's nothing to add, so callers can treat that the same as "no extra
+   flags configured". */
 static WCHAR *quote_extra_compiler_flags(const WCHAR *flags, FlagQuoteStyle style) {
     if (!flags || !flags[0]) return NULL;
     int argc = 0;
@@ -1224,53 +1235,55 @@ static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const 
    for a target architecture, and a batch file's environment changes don't
    propagate out to a parent PowerShell session the way they would to a
    further command chained in the same cmd.exe process. So the whole
-   build+run+cleanup chain runs as a single cmd.exe command instead. */
+   build+run+cleanup chain runs as a single cmd.exe command instead.
+
+   cmd.exe has no quoting that is safe for arbitrary text - %VAR% expands
+   even inside "...", and so does !VAR! under delayed expansion - so no path
+   or flag is spliced into the command line. Each is handed to the child
+   through an environment variable (set here just around the launch, which
+   the console inherits) and referenced as !MARKEDIT_...!: delayed
+   expansion runs after cmd has parsed quotes, & | < > and %-variables, and
+   it doesn't rescan what it substitutes. /v:on is required for that, and
+   for !errorlevel! to report the run's exit code rather than the value from
+   when the line was parsed; setlocal has no effect outside a batch file.
+   The one exception is vcvarsall.bat: `call` re-expands its argument, so a
+   VS install path containing ! or % still can't be used. */
+static const WCHAR *const MSVC_ENVIRONMENT[] = {
+    L"MARKEDIT_VCVARS", L"MARKEDIT_SOURCE", L"MARKEDIT_OUTPUT", L"MARKEDIT_FLAGS",
+};
+
 static void launch_msvc_file(DebugSourceKind kind, WCHAR *vcvarsallPath) {
     WCHAR *output = debug_temporary_path(L"exe");
     WCHAR *directory = path_directory(g_currentFile);
-    if (!output || !directory) {
-        free(vcvarsallPath); free(output); free(directory);
-        return;
-    }
+    WCHAR *extraFlags = quote_extra_compiler_flags(g_compilerExtraFlags, FLAG_QUOTE_ARGV);
+    const WCHAR *values[] = { vcvarsallPath, g_currentFile, output, extraFlags };
+    int ready = output && directory;
+    for (size_t i = 0; ready && i < sizeof(values) / sizeof(values[0]); i++)
+        if (values[i] && !SetEnvironmentVariableW(MSVC_ENVIRONMENT[i], values[i])) ready = 0;
 
-    const WCHAR *std = kind == DEBUG_SOURCE_C ? L"/std:c11" : L"/std:c++17";
-    WCHAR *extraFlags = quote_extra_compiler_flags(g_compilerExtraFlags, FLAG_QUOTE_CMD);
-    size_t capacity = wcslen(vcvarsallPath) + wcslen(output) * 3 + wcslen(g_currentFile) +
-        (extraFlags ? wcslen(extraFlags) : 0) + 512;
-    WCHAR *command = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (!command) {
-        free(vcvarsallPath); free(output); free(directory); free(extraFlags);
-        return;
-    }
     /* The leading/trailing quote wrapping the whole /k argument is cmd.exe's
        documented workaround for a command line that itself contains further
-       quoted substrings (the VS install path, source, and output paths can
-       all contain spaces): when the switch's remainder starts and ends with
+       quoted substrings: when the switch's remainder starts and ends with
        a quote character, cmd strips only that outer pair and leaves
-       everything between - including each inner "..." - untouched, rather
-       than mangling it with its ad-hoc first-quote/last-quote stripping
-       rule. enabledelayedexpansion + !errorlevel! (rather than %errorlevel%)
-       is needed because cmd expands %-variables once, when the whole /k
-       line is parsed, before any of the chained commands actually run - so
-       plain %errorlevel% would show a stale value from before the build. */
-    int written = swprintf(command, capacity,
-        L"/k \"setlocal enabledelayedexpansion && call \"%ls\" x64 >nul && "
-        L"echo Building %ls... && "
-        L"cl.exe /nologo %ls %ls /O2 /EHsc /Fe:\"%ls\" \"%ls\" && "
-        L"(\"%ls\" & echo. & echo Process exited with code !errorlevel!) & "
-        L"del /f /q \"%ls\" >nul 2>nul\"",
-        vcvarsallPath, kind == DEBUG_SOURCE_C ? L"C" : L"C++", std, extraFlags ? extraFlags : L"",
-        output, g_currentFile, output, output);
+       everything between - including each inner "..." - untouched. */
+    WCHAR command[512];
+    if (ready &&
+        swprintf(command, sizeof(command) / sizeof(command[0]),
+                 L"/v:on /k \"call \"!MARKEDIT_VCVARS!\" x64 >nul && "
+                 L"echo Building %ls... && "
+                 L"cl.exe /nologo %ls%ls /O2 /EHsc /Fe:\"!MARKEDIT_OUTPUT!\" \"!MARKEDIT_SOURCE!\" && "
+                 L"(\"!MARKEDIT_OUTPUT!\" & echo. & echo Process exited with code !errorlevel!) & "
+                 L"del /f /q \"!MARKEDIT_OUTPUT!\" >nul 2>nul\"",
+                 kind == DEBUG_SOURCE_C ? L"C" : L"C++",
+                 kind == DEBUG_SOURCE_C ? L"/std:c11" : L"/std:c++17",
+                 extraFlags ? L" !MARKEDIT_FLAGS!" : L"") > 0) {
+        open_console(L"cmd.exe", command, directory,
+                     L"The C/C++ build console could not be started.", L"Run C/C++");
+    }
+    for (size_t i = 0; i < sizeof(MSVC_ENVIRONMENT) / sizeof(MSVC_ENVIRONMENT[0]); i++)
+        SetEnvironmentVariableW(MSVC_ENVIRONMENT[i], NULL);
     free(vcvarsallPath);
     free(extraFlags);
-    if (written < 0) {
-        free(command); free(output); free(directory);
-        return;
-    }
-
-    open_console(L"cmd.exe", command, directory,
-                 L"The C/C++ build console could not be started.", L"Run C/C++");
-    free(command);
     free(output);
     free(directory);
 }

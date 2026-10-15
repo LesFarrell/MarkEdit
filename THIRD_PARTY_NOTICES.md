@@ -16,7 +16,7 @@ GCC-only features only under GCC/Clang, so the same copy also builds with MSVC.
 
 `mermaid.min.js` is from [Mermaid](https://github.com/mermaid-js/mermaid),
 copyright (c) 2014–2022 Knut Sveidqvist and contributors, licensed under the
-MIT License.
+MIT License. A copy is at `third_party/mermaid/LICENSE`.
 
 ## GNU GDB 17.1
 
@@ -53,7 +53,8 @@ Academy and other contributors, licensed under the MIT License. A copy is at
 
 `github-markdown.css` is derived from
 [github-markdown-css](https://github.com/sindresorhus/github-markdown-css),
-copyright (c) Sindre Sorhus, licensed under the MIT License.
+copyright (c) Sindre Sorhus, licensed under the MIT License. A copy is at
+`third_party/github-markdown-css/LICENSE`.
 
 ## Microsoft WebView2 SDK 1.0.4078.44
 

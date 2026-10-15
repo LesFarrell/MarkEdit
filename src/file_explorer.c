@@ -104,6 +104,7 @@ typedef struct IconCacheEntry
 static IconCacheEntry s_iconCache[ICON_CACHE_CAPACITY];
 static int s_iconCacheCount = 0;
 static int s_folderIconIndex = -1;
+static int s_fileIconIndex = -1;
 
 /* Returns a newly allocated parent path, or NULL when the workspace is
    already a drive/UNC root (or parent navigation is unavailable). */
@@ -148,34 +149,43 @@ static int add_icon_to_list(HICON icon)
     return index;
 }
 
+/* Shell icon for a name with the given attributes, added to s_iconList once
+   and remembered in *slot. */
+static int shared_icon_index(int *slot, const WCHAR *name, DWORD attributes)
+{
+    if (*slot < 0)
+    {
+        SHFILEINFOW info = {0};
+        SHGetFileInfoW(name, attributes, &info, sizeof(info),
+                       SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+        *slot = add_icon_to_list(info.hIcon);
+    }
+    return *slot;
+}
+
+/* Every icon added to s_iconList stays there, so a file only gets its own
+   icon when its extension can be cached. Extensionless names, extensions too
+   long for an entry, and anything after the cache fills share one generic
+   file icon, keeping the list bounded however many files are listed. */
 static int icon_index_for_path(const WCHAR *path, int isDirectory)
 {
     if (isDirectory)
-    {
-        if (s_folderIconIndex < 0)
-        {
-            SHFILEINFOW info = {0};
-            SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
-                           SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
-            s_folderIconIndex = add_icon_to_list(info.hIcon);
-        }
-        return s_folderIconIndex;
-    }
+        return shared_icon_index(&s_folderIconIndex, L"folder", FILE_ATTRIBUTE_DIRECTORY);
     const WCHAR *extension = PathFindExtensionW(path);
     for (int i = 0; i < s_iconCacheCount; i++)
         if (_wcsicmp(s_iconCache[i].extension, extension) == 0)
             return s_iconCache[i].iconIndex;
+    size_t extensionCapacity = sizeof(s_iconCache[0].extension) / sizeof(WCHAR);
+    if (!*extension || wcslen(extension) >= extensionCapacity ||
+        s_iconCacheCount >= ICON_CACHE_CAPACITY)
+        return shared_icon_index(&s_fileIconIndex, L"file", FILE_ATTRIBUTE_NORMAL);
     SHFILEINFOW info = {0};
-    SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
+    SHGetFileInfoW(extension, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
                    SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
     int index = add_icon_to_list(info.hIcon);
-    if (*extension && s_iconCacheCount < ICON_CACHE_CAPACITY)
-    {
-        wcsncpy(s_iconCache[s_iconCacheCount].extension, extension, 15);
-        s_iconCache[s_iconCacheCount].extension[15] = 0;
-        s_iconCache[s_iconCacheCount].iconIndex = index;
-        s_iconCacheCount++;
-    }
+    wcscpy(s_iconCache[s_iconCacheCount].extension, extension);
+    s_iconCache[s_iconCacheCount].iconIndex = index;
+    s_iconCacheCount++;
     return index;
 }
 

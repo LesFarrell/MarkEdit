@@ -5,6 +5,44 @@
 #include <windows.h>
 #include "text_codec.h"
 
+enum { FILE_FOLLOW_TAIL_SIZE = 64 };
+
+/* Exact raw-disk position represented by a followed document. The trailing
+   signature distinguishes append-only growth from replacement or copytruncate
+   rotation, while retryBlocked suppresses repeated resource-error dialogs for
+   one unchanged on-disk revision. */
+typedef struct FileFollowState {
+    FILETIME writeTime;
+    ULONGLONG size;
+    DWORD volumeSerial, fileIndexHigh, fileIndexLow;
+    unsigned char tail[FILE_FOLLOW_TAIL_SIZE];
+    size_t tailLength;
+    int hasTime, hasIdentity;
+    FILETIME blockedWriteTime;
+    ULONGLONG blockedSize;
+    int retryBlocked;
+} FileFollowState;
+
+typedef enum FileFollowAction {
+    FILE_FOLLOW_RETRY,
+    FILE_FOLLOW_APPEND,
+    FILE_FOLLOW_RELOAD
+} FileFollowAction;
+
+void file_follow_clear(FileFollowState *state);
+/* Captures identity and the signature ending at representedSize, which may be
+   smaller than the handle's current size if a writer appended during loading. */
+int file_follow_capture(FileFollowState *state, HANDLE file, ULONGLONG representedSize);
+FileFollowAction file_follow_check_growth(const FileFollowState *state, HANDLE file,
+                                          const BY_HANDLE_FILE_INFORMATION *info,
+                                          ULONGLONG size);
+void file_follow_commit_bytes(FileFollowState *state, const char *bytes, size_t length);
+void file_follow_complete(FileFollowState *state, const BY_HANDLE_FILE_INFORMATION *info);
+void file_follow_block_retry(FileFollowState *state, ULONGLONG size, FILETIME writeTime);
+/* Returns true only for the revision that already failed; a newer observation
+   automatically releases the block. */
+int file_follow_retry_blocked(FileFollowState *state, ULONGLONG size, FILETIME writeTime);
+
 /* Creates or truncates path. Returns nonzero only when all bytes and the
    final handle close succeed; a failure may leave a partial file. */
 int write_bytes_file(const WCHAR *path, const char *bytes, size_t length);

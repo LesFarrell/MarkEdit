@@ -9,6 +9,7 @@ function require(name)
 end
 
 local format = require("format")
+local lint = require("lint")
 
 -- Checks the output and that formatting it again changes nothing.
 local function expect(input, expected, label)
@@ -105,5 +106,20 @@ assert(ranged_code == "if x then\n  y = 2\nend\n", "range uses the surrounding d
 
 local tabbed = format.format("if a then\nb()\nend\n", { indent = "\t" })
 assert(tabbed == "if a then\n\tb()\nend\n", "custom indent unit")
+
+-- ---- Syntax linting ----
+
+assert(lint.check("local x = 1\nreturn x\n", "valid.lua") == nil,
+  "valid Lua was rejected")
+assert(lint.check("error('lint must not execute code')\n", "safe.lua") == nil,
+  "lint executed the compiled document")
+
+local problem = lint.check("local x = 1\nif x then\n  return x\n", "broken.lua")
+assert(problem and problem.line == 4 and problem.message:find("end", 1, true),
+  "missing end did not produce a useful line diagnostic")
+
+problem = lint.check("local x = )\n", "broken.lua")
+assert(problem and problem.line == 1 and problem.message ~= "",
+  "invalid expression did not produce a line diagnostic")
 
 print("All lua-format tests passed.")

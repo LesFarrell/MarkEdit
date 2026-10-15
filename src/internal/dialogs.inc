@@ -76,7 +76,11 @@ static LRESULT popup_dialog_theme_message(HWND hwnd, UINT msg, WPARAM wParam, LR
    WM_CTLCOLORBTN, so getting a themed fill/border needs BS_OWNERDRAW. */
 static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
     int pressed = (dis->itemState & ODS_SELECTED) != 0;
-    int isDefault = (GetWindowLongW(dis->hwndItem, GWL_STYLE) & BS_DEFPUSHBUTTON) != 0;
+    /* The style can't say which button is the default: BS_OWNERDRAW (0xB)
+       contains BS_DEFPUSHBUTTON's bit, so every button would match. Every
+       popup's default is its IDOK button, or IDCANCEL when it has no OK. */
+    int id = GetDlgCtrlID(dis->hwndItem);
+    int isDefault = id == IDOK || (id == IDCANCEL && !GetDlgItem(GetParent(dis->hwndItem), IDOK));
     COLORREF fill = pressed ? theme_palette()->pressedBg : theme_palette()->subtleBg;
     fill_rect_color(dis->hDC, &dis->rcItem, fill);
 
@@ -94,6 +98,131 @@ static void draw_popup_button(const DRAWITEMSTRUCT *dis) {
     SetBkMode(dis->hDC, TRANSPARENT);
     RECT textRect = dis->rcItem;
     DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+/* The popups use the GUI font, as the debug panel does, rather than the
+   bold System font a control gets when nobody sets one. */
+static BOOL CALLBACK set_child_font(HWND child, LPARAM font) {
+    SendMessageW(child, WM_SETFONT, (WPARAM)font, TRUE);
+    return TRUE;
+}
+
+static void use_gui_font(HWND dialog) {
+    EnumChildWindows(dialog, set_child_font, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
+}
+
+/* An LBS_OWNERDRAWFIXED list measures its rows once, as it's created, so
+   after a font change its row height has to be set again. */
+static void remeasure_listbox_rows(HWND list, UINT minimum) {
+    MEASUREITEMSTRUCT mis = {0};
+    measure_themed_listbox_item(list, &mis);
+    SendMessageW(list, LB_SETITEMHEIGHT, 0, mis.itemHeight > minimum ? mis.itemHeight : minimum);
+}
+
+/* ---- themed frames for edit fields and lists ----
+   WS_EX_CLIENTEDGE draws a sunken 3D frame in system colours whatever the
+   theme. theme_edit_field() and theme_list_frame() replace it with a 1px
+   border, the accent colour while the control has focus. Edit fields also
+   get inner padding that centres the text vertically in whatever height the
+   field is given; their background comes from the parent's WM_CTLCOLOREDIT
+   as before. A list's frame is installed before themed_scrollbar_attach(),
+   so the bar, which reserves its strip after the frame, sits inside it. */
+enum { THEMED_FRAME_EDIT = 1, THEMED_FRAME_LIST = 2 };
+static int themed_edit_text_height(HWND edit) {
+    HFONT font = (HFONT)SendMessageW(edit, WM_GETFONT, 0, 0);
+    HDC hdc = GetDC(edit);
+    HFONT oldFont = font ? (HFONT)SelectObject(hdc, font) : NULL;
+    TEXTMETRICW tm;
+    GetTextMetricsW(hdc, &tm);
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(edit, hdc);
+    return tm.tmHeight;
+}
+
+/* Paints the 1px border, and for an edit field the padding inside it too.
+   A list's other non-client area is its scrollbar, painted by its owner. */
+static void paint_themed_frame(HWND control, int kind) {
+    RECT window, client;
+    GetWindowRect(control, &window);
+    GetClientRect(control, &client);
+    MapWindowPoints(control, NULL, (POINT *)&client, 2);
+    OffsetRect(&client, -window.left, -window.top);
+    OffsetRect(&window, -window.left, -window.top);
+    HDC hdc = GetWindowDC(control);
+    if (kind == THEMED_FRAME_EDIT) {
+        ExcludeClipRect(hdc, client.left, client.top, client.right, client.bottom);
+        fill_rect_color(hdc, &window, theme_bg_color());
+    }
+    COLORREF border = GetFocus() == control ? theme_accent_color() : theme_border_color();
+    HBRUSH brush = CreateSolidBrush(border);
+    FrameRect(hdc, &window, brush);
+    DeleteObject(brush);
+    ReleaseDC(control, hdc);
+}
+
+static LRESULT CALLBACK ThemedFrameSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                                UINT_PTR subclassId, DWORD_PTR refData) {
+    int kind = (int)refData;
+    switch (msg) {
+        case WM_NCCALCSIZE: {
+            if (kind == THEMED_FRAME_LIST) {
+                LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+                RECT *rc = wParam ? &((NCCALCSIZE_PARAMS *)lParam)->rgrc[0] : (RECT *)lParam;
+                InflateRect(rc, -1, -1);
+                return result;
+            }
+            if (!wParam) break;
+            RECT *rc = &((NCCALCSIZE_PARAMS *)lParam)->rgrc[0];
+            int padX = MulDiv(6, GetDpiForWindow(hwnd), 96);
+            int padY = (rc->bottom - rc->top - themed_edit_text_height(hwnd)) / 2;
+            if (padY < 1) padY = 1;
+            rc->left += padX;
+            rc->right -= padX;
+            rc->top += padY;
+            rc->bottom -= padY;
+            if (rc->right < rc->left) rc->right = rc->left;
+            if (rc->bottom < rc->top) rc->bottom = rc->top;
+            return 0;
+        }
+        case WM_NCPAINT:
+            if (kind == THEMED_FRAME_LIST) DefSubclassProc(hwnd, msg, wParam, lParam);
+            paint_themed_frame(hwnd, kind);
+            return 0;
+        case WM_SETFOCUS: case WM_KILLFOCUS: case WM_ENABLE: {
+            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+            RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+            return result;
+        }
+        /* The padding depends on the font, so recompute the frame. */
+        case WM_SETFONT: {
+            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+            SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            return result;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, ThemedFrameSubclassProc, subclassId);
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void attach_themed_frame(HWND control, int kind) {
+    if (!control) return;
+    SetWindowSubclass(control, ThemedFrameSubclassProc, 1, (DWORD_PTR)kind);
+    SetWindowPos(control, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+/* Call on an EDIT created without WS_EX_CLIENTEDGE. */
+static void theme_edit_field(HWND edit) {
+    attach_themed_frame(edit, THEMED_FRAME_EDIT);
+}
+
+/* Call on a LISTBOX created without WS_EX_CLIENTEDGE, before any
+   themed_scrollbar_attach(). */
+static void theme_list_frame(HWND list) {
+    attach_themed_frame(list, THEMED_FRAME_LIST);
 }
 
 
@@ -114,16 +243,18 @@ static LRESULT CALLBACK GotoLineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     (void)lParam;
     switch (msg) {
         case WM_CREATE: {
-            CreateWindowExA(0, "STATIC", "Line number:", WS_CHILD | WS_VISIBLE,
-                12, 14, 90, 20, hwnd, NULL, GetModuleHandleA(NULL), NULL);
-            g_hGotoEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+            CreateWindowExA(0, "STATIC", "Line number:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                12, 11, 90, 24, hwnd, NULL, GetModuleHandleA(NULL), NULL);
+            g_hGotoEdit = CreateWindowExA(0, "EDIT", "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
                 104, 11, 105, 24, hwnd, (HMENU)ID_GOTO_LINE, GetModuleHandleA(NULL), NULL);
+            theme_edit_field(g_hGotoEdit);
             CreateWindowExA(0, "BUTTON", "Go to",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                 48, 50, 76, 25, hwnd, (HMENU)IDOK, GetModuleHandleA(NULL), NULL);
             CreateWindowExA(0, "BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 132, 50, 76, 25, hwnd, (HMENU)IDCANCEL, GetModuleHandleA(NULL), NULL);
+            use_gui_font(hwnd);
             char current[32];
             Sci_Position line = (Sci_Position)SendMessageA(g_hEdit, SCI_LINEFROMPOSITION,
                 SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0), 0) + 1;
@@ -257,18 +388,22 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
         CreateWindowExW(0, L"STATIC", state->prompt, WS_CHILD | WS_VISIBLE,
             12, 10, 556, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
-        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        state->edit = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             12, 32, 556, 25, hwnd, (HMENU)ID_CHOICE_FILTER, GetModuleHandleW(NULL), NULL);
-        state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        theme_edit_field(state->edit);
+        state->list = CreateWindowExW(0, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
             12, 64, 556, 286, hwnd, (HMENU)ID_CHOICE_LIST, GetModuleHandleW(NULL), NULL);
+        theme_list_frame(state->list);
         CreateWindowExW(0, L"BUTTON", state->okLabel,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             404, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             490, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+        use_gui_font(hwnd);
+        remeasure_listbox_rows(state->list, 0);
         themed_scrollbar_attach(state->list, THEMED_SCROLL_LISTBOX);
         refill_choice_list(state);
         SetFocus(state->edit);
@@ -356,14 +491,16 @@ static LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
         CreateWindowExW(0, L"STATIC", state->prompt, WS_CHILD | WS_VISIBLE,
             12, 14, 396, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
-        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->initial,
+        state->edit = CreateWindowExW(0, L"EDIT", state->initial,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             12, 38, 396, 25, hwnd, (HMENU)ID_TEXT_INPUT, GetModuleHandleW(NULL), NULL);
+        theme_edit_field(state->edit);
         CreateWindowExW(0, L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             244, 76, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             330, 76, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+        use_gui_font(hwnd);
         SendMessageW(state->edit, EM_SETSEL, 0, -1);
         SetFocus(state->edit);
         popup_dialog_theme_opened(hwnd);
@@ -405,10 +542,234 @@ static int show_text_input(const WCHAR *title, const WCHAR *prompt,
     return state.accepted;
 }
 
+/* ---- themed check boxes and radio buttons ----
+   Drawn by hand because the system's are white boxes in system colours on
+   either theme. Shared by checklists and the Settings dialog. */
+
+/* A square box: accent-filled with a tick when checked, outlined otherwise,
+   greyed when disabled. `window` gives the DPI for the tick's width. */
+static void draw_check_box(HDC hdc, HWND window, RECT box, int checked, int enabled) {
+    COLORREF accent = enabled ? theme_accent_color() : theme_palette()->disabledFg;
+    COLORREF outline = enabled ? theme_fg_color() : theme_palette()->disabledFg;
+    HBRUSH fill = CreateSolidBrush(checked ? accent : theme_bg_color());
+    HPEN border = CreatePen(PS_SOLID, 1, checked ? accent : outline);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
+    HPEN oldPen = (HPEN)SelectObject(hdc, border);
+    Rectangle(hdc, box.left, box.top, box.right, box.bottom);
+    if (checked) {
+        int size = box.right - box.left;
+        HPEN tick = CreatePen(PS_SOLID, MulDiv(2, GetDpiForWindow(window), 96), theme_bg_color());
+        SelectObject(hdc, tick);
+        POINT points[3] = {
+            { box.left + size * 3 / 14, box.top + size * 7 / 14 },
+            { box.left + size * 6 / 14, box.top + size * 10 / 14 },
+            { box.left + size * 11 / 14, box.top + size * 4 / 14 },
+        };
+        Polyline(hdc, points, 3);
+        SelectObject(hdc, border);
+        DeleteObject(tick);
+    }
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(border);
+    DeleteObject(fill);
+}
+
+/* A round radio button in `box`: an outlined ring, with an accent dot in
+   an accent ring when selected. */
+static void draw_radio_mark(HDC hdc, RECT box, int selected, int enabled) {
+    COLORREF accent = enabled ? theme_accent_color() : theme_palette()->disabledFg;
+    COLORREF outline = enabled ? theme_fg_color() : theme_palette()->disabledFg;
+    HBRUSH fill = CreateSolidBrush(theme_bg_color());
+    HPEN ring = CreatePen(PS_SOLID, 1, selected ? accent : outline);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
+    HPEN oldPen = (HPEN)SelectObject(hdc, ring);
+    Ellipse(hdc, box.left, box.top, box.right, box.bottom);
+    if (selected) {
+        int inset = (box.right - box.left) / 4;
+        HBRUSH dot = CreateSolidBrush(accent);
+        HPEN dotPen = CreatePen(PS_SOLID, 1, accent);
+        SelectObject(hdc, dot);
+        SelectObject(hdc, dotPen);
+        Ellipse(hdc, box.left + inset, box.top + inset, box.right - inset, box.bottom - inset);
+        SelectObject(hdc, ring);
+        SelectObject(hdc, fill);
+        DeleteObject(dotPen);
+        DeleteObject(dot);
+    }
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(ring);
+    DeleteObject(fill);
+}
+
+/* An owner-drawn BUTTON acting as a check box or radio button: the mark
+   at the left, vertically centred, then the button's text. The caller
+   says whether it's on - an owner-drawn button keeps no check state. */
+static void draw_toggle_button(const DRAWITEMSTRUCT *dis, int radio, int on) {
+    int enabled = !(dis->itemState & ODS_DISABLED);
+    fill_rect_color(dis->hDC, &dis->rcItem, theme_bg_color());
+    int size = MulDiv(14, GetDpiForWindow(dis->hwndItem), 96);
+    RECT box;
+    box.left = dis->rcItem.left + 1;
+    box.top = dis->rcItem.top + (dis->rcItem.bottom - dis->rcItem.top - size) / 2;
+    box.right = box.left + size;
+    box.bottom = box.top + size;
+    if (radio) draw_radio_mark(dis->hDC, box, on, enabled);
+    else draw_check_box(dis->hDC, dis->hwndItem, box, on, enabled);
+
+    WCHAR text[128];
+    GetWindowTextW(dis->hwndItem, text, 128);
+    RECT textRect = dis->rcItem;
+    textRect.left = box.right + MulDiv(8, GetDpiForWindow(dis->hwndItem), 96);
+    SetTextColor(dis->hDC, enabled ? theme_fg_color() : theme_palette()->disabledFg);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    RECT measured = textRect;
+    DrawTextW(dis->hDC, text, -1, &measured, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+    DrawTextW(dis->hDC, text, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (dis->itemState & ODS_FOCUS) {
+        RECT focus = { textRect.left - 2, textRect.top + 1,
+                       textRect.left + (measured.right - measured.left) + 2, textRect.bottom - 1 };
+        DrawFocusRect(dis->hDC, &focus);
+    }
+}
+
+/* ---- checklists: an owner-drawn LISTBOX whose rows carry a checkbox ----
+   Shared by the Replace in Folder review and Manage Plugins. Each row's item
+   data is the caller's own index, and the caller keeps the checked state:
+   it passes that state to draw_checklist_item() and flips it in `toggle`.
+   Clicking a row's box, double-clicking the row, or pressing Space toggles
+   it, the convention of Windows' own checkbox lists. */
+typedef struct Checklist {
+    HWND list;
+    void (*toggle)(void *context, int index);
+    void *context;
+} Checklist;
+
+static int checklist_scaled(HWND list, int pixels) {
+    return MulDiv(pixels, GetDpiForWindow(list), 96);
+}
+
+/* The box occupies the row's left edge; clicks left of its right edge
+   count as clicks on the box. */
+static RECT checklist_box_rect(HWND list, const RECT *row) {
+    int size = checklist_scaled(list, 14), margin = checklist_scaled(list, 6);
+    RECT box;
+    box.left = row->left + margin;
+    box.top = row->top + (row->bottom - row->top - size) / 2;
+    box.right = box.left + size;
+    box.bottom = box.top + size;
+    return box;
+}
+
+static void checklist_add(Checklist *checklist, const WCHAR *label, int index) {
+    int row = (int)SendMessageW(checklist->list, LB_ADDSTRING, 0, (LPARAM)label);
+    if (row >= 0) SendMessageW(checklist->list, LB_SETITEMDATA, (WPARAM)row, (LPARAM)index);
+}
+
+/* Draws one row: the box (accent-filled with a tick when checked), the
+   row's text, and an optional dimmed `detail` right-aligned after it. */
+static void draw_checklist_item(Checklist *checklist, const DRAWITEMSTRUCT *dis, int checked,
+                                const WCHAR *detail) {
+    if ((int)dis->itemID < 0) return;
+    fill_themed_listbox_row(dis);
+
+    RECT box = checklist_box_rect(checklist->list, &dis->rcItem);
+    draw_check_box(dis->hDC, checklist->list, box, checked, 1);
+
+    RECT textRect = dis->rcItem;
+    textRect.left = box.right + checklist_scaled(checklist->list, 8);
+    textRect.right -= checklist_scaled(checklist->list, 8);
+    if (detail && *detail) {
+        RECT detailRect = textRect;
+        SetTextColor(dis->hDC, theme_palette()->lineNumber);
+        SetBkMode(dis->hDC, TRANSPARENT);
+        DrawTextW(dis->hDC, detail, -1, &detailRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SIZE extent;
+        if (GetTextExtentPoint32W(dis->hDC, detail, (int)wcslen(detail), &extent))
+            textRect.right -= extent.cx + checklist_scaled(checklist->list, 12);
+    }
+    WCHAR *label = listbox_item_text(checklist->list, (int)dis->itemID);
+    if (label) draw_themed_listbox_text(dis, label, textRect);
+    free(label);
+}
+
+static void checklist_toggle_row(Checklist *checklist, int row) {
+    if (row < 0 || row >= (int)SendMessageW(checklist->list, LB_GETCOUNT, 0, 0)) return;
+    int index = (int)SendMessageW(checklist->list, LB_GETITEMDATA, (WPARAM)row, 0);
+    checklist->toggle(checklist->context, index);
+    RECT rowRect;
+    if (SendMessageW(checklist->list, LB_GETITEMRECT, (WPARAM)row, (LPARAM)&rowRect) != LB_ERR)
+        InvalidateRect(checklist->list, &rowRect, FALSE);
+}
+
+/* The row under a client-area point, or -1 when the point is below the
+   last row. */
+static int checklist_row_at(HWND list, LPARAM point) {
+    POINT pt = { GET_X_LPARAM(point), GET_Y_LPARAM(point) };
+    DWORD hit = (DWORD)SendMessageW(list, LB_ITEMFROMPOINT, 0, MAKELPARAM(pt.x, pt.y));
+    return HIWORD(hit) ? -1 : (int)LOWORD(hit);
+}
+
+static LRESULT CALLBACK ChecklistSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                              UINT_PTR subclassId, DWORD_PTR refData) {
+    Checklist *checklist = (Checklist *)refData;
+    switch (msg) {
+        case WM_KEYDOWN:
+            if (wParam == VK_SPACE) {
+                checklist_toggle_row(checklist, (int)SendMessageW(hwnd, LB_GETCURSEL, 0, 0));
+                return 0;
+            }
+            break;
+        /* Otherwise the listbox treats Space as a type-ahead search. */
+        case WM_CHAR:
+            if (wParam == L' ') return 0;
+            break;
+        case WM_LBUTTONDOWN: {
+            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+            int row = checklist_row_at(hwnd, lParam);
+            RECT rowRect;
+            if (row >= 0 && SendMessageW(hwnd, LB_GETITEMRECT, (WPARAM)row, (LPARAM)&rowRect) != LB_ERR) {
+                RECT box = checklist_box_rect(hwnd, &rowRect);
+                if (GET_X_LPARAM(lParam) < box.right + checklist_scaled(hwnd, 4))
+                    checklist_toggle_row(checklist, row);
+            }
+            return result;
+        }
+        /* The second click of a double-click on the box arrives as this
+           message, so toggling here keeps every click on the box a toggle. */
+        case WM_LBUTTONDBLCLK: {
+            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+            checklist_toggle_row(checklist, checklist_row_at(hwnd, lParam));
+            return result;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, ChecklistSubclassProc, subclassId);
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+/* Creates the checklist's LISTBOX as control `id` of `parent`, in the GUI
+   font, with rows tall enough for the box. */
+static HWND create_checklist(Checklist *checklist, HWND parent, int id) {
+    checklist->list = CreateWindowExW(0, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+        LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+        0, 0, 0, 0, parent, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
+    if (!checklist->list) return NULL;
+    theme_list_frame(checklist->list);
+    SendMessageW(checklist->list, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), FALSE);
+    remeasure_listbox_rows(checklist->list, (UINT)checklist_scaled(checklist->list, 24));
+    themed_scrollbar_attach(checklist->list, THEMED_SCROLL_LISTBOX);
+    SetWindowSubclass(checklist->list, ChecklistSubclassProc, 1, (DWORD_PTR)checklist);
+    return checklist->list;
+}
+
 /* One line matched by a workspace-wide Find/Replace search - see
    do_replace_in_workspace() below. `label` is the "path:line — snippet"
-   text shown for the match (without the checkbox prefix ReplaceReviewWndProc
-   adds); `accepted` is whether the review dialog's checkbox is ticked. */
+   text shown for the match; `accepted` is whether the review dialog's
+   checkbox is ticked. */
 typedef struct ReplaceMatch {
     WCHAR *path;
     WCHAR *label;
@@ -419,7 +780,7 @@ typedef struct ReplaceMatch {
 typedef struct ReplaceReviewState {
     ReplaceMatch *matches;
     int count;
-    HWND list;
+    Checklist checklist;
     HWND countLabel;
     int confirmed;
 } ReplaceReviewState;
@@ -433,59 +794,17 @@ static void update_replace_count_label(ReplaceReviewState *state) {
     SetWindowTextW(state->countLabel, text);
 }
 
-/* "[x] label" or "[ ] label" for a row of the replace review list. Caller frees. */
-static WCHAR *format_replace_row(const ReplaceMatch *match) {
-    size_t capacity = wcslen(match->label) + 8;
-    WCHAR *row = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (row) swprintf(row, capacity, L"[%lc] %ls", (wint_t)(match->accepted ? L'x' : L' '), match->label);
-    return row;
-}
-
-static void refill_replace_list(ReplaceReviewState *state) {
-    SendMessageW(state->list, LB_RESETCONTENT, 0, 0);
-    for (int i = 0; i < state->count; i++) {
-        WCHAR *row = format_replace_row(&state->matches[i]);
-        if (!row) continue;
-        int idx = (int)SendMessageW(state->list, LB_ADDSTRING, 0, (LPARAM)row);
-        if (idx >= 0) SendMessageW(state->list, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)i);
-        free(row);
-    }
-    if (SendMessageW(state->list, LB_GETCOUNT, 0, 0) > 0)
-        SendMessageW(state->list, LB_SETCURSEL, 0, 0);
+static void toggle_replace_match(void *context, int index) {
+    ReplaceReviewState *state = (ReplaceReviewState *)context;
+    if (index < 0 || index >= state->count) return;
+    state->matches[index].accepted = !state->matches[index].accepted;
     update_replace_count_label(state);
 }
 
-/* Flips the checked state of the match shown at listbox row `row` and
-   rewrites just that row's text in place, preserving its selection. */
-static void toggle_replace_row(ReplaceReviewState *state, int row) {
-    if (row == LB_ERR) return;
-    int matchIndex = (int)SendMessageW(state->list, LB_GETITEMDATA, (WPARAM)row, 0);
-    if (matchIndex < 0 || matchIndex >= state->count) return;
-    state->matches[matchIndex].accepted = !state->matches[matchIndex].accepted;
-    WCHAR *text = format_replace_row(&state->matches[matchIndex]);
-    if (text) {
-        SendMessageW(state->list, LB_DELETESTRING, (WPARAM)row, 0);
-        SendMessageW(state->list, LB_INSERTSTRING, (WPARAM)row, (LPARAM)text);
-        SendMessageW(state->list, LB_SETITEMDATA, (WPARAM)row, (LPARAM)matchIndex);
-        SendMessageW(state->list, LB_SETCURSEL, (WPARAM)row, 0);
-        free(text);
-    }
+static void set_all_replace_matches(ReplaceReviewState *state, int accepted) {
+    for (int i = 0; i < state->count; i++) state->matches[i].accepted = accepted;
+    InvalidateRect(state->checklist.list, NULL, FALSE);
     update_replace_count_label(state);
-}
-
-/* Space toggles the selected row's checkbox, the same convention as a
-   Windows Explorer checkbox listbox - listboxes don't offer this by
-   themselves, so it's added via the same safe-subclassing API already used
-   for g_hTabs/g_hEdit/g_hMinimap elsewhere in this file. */
-static LRESULT CALLBACK ReplaceListSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
-                                                 UINT_PTR subclassId, DWORD_PTR refData) {
-    (void)subclassId;
-    if (msg == WM_KEYDOWN && wParam == VK_SPACE) {
-        toggle_replace_row((ReplaceReviewState *)refData, (int)SendMessageW(hwnd, LB_GETCURSEL, 0, 0));
-        return 0;
-    }
-    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, ReplaceListSubclassProc, subclassId);
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -497,10 +816,10 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             WS_CHILD | WS_VISIBLE, 12, 10, 440, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
         state->countLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT,
             456, 10, 112, 20, hwnd, NULL, GetModuleHandleW(NULL), NULL);
-        state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
-            LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
-            12, 34, 556, 316, hwnd, (HMENU)ID_REPLACE_LIST, GetModuleHandleW(NULL), NULL);
+        state->checklist.toggle = toggle_replace_match;
+        state->checklist.context = state;
+        create_checklist(&state->checklist, hwnd, ID_REPLACE_LIST);
+        MoveWindow(state->checklist.list, 12, 34, 556, 316, FALSE);
         CreateWindowExW(0, L"BUTTON", L"Select All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             12, 360, 96, 26, hwnd, (HMENU)ID_REPLACE_SELECT_ALL, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Select None", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -510,10 +829,11 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             412, 360, 78, 26, hwnd, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             496, 360, 78, 26, hwnd, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
-        themed_scrollbar_attach(state->list, THEMED_SCROLL_LISTBOX);
-        SetWindowSubclass(state->list, ReplaceListSubclassProc, 1, (DWORD_PTR)state);
-        refill_replace_list(state);
-        SetFocus(state->list);
+        use_gui_font(hwnd);
+        for (int i = 0; i < state->count; i++) checklist_add(&state->checklist, state->matches[i].label, i);
+        SendMessageW(state->checklist.list, LB_SETCURSEL, 0, 0);
+        update_replace_count_label(state);
+        SetFocus(state->checklist.list);
         popup_dialog_theme_opened(hwnd);
         return 0;
     }
@@ -527,14 +847,16 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         }
         case WM_MEASUREITEM: {
             MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
-            if (mis->CtlType == ODT_LISTBOX) { measure_themed_listbox_item(state->list, mis); return TRUE; }
+            if (mis->CtlType == ODT_LISTBOX) { measure_themed_listbox_item(state->checklist.list, mis); return TRUE; }
             break;
         }
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
             if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
-            if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == state->list) {
-                draw_themed_listbox_item(state->list, dis);
+            if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == state->checklist.list) {
+                int index = (int)dis->itemData;
+                draw_checklist_item(&state->checklist, dis,
+                                    index >= 0 && index < state->count && state->matches[index].accepted, NULL);
                 return TRUE;
             }
             break;
@@ -543,20 +865,8 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             popup_dialog_theme_destroyed();
             break;
         case WM_COMMAND:
-            if (LOWORD(wParam) == ID_REPLACE_LIST && HIWORD(wParam) == LBN_DBLCLK) {
-                toggle_replace_row(state, (int)SendMessageW(state->list, LB_GETCURSEL, 0, 0));
-                return 0;
-            }
-            if (LOWORD(wParam) == ID_REPLACE_SELECT_ALL) {
-                for (int i = 0; i < state->count; i++) state->matches[i].accepted = 1;
-                refill_replace_list(state);
-                return 0;
-            }
-            if (LOWORD(wParam) == ID_REPLACE_SELECT_NONE) {
-                for (int i = 0; i < state->count; i++) state->matches[i].accepted = 0;
-                refill_replace_list(state);
-                return 0;
-            }
+            if (LOWORD(wParam) == ID_REPLACE_SELECT_ALL) { set_all_replace_matches(state, 1); return 0; }
+            if (LOWORD(wParam) == ID_REPLACE_SELECT_NONE) { set_all_replace_matches(state, 0); return 0; }
             if (LOWORD(wParam) == IDOK) {
                 state->confirmed = 1;
                 DestroyWindow(hwnd);
@@ -567,7 +877,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         case WM_SIZE: {
             int width = LOWORD(lParam), height = HIWORD(lParam);
             MoveWindow(state->countLabel, width - 124, 10, 112, 20, TRUE);
-            MoveWindow(state->list, 12, 34, width - 24, height - 78, TRUE);
+            MoveWindow(state->checklist.list, 12, 34, width - 24, height - 78, TRUE);
             return 0;
         }
         case WM_CLOSE: DestroyWindow(hwnd); return 0;
@@ -580,7 +890,7 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
    user clicked Replace, 0 if they cancelled. */
 static int show_replace_review_dialog(ReplaceMatch *matches, int count) {
     if (!register_popup_class(L"MarkEditReplaceDialog", ReplaceReviewWndProc)) return 0;
-    ReplaceReviewState state = { matches, count, NULL, NULL, 0 };
+    ReplaceReviewState state = { matches, count, {0}, NULL, 0 };
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditReplaceDialog", L"Replace in Folder",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, 600, 440, g_hMainWnd, NULL,

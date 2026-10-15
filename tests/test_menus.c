@@ -194,6 +194,23 @@ static void test_shortcuts_page(void) {
         free(page);
     }
 
+    /* Plugin shortcuts arrive keyed by label, and are listed by menu path. */
+    static const PluginShortcut plugins[] = {
+        { "file.new", "Ctrl+N" },
+        { "/Tools/JSON/Format &JSON", "Ctrl+Alt+J" },
+        { "Line Tools/Salt && &Pepper", "Ctrl+Alt+P" },
+    };
+    char *code = read_utf8_text_file(L"src\\help\\keyboard-shortcuts.lua", 1024 * 1024);
+    page = NULL;
+    if (code) free(plugin_host_render_page("keyboard-shortcuts.lua", code, strlen(code), plugins, 3, &page));
+    free(code);
+    expect(page && strstr(page, "## Plugin commands") &&
+           strstr(page, "| Ctrl+Alt+J | Tools > JSON > Format JSON |") &&
+           strstr(page, "| Ctrl+Alt+P | Plugins > Line Tools > Salt & Pepper |") &&
+           !strstr(page, "/Tools/JSON"),
+           "plugin shortcuts are listed by their plain menu path");
+    free(page);
+
     /* A script error is reported, not crashed on. */
     char *bad = NULL;
     char *error = plugin_host_render_page("bad.lua", "return 5", 8, NULL, 0, &bad);

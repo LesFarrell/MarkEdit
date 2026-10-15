@@ -130,6 +130,7 @@ static int restore_recovery_snapshot(void);
 static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
                               WCHAR **labels, int count, const WCHAR *okLabel);
 static void fire_plugin_event(const char *event, const WCHAR *path);
+static void enter_large_file_mode_if_needed(HWND hwnd);
 static int show_text_input(const WCHAR *title, const WCHAR *prompt,
                            const WCHAR *initial, WCHAR *output, int outputCapacity);
 static void toggle_preview(HWND hwnd);

@@ -8,6 +8,7 @@ local z80 = require("z80")
 local chip8 = require("chip8")
 local mos6502 = require("mos6502")
 local tap = require("tap")
+local c64_prg = require("c64_prg")
 
 local function output_name(path, extension)
   if not path then return "program" .. extension end
@@ -18,10 +19,6 @@ end
 local function spectrum_name(path)
   local name = (path or "program"):match("([^\\/]+)$") or "program"
   return (name:gsub("%.[^%.]+$", ""))
-end
-
-local function word(value)
-  return string.char(value & 0xff, (value >> 8) & 0xff)
 end
 
 -- Assembles the active document for `cpu`. On an error, reports it and
@@ -83,11 +80,17 @@ menu.add("/Tools/Assemblers/CHIP-8 Assembler/Compile", function()
   save(chip8, result, result.bytes, ".ch8", "CHIP-8 program")
 end)
 
--- A C64 .prg is the load address followed by the bytes; start it with
--- SYS <entry> after loading.
+-- A self-starting C64 .prg loads at BASIC start. RUN executes its SYS stub;
+-- the machine-code loader relocates the payload to ORG and jumps to ENTRY.
 menu.add("/Tools/Assemblers/6502 Assembler/Compile C64 PRG", function()
   local result = assemble_source(mos6502)
-  if result then save(mos6502, result, word(result.origin) .. result.bytes, ".prg", "C64 PRG") end
+  if not result then return end
+  local prg_ok, image = pcall(c64_prg.code, result.bytes, result.origin, result.info.entry)
+  if not prg_ok then
+    ui.message(tostring(image), "C64 PRG creation failed", "error")
+    return
+  end
+  save(mos6502, result, image, ".prg", "self-starting C64 PRG")
 end)
 
 menu.add("/Tools/Assemblers/6502 Assembler/Compile Raw Binary", function()

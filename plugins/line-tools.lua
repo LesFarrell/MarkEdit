@@ -139,28 +139,15 @@ menu.add("Line Tools/Order/Reverse", function()
   end)
 end)
 
--- A small private pseudo-random generator avoids changing Lua's shared
--- math.random state, which could surprise another plugin. It's the
--- "minimal standard" Lehmer generator (Park & Miller).
-local RANDOM_MODULUS = 2147483647 -- 2^31 - 1, a prime
-local RANDOM_MULTIPLIER = 48271
-local SEED_MULTIPLIER = 131
-local random_state = 1
-local seed_text = app.date_time()
-for index = 1, #seed_text do
-  random_state = (random_state * SEED_MULTIPLIER + seed_text:byte(index)) % RANDOM_MODULUS
-end
-
-local function random_index(limit)
-  random_state = (random_state * RANDOM_MULTIPLIER) % RANDOM_MODULUS
-  return random_state % limit + 1
-end
-
 menu.add("Line Tools/Order/Shuffle", function()
   transform(function(lines)
     local original = table.concat(lines, "\n")
+    -- Lua 5.4 seeds math.random randomly when it starts. Its generator is
+    -- shared by every plugin (only the tables are per plugin), but drawing
+    -- from it without calling math.randomseed changes nothing another
+    -- plugin could rely on, so no private generator is needed.
     for index = #lines, 2, -1 do
-      local other = random_index(index)
+      local other = math.random(index)
       lines[index], lines[other] = lines[other], lines[index]
     end
 

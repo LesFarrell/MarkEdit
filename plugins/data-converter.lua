@@ -173,7 +173,7 @@ local function url_encode(text)
 end
 
 local function url_decode(text)
-  text = text:gsub("+", " ")
+  text = text:gsub("%+", " ")
   local position = 1
   while true do
     local percent = text:find("%", position, true)

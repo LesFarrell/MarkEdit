@@ -175,10 +175,11 @@ typedef struct Document {
     int hasBom; /* the file has a byte-order mark for its encoding (UTF-8 or UTF-16) */
     int encoding; /* the TextEncoding the file is stored in; the editor holds UTF-8 */
     int encodingForced; /* chosen with Reopen with Encoding, so reloads keep it */
-    FILETIME fileTime;
-    int hasFileTime;
+    FileFollowState followFile; /* exact raw disk revision represented by this document */
+    TextCodecState followCodec; /* incomplete encoded character at an append boundary */
     int externalChanged;
     int externalDeleted;
+    int following;
     Sci_Position caret;
     Sci_Position anchor;
     Sci_Position firstVisibleLine;
@@ -225,7 +226,11 @@ static WCHAR *g_wikiBackStack[MAX_WIKI_BACK];
 static int g_wikiBackCount = 0;
 
 /* Most editor operations naturally target the selected tab. These aliases
-   keep that code direct while the storage itself remains per-document. */
+   keep that code direct while the storage itself remains per-document.
+   Despite the g_ names they are not globals: each one reads or writes a
+   field of whichever document is active at that moment, so code that
+   switches tabs (or touches a background document) must go through
+   g_documentStore.documents[i] instead. */
 #define g_currentFile (g_documentStore.documents[g_documentStore.active].path)
 #define g_dirty       (g_documentStore.documents[g_documentStore.active].dirty)
 #define g_hasBom      (g_documentStore.documents[g_documentStore.active].hasBom)
@@ -432,10 +437,11 @@ static void create_navigation_controls(HWND hwnd) {
        LB_GETTEXT - without it, an owner-draw listbox instead treats the
        LB_ADDSTRING data as an opaque per-item value, which here is a
        heap pointer that update_outline() frees right after inserting it. */
-    g_hOutline = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+    g_hOutline = CreateWindowExW(0, L"LISTBOX", L"",
         WS_CHILD | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
         LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
         0, 0, 0, 0, hwnd, (HMENU)ID_OUTLINE, GetModuleHandleW(NULL), NULL);
+    theme_list_frame(g_hOutline);
     themed_scrollbar_attach(g_hOutline, THEMED_SCROLL_LISTBOX);
 }
 
@@ -680,8 +686,14 @@ static void handle_document_modified(HWND hwnd, const struct SCNotification *scn
        views of the same shared document (without this, typing only in the
        split pane would never mark the tab dirty or stale the recovery
        snapshot, silently losing track of real unsaved edits). */
-    if (!g_documentStore.switching && !g_dirty) set_dirty(1);
-    if (!g_documentStore.switching) g_recoverySnapshotStale = 1;
+    if (!g_documentStore.switching) {
+        /* A followed file is a read-only view of disk in practice. As soon
+           as the user edits it, stop automatic reloads so their changes can
+           never be replaced silently. */
+        g_documentStore.documents[g_documentStore.active].following = 0;
+        if (!g_dirty) set_dirty(1);
+        g_recoverySnapshotStale = 1;
+    }
     enter_large_file_mode_if_needed(hwnd);
     schedule_updates_after_edit(hwnd, scn);
 }

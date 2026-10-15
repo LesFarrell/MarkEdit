@@ -158,24 +158,26 @@ end
 
 local function clear_error() editor.clear_indicator(ERROR_INDICATOR) end
 
-local function show_error(text, base, problem)
+-- Highlights problem, found in the text starting at document position base,
+-- and reports it at its document line and column, so an error in a
+-- selection is described where the user sees it, whatever the line endings.
+local function show_error(base, problem)
   clear_error()
   local absolute = math.min(base + problem.position - 1, editor.length())
   if absolute >= 1 then editor.indicator(absolute, absolute, ERROR_INDICATOR, ERROR_COLOUR) end
-  editor.set_caret(math.min(base + problem.position - 1, editor.length() + 1))
-  local before = text:sub(1, problem.position - 1)
-  local line = 1
-  for _ in before:gmatch("\n") do line = line + 1 end
-  local line_start = before:match(".*\n()") or 1
-  local column_text = text:sub(line_start, problem.position - 1)
+  local caret = math.min(base + problem.position - 1, editor.length() + 1)
+  editor.set_caret(caret)
+  local line = editor.line_at(caret)
+  local line_start = editor.line_range(line)
+  local before = editor.get_range(line_start, caret - 1)
   ui.message(string.format("Delimited-text error at line %d, column %d: %s",
-    line, (utf8.len(column_text) or #column_text) + 1, problem.message), nil, "error")
+    line, (utf8.len(before) or #before) + 1, problem.message), nil, "error")
 end
 
 local function read_data()
   local text, first, last = source_range()
   local data, problem = parse(text)
-  if not data then show_error(text, first, problem); return nil end
+  if not data then show_error(first, problem); return nil end
   clear_error()
   return data, first, last
 end

@@ -35,8 +35,47 @@ static void test_atx_headings(void) {
     check_heading("Plain text\n", 0, NULL);
 }
 
+/* Feeds `lines` through one scan and records each line's heading level. */
+static void scan_levels(const char *const *lines, int count, int *levels) {
+    OutlineScan scan = {0};
+    for (int i = 0; i < count; i++) {
+        int start = 0, length = 0;
+        levels[i] = outline_scan_line(&scan, lines[i], (int)strlen(lines[i]), &start, &length);
+    }
+}
+
+static void test_code_fences(void) {
+    static const char *const lines[] = {
+        "# Title",          /* 1 */
+        "```lua",           /* opens a backtick fence */
+        "# not a heading",
+        "~~~",              /* a tilde run doesn't close a backtick fence */
+        "## still code",
+        "```",              /* closes it */
+        "## Section",       /* 2 */
+        "~~~~",             /* opens a 4-tilde fence */
+        "# code",
+        "~~~ text",         /* trailing text: not a closing fence */
+        "~~~",              /* too short to close a 4-tilde fence */
+        "# code",
+        "~~~~~",            /* closes it: at least as long */
+        "### After",        /* 3 */
+        "``not a fence",
+        "# Real",           /* 1 */
+    };
+    enum { COUNT = sizeof(lines) / sizeof(lines[0]) };
+    static const int expected[COUNT] = { 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 3, 0, 1 };
+    int levels[COUNT];
+    scan_levels(lines, COUNT, levels);
+    for (int i = 0; i < COUNT; i++) {
+        if (levels[i] != expected[i]) fprintf(stderr, "line %d: level %d, expected %d\n", i, levels[i], expected[i]);
+        CHECK(levels[i] == expected[i]);
+    }
+}
+
 int main(void) {
     test_atx_headings();
+    test_code_fences();
     if (failures) return 1;
     puts("All outline tests passed.");
     return 0;

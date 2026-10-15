@@ -1,0 +1,12 @@
+github-markdown-css (upstream release not identified)
+Source: https://github.com/sindresorhus/github-markdown-css
+Licence: https://github.com/sindresorhus/github-markdown-css/blob/main/license
+
+github-markdown.css carries no version header, so the release it was derived
+from is unknown; the licence was taken from the main branch.
+
+Vendored files:
+- github-markdown.css (derived; light theme)
+
+SHA-256:
+- github-markdown.css: db10caf94eafd64caac584bba6cd16c4da67de135282daf5aab7f32967112f26

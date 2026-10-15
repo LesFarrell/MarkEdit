@@ -67,6 +67,9 @@ end
 
 -- Returns the decoded bytes, or nil and a message. Whitespace (such as line
 -- breaks in wrapped Base64) is ignored, and the = padding is optional.
+-- A short final group carries a few bits beyond its last byte; requiring
+-- them to be zero rejects non-canonical text (such as "AB==") instead of
+-- silently decoding it to something that encodes differently.
 local function base64_decode(text)
   local clean = text:gsub("%s", ""):gsub("=+$", "")
   if clean:find("=") then return nil, "Padding (=) can only come at the end of Base64 text." end
@@ -81,6 +84,9 @@ local function base64_decode(text)
       end
       n = (n << 6) | value
       count = count + 1
+    end
+    if n & ((1 << (8 - 2 * count)) - 1) ~= 0 then
+      return nil, "This isn't valid Base64: its last character has bits that don't belong to any byte."
     end
     n = n << (6 * (4 - count))
     local bytes = string.char((n >> 16) & 255, (n >> 8) & 255, n & 255)

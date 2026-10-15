@@ -16,6 +16,16 @@
 -- needs only zig on PATH besides make - zig cc / zig c++ / zig ar / zig rc
 -- stand in for the whole GCC toolchain, including windres.
 
+-- The non-blank lines of a repo-root *.rsp response file, trimmed.
+function rsp_lines(path)
+    local lines = {}
+    for line in io.lines(path) do
+        local entry = line:match("^%s*(.-)%s*$")
+        if entry ~= "" then table.insert(lines, entry) end
+    end
+    return lines
+end
+
 newoption {
     trigger = "zig",
     description = "With gmake: compile and link with zig cc / zig c++ instead of GCC",
@@ -42,16 +52,11 @@ workspace "MarkEdit"
         }
 
     filter "toolset:gcc or clang"
-        buildoptions {
-            "-ffunction-sections",
-            "-fdata-sections",
-            -- Lua errors use longjmp; x64 Windows requires valid unwind tables
-            -- while that jump crosses plugin-host frames.
-            "-funwind-tables",
-            "-fasynchronous-unwind-tables",
-            "-fno-ident",
-            "-fmerge-all-constants",
-        }
+        -- The code-generation flags build.bat and test.bat also read, so every
+        -- project here (the tests too) compiles like the release build. They
+        -- include the unwind tables Lua's longjmp needs on x64 Windows while
+        -- it crosses plugin-host frames.
+        buildoptions(rsp_lines("release-flags.rsp"))
         linkoptions { "-Wl,--gc-sections", "-Wl,--strip-all", "-Wl,--build-id=none" }
 
     filter "toolset:msc"
@@ -72,15 +77,14 @@ LEXILLA_DIR = "third_party/lexilla"
 LUA_DIR = "third_party/lua"
 
 -- The compiled translation units live in the repo-root *.rsp response files
--- that build.bat hands to the compiler. Reading them here keeps Premake and
--- the batch build in step; the .rsp also carry -D/-I/-W flags, which are
--- filtered out (only .c/.cc/.cpp/.cxx entries are returned). This is the one
--- place a compiled-source list is read, so a new file only has to be added to
--- its .rsp.
+-- that build.bat and test.bat hand to the compiler. Reading them here keeps
+-- Premake and the batch builds in step; the .rsp also carry -D/-I flags,
+-- which are filtered out (only .c/.cc/.cpp/.cxx entries are returned). This
+-- is the one place a compiled-source list is read, so a new file only has to
+-- be added to its .rsp.
 function sources_from_rsp(path)
     local sources = {}
-    for line in io.lines(path) do
-        local entry = line:match("^%s*(.-)%s*$")
+    for _, entry in ipairs(rsp_lines(path)) do
         if entry:match("%.[cC]$") or entry:match("%.[cC][xX][xX]$") or
            entry:match("%.[cC][cC]$") or entry:match("%.[cC][pP][pP]$") then
             table.insert(sources, entry)
@@ -95,9 +99,11 @@ function cmark_gfm_settings()
     files(CMARK_GFM_SOURCES)
     includedirs { CMARK_GFM_DIR.."/src", CMARK_GFM_DIR.."/extensions" }
     defines { "CMARK_GFM_STATIC_DEFINE", "CMARK_GFM_EXTENSIONS_STATIC_DEFINE" }
-    filter "toolset:gcc or clang"
+    -- Scoped to cmark-gfm's own files (as build.bat compiles them apart), so
+    -- MarkEdit's sources keep the unused-parameter warning.
+    filter { "files:"..CMARK_GFM_DIR.."/**.c", "toolset:gcc or clang" }
         buildoptions { "-Wno-unused-parameter" }
-    filter "toolset:msc"
+    filter { "files:"..CMARK_GFM_DIR.."/**.c", "toolset:msc" }
         disablewarnings { "4100" } -- unreferenced parameter, as -Wno-unused-parameter
     filter {}
 end
@@ -120,26 +126,30 @@ end
 -- script's role as the lighter-weight alternative to build.bat.
 -- All paths are relative to the repo root.
 DIST_FILES = {
-    "markedit.exe", "Scintilla.dll", "WebView2Loader.dll",
+    "build/bin/markedit.exe",
     "preview_shell.html", "github-markdown.css", "mermaid.min.js", "highlight.min.js",
     "highlight-powershell.min.js", "highlight-github.min.css", "highlight-github-dark.min.css",
     "LICENSE", "THIRD_PARTY_NOTICES.md",
 }
 DIST_LICENCES = {
-    ["cmark-gfm"]   = { CMARK_GFM_DIR.."/COPYING" },
+    ["cmark-gfm"]   = { CMARK_GFM_DIR.."/COPYING", CMARK_GFM_DIR.."/VERSION.txt" },
     ["gdb"]         = {
         "third_party/gdb/COPYING.txt", "third_party/gdb/COPYING.MinGW-w64-runtime.txt",
         "third_party/gdb/VERSION.txt", "third_party/gdb/SOURCE.md", "third_party/gdb/SHA256SUMS.txt",
+    },
+    ["github-markdown-css"] = {
+        "third_party/github-markdown-css/LICENSE", "third_party/github-markdown-css/VERSION.txt",
     },
     ["highlightjs"] = { "third_party/highlightjs/LICENSE", "third_party/highlightjs/VERSION.txt" },
     ["katex"]       = { "third_party/katex/LICENSE", "third_party/katex/VERSION.txt" },
     ["lexilla"]     = { LEXILLA_DIR.."/License.txt", LEXILLA_DIR.."/version.txt" },
     ["lua"]         = { LUA_DIR.."/LICENSE", LUA_DIR.."/VERSION.txt" },
+    ["mermaid"]     = { "third_party/mermaid/LICENSE", "third_party/mermaid/VERSION.txt" },
     ["scintilla"]   = { SCINTILLA_DIR.."/License.txt", SCINTILLA_DIR.."/version.txt" },
-    ["webview2"]    = { WEBVIEW2_DIR.."/LICENSE.txt" },
+    ["webview2"]    = { WEBVIEW2_DIR.."/LICENSE.txt", WEBVIEW2_DIR.."/VERSION.txt" },
 }
--- The two runtime DLLs are copied next to markedit.exe first, so the build
--- runs in place as well as from dist/.
+-- The two runtime DLLs go straight into dist/ from where they're vendored,
+-- like markedit.exe from build/bin, so the repo root holds no build output.
 RUNTIME_DLLS = { WEBVIEW2_DIR.."/x64/WebView2Loader.dll", SCINTILLA_DIR.."/bin/Scintilla.dll" }
 
 -- Post-build commands run with cwd = the build/ directory (where both the
@@ -168,9 +178,9 @@ local function staging_commands(posix)
         end
     end
 
-    for _, dll in ipairs(RUNTIME_DLLS) do copy(dll, "") end
     mkdir("dist/katex")
     mkdir("dist/plugins")
+    for _, dll in ipairs(RUNTIME_DLLS) do copy(dll, "dist/") end
     for _, file in ipairs(DIST_FILES) do copy(file, "dist/") end
     if posix then
         table.insert(commands, "cp -rf "..at("katex").."/. "..at("dist/katex").."/")
@@ -206,53 +216,24 @@ project "lexilla"
     includedirs { LEXILLA_DIR.."/include", LEXILLA_DIR.."/lexlib", SCINTILLA_DIR.."/include" }
     defines { "NDEBUG" }
     optimize "Size"
-
-    filter "toolset:gcc or clang"
-        buildoptions { "-fno-exceptions", "-fno-rtti" }
-    filter {}
+    -- No -fno-exceptions/-fno-rtti, as in build.bat: lexlib's
+    -- CharacterCategory.cxx uses try/catch.
 
 project "markedit"
     kind "WindowedApp"
     language "C"
     cdialect "C11"
     targetname "markedit"
-    targetdir "."
+    targetdir "build/bin"
     objdir "build/obj/markedit"
 
     files(sources_from_rsp("markedit-sources.rsp"))
+    -- Not compiled on their own: the unity build's *.inc components, the
+    -- headers, and the scripts and help markedit.rc embeds. Wildcards, so a
+    -- new header or component shows up in the IDE without editing this list.
     files {
-        "src/internal/editor_view.inc", "src/internal/preview.inc", "src/internal/documents.inc", "src/internal/dialogs.inc",
-        "src/internal/help_and_menu.inc", "src/internal/ui_shell.inc", "src/internal/debugger.inc",
-        "src/internal/outline_host.inc", "src/internal/editor_input.inc",
-        "src/internal/workspace.inc",
-        "src/internal/settings_dialog.inc", "src/internal/command_dispatch.inc",
-        "src/internal/plugin_bridge.inc", "src/internal/control_theme.inc",
-        "src/internal/spell_check.inc", "src/internal/recovery_host.inc",
-        "src/editor_commands.h",
-        "src/editor_language.h",
-        "src/preview_fallback.h",
-        "src/path_utils.h",
-        "src/file_io.h",
-        "src/recovery.h",
-        "src/text_codec.h",
-        "src/workspace_text.h",
-        "src/markdown.h",
-        "src/settings.h", "src/settings_values.h", "src/settings_io.h", "src/find_state.h",
-        "src/recent_list.h",
-        "src/layout_metrics.h", "src/file_explorer.h",
-        "src/toolbar_icons.h",
-        "src/themed_scrollbar.h",
-        "src/plugin_host.h",
-        "src/plugin_settings.h",
-        "src/lua_editor_api.h",
-        "src/outline_minimap.h",
-        "src/progress_dialog.h",
-        "src/scintilla_config.h",
-        "src/menu_commands.h", "src/command_ids.h",
-        "src/menus.lua", "src/lua/formatting_base.lua",
-        "src/lua/formatting_tables.lua", "src/lua/formatting_text.lua",
-        "src/help/markdown-reference.md", "src/help/keyboard-shortcuts.lua",
-        "src/theme.h",
+        "src/internal/*.inc", "src/*.h",
+        "src/menus.lua", "src/lua/*.lua", "src/help/*",
         "markedit.rc",
     }
     cmark_gfm_settings()
@@ -323,7 +304,9 @@ function test_project(name, sources, links_list, uses)
         language "C"
         cdialect "C11"
         targetname(name)
-        targetdir "tests"
+        -- Beside test.bat's builds; the tests load ..\Scintilla.dll, so
+        -- each one copies it into build/ first.
+        targetdir "build/tests"
         objdir("build/obj/" .. name)
         files { "tests/" .. name .. ".c" }
         files(sources)
@@ -341,8 +324,10 @@ function test_project(name, sources, links_list, uses)
         optimize "Size"
         filter "toolset:gcc or clang"
             buildoptions { "-Werror" }
+            prebuildcommands { "cp -f ../"..SCINTILLA_DIR.."/bin/Scintilla.dll ." }
         filter "toolset:msc"
             buildoptions { "/WX" }
+            prebuildcommands { 'copy /Y "..\\'..SCINTILLA_DIR:gsub("/", "\\")..'\\bin\\Scintilla.dll" . >nul' }
         filter {}
 end
 

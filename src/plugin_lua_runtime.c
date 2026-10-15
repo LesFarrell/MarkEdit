@@ -62,7 +62,9 @@ static void push_shallow_table_copy(lua_State *L, int sourceIndex) {
 
 /* Pushes a private global environment for owner. Standard-library and API
    tables are shallow-copied so a plugin cannot modify another plugin's
-   string/table/editor/etc tables. Functions themselves remain shared. */
+   string/table/editor/etc tables. Functions themselves remain shared. The
+   string library behind string methods is guarded separately, by
+   plugin_lua_protect_string_metatable(). */
 static void push_plugin_environment(lua_State *L, const char *owner) {
     lua_getfield(L, LUA_REGISTRYINDEX, "markedit.environments");
     if (lua_isnil(L, -1)) {
@@ -160,12 +162,34 @@ void restart_time_limit(void) {
     s_callStarted = GetTickCount64();
 }
 
+/* A Lua state whose allocations are counted in *memory and refused beyond
+   PLUGIN_MEMORY_LIMIT_BYTES, or NULL when memory ran out. *memory must
+   outlive the state. */
+lua_State *plugin_lua_new_state(LuaMemory *memory) {
+    memory->used = 0;
+    memory->limit = PLUGIN_MEMORY_LIMIT_BYTES;
+    return lua_newstate(limited_alloc, memory);
+}
+
 /* Starts the sandboxed state, or returns NULL when memory ran out. */
 lua_State *plugin_lua_start(void) {
-    s_memory.used = 0;
-    s_memory.limit = PLUGIN_MEMORY_LIMIT_BYTES;
-    s_lua = lua_newstate(limited_alloc, &s_memory);
+    s_lua = plugin_lua_new_state(&s_memory);
     return s_lua;
+}
+
+/* Every string shares one metatable, whose __index is the original string
+   library rather than any plugin's copy of it, so a plugin that reached it
+   through getmetatable("") could change ("x"):upper() for every plugin.
+   A __metatable field makes getmetatable("") return false instead; method
+   calls still find the original functions. */
+void plugin_lua_protect_string_metatable(lua_State *L) {
+    lua_pushliteral(L, "");
+    if (lua_getmetatable(L, -1)) {
+        lua_pushboolean(L, 0);
+        lua_setfield(L, -2, "__metatable");
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
 }
 
 /* Arms the time limit, so a plugin that does not finish is stopped. */

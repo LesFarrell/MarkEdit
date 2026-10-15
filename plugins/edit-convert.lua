@@ -75,9 +75,30 @@ local function replace_lines(first, last, lines)
   editor.set_selection(start, start + #text - 1)
 end
 
+-- Sorts as Line Tools > Order does: ignoring ASCII case, with lines that
+-- compare equal kept in their original order.
+local function sort_lines(lines, descending)
+  local decorated = {}
+  for index, line in ipairs(lines) do
+    decorated[index] = { line = line, key = line:lower(), index = index }
+  end
+  table.sort(decorated, function(a, b)
+    if a.key == b.key then return a.index < b.index end
+    if descending then return a.key > b.key end
+    return a.key < b.key
+  end)
+  for index, item in ipairs(decorated) do lines[index] = item.line end
+  return lines
+end
+
+-- Works on every line the selection touches. Like line-tools.lua, it needs
+-- a selection, and says so rather than silently doing nothing.
 local function transform_lines(mode)
   local first, last = target_lines()
-  if not first or last <= first then return end
+  if not first then
+    ui.message("Select one or more lines first.", nil, "warning")
+    return
+  end
   local lines = {}
   for line = first, last do lines[#lines + 1] = editor.get_line(line) end
 
@@ -87,10 +108,8 @@ local function transform_lines(mode)
       if not seen[line] then seen[line], kept[#kept + 1] = true, line end
     end
     lines = kept
-  elseif mode == "descending" then
-    table.sort(lines, function(a, b) return a > b end)
   else
-    table.sort(lines)
+    lines = sort_lines(lines, mode == "descending")
   end
   replace_lines(first, last, lines)
 end

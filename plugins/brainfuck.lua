@@ -1,4 +1,4 @@
--- Run Brainfuck, on the Plugins menu: runs the selected text as a
+-- Tools > Brainfu*k: runs the selected text as a
 -- Brainfuck program and inserts what it prints on a new line after the
 -- selection, leaving it selected.
 --
@@ -11,6 +11,9 @@
 --
 -- A program that runs for too long, or prints too much, is stopped, with a
 -- message saying why, and what it printed so far is inserted.
+--
+-- examples/HelloWorld.bf in this folder is a program to try: open it,
+-- select all, and run the command.
 --
 -- Uses only the plugin API documented in README.md in this folder.
 

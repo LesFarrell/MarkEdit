@@ -1,14 +1,13 @@
 -- Text commands. On Edit > Convert:
 --   snake_case, camelCase, PascalCase, kebab-case, CONSTANT_CASE
 -- On the Plugins menu:
---   Lines      Keep/Remove Lines Containing and Sort Naturally (so "file2"
---              comes before "file10")
+--   Lines       Keep/Remove Lines Containing
 --   Text        Count Occurrences
 --   Insert      UUID, Lorem Ipsum
 --
--- edit-convert.lua and line-tools.lua already provide the standard case,
--- sorting, deduplication, blank-line, and shuffle commands, so those aren't
--- repeated here.
+-- edit-convert.lua, line-tools.lua and natural-sort.lua already provide the
+-- standard case, sorting (including natural sorting), deduplication,
+-- blank-line, and shuffle commands, so those aren't repeated here.
 --
 -- Uses only the plugin API documented in README.md in this folder.
 
@@ -131,28 +130,6 @@ end
 
 menu.add("Lines/Keep Lines Containing...", function() filter_lines(true) end)
 menu.add("Lines/Remove Lines Containing...", function() filter_lines(false) end)
-
--- Compares runs of digits by their value, so "item 9" sorts before
--- "item 10". Letters compare ignoring case, and ties keep byte order.
-local function natural_key(line)
-  return (line:lower():gsub("%d+", function(digits)
-    digits = digits:gsub("^0+", "")
-    -- The length first, so longer numbers sort later.
-    return string.format("%03d", #digits) .. digits
-  end))
-end
-
-menu.add("Lines/Sort Naturally", function()
-  transform_lines(function(lines)
-    local keys = {}
-    for _, line in ipairs(lines) do keys[line] = keys[line] or natural_key(line) end
-    table.sort(lines, function(a, b)
-      if keys[a] ~= keys[b] then return keys[a] < keys[b] end
-      return a < b
-    end)
-    return lines
-  end)
-end)
 
 -- ---- Plugins > Text ----
 

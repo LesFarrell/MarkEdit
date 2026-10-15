@@ -195,6 +195,97 @@ static void test_files(void) {
     CHECK(DeleteFileW(path));
 }
 
+static HANDLE open_follow_test_file(const WCHAR *path, DWORD access, DWORD creation) {
+    return CreateFileW(path, access,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
+}
+
+static void test_file_following(void) {
+    WCHAR directory[MAX_PATH], path[MAX_PATH];
+    DWORD pathLength = GetTempPathW(MAX_PATH, directory);
+    CHECK(pathLength && pathLength < MAX_PATH);
+    if (!pathLength || pathLength >= MAX_PATH) return;
+    CHECK(GetTempFileNameW(directory, L"mff", 0, path) != 0);
+    CHECK(write_bytes_file(path, "old", 3));
+
+    HANDLE loaded = open_follow_test_file(path, GENERIC_READ, OPEN_EXISTING);
+    CHECK(loaded != INVALID_HANDLE_VALUE);
+    if (loaded == INVALID_HANDLE_VALUE) { DeleteFileW(path); return; }
+
+    /* Simulate a live writer growing the log after the loader sampled three
+       bytes but before it captured identity/signature metadata. */
+    HANDLE writer = open_follow_test_file(path, FILE_APPEND_DATA, OPEN_EXISTING);
+    DWORD written = 0;
+    CHECK(writer != INVALID_HANDLE_VALUE &&
+          WriteFile(writer, "new", 3, &written, NULL) && written == 3);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+
+    FileFollowState state;
+    CHECK(file_follow_capture(&state, loaded, 3));
+    CHECK(state.size == 3 && state.tailLength == 3 &&
+          memcmp(state.tail, "old", 3) == 0);
+    BY_HANDLE_FILE_INFORMATION info;
+    CHECK(GetFileInformationByHandle(loaded, &info));
+    ULONGLONG size = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    CHECK(size == 6);
+    CHECK(file_follow_check_growth(&state, loaded, &info, size) == FILE_FOLLOW_APPEND);
+
+    /* A same-file copytruncate/regrow can still be larger than the old offset;
+       changing the signature must force a reload instead of an append. */
+    writer = open_follow_test_file(path, GENERIC_WRITE, OPEN_EXISTING);
+    CHECK(writer != INVALID_HANDLE_VALUE);
+    if (writer != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER zero = {0};
+        CHECK(SetFilePointerEx(writer, zero, NULL, FILE_BEGIN));
+        CHECK(WriteFile(writer, "OLD", 3, &written, NULL) && written == 3);
+        CloseHandle(writer);
+    }
+    CHECK(GetFileInformationByHandle(loaded, &info));
+    CHECK(file_follow_check_growth(&state, loaded, &info, size) == FILE_FOLLOW_RELOAD);
+
+    /* Truncation and replacement are reloads, never negative/duplicate appends. */
+    writer = open_follow_test_file(path, GENERIC_WRITE, TRUNCATE_EXISTING);
+    CHECK(writer != INVALID_HANDLE_VALUE);
+    if (writer != INVALID_HANDLE_VALUE) {
+        CHECK(WriteFile(writer, "x", 1, &written, NULL) && written == 1);
+        CloseHandle(writer);
+    }
+    CHECK(GetFileInformationByHandle(loaded, &info));
+    size = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    CHECK(file_follow_check_growth(&state, loaded, &info, size) == FILE_FOLLOW_RELOAD);
+    CloseHandle(loaded);
+
+    CHECK(DeleteFileW(path));
+    CHECK(write_bytes_file(path, "replacement", 11));
+    HANDLE replacement = open_follow_test_file(path, GENERIC_READ, OPEN_EXISTING);
+    CHECK(replacement != INVALID_HANDLE_VALUE);
+    if (replacement != INVALID_HANDLE_VALUE) {
+        CHECK(GetFileInformationByHandle(replacement, &info));
+        size = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+        CHECK(file_follow_check_growth(&state, replacement, &info, size) == FILE_FOLLOW_RELOAD);
+        CloseHandle(replacement);
+    }
+
+    FILETIME failedTime = {17, 23};
+    file_follow_block_retry(&state, 100, failedTime);
+    CHECK(file_follow_retry_blocked(&state, 100, failedTime));
+    failedTime.dwLowDateTime++;
+    CHECK(!file_follow_retry_blocked(&state, 100, failedTime));
+    CHECK(!state.retryBlocked);
+
+    /* Follow decoding deliberately does not finalize each read: an incomplete
+       UTF-16 code unit must remain pending until the next append arrives. */
+    TextCodecState codec = {TEXT_ENCODING_UTF16LE, {0}, 0};
+    char decoded[8]; size_t produced = 99;
+    CHECK(text_decode(&codec, "A", 1, 0, decoded, sizeof(decoded), &produced));
+    CHECK(produced == 0 && codec.carryLength == 1);
+    CHECK(text_decode(&codec, "\0", 1, 0, decoded, sizeof(decoded), &produced));
+    CHECK(produced == 1 && decoded[0] == 'A' && codec.carryLength == 0);
+
+    CHECK(DeleteFileW(path));
+}
+
 static void test_plugin_settings(void) {
     WCHAR directory[MAX_PATH], path[MAX_PATH];
     DWORD length = GetTempPathW(MAX_PATH, directory);
@@ -330,7 +421,8 @@ static void test_workspace_text(void) {
 }
 
 int main(void) {
-    test_codecs(); test_lossless_progress(); test_files(); test_plugin_settings(); test_workspace_text();
+    test_codecs(); test_lossless_progress(); test_files(); test_file_following();
+    test_plugin_settings(); test_workspace_text();
     if (failures) return 1;
     puts("All core tests passed.");
     return 0;

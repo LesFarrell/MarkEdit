@@ -99,6 +99,7 @@ assert(image:find("32767", 1, true) and image:find("32769", 1, true),
 
 local chip8 = require("chip8")
 local mos6502 = require("mos6502")
+local c64_prg = require("c64_prg")
 
 local function expect_cpu_bytes(cpu, source, expected)
   local output = core.assemble(source, cpu)
@@ -172,5 +173,26 @@ expect_cpu_error(mos6502, "LDA ($1234),Y", "zero-page address is outside 0..255"
 expect_cpu_error(mos6502, "BNE $D000", "branch target is out of range")
 expect_cpu_error(mos6502, "LDA #300", "immediate value is outside -128..255")
 expect_cpu_error(mos6502, "FOO", "unknown instruction 'FOO'")
+
+local c64_image = c64_prg.code(string.char(0xa9, 1, 0x60), 0xc000, 0xc002)
+assert(c64_image:sub(1, 2) == string.char(1, 8), "C64 PRG does not load at $0801")
+assert(c64_image:sub(8, 11) == "2061" and c64_image:byte(7) == 0x9e,
+  "C64 PRG has no BASIC SYS2061 loader")
+assert(#c64_image == 2 + 12 + 52 + 3 and c64_image:sub(-3) == string.char(0xa9, 1, 0x60),
+  "C64 PRG does not contain the packed payload")
+-- Relocator operands: payload $0841, destination $C000, 0 pages + 3 bytes,
+-- and final JMP $C002.
+assert(c64_image:byte(15) == 0xa9 and c64_image:byte(16) == 0x41 and
+       c64_image:byte(19) == 0xa9 and c64_image:byte(20) == 0x08 and
+       c64_image:byte(23) == 0xa9 and c64_image:byte(24) == 0x00 and
+       c64_image:byte(27) == 0xa9 and c64_image:byte(28) == 0xc0 and
+       c64_image:byte(33) == 0xa2 and c64_image:byte(34) == 0 and
+       c64_image:byte(53) == 0xc0 and c64_image:byte(54) == 3 and
+       c64_image:byte(64) == 0x4c and c64_image:byte(65) == 0x02 and
+       c64_image:byte(66) == 0xc0, "C64 relocator operands are wrong")
+
+local ok, problem = pcall(c64_prg.code, string.rep("x", 100), 0x0820, 0x0820)
+assert(not ok and tostring(problem):find("overlaps the C64 PRG loader", 1, true),
+  "C64 PRG accepts code that overwrites its running loader")
 
 print("All assembler tests passed.")

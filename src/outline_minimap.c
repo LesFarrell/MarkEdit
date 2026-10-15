@@ -24,8 +24,6 @@
 #include "text_codec.h"
 #include "theme.h"
 
-#include "../third_party/lexilla/include/SciLexer.h"
-
 /* Vertical padding above/below each minimap line, in pixels. Negative pulls
    the lines closer together than Scintilla's natural spacing. */
 #define MINIMAP_EXTRA_ASCENT (-2)
@@ -62,6 +60,65 @@ int outline_parse_atx_heading(const char *line, int length, int *textStart, int 
     return hashes;
 }
 
+/* The run length of a code fence - up to 3 spaces, then 3 or more backticks
+   or tildes - or 0. *bare says whether only whitespace follows the run, as
+   a closing fence requires. */
+static int code_fence_run(const char *line, int length, char *fence, int *bare) {
+    int i = 0;
+    while (i < length && i < 3 && line[i] == ' ') i++;
+    if (i >= length || (line[i] != '`' && line[i] != '~')) return 0;
+    char marker = line[i];
+    int run = 0;
+    while (i + run < length && line[i + run] == marker) run++;
+    if (run < 3) return 0;
+    int rest = i + run;
+    while (rest < length && (line[rest] == ' ' || line[rest] == '\t')) rest++;
+    *fence = marker;
+    *bare = rest == length;
+    return run;
+}
+
+int outline_scan_line(OutlineScan *scan, const char *line, int length, int *textStart, int *textLength) {
+    char marker = 0;
+    int bare = 0;
+    int run = code_fence_run(line, length, &marker, &bare);
+    if (scan->fence) {
+        if (run >= scan->fenceLength && marker == scan->fence && bare) scan->fence = 0;
+        return 0;
+    }
+    if (run) {
+        scan->fence = marker;
+        scan->fenceLength = run;
+        return 0;
+    }
+    return outline_parse_atx_heading(line, length, textStart, textLength);
+}
+
+/* Adds one heading's row: its title, indented two spaces per level. */
+static void add_outline_heading(const char *title, int titleLength, int level, Sci_Position lineNumber) {
+    char *heading = (char *)malloc((size_t)titleLength + 1);
+    if (!heading) return;
+    memcpy(heading, title, (size_t)titleLength);
+    heading[titleLength] = 0;
+    WCHAR *wide = to_wide(heading);
+    free(heading);
+    if (!wide) return;
+    size_t capacity = wcslen(wide) + (size_t)level * 2 + 1;
+    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (label) {
+        int indent = (level - 1) * 2;
+        for (int i = 0; i < indent; i++) label[i] = L' ';
+        wcscpy(label + indent, wide);
+        SendMessageW(*g_host->outline, LB_ADDSTRING, 0, (LPARAM)label);
+        g_host->outlineLines[(*g_host->outlineCount)++] = lineNumber;
+        free(label);
+    }
+    free(wide);
+}
+
+/* Reads the lines straight from Scintilla's buffer rather than asking the
+   lexer which are headings: Scintilla styles text lazily, as it's shown,
+   so lines it hasn't reached yet would be missed. */
 void update_outline(void) {
     if (!(*g_host->outline)) return;
     SendMessageW(*g_host->outline, LB_RESETCONTENT, 0, 0);
@@ -70,44 +127,21 @@ void update_outline(void) {
     /* The list is only read back by clicks on it, and toggle_outline()
        rebuilds it when the pane is shown, so a hidden pane skips the scan. */
     if (!g_outlineVisible || *g_host->activeLanguage != LANG_MARKDOWN) return;
+    HWND edit = *g_host->edit;
+    const char *text = (const char *)SendMessageA(edit, SCI_GETCHARACTERPOINTER, 0, 0);
+    if (!text) return;
     /* Suspend repainting so re-adding every heading doesn't flicker. */
     SendMessageW(*g_host->outline, WM_SETREDRAW, FALSE, 0);
-    Sci_Position lines = (Sci_Position)SendMessageA(*g_host->edit, SCI_GETLINECOUNT, 0, 0);
+    OutlineScan scan = {0};
+    Sci_Position lines = (Sci_Position)SendMessageA(edit, SCI_GETLINECOUNT, 0, 0);
     for (Sci_Position lineNumber = 0; lineNumber < lines && *g_host->outlineCount < OUTLINE_MAX_HEADINGS; lineNumber++) {
-        Sci_Position linePosition = (Sci_Position)SendMessageA(*g_host->edit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
-        int style = (int)SendMessageA(*g_host->edit, SCI_GETSTYLEAT, (WPARAM)linePosition, 0);
-        if (style < SCE_MARKDOWN_HEADER1 || style > SCE_MARKDOWN_HEADER6) continue;
-        Sci_Position length = (Sci_Position)SendMessageA(*g_host->edit, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
-        if (length <= 0 || length > 65535) continue;
-        char *line = (char *)malloc((size_t)length + 1);
-        if (!line) break;
-        Sci_Position got = (Sci_Position)SendMessageA(*g_host->edit, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)line);
-        line[got >= 0 && got <= length ? got : length] = 0;
-        int start = 0, textLength = 0;
-        int level = outline_parse_atx_heading(line, (int)got, &start, &textLength);
-        if (level && textLength > 0) {
-            char *heading = (char *)malloc((size_t)textLength + 1);
-            if (heading) {
-                memcpy(heading, line + start, (size_t)textLength);
-                heading[textLength] = 0;
-                WCHAR *wide = to_wide(heading);
-                if (wide) {
-                    size_t capacity = wcslen(wide) + (size_t)level * 2 + 1;
-                    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-                    if (label) {
-                        int indent = (level - 1) * 2;
-                        for (int i = 0; i < indent; i++) label[i] = L' ';
-                        wcscpy(label + indent, wide);
-                        SendMessageW(*g_host->outline, LB_ADDSTRING, 0, (LPARAM)label);
-                        g_host->outlineLines[(*g_host->outlineCount)++] = lineNumber;
-                        free(label);
-                    }
-                    free(wide);
-                }
-                free(heading);
-            }
-        }
-        free(line);
+        Sci_Position start = (Sci_Position)SendMessageA(edit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+        Sci_Position end = (Sci_Position)SendMessageA(edit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+        if (end - start > 65535) end = start + 65535;
+        int titleStart = 0, titleLength = 0;
+        int level = outline_scan_line(&scan, text + start, (int)(end - start), &titleStart, &titleLength);
+        if (level && titleLength > 0)
+            add_outline_heading(text + start + titleStart, titleLength, level, lineNumber);
     }
     SendMessageW(*g_host->outline, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(*g_host->outline, NULL, TRUE);

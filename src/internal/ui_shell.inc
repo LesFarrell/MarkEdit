@@ -136,26 +136,22 @@ typedef struct {
     int separated; /* whether plugin items placed directly in it follow a separator */
 } MenuBarEntry;
 
-/* The menu bar's items are owner-drawn from these ANSI strings, so they must
+/* The menu bar's items are owner-drawn from these strings, so they must
    outlive the menu that uses them. build_menu() alternates between the two
    sets: by the time a set is reused, refresh_menu() has destroyed the menu
    built from it. */
-static char *g_menuBarLabels[2][MENU_BAR_MAX_MENUS];
+static WCHAR *g_menuBarLabels[2][MENU_BAR_MAX_MENUS];
 static int g_menuBarGeneration = 0;
 
 /* An owner-drawn menu-bar label for name, kept until the menu bar built
    alongside it is destroyed; NULL when there's no room or memory. */
-static const char *keep_menu_bar_label(const WCHAR *name) {
-    char **labels = g_menuBarLabels[g_menuBarGeneration];
+static const WCHAR *keep_menu_bar_label(const WCHAR *name) {
+    WCHAR **labels = g_menuBarLabels[g_menuBarGeneration];
     int slot = 0;
     while (slot < MENU_BAR_MAX_MENUS && labels[slot]) slot++;
     if (slot >= MENU_BAR_MAX_MENUS) return NULL;
-    int length = WideCharToMultiByte(CP_ACP, 0, name, -1, NULL, 0, NULL, NULL);
-    char *ansi = length > 0 ? (char *)malloc((size_t)length) : NULL;
-    if (!ansi) return NULL;
-    WideCharToMultiByte(CP_ACP, 0, name, -1, ansi, length, NULL, NULL);
-    labels[slot] = ansi;
-    return ansi;
+    labels[slot] = wcsdup_heap(name);
+    return labels[slot];
 }
 
 static int menu_item_is_separator(HMENU menu, int position) {
@@ -408,7 +404,7 @@ static void append_definition_items(HMENU menu, const PluginMenuItem *items, int
    is one, and needs no separator before plugin items. */
 static MenuBarEntry *add_menu_bar_menu(HMENU menuBar, MenuBarEntry *entries, int *entryCount,
                                        const WCHAR *name, HMENU menu, int createdByPlugins) {
-    const char *label = *entryCount < MENU_BAR_MAX_MENUS ? keep_menu_bar_label(name) : NULL;
+    const WCHAR *label = *entryCount < MENU_BAR_MAX_MENUS ? keep_menu_bar_label(name) : NULL;
     if (!label) return NULL;
     UINT position = (UINT)-1;
     for (int i = 0; createdByPlugins && i < *entryCount; i++) {
@@ -416,7 +412,7 @@ static MenuBarEntry *add_menu_bar_menu(HMENU menuBar, MenuBarEntry *entries, int
         for (int p = GetMenuItemCount(menuBar) - 1; p >= 0; p--)
             if (GetSubMenu(menuBar, p) == entries[i].menu) position = (UINT)p;
     }
-    InsertMenuA(menuBar, position, MF_BYPOSITION | MF_POPUP | MF_OWNERDRAW, (UINT_PTR)menu, label);
+    InsertMenuW(menuBar, position, MF_BYPOSITION | MF_POPUP | MF_OWNERDRAW, (UINT_PTR)menu, label);
     entries[*entryCount] = (MenuBarEntry){ name, menu, createdByPlugins };
     return &entries[(*entryCount)++];
 }

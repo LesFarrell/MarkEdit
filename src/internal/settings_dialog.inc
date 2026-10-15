@@ -85,7 +85,7 @@ static const SettingsControlSpec SETTINGS_CONTROLS[SC_COUNT] = {
     [SC_INDENT_GUIDES] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Indent guides", 0, 56, 320, 22, &g_indentGuides, 1, NULL },
     [SC_MINIMAP] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Minimap", 0, 84, 320, 22, &g_minimapVisible, 1, NULL },
     [SC_USE_SPACES] = { SETTINGS_EDITOR, SETTINGS_CHECK, L"Use spaces for indentation", 0, 112, 320, 22, &g_indentUseSpaces, 1, NULL },
-    [SC_TAB_WIDTH_CAPTION] = { SETTINGS_EDITOR, SETTINGS_TEXT, L"Spaces per tab:", 0, 142, 120, 20, NULL, 0, NULL },
+    [SC_TAB_WIDTH_CAPTION] = { SETTINGS_EDITOR, SETTINGS_TEXT, L"Spaces per tab:", 0, 140, 120, 24, NULL, 0, NULL },
     [SC_TAB_WIDTH] = { SETTINGS_EDITOR, SETTINGS_NUMBER_EDIT, NULL, 124, 140, 50, 24, NULL, 0, NULL },
     [SC_SPELL_LANGUAGE_CAPTION] = { SETTINGS_EDITOR, SETTINGS_TEXT, L"Spell check language:", 0, 172, 200, 20, NULL, 0, NULL },
     [SC_SPELL_LANGUAGE_LABEL] = { SETTINGS_EDITOR, SETTINGS_TEXT, NULL, 0, 194, 320, 20, NULL, 0, NULL },
@@ -94,7 +94,7 @@ static const SettingsControlSpec SETTINGS_CONTROLS[SC_COUNT] = {
     [SC_COMPILER_HINT] = { SETTINGS_COMPILER, SETTINGS_TEXT,
         L"Optional overrides (leave blank to search PATH automatically):", 0, 0, 380, 18, NULL, 0, NULL },
 #define COMPILER_PATH_ROW(name, label, y, slot) \
-    [name##_CAPTION] = { SETTINGS_COMPILER, SETTINGS_TEXT, label, 0, (y) + 2, 90, 20, NULL, 0, NULL }, \
+    [name##_CAPTION] = { SETTINGS_COMPILER, SETTINGS_TEXT, label, 0, (y), 90, 24, NULL, 0, NULL }, \
     [name] = { SETTINGS_COMPILER, SETTINGS_PATH_EDIT, NULL, 96, (y), 176, 24, NULL, 0, (slot) }, \
     [name##_BROWSE] = { SETTINGS_COMPILER, SETTINGS_BUTTON, L"Browse...", 280, (y), 90, 24, NULL, 0, NULL }
     COMPILER_PATH_ROW(SC_VCVARS, L"MSVC vcvars:", 22, &g_vcvarsallOverridePath),
@@ -135,6 +135,20 @@ static void update_settings_spell_label(SettingsDialogState *state) {
     if (g_spellLanguage[0])
         GetLocaleInfoEx(g_spellLanguage, LOCALE_SLOCALIZEDDISPLAYNAME, displayName, LOCALE_NAME_MAX_LENGTH);
     SetWindowTextW(state->controls[SC_SPELL_LANGUAGE_LABEL], displayName[0] ? displayName : g_spellLanguage);
+}
+
+/* Whether a check box or radio button shows as on: read from the setting
+   itself, so it can't drift from what the menu items toggle. */
+static int settings_toggle_is_on(SettingsControl control) {
+    const SettingsControlSpec *spec = &SETTINGS_CONTROLS[control];
+    return spec->setting && (*spec->setting != 0) == (spec->value != 0);
+}
+
+/* Repaints every check box and radio button after one of them was clicked:
+   picking a radio button also clears the others in its group. */
+static void refresh_settings_toggles(SettingsDialogState *state) {
+    for (int i = 0; i < SC_COUNT; i++)
+        if (SETTINGS_CONTROLS[i].setting) InvalidateRect(state->controls[i], NULL, FALSE);
 }
 
 static void update_settings_tab_width(SettingsDialogState *state) {
@@ -232,20 +246,20 @@ static void update_settings_category(SettingsDialogState *state) {
 static void refresh_settings_dialog_theme(HWND hwnd, SettingsDialogState *state) {
     popup_dialog_theme_created(hwnd);
     apply_explorer_theme(state->categoryList);
-    /* Checkboxes/radios stay unthemed (see create_settings_control() for
-       why); nothing to redo here since that opt-out doesn't depend on
-       light/dark. */
-    RedrawWindow(hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    /* RDW_FRAME repaints the themed borders of the list and edit fields. */
+    RedrawWindow(hwnd, NULL, NULL,
+                 RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 static void create_settings_category_list(HWND hwnd, SettingsDialogState *state, HINSTANCE instance) {
     static const WCHAR *const categories[SETTINGS_CATEGORY_COUNT] = {
         L"Appearance", L"Font", L"Word Wrap", L"Preview", L"Editor", L"Compiler"
     };
-    state->categoryList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+    state->categoryList = CreateWindowExW(0, L"LISTBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
         LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
         12, 12, 140, 300, hwnd, (HMENU)ID_SETTINGS_CATEGORIES, instance, NULL);
+    theme_list_frame(state->categoryList);
     for (int i = 0; i < SETTINGS_CATEGORY_COUNT; i++)
         SendMessageW(state->categoryList, LB_ADDSTRING, 0, (LPARAM)categories[i]);
     apply_explorer_theme(state->categoryList);
@@ -257,28 +271,22 @@ static HWND create_settings_control(HWND hwnd, HINSTANCE instance, SettingsContr
                                     int panelX, int panelY) {
     const SettingsControlSpec *spec = &SETTINGS_CONTROLS[control];
     const WCHAR *windowClass = L"BUTTON";
-    DWORD style = WS_CHILD | WS_TABSTOP, exStyle = 0;
+    DWORD style = WS_CHILD | WS_TABSTOP;
     switch (spec->kind) {
-        case SETTINGS_TEXT: windowClass = L"STATIC"; style = WS_CHILD; break;
-        case SETTINGS_CHECK: style |= BS_AUTOCHECKBOX; break;
-        case SETTINGS_RADIO_FIRST: style |= WS_GROUP | BS_AUTORADIOBUTTON; break;
-        case SETTINGS_RADIO: style |= BS_AUTORADIOBUTTON; break;
-        case SETTINGS_BUTTON: style |= BS_OWNERDRAW; break;
+        /* Centred vertically, so a caption given its text box's row lines up with it. */
+        case SETTINGS_TEXT: windowClass = L"STATIC"; style = WS_CHILD | SS_CENTERIMAGE; break;
+        /* Check boxes and radio buttons are owner-drawn too, by
+           draw_toggle_button(), from the setting they show. */
+        case SETTINGS_CHECK: case SETTINGS_RADIO: case SETTINGS_BUTTON: style |= BS_OWNERDRAW; break;
+        case SETTINGS_RADIO_FIRST: style |= WS_GROUP | BS_OWNERDRAW; break;
         case SETTINGS_NUMBER_EDIT: style |= ES_NUMBER; /* fall through */
         case SETTINGS_PATH_EDIT:
-            windowClass = L"EDIT"; exStyle = WS_EX_CLIENTEDGE; style |= ES_AUTOHSCROLL; break;
+            windowClass = L"EDIT"; style |= ES_AUTOHSCROLL; break;
     }
     HMENU id = spec->kind == SETTINGS_TEXT ? NULL : (HMENU)(UINT_PTR)(ID_SETTINGS_FIRST + control);
-    HWND window = CreateWindowExW(exStyle, windowClass, spec->text ? spec->text : L"", style,
+    HWND window = CreateWindowExW(0, windowClass, spec->text ? spec->text : L"", style,
         panelX + spec->x, panelY + spec->y, spec->width, spec->height, hwnd, id, instance, NULL);
-    if (spec->setting) {
-        int on = (*spec->setting != 0) == (spec->value != 0);
-        SendMessageW(window, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
-        /* The visual style draws checkbox and radio labels in the system
-           text colour, unreadable on the dark theme's background; unthemed,
-           they take the colour WM_CTLCOLORSTATIC/BTN gives them. */
-        SetWindowTheme(window, L"", L"");
-    }
+    if (spec->kind == SETTINGS_NUMBER_EDIT || spec->kind == SETTINGS_PATH_EDIT) theme_edit_field(window);
     if (spec->path) SetWindowTextW(window, *spec->path ? *spec->path : L"");
     return window;
 }
@@ -295,6 +303,8 @@ static void initialize_settings_dialog(HWND hwnd, SettingsDialogState *state) {
     CreateWindowExW(0, L"BUTTON", L"Close",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
         496, 330, 78, 26, hwnd, (HMENU)IDCANCEL, instance, NULL);
+    use_gui_font(hwnd);
+    remeasure_listbox_rows(state->categoryList, (UINT)MulDiv(28, GetDpiForWindow(hwnd), 96));
     update_settings_font_label(state);
     update_settings_css_label(state);
     update_settings_spell_label(state);
@@ -365,7 +375,10 @@ static void handle_settings_command(HWND hwnd, SettingsDialogState *state, WPARA
     } else if (controlId >= ID_SETTINGS_FIRST && controlId < ID_SETTINGS_FIRST + SC_COUNT) {
         SettingsControl control = (SettingsControl)(controlId - ID_SETTINGS_FIRST);
         if (event == EN_KILLFOCUS) commit_settings_edit(state, control);
-        else if (event == BN_CLICKED) handle_settings_button(hwnd, state, control);
+        else if (event == BN_CLICKED) {
+            handle_settings_button(hwnd, state, control);
+            refresh_settings_toggles(state);
+        }
     }
 }
 
@@ -392,7 +405,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
-            if (dis->CtlType == ODT_BUTTON) { draw_popup_button(dis); return TRUE; }
+            if (dis->CtlType == ODT_BUTTON) {
+                int control = (int)dis->CtlID - ID_SETTINGS_FIRST;
+                SettingsControlKind kind = control >= 0 && control < SC_COUNT
+                    ? SETTINGS_CONTROLS[control].kind : SETTINGS_BUTTON;
+                if (kind == SETTINGS_CHECK || kind == SETTINGS_RADIO || kind == SETTINGS_RADIO_FIRST)
+                    draw_toggle_button(dis, kind != SETTINGS_CHECK, settings_toggle_is_on((SettingsControl)control));
+                else
+                    draw_popup_button(dis);
+                return TRUE;
+            }
             if (dis->CtlType == ODT_LISTBOX && dis->hwndItem == state->categoryList) {
                 draw_themed_listbox_item(state->categoryList, dis);
                 return TRUE;

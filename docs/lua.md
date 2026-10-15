@@ -13,9 +13,9 @@ This guide is for people working on MarkEdit's source. It covers each Lua file i
 | `%APPDATA%\markedit\themes.lua` | A user's colours for the light and dark themes, overriding the built-in ones in [src/theme.c](../src/theme.c). | On disk. **Plugins > Customize Theme Colours** creates it, listing every colour. Run in a Lua state of its own (`plugin_host_load_theme()`). | Users |
 | `src/lua/formatting_*.lua` | Markdown and HTML formatting plus Markdown-aware Edit commands. | Built into `markedit.exe` as three resources and compiled together as one Lua chunk. | MarkEdit developers |
 | [plugins/edit-convert.lua](../plugins/edit-convert.lua) | The complete **Edit > Convert** submenu and its transformations. | Loaded from the `plugins` folder. | MarkEdit developers |
-| [plugins/json-tools.lua](../plugins/json-tools.lua) | JSON formatting, validation and related tools. | Loaded from the `plugins` folder. | MarkEdit developers |
+| [plugins/json-tools.lua](../plugins/json-tools.lua) / [json-check.lua](../plugins/json-check.lua) | JSON formatting, conversion and string tools / JSON syntax checking, including as you type. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/csv-tools.lua](../plugins/csv-tools.lua) | Delimited-text parsing, transformations and export. | Loaded from the `plugins` folder. | MarkEdit developers |
-| `plugins/*-tools.lua` and other bundled plugins | SQL, logs, data conversion, natural sorting, number conversion, grammar, Lua formatting and other optional tools. | Loaded from the `plugins` folder. | MarkEdit developers |
+| `plugins/*-tools.lua` and other bundled plugins | SQL, logs, tail-following, data conversion, natural sorting, number conversion, grammar, Lua formatting/linting and other optional tools. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [src/help/keyboard-shortcuts.lua](../src/help/keyboard-shortcuts.lua) | Builds the **Help > Keyboard Shortcuts** page. | Built into `markedit.exe` (resource `IDR_HELP_SHORTCUTS`). | MarkEdit developers |
 | [plugins/*.lua](../plugins/) | Bundled plugins and examples. | The `plugins` folder beside `markedit.exe` (copied to `dist/` by the build). | MarkEdit developers |
 | `%APPDATA%\markedit\plugins` | Personal `.lua` plugins or folders containing `init.lua`. | Created by **Plugins > New Plugin/Open Plugins Folder**. | Users |
@@ -65,7 +65,7 @@ What this order means:
 
 Every script above runs in a single `lua_State`, created in `ensure_state()` / `open_environment()` in [src/plugin_host.c](../src/plugin_host.c). The consequences:
 
-- **Globals are shared.** That's why the built-in formatting chunk and `example.lua` declare everything `local`.
+- **Globals are per script.** `set_chunk_environment()` in [src/plugin_lua_runtime.c](../src/plugin_lua_runtime.c) gives each script (and each folder extension, whose modules share it) a private global environment, holding shallow copies of the library and API tables, so one plugin's globals, or its changes to `string` or `editor`, never reach another. The functions themselves, and any state kept behind them in C (such as `math.random`'s generator), are still shared.
 - **It's sandboxed.** Only the base, `string`, `table`, `math`, `utf8` and `coroutine` libraries are opened. `dofile` and `loadfile` are removed, and `load` accepts source text only. The custom `require` reads source modules only beneath the folder extension currently loading.
 - **The API is eight global tables:** `editor`, `ui`, `menu`, `commands`, `events`, `config`, `app` and `documents`. All but `editor` are `luaL_Reg` arrays in `plugin_registry.c`; `editor` is built in `lua_editor_api.c`. The `editor` functions only work while a command or event handler has an active editor. Called from a script's top-level code, they raise an error.
 - **There's a time limit.** A count hook (`time_limit_hook`) stops any call that runs longer than `PLUGIN_TIME_LIMIT_MS` (5 s, not counting time in dialogs). Commands registered by a built-in script (`plugin_host_load_builtin`) are exempt, because formatting a large document can legitimately take longer.

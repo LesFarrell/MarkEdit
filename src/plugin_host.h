@@ -14,7 +14,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 3
+#define MARKEDIT_PLUGIN_API_VERSION 4
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -59,6 +59,10 @@ typedef struct {
     int (*document_close)(int index);
     char *(*document_path)(int index);
     int (*document_modified)(int index);
+    /* Gets or changes automatic following for the active document. `set` is
+       zero for a query; enabled is ignored then. The application owns file
+       watching and retrying; Lua owns the opt-in and caret policy. */
+    int (*document_follow)(int set, int enabled);
     const char *(*document_encoding)(void);
     /* Changes the active document's save encoding. The value is one of
        "utf-8", "utf-8-bom", "utf-16le", "utf-16be" or "ansi". */

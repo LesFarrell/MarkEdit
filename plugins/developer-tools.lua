@@ -1,3 +1,8 @@
+-- NOTE: every command here duplicates one in encoding.lua (Plugins >
+-- Encode), which also handles whole documents, URL-safe Base64 and more
+-- HTML entities, and now rejects non-canonical Base64 padding too. Removing
+-- them would leave this plugin empty, so whether to keep it is pending.
+--
 -- Small, dependency-free transforms for text commonly handled by developers.
 -- Commands intentionally require a selection so they cannot rewrite a whole
 -- document by accident.

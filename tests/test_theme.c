@@ -31,6 +31,10 @@ static void test_built_in_palettes(void) {
     CHECK(theme_palette_for(0)->selectionBg == RGB(0xB6, 0xD7, 0xFF));
     CHECK(theme_palette_for(1)->keyword == RGB(0xFF, 0x7B, 0x72));
     CHECK(theme_palette_for(1)->operatorColour == RGB(0xE6, 0xED, 0xF3));
+    CHECK(theme_palette_for(0)->tabSelectedFg == RGB(0x09, 0x69, 0xDA));
+    CHECK(theme_palette_for(1)->tabSelectedFg == RGB(0x58, 0xA6, 0xFF));
+    CHECK(theme_palette_for(0)->tabSelectedFg != theme_palette_for(0)->tabFg);
+    CHECK(theme_palette_for(1)->tabSelectedFg != theme_palette_for(1)->tabFg);
 }
 
 static void test_parse_colour(void) {
@@ -102,9 +106,23 @@ static void test_problems(void) {
     CHECK(report && strstr(report, "did not finish"));
     free(report);
 
+    /* It has the plugins' memory limit, so a huge allocation is reported. */
+    report = load("local s = string.rep('x', 1 << 30) return {}");
+    CHECK(report && strstr(report, "memory"));
+    free(report);
+
     /* The file sees only the base and string libraries. */
     report = load("return { light = { bg = os.getenv('X') } }");
     CHECK(report != NULL);
+    free(report);
+
+    /* ...with the same file and bytecode restrictions plugins have. */
+    report = load(
+        "assert(dofile == nil and loadfile == nil, 'file loaders removed')\n"
+        "assert(load(string.dump(function() end)) == nil, 'binary chunks refused')\n"
+        "return {}");
+    if (report) fprintf(stderr, "%s\n", report);
+    CHECK(report == NULL);
     free(report);
     theme_reset_palettes();
 }
@@ -125,6 +143,8 @@ static void test_example_theme(void) {
     CHECK(theme_palette_for(1)->bg == RGB(0x00, 0x2B, 0x36));
     CHECK(theme_palette_for(0)->bg == RGB(0xFD, 0xF6, 0xE3));
     CHECK(theme_palette_for(0)->keyword == RGB(0x85, 0x99, 0x00));
+    CHECK(theme_palette_for(0)->tabSelectedFg == RGB(0x26, 0x8B, 0xD2));
+    CHECK(theme_palette_for(1)->tabSelectedFg == RGB(0x26, 0x8B, 0xD2));
     /* mix(): a quarter of the way from base3 to base00. */
     CHECK(theme_palette_for(0)->border == RGB(0xD7, 0xD7, 0xCB));
     free(report);

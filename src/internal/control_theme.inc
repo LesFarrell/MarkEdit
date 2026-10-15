@@ -34,10 +34,11 @@ static void apply_main_theme(HWND hwnd) {
     if (hwnd) InvalidateRect(hwnd, NULL, TRUE);
 
     /* The outline's content is owner-drawn (see draw_themed_listbox_item());
-       its scrollbar is themed separately (see themed_scrollbar.h). */
+       its scrollbar is themed separately (see themed_scrollbar.h), and its
+       border is a themed frame (theme_list_frame()), hence RDW_FRAME. */
     if (g_hOutline) {
         themed_scrollbar_refresh(g_hOutline);
-        InvalidateRect(g_hOutline, NULL, TRUE);
+        RedrawWindow(g_hOutline, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_ERASE);
     }
     apply_debug_panel_theme();
     explorer_apply_theme();
@@ -259,35 +260,42 @@ static void measure_themed_listbox_item(HWND listbox, MEASUREITEMSTRUCT *mis) {
     mis->itemHeight = (UINT)(tm.tmHeight + tm.tmExternalLeading + MulDiv(6, GetDpiForWindow(g_hMainWnd), 96));
 }
 
+/* A listbox row's text, or NULL when it has none. LB_GETTEXT overflows
+   whatever buffer it's given rather than truncating to it, so the buffer is
+   sized from LB_GETTEXTLEN first - a heading line (or a long file path in
+   the picker) can run well past any fixed stack buffer. Caller frees. */
+static WCHAR *listbox_item_text(HWND listbox, int item) {
+    int textLen = (int)SendMessageW(listbox, LB_GETTEXTLEN, (WPARAM)item, 0);
+    if (textLen <= 0) return NULL;
+    WCHAR *label = (WCHAR *)malloc(((size_t)textLen + 1) * sizeof(WCHAR));
+    if (label && SendMessageW(listbox, LB_GETTEXT, (WPARAM)item, (LPARAM)label) <= 0) {
+        free(label);
+        label = NULL;
+    }
+    return label;
+}
+
+/* Draws `text` left-aligned in `textRect` in the themed text colour shared
+   by every owner-drawn listbox; fill_themed_listbox_row() paints behind it. */
+static void draw_themed_listbox_text(const DRAWITEMSTRUCT *dis, const WCHAR *text, RECT textRect) {
+    SetTextColor(dis->hDC, theme_fg_color());
+    SetBkMode(dis->hDC, TRANSPARENT);
+    DrawTextW(dis->hDC, text, -1, &textRect,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
+
+static void fill_themed_listbox_row(const DRAWITEMSTRUCT *dis) {
+    int selected = (dis->itemState & ODS_SELECTED) != 0;
+    fill_rect_color(dis->hDC, &dis->rcItem, selected ? theme_palette()->selectionBg : theme_bg_color());
+}
+
 static void draw_themed_listbox_item(HWND listbox, const DRAWITEMSTRUCT *dis) {
     if ((int)dis->itemID < 0) return;
-    int selected = (dis->itemState & ODS_SELECTED) != 0;
-    COLORREF bg = selected ? theme_palette()->selectionBg : theme_bg_color();
-    COLORREF fg = theme_fg_color();
-    fill_rect_color(dis->hDC, &dis->rcItem, bg);
-
-    /* LB_GETTEXT overflows whatever buffer it's given rather than truncating
-       to it, so the buffer has to be sized from LB_GETTEXTLEN first - a
-       heading line (or a long file path in the picker) can run well past
-       any fixed stack buffer. */
-    int textLen = (int)SendMessageW(listbox, LB_GETTEXTLEN, dis->itemID, 0);
-    if (textLen <= 0) return;
-    WCHAR stackLabel[256];
-    WCHAR *heapLabel = NULL;
-    WCHAR *label = stackLabel;
-    if (textLen >= (int)(sizeof(stackLabel) / sizeof(stackLabel[0]))) {
-        heapLabel = (WCHAR *)malloc(((size_t)textLen + 1) * sizeof(WCHAR));
-        if (!heapLabel) return;
-        label = heapLabel;
-    }
-    int length = (int)SendMessageW(listbox, LB_GETTEXT, dis->itemID, (LPARAM)label);
-    if (length > 0) {
-        RECT textRect = dis->rcItem;
-        textRect.left += 4;
-        SetTextColor(dis->hDC, fg);
-        SetBkMode(dis->hDC, TRANSPARENT);
-        DrawTextW(dis->hDC, label, length, &textRect,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    }
-    free(heapLabel);
+    fill_themed_listbox_row(dis);
+    WCHAR *label = listbox_item_text(listbox, (int)dis->itemID);
+    if (!label) return;
+    RECT textRect = dis->rcItem;
+    textRect.left += 4;
+    draw_themed_listbox_text(dis, label, textRect);
+    free(label);
 }

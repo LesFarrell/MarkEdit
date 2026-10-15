@@ -143,12 +143,16 @@ depend on a UI module.
 | `text_codec.c` | `text_codec.h` | UTF-8/16 and BOM handling | — |
 | `file_io.c` | `file_io.h` | Atomic file read/write helpers | `path_utils.h` |
 | `workspace_text.c` | `workspace_text.h` | Workspace text helpers | — |
+| `plugin_settings.c` | `plugin_settings.h` | Sectioned JSON settings store shared by application preferences and Lua plugins | `file_io.h` |
+| `preview_fallback.c` | `preview_fallback.h` | Self-contained preview page for WebView2 runtimes without virtual-host folder mapping | — |
 | `markdown.c` | `markdown.h` | Markdown rendering via cmark-gfm | cmark-gfm |
 | `settings.c` | `settings_io.h` | Persistence | `settings_values.h`, `settings_io.h`, `find_state.h`, `layout_metrics.h`, `path_utils.h`, `plugin_settings.h`, `text_codec.h` |
 | `recent_list.c` | `recent_list.h` | Recent-files list | `settings_io.h` |
 | `file_explorer.c` | `file_explorer.h` | Explorer panel and tree | `layout_metrics.h`, `settings_values.h`, `theme.h` |
 | `recovery.c` | `recovery.h` | Crash-recovery snapshots | `file_io.h`, `path_utils.h` |
 | `toolbar_icons.c` / `themed_scrollbar.c` | matching | Owner-drawn UI helpers | windows.h, uxtheme |
+| `editor_commands.c` | `editor_commands.h` | Text operations on a supplied Scintilla view (no application state) and the shared margin indices | Scintilla |
+| `editor_language.c` | `editor_language.h` | Language metadata, extension matching, and Scintilla syntax colours | `theme.h`, Scintilla, Lexilla |
 | `outline_minimap.c` | `outline_minimap.h` | Outline panel and minimap, driven through a host struct | `editor_commands.h`, `editor_language.h`, `settings_io.h`, `settings_values.h`, `text_codec.h`, `theme.h`, Scintilla |
 | `theme.c` | `theme.h` | The light and dark `ThemePalette`s: every colour by role, its `themes.lua` name and built-in value, and the template Customize Theme Colours writes | `settings_values.h` |
 | `scintilla_config.c` | `scintilla_config.h` | Scintilla view setup: margins, markers, wrap/whitespace/indent, gutter sizing | `editor_commands.h`, `settings_values.h`, `themed_scrollbar.h`, Scintilla |
@@ -170,10 +174,17 @@ Two dependency rules fall out of the table:
   reads persisted values includes `settings_values.h`; only `markedit.c` pulls in
   the umbrella `settings.h`.
 
-Compiled sources are listed once, in the repo-root `*.rsp` response files that
-`build.bat` already passes to the compiler. `premake5.lua` reads those same files
-via `sources_from_rsp()`, so adding a new `.c` file is a one-line change to its
-`.rsp` rather than an edit in two build systems.
+Compiled sources are listed in the repo-root `*.rsp` response files.
+`build.bat` passes `markedit-sources.rsp`, `cmark-gfm-sources.rsp`,
+`lua-sources.rsp` and `lexilla-sources.rsp` to the compiler (cmark-gfm and
+Lexilla compiled file by file, with their own flags). `plugin-sources.rsp`
+lists the plugin host subset for `test.bat` and the Premake test projects;
+those files are also in `markedit-sources.rsp`. `release-flags.rsp` holds the
+release code-generation flags (`-Os`, the unwind tables Lua's `longjmp` needs,
+section flags), which `build.bat`, `test.bat` and `premake5.lua` all use.
+`premake5.lua` reads the source lists via `sources_from_rsp()`, so adding a new
+`.c` file is a one-line change to its `.rsp` rather than an edit in two build
+systems.
 
 ## Commands
 
@@ -193,7 +204,7 @@ The built-in formatter is stored as three focused files:
 
 They are separate executable resources but are joined and compiled as one Lua chunk. This preserves private `local` helpers across the parts and makes loading atomic.
 
-General Edit conversions live in `plugins/edit-convert.lua`, which creates the complete Edit → Convert submenu. Native code exposes only the small EOL-mode, tab-width, and save-encoding capabilities that text transformations cannot reproduce faithfully. JSON validation and transformations live entirely in `plugins/json-tools.lua`, which creates the Tools → JSON submenu and every item in it. The plugin supplies formatting, minification, validation, error highlighting, recursive key sorting, string escaping, JSON/YAML conversion, and optional live validation; the core contains no JSON tool commands. Delimited-text operations live in `plugins/csv-tools.lua`; its shared parser replaces the older CSV-to-Markdown implementation that was formerly duplicated in `markdown-tools.lua`. SQL, CLEF logs, data interchange, natural sorting, number conversion, and heuristic grammar checks are likewise ordinary bundled plugins and require no dedicated native commands.
+General Edit conversions live in `plugins/edit-convert.lua`, which creates the complete Edit → Convert submenu. Native code exposes only small capabilities that Lua cannot reproduce faithfully, including EOL mode, tab width, save encoding, and opt-in access to the native external-file watcher. `plugins/tail.lua` supplies the follow checkbox and caret policy; the native document layer tracks disk identity, raw byte offset, a trailing-byte rotation signature and streaming codec state. It incrementally decodes and appends growth, quietly retries transient access/read failures, and fully reloads only after truncation or replacement. JSON tools live entirely in two plugins that share the Tools → JSON submenu: `plugins/json-check.lua` supplies syntax checking (strict JSON, JSONC and JSON Lines), JSON paths and error highlighting as you type; `plugins/json-tools.lua` supplies formatting, minification, recursive key sorting, string escaping and JSON/YAML conversion. The core contains no JSON tool commands. Delimited-text operations live in `plugins/csv-tools.lua`; its shared parser replaces the older CSV-to-Markdown implementation that was formerly duplicated in `markdown-tools.lua`. SQL, CLEF logs, data interchange, natural sorting, number conversion, and heuristic grammar checks are likewise ordinary bundled plugins and require no dedicated native commands.
 
 Lua is preferred for commands whose main input and output are editor text. C remains preferred for filesystem and encoding work, recovery, windows and controls, COM, subprocesses, debugging, large-file streaming and per-keystroke behaviour. Moving one of those areas to Lua is useful only when the Lua API can expose a small capability rather than mirroring a native subsystem wholesale.
 

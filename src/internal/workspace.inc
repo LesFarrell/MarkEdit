@@ -445,7 +445,7 @@ static void reload_document_buffer(int index, const char *content) {
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
     end_background_document_access(&access);
     g_documentStore.documents[index].dirty = 0;
-    record_document_file_time(index);
+    record_document_disk_state(index);
     update_tab_label(index);
     update_document_mapping();
     if (index == g_documentStore.active) {
@@ -849,7 +849,7 @@ static void explorer_path_renamed(const WCHAR *oldPath, const WCHAR *newPath, in
         recent_list_remove(&g_recentFileList, g_documentStore.documents[i].path);
         replace_wstring(&g_documentStore.documents[i].path, retargeted);
         recent_list_add(&g_recentFileList, retargeted);
-        record_document_file_time(i);
+        record_document_disk_state(i);
         update_tab_label(i);
         free(retargeted);
     }
@@ -926,6 +926,7 @@ static void refresh_theme(HWND hwnd) {
     if (g_hStatus) InvalidateRect(g_hStatus, NULL, TRUE);
     apply_preview_host_theme();
     apply_webview_background_colour();
+    apply_preview_theme(); /* themes.lua may have changed its scrollbar colours */
 }
 
 static void select_theme(HWND hwnd, int darkMode) {

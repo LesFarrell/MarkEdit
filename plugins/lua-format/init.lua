@@ -1,9 +1,9 @@
--- lua-format: reindent the active Lua document, or the selected lines, from
--- Tools > Format Lua. The work is done by format.lua, which only rewrites
--- indentation and trailing whitespace. The caret keeps its line and column,
--- and formatting a selection leaves those lines selected.
+-- lua-format: conservatively reindent Lua and lint its syntax. Formatting is
+-- implemented by format.lua; lint.lua asks the embedded Lua parser to compile
+-- the document without executing it.
 
 local format = require("format")
+local lint = require("lint")
 
 local function leading_whitespace(text)
   return #(text:match("^[ \t]*") or "")
@@ -44,4 +44,18 @@ menu.add("/Tools/Format Lua", function()
     editor.set_caret(new_start + math.min(indent + column, new_finish - new_start))
   end
   ui.status("Formatted Lua")
+end)
+
+menu.add("/Tools/Lint Lua", function()
+  local problem = lint.check(editor.get_text(), editor.file_path() or "document.lua")
+  if not problem then
+    ui.status("Lua lint passed: no syntax errors")
+    return
+  end
+
+  local line = math.max(1, math.min(problem.line, editor.line_count()))
+  local first, last = editor.line_range(line)
+  editor.set_selection(first, last)
+  ui.message(("Line %d: %s"):format(problem.line, problem.message),
+    "Lua lint failed", "error")
 end)

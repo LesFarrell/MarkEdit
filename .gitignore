@@ -1,22 +1,17 @@
-# Build outputs
+# Build outputs. Both builds link markedit.exe under build\ (build\zig or
+# build\bin) and stage it, with the runtime DLLs, only into dist\.
 markedit.exe
 markedit.pdb
 /dist/
 /dist.previous/
-/dest/
-/Scintilla.dll
-/WebView2Loader.dll
+/markedit.zip
 /Lexilla.lib
 /Lexilla.pdb
 
-# markedit.lib is the linker's side-effect import lib, produced because
-# Lexilla.cxx unconditionally __declspec(dllexport)s its API even when
-# compiled into an exe rather than a DLL. build.bat redirects it into
-# build\zig; a premake build may still write it beside markedit.exe.
-/markedit.lib
-
-# build.bat's intermediates (build\zig) and premake5-generated Makefiles and
-# objects (premake5.lua is the checked-in source)
+# build.bat's intermediates and exe (build\zig, including the linker's
+# side-effect markedit.lib), premake's exe (build\bin), the test programs
+# test.bat and premake build (build\tests), and premake5-generated Makefiles
+# and objects (premake5.lua is the checked-in source)
 /build/
 
 # Inno Setup's default output directory (markedit.iss is the checked-in source)
@@ -48,10 +43,6 @@ third_party/scintilla/bin/*
 third_party/webview2/x64/WebView2LoaderStatic.lib
 
 .claude/
-
-# test.bat builds each test program beside its source
-/tests/*.exe
-/tests/*.pdb
 
 # Interrupted atomic writes
 *.markedit-*.tmp

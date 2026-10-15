@@ -2,7 +2,7 @@
 
 A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
 
-This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, Markdown, text, calculator, assembler, Lua formatting, and developer-oriented extensions.
+This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, tail-following, number conversion, natural sorting, grammar, Markdown, text, calculator, assembler, Lua formatting/linting, and developer-oriented extensions.
 
 **Contents:** [Quick start](#quick-start) · [How plugins are loaded](#how-plugins-are-loaded) · [Positions, ranges, and lines](#positions-ranges-and-lines) · [API reference](#api-reference) · [Where commands appear](#where-commands-appear) · [Replacing built-in commands](#replacing-built-in-commands) · [Customizing the menu bar](#customizing-the-menu-bar) · [How commands run](#how-commands-run) · [The Lua environment](#the-lua-environment) · [Limits](#limits) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting)
 
@@ -98,7 +98,7 @@ Separators follow the same rules as `"-"` in the menu definition: one at the sta
 
 Makes the built-in command called `name` run `fn()` instead of its usual code, wherever it's used from: menu, toolbar, or keyboard shortcut. `title` is used as the title of dialogs `fn` shows (default `"MarkEdit"`). If several plugins register the same name, the last one loaded wins. See [Replacing built-in commands](#replacing-built-in-commands).
 
-`commands.execute(name)` queues a named built-in command to run after the current plugin callback finishes and returns whether the name exists.
+`commands.execute(name)` queues a named built-in command to run after the current plugin callback finishes and returns whether the name exists. The `run.*` commands (run, debug, step, breakpoints) can't be executed from a plugin and raise an error.
 
 ### events
 
@@ -130,11 +130,11 @@ Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.
 
 ### app
 
-`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, and `tab_width`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
+`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, and `tab_width`, and API 4 adds `tail_follow`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
 
 ### documents
 
-`documents.count()` and `documents.active()` describe the tabs. `documents.activate(index)`, `new()`, `open(path)`, `save([save_as])`, and `close([index])` manage them. `documents.path([index])`, `modified([index])`, and `encoding()` return document metadata. Passing `"utf-8"`, `"utf-8-bom"`, `"utf-16le"`, `"utf-16be"`, or `"ansi"` to `documents.encoding(value)` changes how the active document will be saved and marks it modified. Save-encoding changes are document metadata and are not reverted by text Undo. Indices are 1-based. File pickers remain user-controlled through `ui.pick_file()` and `ui.pick_folder()`.
+`documents.count()` and `documents.active()` describe the tabs. `documents.activate(index)`, `new()`, `open(path)`, `save([save_as])`, and `close([index])` manage them. `documents.open(path)` asks the user before opening a file that isn't already in a tab, and does nothing if they decline. `documents.path([index])`, `modified([index])`, and `encoding()` return document metadata. `documents.follow()` reports whether the active document is following external updates; `documents.follow(true)` starts and `documents.follow(false)` stops. Following requires a clean, saved file and reloads external changes without prompting. Growth is decoded and appended incrementally from the last loaded disk offset, including for multi-gigabyte large-file documents. File identity and a trailing-byte signature detect replacement, truncation and `copytruncate` rotation; those cases fall back to one full reload. Transient access or read failures remain pending and are retried quietly on later watcher ticks without removing the file from Recents. Resource failures are reported once and wait for a newer disk change rather than continually retrying. Editing the document or reloading plugins stops following. Passing `"utf-8"`, `"utf-8-bom"`, `"utf-16le"`, `"utf-16be"`, or `"ansi"` to `documents.encoding(value)` changes how the active document will be saved and marks it modified. Save-encoding changes are document metadata and are not reverted by text Undo. Indices are 1-based. File pickers remain user-controlled through `ui.pick_file()` and `ui.pick_folder()`.
 
 ### editor
 
@@ -160,6 +160,7 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.replace_range(start, finish, text)` | Replaces a range with `text`. An empty range inserts `text` there. The selection moves with the text around it. |
 | `editor.insert(text [, position])` | Inserts `text` at `position`, or at the caret. |
 | `editor.set_text(text)` | Replaces the whole document. The caret position isn't kept; prefer `replace_range` for partial changes. |
+| `editor.begin_undo()` / `editor.end_undo()` | Mark the start and end of a group of changes that Undo reverses together. Pairs may nest. A command or event handler is already [one undo step](#how-commands-run), so a group inside one never splits it. A group still open when the callback returns is closed then; `end_undo` without a matching `begin_undo` raises an error. |
 
 #### Selection and caret
 

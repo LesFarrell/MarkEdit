@@ -17,7 +17,8 @@ $ErrorActionPreference = 'Stop'
 $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
 $failures = [System.Collections.Generic.List[string]]::new()
 
-# 1. Every compiled source is named by exactly one *.rsp.
+# 1. Every compiled source is named by at least one *.rsp (a few, such as
+#    file_io.c, are in both markedit-sources.rsp and plugin-sources.rsp).
 $rspSources = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase)
 foreach ($rsp in Get-ChildItem -LiteralPath $root -Filter '*.rsp') {

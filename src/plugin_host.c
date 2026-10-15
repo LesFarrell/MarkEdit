@@ -100,24 +100,9 @@ static int register_menu_function(lua_State *L, int depth, const char *label) {
     luaL_addchar(&buffer, '/');
     luaL_addstring(&buffer, label);
     luaL_pushresult(&buffer);
-    char *path = checked_copy(L, lua_tostring(L, -1));
-    char *owner = dup_string(s_loadingName ? s_loadingName : "menus.lua");
-    if (!owner) {
-        free(path);
-        luaL_error(L, "out of memory");
-    }
+    append_command(L, lua_tostring(L, -1), lua_absindex(L, -2), "menus.lua")->placed = 1;
     lua_pop(L, 1);
-    lua_pushvalue(L, -1);
-    s_commands[s_commandCount].label = path;
-    s_commands[s_commandCount].ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    s_commands[s_commandCount].placed = 1;
-    s_commands[s_commandCount].overrides = NULL;
-    s_commands[s_commandCount].builtIn = s_loadingBuiltIn;
-    s_commands[s_commandCount].separator = 0;
-    s_commands[s_commandCount].owner = owner;
-    s_commands[s_commandCount].configKey = NULL;
-    s_commands[s_commandCount].checkDefault = 0;
-    return s_commandCount++;
+    return s_commandCount - 1;
 }
 
 /* Converts the item array at the stack top. *outItems is set before it is
@@ -192,18 +177,13 @@ static int run_menu_definition(lua_State *L) {
     return 0;
 }
 
-/* Only libraries without file system or process access are opened. Run in
-   protected mode, since any of this can fail for lack of memory. */
-static int open_environment(lua_State *L) {
-    static const luaL_Reg libraries[] = {
-        {LUA_GNAME, luaopen_base},
-        {LUA_COLIBNAME, luaopen_coroutine},
-        {LUA_TABLIBNAME, luaopen_table},
-        {LUA_STRLIBNAME, luaopen_string},
-        {LUA_MATHLIBNAME, luaopen_math},
-        {LUA_UTF8LIBNAME, luaopen_utf8},
-    };
-    for (size_t i = 0; i < sizeof(libraries) / sizeof(libraries[0]); i++) {
+/* Opens `libraries` (which must include the base library) with the base
+   library's file and bytecode access taken away. Every Lua state that runs a
+   user-editable script goes through this: plugins, themes.lua and the
+   keyboard-shortcuts page. Call it in protected mode, since any of this can
+   fail for lack of memory. */
+static void open_safe_libraries(lua_State *L, const luaL_Reg *libraries, size_t count) {
+    for (size_t i = 0; i < count; i++) {
         luaL_requiref(L, libraries[i].name, libraries[i].func, 1);
         lua_pop(L, 1);
     }
@@ -219,8 +199,22 @@ static int open_environment(lua_State *L) {
         "local load = load\n"
         "_G.load = function(chunk, name, _, ...) return load(chunk, name, 't', ...) end\n";
     if (luaL_loadbufferx(L, textOnlyLoad, sizeof(textOnlyLoad) - 1, "=markedit", "t") != LUA_OK)
-        return lua_error(L);
+        lua_error(L);
     lua_call(L, 0, 0);
+}
+
+/* Only libraries without file system or process access are opened. */
+static int open_environment(lua_State *L) {
+    static const luaL_Reg libraries[] = {
+        {LUA_GNAME, luaopen_base},
+        {LUA_COLIBNAME, luaopen_coroutine},
+        {LUA_TABLIBNAME, luaopen_table},
+        {LUA_STRLIBNAME, luaopen_string},
+        {LUA_MATHLIBNAME, luaopen_math},
+        {LUA_UTF8LIBNAME, luaopen_utf8},
+    };
+    open_safe_libraries(L, libraries, sizeof(libraries) / sizeof(libraries[0]));
+    plugin_lua_protect_string_metatable(L);
 
     lua_editor_api_push(L);
     lua_setglobal(L, "editor");
@@ -353,10 +347,7 @@ static int render_page(lua_State *L) {
         {LUA_STRLIBNAME, luaopen_string},
         {LUA_UTF8LIBNAME, luaopen_utf8},
     };
-    for (size_t i = 0; i < sizeof(libraries) / sizeof(libraries[0]); i++) {
-        luaL_requiref(L, libraries[i].name, libraries[i].func, 1);
-        lua_pop(L, 1);
-    }
+    open_safe_libraries(L, libraries, sizeof(libraries) / sizeof(libraries[0]));
     char chunkName[260];
     snprintf(chunkName, sizeof(chunkName), "=%s", job->name);
     if (luaL_loadbufferx(L, job->code, job->length, chunkName, "t") != LUA_OK) return lua_error(L);
@@ -379,7 +370,8 @@ static int render_page(lua_State *L) {
 char *plugin_host_render_page(const char *name, const char *code, size_t length,
                               const PluginShortcut *shortcuts, int shortcutCount, char **page) {
     *page = NULL;
-    lua_State *L = luaL_newstate();
+    LuaMemory memory;
+    lua_State *L = plugin_lua_new_state(&memory);
     if (!L) return dup_string("Lua could not start: out of memory");
     PageJob job = { name, code, length, shortcuts, shortcutCount };
     lua_pushcfunction(L, render_page);
@@ -405,7 +397,8 @@ char *plugin_host_render_page(const char *name, const char *code, size_t length,
 
 /* ---- themes.lua ----
    Runs in its own Lua state, like the shortcuts page: a colour file needs
-   nothing but tables and strings, and must not see or change plugin state. */
+   nothing but tables and strings, and must not see or change plugin state.
+   Both states have the plugins' memory limit. */
 
 typedef struct ThemeJob {
     const char *name, *code;
@@ -455,9 +448,11 @@ static void read_theme_colours(lua_State *L, ThemeJob *job, const char *theme, i
 
 static int run_theme_file(lua_State *L) {
     ThemeJob *job = (ThemeJob *)lua_touserdata(L, 1);
-    luaL_requiref(L, LUA_GNAME, luaopen_base, 1);
-    luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
-    lua_pop(L, 2);
+    static const luaL_Reg libraries[] = {
+        {LUA_GNAME, luaopen_base},
+        {LUA_STRLIBNAME, luaopen_string},
+    };
+    open_safe_libraries(L, libraries, sizeof(libraries) / sizeof(libraries[0]));
     char chunkName[260];
     snprintf(chunkName, sizeof(chunkName), "=%s", job->name);
     if (luaL_loadbufferx(L, job->code, job->length, chunkName, "t") != LUA_OK) return lua_error(L);
@@ -480,7 +475,8 @@ static int run_theme_file(lua_State *L) {
 
 char *plugin_host_load_theme(const char *name, const char *code, size_t length,
                              PluginThemeColourFn setColour, void *context) {
-    lua_State *L = luaL_newstate();
+    LuaMemory memory;
+    lua_State *L = plugin_lua_new_state(&memory);
     if (!L) return dup_string("Lua could not start: out of memory");
     ThemeJob job = { name, code, length, setColour, context, NULL };
     s_themeHookCalls = 0;

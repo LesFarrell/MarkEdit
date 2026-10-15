@@ -97,21 +97,74 @@ static void restore_document_view(HWND hEdit, const Document *doc) {
     SendMessageA(hEdit, SCI_SETXOFFSET, (WPARAM)doc->xOffset, 0);
 }
 
-static void record_document_file_time(int index) {
+static void clear_document_disk_state(Document *doc) {
+    file_follow_clear(&doc->followFile);
+    doc->followCodec = (TextCodecState){ (TextEncoding)doc->encoding, {0}, 0 };
+}
+
+static void finish_recording_document_disk_state(Document *doc) {
+    doc->externalChanged = 0;
+    doc->externalDeleted = 0;
+    if (g_hTabs) InvalidateRect(g_hTabs, NULL, FALSE);
+}
+
+static void record_loaded_document_disk_state(int index, HANDLE file,
+                                              ULONGLONG representedSize) {
     if (index < 0 || index >= g_documentStore.count) return;
     Document *doc = &g_documentStore.documents[index];
-    doc->hasFileTime = 0;
+    clear_document_disk_state(doc);
+    file_follow_capture(&doc->followFile, file, representedSize);
+    finish_recording_document_disk_state(doc);
+}
+
+static void record_document_disk_state(int index) {
+    if (index < 0 || index >= g_documentStore.count) return;
+    Document *doc = &g_documentStore.documents[index];
+    clear_document_disk_state(doc);
     if (!doc->path) return;
     WCHAR *ioPath = extended_path(doc->path);
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (ioPath && GetFileAttributesExW(ioPath, GetFileExInfoStandard, &data)) {
-        doc->fileTime = data.ftLastWriteTime;
-        doc->hasFileTime = 1;
+        doc->followFile.writeTime = data.ftLastWriteTime;
+        doc->followFile.hasTime = 1;
+        doc->followFile.size = ((ULONGLONG)data.nFileSizeHigh << 32) | data.nFileSizeLow;
     }
-    doc->externalChanged = 0;
-    doc->externalDeleted = 0;
-    if (g_hTabs) InvalidateRect(g_hTabs, NULL, FALSE);
+    HANDLE file = ioPath ? CreateFileW(ioPath, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (file != INVALID_HANDLE_VALUE && GetFileInformationByHandle(file, &info)) {
+        ULONGLONG size = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+        FileFollowState captured;
+        if (file_follow_capture(&captured, file, size)) doc->followFile = captured;
+    }
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    finish_recording_document_disk_state(doc);
     free(ioPath);
+}
+
+/* Following is per document and available only for a clean, saved file. The
+   existing watcher and loader do the actual work; Lua owns the tail policy. */
+static int set_active_document_following(int enabled) {
+    if (g_documentStore.count <= 0) return 0;
+    Document *doc = &g_documentStore.documents[g_documentStore.active];
+    if (!enabled) {
+        doc->following = 0;
+        doc->followFile.retryBlocked = 0;
+        return 0;
+    }
+    if (!doc->path || doc->dirty || !doc->followFile.hasIdentity ||
+        (doc->followFile.size && !doc->followFile.tailLength)) return 0;
+    doc->followFile.retryBlocked = 0;
+    doc->following = 1;
+    return 1;
+}
+
+static void stop_following_all_documents(void) {
+    for (int i = 0; i < g_documentStore.count; i++) {
+        g_documentStore.documents[i].following = 0;
+        g_documentStore.documents[i].followFile.retryBlocked = 0;
+    }
 }
 
 /* Swaps the shared document pointer for the main editor, its minimap, and
@@ -367,8 +420,10 @@ typedef enum {
 } LoadResult;
 
 /* Streams `file` into a new large-file document for the active tab (see
-   read_large_file_document()). */
-static LoadResult load_large_file(HANDLE file, size_t length, int forcedEncoding) {
+   read_large_file_document()). Automatic follow reloads pass showProgress=0
+   so a growing log never opens a modal progress window on watcher ticks. */
+static LoadResult load_large_file(HANDLE file, size_t length, int forcedEncoding,
+                                  int showProgress) {
     /* SCI_CREATELOADER resets g_hEdit's per-view line state as a side
        effect (Editor.cxx's CreateLoader). A successful load swaps in the
        new document, which rebuilds it; a failed one re-attaches the
@@ -377,12 +432,13 @@ static LoadResult load_large_file(HANDLE file, size_t length, int forcedEncoding
     save_active_document_view();
     HCURSOR oldCursor = SetCursor(LoadCursorA(NULL, IDC_WAIT));
     int hasBom = 0, encoding = TEXT_ENCODING_UTF8, outOfMemory = 0;
-    LargeOperationProgress progress;
-    large_operation_progress_begin(&progress, L"Opening large file", L"Loading text...");
+    LargeOperationProgress progress = {0};
+    if (showProgress)
+        large_operation_progress_begin(&progress, L"Opening large file", L"Loading text...");
     sptr_t sciDoc = read_large_file_document(file, length, forcedEncoding, &encoding,
                                              &hasBom, &outOfMemory, &progress);
     int cancelled = progress.cancelled;
-    large_operation_progress_end(&progress);
+    if (showProgress) large_operation_progress_end(&progress);
     SetCursor(oldCursor);
     if (!sciDoc) {
         const Document *doc = &g_documentStore.documents[g_documentStore.active];
@@ -495,7 +551,6 @@ static void finish_file_load(const WCHAR *path) {
     /* An ordinary load's SCN_MODIFIED schedules this; a large-file load
        raises none, so clear the outline the old text built. */
     if (g_largeFile) update_outline();
-    record_document_file_time(g_documentStore.active);
     update_document_mapping();
     update_preview();
     set_dirty(0);
@@ -517,17 +572,23 @@ static void report_load_failure(LoadResult result) {
 }
 
 /* `forcedEncoding` is a TextEncoding to read the file as (File > Reopen
-   with Encoding), or -1 to detect it. */
-static int load_file_as(const WCHAR *path, int forcedEncoding) {
+   with Encoding), or -1 to detect it. Follow-mode reloads are quiet because
+   a writer may deny access briefly; the watcher leaves the change pending and
+   retries instead of showing an error and dropping the file from Recents. */
+static int load_file_as_internal(const WCHAR *path, int forcedEncoding, int reportErrors,
+                                 LoadResult *failure) {
+    if (failure) *failure = LOAD_READ_FAILED;
     WCHAR *ioPath = extended_path(path);
     HANDLE file = ioPath ? CreateFileW(ioPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL)
         : INVALID_HANDLE_VALUE;
     free(ioPath);
     if (file == INVALID_HANDLE_VALUE) {
-        show_error(L"Could not open file.");
-        recent_list_remove(&g_recentFileList, path);
-        refresh_menu(g_hMainWnd);
+        if (reportErrors) {
+            show_error(L"Could not open file.");
+            recent_list_remove(&g_recentFileList, path);
+            refresh_menu(g_hMainWnd);
+        }
         return 0;
     }
     LARGE_INTEGER size;
@@ -537,12 +598,20 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
            threshold is set to: only a large-file document has 64-bit positions. */
         int largeFile = size.QuadPart >= large_file_threshold_bytes() ||
                         size.QuadPart > INT_MAX;
-        result = largeFile ? load_large_file(file, (size_t)size.QuadPart, forcedEncoding)
+        result = largeFile ? load_large_file(file, (size_t)size.QuadPart, forcedEncoding,
+                                             reportErrors)
                            : load_ordinary_file(file, (size_t)size.QuadPart, forcedEncoding);
     }
+    /* Capture the exact byte boundary loaded from this handle before closing
+       it. A live log may already be longer; the watcher will append that
+       growth instead of incorrectly treating it as present in the editor. */
+    if (result == LOAD_OK)
+        record_loaded_document_disk_state(g_documentStore.active, file,
+                                          (ULONGLONG)size.QuadPart);
     CloseHandle(file);
     if (result != LOAD_OK) {
-        report_load_failure(result);
+        if (failure) *failure = result;
+        if (reportErrors) report_load_failure(result);
         return 0;
     }
     WCHAR *displayPath = absolute_path(path);
@@ -551,8 +620,123 @@ static int load_file_as(const WCHAR *path, int forcedEncoding) {
     return 1;
 }
 
+static int load_file_as(const WCHAR *path, int forcedEncoding) {
+    return load_file_as_internal(path, forcedEncoding, 1, NULL);
+}
+
 static int load_file(const WCHAR *path) {
     return load_file_as(path, -1);
+}
+
+typedef enum FollowAppendResult {
+    FOLLOW_APPEND_DONE,
+    FOLLOW_APPEND_FALLBACK,
+    FOLLOW_APPEND_RETRY,
+    FOLLOW_APPEND_OUT_OF_MEMORY
+} FollowAppendResult;
+
+/* Appends only disk bytes beyond the last successfully represented offset.
+   The persistent codec state carries a split UTF-16 surrogate/code unit or
+   ANSI multibyte character into the next watcher tick. Identity, truncation,
+   and same-size rewrites fall back to the normal full reload path. */
+static FollowAppendResult append_followed_growth(const WCHAR *path) {
+    Document *doc = &g_documentStore.documents[g_documentStore.active];
+    WCHAR *ioPath = extended_path(path);
+    HANDLE file = ioPath ? CreateFileW(ioPath, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL) : INVALID_HANDLE_VALUE;
+    free(ioPath);
+    if (file == INVALID_HANDLE_VALUE) return FOLLOW_APPEND_RETRY;
+
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(file, &info)) {
+        CloseHandle(file);
+        return FOLLOW_APPEND_RETRY;
+    }
+    ULONGLONG size = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    FileFollowAction action = file_follow_check_growth(&doc->followFile, file, &info, size);
+    if (action != FILE_FOLLOW_APPEND) {
+        CloseHandle(file);
+        return action == FILE_FOLLOW_RETRY ? FOLLOW_APPEND_RETRY : FOLLOW_APPEND_FALLBACK;
+    }
+
+    LARGE_INTEGER offset;
+    offset.QuadPart = (LONGLONG)doc->followFile.size;
+    if (!SetFilePointerEx(file, offset, NULL, FILE_BEGIN)) {
+        CloseHandle(file);
+        return FOLLOW_APPEND_RETRY;
+    }
+
+    char *input = (char *)malloc(LARGE_FILE_READ_CHUNK);
+    size_t outputCapacity = text_decode_capacity(LARGE_FILE_READ_CHUNK);
+    char *output = outputCapacity ? (char *)malloc(outputCapacity) : NULL;
+    if (!input || !output) {
+        file_follow_block_retry(&doc->followFile, size, info.ftLastWriteTime);
+        free(input); free(output); CloseHandle(file);
+        return FOLLOW_APPEND_OUT_OF_MEMORY;
+    }
+
+    TextCodecState codec = doc->followCodec;
+    codec.encoding = (TextEncoding)doc->encoding;
+    ULONGLONG remaining = size - doc->followFile.size;
+    int oldSwitching = g_documentStore.switching;
+    g_documentStore.switching = 1;
+    SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, FALSE, 0);
+    FollowAppendResult result = FOLLOW_APPEND_DONE;
+    while (remaining) {
+        DWORD wanted = remaining > LARGE_FILE_READ_CHUNK ? LARGE_FILE_READ_CHUNK : (DWORD)remaining;
+        DWORD got = 0;
+        if (!ReadFile(file, input, wanted, &got, NULL) || !got) {
+            result = FOLLOW_APPEND_RETRY;
+            break;
+        }
+        size_t produced = 0;
+        if (!text_decode(&codec, input, got, 0, output, outputCapacity, &produced)) {
+            result = FOLLOW_APPEND_OUT_OF_MEMORY;
+            break;
+        }
+        if (produced) {
+            SendMessageA(g_hEdit, SCI_SETSTATUS, SC_STATUS_OK, 0);
+            SendMessageA(g_hEdit, SCI_APPENDTEXT, (WPARAM)produced, (LPARAM)output);
+            if (SendMessageA(g_hEdit, SCI_GETSTATUS, 0, 0) != SC_STATUS_OK) {
+                result = FOLLOW_APPEND_OUT_OF_MEMORY;
+                break;
+            }
+        }
+        file_follow_commit_bytes(&doc->followFile, input, got);
+        doc->followCodec = codec;
+        remaining -= got;
+    }
+    SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, TRUE, 0);
+    SendMessageA(g_hEdit, SCI_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    g_documentStore.switching = oldSwitching;
+    free(input); free(output); CloseHandle(file);
+
+    if (result != FOLLOW_APPEND_DONE) {
+        if (result == FOLLOW_APPEND_OUT_OF_MEMORY)
+            file_follow_block_retry(&doc->followFile, size, info.ftLastWriteTime);
+        return result;
+    }
+    file_follow_complete(&doc->followFile, &info);
+    doc->externalChanged = 0;
+    doc->externalDeleted = 0;
+    InvalidateRect(g_hTabs, NULL, FALSE);
+    enter_large_file_mode_if_needed(g_hMainWnd);
+    update_document_mapping();
+    update_status_bar();
+    fire_plugin_event("open", g_currentFile);
+    return FOLLOW_APPEND_DONE;
+}
+
+static void block_follow_retry_for_path(Document *doc, const WCHAR *path) {
+    WCHAR *ioPath = extended_path(path);
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (ioPath && GetFileAttributesExW(ioPath, GetFileExInfoStandard, &data)) {
+        ULONGLONG size = ((ULONGLONG)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+        file_follow_block_retry(&doc->followFile, size, data.ftLastWriteTime);
+    }
+    free(ioPath);
 }
 
 /* SCN_MODIFIED is delivered from inside Scintilla's edit operation, so the
@@ -1109,7 +1293,7 @@ static void finish_document_save(const WCHAR *path, TextEncoding encoding, int h
     /* Save As changes the persistence key from the old path to the new one;
        write the current markers immediately instead of waiting for exit. */
     save_breakpoints_for_active_document(g_currentFile);
-    record_document_file_time(g_documentStore.active);
+    record_document_disk_state(g_documentStore.active);
     update_document_mapping();
     /* HTML's preview (see show_html_file_preview()) is a real navigation to
        the saved file, not a re-render of the live buffer like Markdown's -
@@ -1406,6 +1590,7 @@ static void release_document_reference(Document *doc) {
 }
 
 static void push_closed_document(Document removed, int index) {
+    removed.following = 0;
     removed.closedIndex = index;
     /* Holding a large-file tab's document for Reopen Closed Tab would keep
        the whole file in memory; it keeps only its path and is read from
@@ -1552,6 +1737,44 @@ static void do_reopen_closed_tab(void) {
 static void prompt_reload_active_external_change(void) {
     if (g_documentStore.count <= 0 || !g_currentFile || !g_documentStore.documents[g_documentStore.active].externalChanged) return;
     Document *doc = &g_documentStore.documents[g_documentStore.active];
+    if (doc->following && !doc->dirty) {
+        /* Log rotation may leave the path absent or locked briefly. Do not
+           clear externalChanged here: finish_file_load() clears it after a
+           successful quiet reload; failure leaves it pending for the next
+           watcher tick. */
+        if (doc->externalDeleted) return;
+        WCHAR *path = wcsdup_heap(g_currentFile);
+        FollowAppendResult appendResult = path ? append_followed_growth(path) : FOLLOW_APPEND_RETRY;
+        if (appendResult == FOLLOW_APPEND_DONE) {
+            free(path);
+            return;
+        }
+        if (appendResult == FOLLOW_APPEND_RETRY) {
+            free(path);
+            return;
+        }
+        if (appendResult == FOLLOW_APPEND_OUT_OF_MEMORY) {
+            free(path);
+            doc->externalChanged = 0;
+            InvalidateRect(g_hTabs, NULL, FALSE);
+            report_load_failure(LOAD_OUT_OF_MEMORY);
+            return;
+        }
+        LoadResult failure = LOAD_READ_FAILED;
+        int loaded = path && load_file_as_internal(path,
+            doc->encodingForced ? doc->encoding : -1, 0, &failure);
+        /* Access and reads can fail while a writer replaces the file, so they
+           stay pending. Resource/size failures will not heal on the next
+           1.5-second tick: report once and wait for a newer disk change. */
+        if (!loaded && failure != LOAD_READ_FAILED) {
+            if (path) block_follow_retry_for_path(doc, path);
+            doc->externalChanged = 0;
+            InvalidateRect(g_hTabs, NULL, FALSE);
+            if (failure != LOAD_CANCELLED) report_load_failure(failure);
+        }
+        free(path);
+        return;
+    }
     doc->externalChanged = 0;
     InvalidateRect(g_hTabs, NULL, FALSE);
     if (doc->externalDeleted) {
@@ -1586,17 +1809,17 @@ static void check_external_file_change(void) {
         if (!exists) {
             if (attributeError != ERROR_FILE_NOT_FOUND && attributeError != ERROR_PATH_NOT_FOUND)
                 continue;
-            if (doc->hasFileTime && !doc->externalDeleted) {
+            if (doc->followFile.hasTime && !doc->externalDeleted) {
                 doc->externalDeleted = 1;
                 doc->externalChanged = 1;
                 changedVisual = 1;
             }
-            doc->hasFileTime = 0;
+            doc->followFile.hasTime = 0;
             continue;
         }
-        if (!doc->hasFileTime) {
-            doc->fileTime = data.ftLastWriteTime;
-            doc->hasFileTime = 1;
+        if (!doc->followFile.hasTime) {
+            doc->followFile.writeTime = data.ftLastWriteTime;
+            doc->followFile.hasTime = 1;
             if (doc->externalDeleted) {
                 doc->externalDeleted = 0;
                 doc->externalChanged = 1;
@@ -1604,8 +1827,15 @@ static void check_external_file_change(void) {
             }
             continue;
         }
-        if (CompareFileTime(&doc->fileTime, &data.ftLastWriteTime) != 0) {
-            doc->fileTime = data.ftLastWriteTime;
+        ULONGLONG diskSize = ((ULONGLONG)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+        if (doc->following && file_follow_retry_blocked(
+                &doc->followFile, diskSize, data.ftLastWriteTime)) continue;
+        /* Some long-lived log writers do not expose a new last-write time
+           until their handle is flushed or closed. A followed document's raw
+           disk offset makes growth independently observable. */
+        if (CompareFileTime(&doc->followFile.writeTime, &data.ftLastWriteTime) != 0 ||
+            (doc->following && diskSize != doc->followFile.size)) {
+            doc->followFile.writeTime = data.ftLastWriteTime;
             if (!doc->externalChanged) changedVisual = 1;
             doc->externalChanged = 1;
         }

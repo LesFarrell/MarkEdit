@@ -57,7 +57,7 @@ local function solarized(background, highlight, text, emphasis, muted)
     tabBg = highlight,
     tabSelectedBg = background,
     tabFg = muted,
-    tabSelectedFg = emphasis,
+    tabSelectedFg = blue,
     changedMarker = yellow,
     minimapFrame = muted,
     previewTextFg = text,

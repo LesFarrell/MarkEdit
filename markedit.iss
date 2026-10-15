@@ -68,12 +68,15 @@ Source: "dist\plugins\*"; DestDir: "{app}\plugins"; Flags: ignoreversion recurse
 Source: "dist\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\third_party\cmark-gfm\COPYING"; DestDir: "{app}\third_party\cmark-gfm"; Flags: ignoreversion
+Source: "dist\third_party\cmark-gfm\VERSION.txt"; DestDir: "{app}\third_party\cmark-gfm"; Flags: ignoreversion
 Source: "dist\third_party\gdb\bin\gdb.exe"; DestDir: "{app}\third_party\gdb\bin"; Flags: ignoreversion
 Source: "dist\third_party\gdb\COPYING.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\COPYING.MinGW-w64-runtime.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\VERSION.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\SOURCE.md"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\SHA256SUMS.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
+Source: "dist\third_party\github-markdown-css\LICENSE"; DestDir: "{app}\third_party\github-markdown-css"; Flags: ignoreversion
+Source: "dist\third_party\github-markdown-css\VERSION.txt"; DestDir: "{app}\third_party\github-markdown-css"; Flags: ignoreversion
 Source: "dist\third_party\highlightjs\LICENSE"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
 Source: "dist\third_party\highlightjs\VERSION.txt"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
 Source: "dist\third_party\katex\LICENSE"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
@@ -82,9 +85,12 @@ Source: "dist\third_party\lexilla\License.txt"; DestDir: "{app}\third_party\lexi
 Source: "dist\third_party\lexilla\version.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
 Source: "dist\third_party\lua\LICENSE"; DestDir: "{app}\third_party\lua"; Flags: ignoreversion
 Source: "dist\third_party\lua\VERSION.txt"; DestDir: "{app}\third_party\lua"; Flags: ignoreversion
+Source: "dist\third_party\mermaid\LICENSE"; DestDir: "{app}\third_party\mermaid"; Flags: ignoreversion
+Source: "dist\third_party\mermaid\VERSION.txt"; DestDir: "{app}\third_party\mermaid"; Flags: ignoreversion
 Source: "dist\third_party\scintilla\License.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
 Source: "dist\third_party\scintilla\version.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
 Source: "dist\third_party\webview2\LICENSE.txt"; DestDir: "{app}\third_party\webview2"; Flags: ignoreversion
+Source: "dist\third_party\webview2\VERSION.txt"; DestDir: "{app}\third_party\webview2"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
