@@ -56,7 +56,7 @@ end)
 events.on("selection_changed", function()
   if not documents.follow() then return end
   local first, last = editor.get_selection_range()
-  if first <= last or editor.get_caret() ~= editor.length() + 1 then
+  if editor.selection_count() > 1 or first <= last or editor.get_caret() ~= editor.length() + 1 then
     stop("Stopped following because the caret moved")
   end
 end)

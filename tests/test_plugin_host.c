@@ -858,6 +858,13 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(tailFollow, editor) && !s_documentFollowing &&
            !plugin_host_command_is_checked(tailFollow),
            "tail plugin checkbox stops following");
+    expect(run_ok(tailFollow, editor) && s_documentFollowing,
+           "tail plugin follows again before the multi-caret check");
+    SendMessageA(editor, SCI_ADDSELECTION, 0, 0);
+    expect(SendMessageA(editor, SCI_GETSELECTIONS, 0, 0) == 2 &&
+           plugin_host_fire("selection_changed", NULL, editor) == NULL &&
+           !s_documentFollowing,
+           "tail plugin stops following when extra carets are added");
 
     set_document(editor, "local x = 1\nif x then\n  return x\n");
     s_lastMessage[0] = 0;
