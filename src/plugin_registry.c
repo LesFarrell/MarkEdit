@@ -33,6 +33,9 @@ int s_handlerCount = 0;
 int s_nextHandlerId = 1;
 PluginDeferred s_deferred[PLUGIN_MAX_DEFERRED];
 int s_nextDeferredToken = 1;
+PluginContextMenuItem s_contextMenuItems[PLUGIN_MAX_CONTEXT_ITEMS];
+int s_contextMenuItemCount = 0;
+int s_nextContextMenuItemId = 1;
 
 static const char *current_owner(lua_State *L);
 
@@ -105,6 +108,22 @@ void discard_handlers_from(int first) {
         memset(&s_handlers[i], 0, sizeof(s_handlers[i]));
     }
     if (first < s_handlerCount) s_handlerCount = first;
+}
+
+static void free_context_menu_item(PluginContextMenuItem *item) {
+    if (s_lua) luaL_unref(s_lua, LUA_REGISTRYINDEX, item->ref);
+    if (s_lua && item->enabledRef != LUA_NOREF)
+        luaL_unref(s_lua, LUA_REGISTRYINDEX, item->enabledRef);
+    free(item->label);
+    free(item->owner);
+    free(item->configKey);
+    memset(item, 0, sizeof(*item));
+}
+
+void discard_context_menu_items_from(int first) {
+    for (int i = first; i < s_contextMenuItemCount; i++)
+        free_context_menu_item(&s_contextMenuItems[i]);
+    if (first < s_contextMenuItemCount) s_contextMenuItemCount = first;
 }
 
 static const char *current_title(void) {
@@ -319,6 +338,107 @@ static int menu_separator(lua_State *L) {
     const char *path = optional_cstring(L, 1, "", "menu path");
     append_command(L, path, 0, "plugin");
     return 0;
+}
+
+/* contextmenu.add(label, fn): adds an item to the editor's right-click menu
+   and returns a stable handle accepted by contextmenu.remove(). */
+static PluginContextMenuItem *append_context_menu_item(lua_State *L,
+                                                       const char *label,
+                                                       int functionIndex,
+                                                       int enabledIndex) {
+    int parts = 0, inPart = 0;
+    for (const char *c = label; ; c++) {
+        if (*c && *c != '/') inPart = 1;
+        else {
+            if (inPart) parts++;
+            inPart = 0;
+            if (!*c) break;
+        }
+    }
+    if (!parts) {
+        luaL_argerror(L, 1, "context menu label must contain a name");
+        return NULL;
+    }
+    if (parts > PLUGIN_MAX_CONTEXT_DEPTH) {
+        luaL_argerror(L, 1, "context menu label has too many parts");
+        return NULL;
+    }
+    if (s_contextMenuItemCount >= PLUGIN_MAX_CONTEXT_ITEMS) {
+        luaL_error(L, "too many context menu items (the limit is %d)",
+                   PLUGIN_MAX_CONTEXT_ITEMS);
+        return NULL;
+    }
+
+    const char *owner = current_owner(L);
+    char *labelCopy = dup_string(label);
+    char *ownerCopy = dup_string(owner);
+    if (!labelCopy || !ownerCopy) {
+        free(labelCopy);
+        free(ownerCopy);
+        luaL_error(L, "out of memory");
+        return NULL;
+    }
+    lua_pushvalue(L, functionIndex);
+    PluginContextMenuItem *item = &s_contextMenuItems[s_contextMenuItemCount++];
+    memset(item, 0, sizeof(*item));
+    item->id = s_nextContextMenuItemId;
+    item->label = labelCopy;
+    item->ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    item->enabledRef = LUA_NOREF;
+    if (!lua_isnoneornil(L, enabledIndex)) {
+        lua_pushvalue(L, enabledIndex);
+        item->enabledRef = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    item->owner = ownerCopy;
+    s_nextContextMenuItemId = s_nextContextMenuItemId == INT_MAX
+        ? 1 : s_nextContextMenuItemId + 1;
+    return item;
+}
+
+static int contextmenu_add(lua_State *L) {
+    const char *label = checked_cstring(L, 1, "context menu label");
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if (!lua_isnoneornil(L, 3)) luaL_checktype(L, 3, LUA_TFUNCTION);
+    PluginContextMenuItem *item = append_context_menu_item(L, label, 2, 3);
+    lua_pushinteger(L, item->id);
+    return 1;
+}
+
+/* contextmenu.checkbox(label, key, default, fn): the context-menu equivalent
+   of menu.checkbox, including automatic persistence and rollback on error. */
+static int contextmenu_checkbox(lua_State *L) {
+    const char *label = checked_cstring(L, 1, "context menu label");
+    const char *key = checked_config_key(L, 2);
+    luaL_checktype(L, 3, LUA_TBOOLEAN);
+    luaL_checktype(L, 4, LUA_TFUNCTION);
+    if (!lua_isnoneornil(L, 5)) luaL_checktype(L, 5, LUA_TFUNCTION);
+    PluginContextMenuItem *item = append_context_menu_item(L, label, 4, 5);
+    item->configKey = dup_string(key);
+    if (!item->configKey) {
+        discard_context_menu_items_from(s_contextMenuItemCount - 1);
+        return luaL_error(L, "out of memory");
+    }
+    item->checkDefault = lua_toboolean(L, 3);
+    lua_pushinteger(L, item->id);
+    return 1;
+}
+
+static int contextmenu_remove(lua_State *L) {
+    int id = (int)luaL_checkinteger(L, 1);
+    const char *owner = current_owner(L);
+    for (int i = 0; i < s_contextMenuItemCount; i++) {
+        PluginContextMenuItem *item = &s_contextMenuItems[i];
+        if (item->id != id || strcmp(item->owner, owner) != 0) continue;
+        free_context_menu_item(item);
+        memmove(item, item + 1,
+                (size_t)(s_contextMenuItemCount - i - 1) * sizeof(*item));
+        s_contextMenuItemCount--;
+        memset(&s_contextMenuItems[s_contextMenuItemCount], 0, sizeof(*item));
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushboolean(L, 0);
+    return 1;
 }
 
 /* commands.register(name, fn [, title]): fn runs in place of the built-in
@@ -689,7 +809,8 @@ static int app_capabilities(lua_State *L) {
     static const char *const names[] = {
         "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
         "documents", "command_execution", "path_picker", "status", "logging", "defer",
-        "eol_conversion", "save_encoding", "tab_width", "spelling", "output_panel"
+        "eol_conversion", "save_encoding", "tab_width", "spelling", "output_panel",
+        "context_menu"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -902,6 +1023,10 @@ static const luaL_Reg ui_functions[] = {
 static const luaL_Reg menu_functions[] = {
     {"add", menu_add}, {"checkbox", menu_checkbox}, {"separator", menu_separator}, {NULL, NULL}
 };
+static const luaL_Reg contextmenu_functions[] = {
+    {"add", contextmenu_add}, {"checkbox", contextmenu_checkbox},
+    {"remove", contextmenu_remove}, {NULL, NULL}
+};
 static const luaL_Reg events_functions[] = {
     {"on", events_on}, {"off", events_off}, {NULL, NULL}
 };
@@ -995,6 +1120,8 @@ void plugin_registry_open(lua_State *L) {
     lua_setglobal(L, "ui");
     luaL_newlib(L, menu_functions);
     lua_setglobal(L, "menu");
+    luaL_newlib(L, contextmenu_functions);
+    lua_setglobal(L, "contextmenu");
     luaL_newlib(L, events_functions);
     lua_setglobal(L, "events");
     luaL_newlib(L, commands_functions);
@@ -1042,16 +1169,18 @@ int plugin_host_command_is_checkable(int index) {
     return index >= 0 && index < s_commandCount && s_commands[index].configKey != NULL;
 }
 
-static int stored_checkbox_state(const PluginCommand *command) {
+static int stored_checkbox_state(const char *owner, const char *key, int defaultState) {
     char *value = s_callbacks.config_get
-        ? s_callbacks.config_get(command->owner, command->configKey) : NULL;
-    int checked = value ? config_value_is_true(value) : command->checkDefault;
+        ? s_callbacks.config_get(owner, key) : NULL;
+    int checked = value ? config_value_is_true(value) : defaultState;
     free(value);
     return checked;
 }
 
 int plugin_host_command_is_checked(int index) {
-    return plugin_host_command_is_checkable(index) ? stored_checkbox_state(&s_commands[index]) : 0;
+    if (!plugin_host_command_is_checkable(index)) return 0;
+    const PluginCommand *command = &s_commands[index];
+    return stored_checkbox_state(command->owner, command->configKey, command->checkDefault);
 }
 
 const char *plugin_host_command_checkbox_owner(int index) {
@@ -1072,6 +1201,77 @@ int plugin_host_find_checkbox(const char *owner, const char *key) {
 
 const char *plugin_host_command_overrides(int index) {
     return index >= 0 && index < s_commandCount ? s_commands[index].overrides : NULL;
+}
+
+int plugin_host_context_menu_item_count(void) {
+    return s_contextMenuItemCount;
+}
+
+const char *plugin_host_context_menu_item_label(int index) {
+    return index >= 0 && index < s_contextMenuItemCount
+        ? s_contextMenuItems[index].label : NULL;
+}
+
+int plugin_host_context_menu_item_id(int index) {
+    return index >= 0 && index < s_contextMenuItemCount
+        ? s_contextMenuItems[index].id : 0;
+}
+
+int plugin_host_context_menu_item_is_checkable(int index) {
+    return index >= 0 && index < s_contextMenuItemCount &&
+        s_contextMenuItems[index].configKey != NULL;
+}
+
+int plugin_host_context_menu_item_is_checked(int index) {
+    if (!plugin_host_context_menu_item_is_checkable(index)) return 0;
+    const PluginContextMenuItem *item = &s_contextMenuItems[index];
+    return stored_checkbox_state(item->owner, item->configKey, item->checkDefault);
+}
+
+/* Calls a context-menu enabled predicate and writes its truth value through
+   the light userdata argument. Keeping the result outside Lua lets the
+   existing protected-call path restore the stack and enforce time limits. */
+static int call_enabled_predicate(lua_State *L) {
+    int *enabled = (int *)lua_touserdata(L, 2);
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_pushvalue(L, 1);
+    lua_call(L, 0, 1);
+    *enabled = lua_toboolean(L, -1);
+    return 0;
+}
+
+char *plugin_host_context_menu_item_enabled(int index, HWND hEdit, int *enabled) {
+    if (enabled) *enabled = 0;
+    if (!enabled || s_busy || !s_lua || index < 0 || index >= s_contextMenuItemCount)
+        return NULL;
+    PluginContextMenuItem *item = &s_contextMenuItems[index];
+    if (item->enabledRef == LUA_NOREF) {
+        *enabled = 1;
+        return NULL;
+    }
+
+    char *stableLabel = dup_string(item->label);
+    char *stableOwner = dup_string(item->owner);
+    if (!stableLabel || !stableOwner) {
+        free(stableLabel); free(stableOwner);
+        return dup_string("out of memory evaluating context menu state");
+    }
+    s_busy = 1;
+    lua_editor_api_set_editor(hEdit);
+    s_runningLabel = stableLabel;
+    s_runningOwner = stableOwner;
+    s_timeLimited = 1;
+    lua_pushcfunction(s_lua, call_enabled_predicate);
+    lua_rawgeti(s_lua, LUA_REGISTRYINDEX, item->enabledRef);
+    lua_pushlightuserdata(s_lua, enabled);
+    char *error = protected_call(2);
+    lua_editor_api_set_editor(NULL);
+    s_runningLabel = NULL;
+    s_runningOwner = NULL;
+    s_busy = 0;
+    free(stableLabel);
+    free(stableOwner);
+    return error;
 }
 
 int plugin_host_find_override(const char *name) {
@@ -1143,24 +1343,57 @@ static char *call_registered(int ref, const char *label, const char *owner,
     return error;
 }
 
+/* Toggles one persisted checkbox and calls its function with the new state.
+   owner/key are copied because a context-menu callback may remove itself. */
+static char *run_checkbox(int ref, const char *label, const char *owner,
+                          const char *key, int defaultState, HWND hEdit,
+                          int timeLimited) {
+    int oldState = stored_checkbox_state(owner, key, defaultState);
+    int newState = !oldState;
+    char *stableOwner = dup_string(owner);
+    char *stableKey = dup_string(key);
+    if (!stableOwner || !stableKey) {
+        free(stableOwner); free(stableKey);
+        return dup_string("out of memory starting plugin callback");
+    }
+    if (!s_callbacks.config_set ||
+        !s_callbacks.config_set(stableOwner, stableKey, newState ? "1" : "0")) {
+        free(stableOwner); free(stableKey);
+        return dup_string("Could not save the plugin checkbox state.");
+    }
+    char *error = call_registered(ref, label, owner, NULL, newState, hEdit, timeLimited);
+    if (error) s_callbacks.config_set(stableOwner, stableKey, oldState ? "1" : "0");
+    free(stableOwner); free(stableKey);
+    return error;
+}
+
 char *plugin_host_run(int index, HWND hEdit) {
     if (s_busy) return dup_string("Another plugin is still running.");
     if (!s_lua || index < 0 || index >= s_commandCount)
         return dup_string("That plugin command is no longer loaded.");
     const PluginCommand *command = &s_commands[index];
     if (command->separator) return NULL; /* nothing to run */
-    if (command->configKey) {
-        int oldState = stored_checkbox_state(command), newState = !oldState;
-        if (!s_callbacks.config_set ||
-            !s_callbacks.config_set(command->owner, command->configKey, newState ? "1" : "0"))
-            return dup_string("Could not save the plugin checkbox state.");
-        char *error = call_registered(command->ref, command->label, command->owner,
-                                      NULL, newState, hEdit, !command->builtIn);
-        if (error) s_callbacks.config_set(command->owner, command->configKey, oldState ? "1" : "0");
-        return error;
-    }
+    if (command->configKey)
+        return run_checkbox(command->ref, command->label, command->owner,
+                            command->configKey, command->checkDefault, hEdit,
+                            !command->builtIn);
     return call_registered(command->ref, command->label, command->owner,
                            NULL, -1, hEdit, !command->builtIn);
+}
+
+char *plugin_host_run_context_menu_item(int id, HWND hEdit) {
+    if (s_busy) return dup_string("Another plugin is still running.");
+    if (!s_lua) return NULL;
+    for (int i = 0; i < s_contextMenuItemCount; i++) {
+        PluginContextMenuItem *item = &s_contextMenuItems[i];
+        if (item->id != id) continue;
+        if (item->configKey)
+            return run_checkbox(item->ref, item->label, item->owner,
+                                item->configKey, item->checkDefault, hEdit, 1);
+        return call_registered(item->ref, item->label, item->owner,
+                               NULL, -1, hEdit, 1);
+    }
+    return NULL;
 }
 
 char *plugin_host_fire(const char *event, const char *argument, HWND hEdit) {

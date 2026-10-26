@@ -40,7 +40,6 @@ static void apply_main_theme(HWND hwnd) {
         themed_scrollbar_refresh(g_hOutline);
         RedrawWindow(g_hOutline, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_ERASE);
     }
-    apply_debug_panel_theme();
     explorer_apply_theme();
 }
 

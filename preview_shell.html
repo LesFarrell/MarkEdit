@@ -71,6 +71,20 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
 .markdown-body pre code.hljs{padding:0;overflow:visible;background:transparent;}
 .math-display{margin:1em 0;overflow-x:auto;overflow-y:hidden;text-align:center;}
 .math-display>.katex-display{margin:0;padding:.2em 0;}
+/* Scrollbars match the app's own themed bars (themed_scrollbar.c): 14px,
+   no arrow buttons, a rounded thumb inset 3px. The colours are the app
+   palette's scrollThumb, scrollThumbHot and scrollThumbDrag, which
+   setTheme() passes in so themes.lua changes reach them; the fallbacks are
+   theme.c's built-in values, used until it does. */
+::-webkit-scrollbar{width:14px;height:14px;}
+::-webkit-scrollbar-button{display:none;}
+::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent;}
+::-webkit-scrollbar-thumb{background-color:var(--scrollbar-thumb,#c8cdd3);border:3px solid transparent;border-radius:7px;background-clip:padding-box;min-height:24px;}
+::-webkit-scrollbar-thumb:hover{background-color:var(--scrollbar-thumb-hot,#a8b0b9);}
+::-webkit-scrollbar-thumb:active{background-color:var(--scrollbar-thumb-drag,#8c959f);}
+.theme-dark ::-webkit-scrollbar-thumb{background-color:var(--scrollbar-thumb,#484f58);}
+.theme-dark ::-webkit-scrollbar-thumb:hover{background-color:var(--scrollbar-thumb-hot,#6e7681);}
+.theme-dark ::-webkit-scrollbar-thumb:active{background-color:var(--scrollbar-thumb-drag,#8b949e);}
 .theme-dark, .theme-dark body{background:#161b22;color:#e6edf3;color-scheme:dark;}
 .theme-dark code{background:#21262d;color:#e6edf3;}
 .theme-dark pre.codeblock{background:#21262d;}
@@ -118,9 +132,18 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
     }
     applyTheme(window.__markeditTheme);
   }
-  window.setTheme = function(theme) {
+  /* scrollbarColours, when given, is the app palette's [thumb, hot, drag]
+     for this theme; the scrollbar rules read them as CSS variables. */
+  var SCROLLBAR_VARIABLES = ['--scrollbar-thumb', '--scrollbar-thumb-hot', '--scrollbar-thumb-drag'];
+  window.setTheme = function(theme, scrollbarColours) {
     window.__markeditTheme = theme === 'dark' ? 'dark' : 'light';
     applyTheme(window.__markeditTheme);
+    if (Array.isArray(scrollbarColours)) {
+      SCROLLBAR_VARIABLES.forEach(function(name, i) {
+        if (/^#[0-9a-f]{6}$/i.test(scrollbarColours[i] || ''))
+          document.documentElement.style.setProperty(name, scrollbarColours[i]);
+      });
+    }
   };
   var link = document.getElementById('gh-css-local');
   link.onload = apply;

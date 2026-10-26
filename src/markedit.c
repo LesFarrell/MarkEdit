@@ -51,6 +51,9 @@
 #include "output_process.h"
 #include "output_text.h"
 #include "path_utils.h"
+#include "terminal_grid.h"
+#include "terminal_process.h"
+#include "terminal_view.h"
 #include "progress_dialog.h"
 #include "scintilla_config.h"
 #include "plugin_host.h"
@@ -72,8 +75,8 @@
 
 typedef struct AppWindows {
     HWND edit, preview, tabs, status, outline, minimap, splitEdit, lastEditView;
-    HWND debugPanel, debugStatus, debugVariables;
-    HWND debugContinue, debugStepOver, debugStepInto, debugStepOut, debugClose;
+    HWND debugStatus, debugVariables;
+    HWND debugContinue, debugStepOver, debugStepInto, debugStepOut;
     HWND outputPanel, outputInput;
 } AppWindows;
 static AppWindows g_windows;
@@ -85,14 +88,12 @@ static AppWindows g_windows;
 #define g_hMinimap g_windows.minimap
 #define g_hSplitEdit g_windows.splitEdit
 #define g_lastEditView g_windows.lastEditView
-#define g_hDebugPanel g_windows.debugPanel
 #define g_hDebugStatus g_windows.debugStatus
 #define g_hDebugVariables g_windows.debugVariables
 #define g_hDebugContinue g_windows.debugContinue
 #define g_hDebugStepOver g_windows.debugStepOver
 #define g_hDebugStepInto g_windows.debugStepInto
 #define g_hDebugStepOut g_windows.debugStepOut
-#define g_hDebugClose g_windows.debugClose
 #define g_hOutputPanel g_windows.outputPanel
 #define g_hOutputInput g_windows.outputInput
 HWND g_hMainWnd;
@@ -168,10 +169,10 @@ static HANDLE g_debugProcess = NULL;
 static HANDLE g_debugJob = NULL; /* owns the hidden GDB process tree so it cannot outlive MarkEdit */
 static int g_lastDebugLine = -1;
 static int g_activeDebuggerKind = 0; /* 1 = pdb, 2 = GDB */
-static int g_debugPanelVisible = 0;
 static char *g_lastDebugState = NULL;
-static void apply_debug_panel_theme(void);
 static void apply_output_panel_font(const char *faceUtf8);
+static HWND active_output_focus_target(void);
+static void show_output_panel(HWND hwnd, int tab, int focusInput);
 static int run_in_output_panel(const WCHAR *file, const WCHAR *parameters,
                                const WCHAR *directory, const WCHAR *title);
 static void restore_persisted_breakpoints(const WCHAR *path);
@@ -471,52 +472,6 @@ static void create_navigation_controls(HWND hwnd) {
     themed_scrollbar_attach(g_hOutline, THEMED_SCROLL_LISTBOX);
 }
 
-static void create_debug_controls(HWND hwnd, int dpi) {
-    g_hDebugPanel = CreateWindowExW(0, L"STATIC", L"",
-        WS_CHILD | WS_CLIPCHILDREN,
-        0, 0, 0, 0, hwnd, (HMENU)ID_DEBUG_PANEL, GetModuleHandleW(NULL), NULL);
-    SetWindowSubclass(g_hDebugPanel, DebugPanelSubclassProc, 1, 0);
-    g_hDebugStatus = CreateWindowExW(0, L"STATIC", L"Debugger",
-        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP,
-        0, 0, 0, 0, g_hDebugPanel, (HMENU)ID_DEBUG_STATUS, GetModuleHandleW(NULL), NULL);
-    g_hDebugContinue = CreateWindowExW(0, L"BUTTON", L"Continue  F6",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_CONTINUE, GetModuleHandleW(NULL), NULL);
-    g_hDebugStepOver = CreateWindowExW(0, L"BUTTON", L"Step Over  F10",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_STEP_OVER, GetModuleHandleW(NULL), NULL);
-    g_hDebugStepInto = CreateWindowExW(0, L"BUTTON", L"Step Into  F11",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_STEP_INTO, GetModuleHandleW(NULL), NULL);
-    g_hDebugStepOut = CreateWindowExW(0, L"BUTTON", L"Step Out  Shift+F11",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-        0, 0, 0, 0, g_hDebugPanel, (HMENU)IDM_DEBUG_STEP_OUT, GetModuleHandleW(NULL), NULL);
-    g_hDebugClose = CreateWindowExW(0, L"BUTTON", L"X",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-        0, 0, 0, 0, g_hDebugPanel, (HMENU)ID_DEBUG_CLOSE, GetModuleHandleW(NULL), NULL);
-    g_hDebugVariables = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL |
-        LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
-        0, 0, 0, 0, g_hDebugPanel, (HMENU)ID_DEBUG_VARIABLES, GetModuleHandleW(NULL), NULL);
-    ListView_SetExtendedListViewStyle(g_hDebugVariables,
-        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-    LVCOLUMNW debugColumn = {0};
-    debugColumn.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    debugColumn.pszText = L"Name"; debugColumn.cx = MulDiv(DEBUG_NAME_COLUMN_WIDTH, dpi, 96);
-    SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 0, (LPARAM)&debugColumn);
-    debugColumn.pszText = L"Value"; debugColumn.cx = MulDiv(DEBUG_VALUE_COLUMN_WIDTH, dpi, 96); debugColumn.iSubItem = 1;
-    SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 1, (LPARAM)&debugColumn);
-    HWND debugHeader = ListView_GetHeader(g_hDebugVariables);
-    if (debugHeader) SetWindowSubclass(debugHeader, DebugHeaderSubclassProc, 1, 0);
-    HFONT debugFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    HWND debugControls[] = { g_hDebugStatus, g_hDebugContinue, g_hDebugStepOver,
-                             g_hDebugStepInto, g_hDebugStepOut, g_hDebugClose,
-                             g_hDebugVariables };
-    for (size_t i = 0; i < sizeof(debugControls) / sizeof(debugControls[0]); i++)
-        SendMessageW(debugControls[i], WM_SETFONT, (WPARAM)debugFont, TRUE);
-    apply_debug_panel_theme();
-}
-
 static void create_document_tabs(HWND hwnd, int dpi) {
     g_hTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_TOOLTIPS |
@@ -611,7 +566,6 @@ static void initialize_main_window(HWND hwnd) {
     if (!g_focusMode) SetMenu(hwnd, build_menu());
     create_toolbar(hwnd);
     create_navigation_controls(hwnd);
-    create_debug_controls(hwnd, dpi);
 
     explorer_init(hwnd, explorer_request_open, show_text_input, reveal_path_in_explorer,
                   explorer_path_renamed, explorer_request_change_root);
@@ -811,12 +765,6 @@ static int handle_control_color(UINT msg, WPARAM wParam, LPARAM lParam, LRESULT 
         SetBkColor(hdc, preview_bg_color());
         SetTextColor(hdc, preview_palette()->previewTextFg);
         *result = (LRESULT)g_previewBkBrush;
-        return 1;
-    }
-    if (msg == WM_CTLCOLORSTATIC && control == g_hDebugPanel && g_mainBkBrush) {
-        SetBkColor(hdc, theme_bg_color());
-        SetTextColor(hdc, theme_fg_color());
-        *result = (LRESULT)g_mainBkBrush;
         return 1;
     }
     if (msg == WM_CTLCOLORLISTBOX && control == g_hOutline && g_mainBkBrush) {
@@ -1094,6 +1042,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_MOUSEMOVE:
             update_splitter_drag(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
+        case WM_MOUSEWHEEL:
+            if (route_terminal_mouse_wheel(wParam, lParam)) return 0;
+            break;
         case WM_LBUTTONUP:
             end_splitter_drag();
             return 0;
@@ -1310,6 +1261,7 @@ static int run_message_loop(HWND mainWindow) {
     while ((result = GetMessage(&message, NULL, 0, 0)) > 0) {
         if (find_dialog_shortcut(&message)) continue;
         if (g_hFindDlg && IsDialogMessage(g_hFindDlg, &message)) continue;
+        if (explorer_pretranslate_message(&message)) continue;
         if (g_hAccel && TranslateAcceleratorA(mainWindow, g_hAccel, &message)) continue;
         if (IsDialogMessage(mainWindow, &message)) continue;
         TranslateMessage(&message);

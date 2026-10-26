@@ -55,15 +55,4 @@ int output_find_location(const char *line, size_t length, OutputLocation *locati
    isn't a file. Returns 0 when there's no shorter candidate. */
 int output_location_next_candidate(const char *line, OutputLocation *location);
 
-/* ---- the terminal's PowerShell ----
-   PowerShell decodes the terminal's input in the OEM code page, so each
-   command is sent as Base64 UTF-8 and run with Invoke-Expression, which
-   keeps variables and the location between commands. */
-
-/* Sent once when the terminal starts: UTF-8 output, then the first prompt. */
-extern const char OUTPUT_TERMINAL_STARTUP[];
-/* The lines that run `command` (UTF-8) and then show the prompt again, as a
-   heap string the caller frees, or NULL when out of memory. */
-char *output_terminal_command(const char *command, size_t length);
-
 #endif

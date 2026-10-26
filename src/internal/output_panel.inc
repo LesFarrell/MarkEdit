@@ -1,21 +1,24 @@
-/* ---- The output panel: Run's output and a PowerShell terminal ----------
+/* ---- The output panel: Run's output, a real terminal, and the debugger --
    Docked under the editor and preview with a splitter above it (see
-   layout_output_panel()). Each tab shows one program's output in a
-   read-only Scintilla view that scrolls sideways rather than wraps: the
-   Output tab whatever Run started, plus what plugins write with the
-   output.* API (see write_plugin_output()); the Terminal tab a PowerShell
-   that starts the first time it is used. The line along the bottom sends
-   what is typed to the visible tab's program: a command on the Terminal
-   tab, input for the running program on the Output tab. Double-clicking a
-   file location in the output opens it.
+   layout_output_panel()). The Output tab is a read-only Scintilla log that
+   scrolls sideways rather than wraps, showing whatever Run started plus
+   what plugins write with the output.* API (see write_plugin_output()); the
+   line along the bottom sends typed input to it. The Terminal tab is a real
+   PowerShell on a Windows pseudoconsole (ConPTY), rendered and driven by
+   terminal_view.c - full-screen programs (vim, less, PSReadLine's live
+   completion) work there the way they would in any other terminal, and
+   keystrokes go to it directly rather than through the shared input line.
+   The Debug tab shows a running debug session's status and variables
+   (populated by debugger.inc, shown via its show_debug_panel()); it reuses
+   each tab's view/input-line split for the variables list and status line.
 
-   output_process.c runs the programs and output_text.c decodes what they
-   write; this file only connects them to the views. */
+   output_process.c runs the Output tab's programs and output_text.c decodes
+   what they write; this file only connects them to the Scintilla views.
+   terminal_view.c is self-contained (it owns its TerminalProcess and
+   TerminalGrid), so this file only starts, sizes, themes and stops it. */
 
 #define OUTPUT_MAX_LENGTH (4 * 1024 * 1024) /* older output is dropped beyond this */
 #define OUTPUT_HISTORY_SIZE 50
-
-enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_COUNT };
 
 /* Styles of the panel's own text, after the decoder's ANSI colours. */
 enum { OUTPUT_STYLE_NOTE = OUTPUT_STYLE_COUNT, OUTPUT_STYLE_FAILURE, OUTPUT_STYLE_INPUT };
@@ -34,6 +37,7 @@ typedef struct OutputPane {
 } OutputPane;
 
 static OutputPane g_outputPanes[OUTPUT_TAB_COUNT];
+static TerminalView *g_terminalView; /* the Terminal tab; g_outputPanes[OUTPUT_TAB_TERMINAL].view is its window */
 static int g_outputTab = OUTPUT_TAB_RUN;
 static int g_outputNextSession = 1;
 static HWND g_hOutputClear, g_hOutputStop, g_hOutputClose;
@@ -64,6 +68,37 @@ static int output_pane_running(const OutputPane *pane) {
     return pane->process != NULL;
 }
 
+/* Whether the given tab has something running - the Run tab's OutputProcess,
+   or the Terminal tab's own shell. */
+static int tab_running(int tab) {
+    return tab == OUTPUT_TAB_TERMINAL ? terminal_view_running(g_terminalView)
+                                      : output_pane_running(&g_outputPanes[tab]);
+}
+
+/* Where Tab/pane-cycling (ui_shell.inc's cycle_pane_focus) should send focus
+   when it reaches the output panel: the shared input line normally, the
+   Terminal tab's own control (which takes keystrokes directly), or the
+   Debug tab's variables list. */
+static HWND active_output_focus_target(void) {
+    if (g_outputTab == OUTPUT_TAB_TERMINAL) return terminal_view_window(g_terminalView);
+    if (g_outputTab == OUTPUT_TAB_DEBUG) return g_hDebugVariables;
+    return g_hOutputInput;
+}
+
+/* WM_MOUSEWHEEL follows the focused-window chain on systems/settings that do
+   not route it to the window under the pointer. Forward it explicitly when
+   the visible Terminal pane is under the wheel, so hovering is sufficient. */
+static int route_terminal_mouse_wheel(WPARAM wParam, LPARAM lParam) {
+    if (g_outputTab != OUTPUT_TAB_TERMINAL || !g_terminalView) return 0;
+    HWND terminal = terminal_view_window(g_terminalView);
+    if (!terminal || !IsWindowVisible(terminal)) return 0;
+    RECT bounds;
+    POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+    if (!GetWindowRect(terminal, &bounds) || !PtInRect(&bounds, point)) return 0;
+    SendMessageW(terminal, WM_MOUSEWHEEL, wParam, lParam);
+    return 1;
+}
+
 /* ---- appearance ---- */
 
 static void apply_output_view_theme(HWND view) {
@@ -84,33 +119,63 @@ static void apply_output_view_theme(HWND view) {
     SendMessageA(view, SCI_SETSELFORE, TRUE, p->selectionFg);
 }
 
+/* The debugger stays in the output panel instead of a tool window of its
+   own. Its buttons remain native controls for keyboard/accessibility, with
+   owner-drawing used only to match the app's exact border palette. */
+static void apply_debug_tab_theme(void) {
+    HWND controls[] = { g_hDebugStatus, g_hDebugContinue, g_hDebugStepOver,
+                        g_hDebugStepInto, g_hDebugStepOut, g_hDebugVariables };
+    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++)
+        if (controls[i]) {
+            apply_explorer_theme(controls[i]);
+            InvalidateRect(controls[i], NULL, TRUE);
+        }
+    if (g_hDebugVariables) {
+        ListView_SetBkColor(g_hDebugVariables, theme_bg_color());
+        ListView_SetTextBkColor(g_hDebugVariables, theme_bg_color());
+        ListView_SetTextColor(g_hDebugVariables, theme_fg_color());
+        HWND header = ListView_GetHeader(g_hDebugVariables);
+        if (header) {
+            apply_explorer_theme(header);
+            InvalidateRect(header, NULL, TRUE);
+        }
+    }
+}
+
 static void apply_output_panel_theme(void) {
     if (!g_hOutputPanel) return;
-    for (int i = 0; i < OUTPUT_TAB_COUNT; i++) apply_output_view_theme(g_outputPanes[i].view);
+    apply_output_view_theme(g_outputPanes[OUTPUT_TAB_RUN].view);
     apply_output_view_theme(g_hOutputInput);
+    const ThemePalette *p = theme_palette();
+    const COLORREF *ansi = g_editorDarkMode ? OUTPUT_ANSI_DARK : OUTPUT_ANSI_LIGHT;
+    terminal_view_apply_theme(g_terminalView, ansi, p->fg, p->bg);
+    apply_debug_tab_theme();
     InvalidateRect(g_hOutputPanel, NULL, TRUE);
-    HWND buttons[] = { g_outputPanes[0].tab, g_outputPanes[1].tab, g_hOutputClear,
-                       g_hOutputStop, g_hOutputClose };
+    HWND buttons[] = { g_outputPanes[0].tab, g_outputPanes[1].tab, g_outputPanes[2].tab,
+                       g_hOutputClear, g_hOutputStop, g_hOutputClose,
+                       g_hDebugContinue, g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut };
     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++)
         if (buttons[i]) InvalidateRect(buttons[i], NULL, TRUE);
 }
 
-/* The editor's font, at its size, for the views and the input line. */
+/* The editor's font, at its size, for the Run tab's views, the input line
+   and the Terminal tab. */
 static void apply_output_panel_font(const char *faceUtf8) {
     if (!g_hOutputPanel) return;
-    HWND views[] = { g_outputPanes[0].view, g_outputPanes[1].view, g_hOutputInput };
+    HWND views[] = { g_outputPanes[OUTPUT_TAB_RUN].view, g_hOutputInput };
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); i++) {
         SendMessageA(views[i], SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
         SendMessageA(views[i], SCI_STYLESETSIZE, STYLE_DEFAULT, g_fontPointSize);
         SendMessageA(views[i], SCI_STYLESETWEIGHT, STYLE_DEFAULT, g_fontWeight);
         apply_output_view_theme(views[i]); /* its STYLECLEARALL spreads the font */
     }
+    terminal_view_apply_font(g_terminalView, faceUtf8, g_fontPointSize, g_fontWeight);
 }
 
 /* The Stop button and the tab labels follow what's running. */
 static void update_output_controls(void) {
     if (!g_hOutputPanel) return;
-    EnableWindow(g_hOutputStop, output_pane_running(active_output_pane()));
+    EnableWindow(g_hOutputStop, tab_running(g_outputTab));
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++) InvalidateRect(g_outputPanes[i].tab, NULL, TRUE);
 }
 
@@ -207,29 +272,22 @@ static int start_output_program(OutputPane *pane, const WCHAR *commandLine, cons
     return 1;
 }
 
-/* WM_APP_OUTPUT: output from a program, or the news that it has finished. */
+/* WM_APP_OUTPUT: output from Run's program, or the news that it has
+   finished. The Terminal tab's own output arrives at its own window
+   instead - see terminal_view.c's WM_TERMINAL_CHUNK. */
 static void handle_output_chunk(OutputChunk *chunk) {
-    for (int i = 0; i < OUTPUT_TAB_COUNT; i++) {
-        OutputPane *pane = &g_outputPanes[i];
-        if (!pane->process || pane->session != chunk->session) continue;
+    OutputPane *pane = &g_outputPanes[OUTPUT_TAB_RUN];
+    if (pane->process && pane->session == chunk->session) {
         output_decoder_feed(&pane->decoder, chunk->data, chunk->length, &OUTPUT_PANE_SINK, pane);
         if (chunk->finished) {
             end_output_program(pane);
-            if (i == OUTPUT_TAB_TERMINAL) {
-                WCHAR note[64];
-                swprintf(note, sizeof(note) / sizeof(note[0]),
-                         L"[The terminal ended with code %lu. Press Enter to start it again.]",
-                         (unsigned long)chunk->exitCode);
-                append_output_note(pane, OUTPUT_STYLE_NOTE, note);
-            }
             update_output_controls();
         }
-        break;
     }
     free(chunk);
 }
 
-/* The folder new terminals start in: the workspace, or the document's
+/* The folder a new terminal starts in: the workspace, or the document's
    folder, or the user's profile. Caller frees. */
 static WCHAR *terminal_directory(void) {
     if (g_currentWorkspaceFolder) return _wcsdup(g_currentWorkspaceFolder);
@@ -239,22 +297,21 @@ static WCHAR *terminal_directory(void) {
     return length > 0 && length < MAX_PATH ? _wcsdup(profile) : NULL;
 }
 
+/* Starts (or restarts) the Terminal tab's shell: a real, interactive
+   PowerShell session, the same as the user would get opening it directly -
+   unlike the old pipe-based terminal, there's no need to suppress its
+   profile or wrap commands to survive a non-interactive pipe. */
 static int start_terminal(void) {
-    OutputPane *pane = &g_outputPanes[OUTPUT_TAB_TERMINAL];
-    if (pane->process) return 1;
+    if (terminal_view_running(g_terminalView)) return 1;
     WCHAR *powershell = locate_powershell();
     WCHAR *directory = terminal_directory();
-    size_t capacity = (powershell ? wcslen(powershell) : 0) + 64;
+    size_t capacity = (powershell ? wcslen(powershell) : 0) + 16;
     WCHAR *command = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     int started = 0;
-    if (powershell && command &&
-        swprintf(command, capacity, L"\"%ls\" -NoLogo -NoProfile -NoExit -Command -", powershell) > 0)
-        started = start_output_program(pane, command, directory);
-    if (started) {
-        output_process_write(pane->process, OUTPUT_TERMINAL_STARTUP, strlen(OUTPUT_TERMINAL_STARTUP));
-    } else {
-        append_output_note(pane, OUTPUT_STYLE_FAILURE, L"[PowerShell could not be started.]");
-    }
+    if (powershell && command && swprintf(command, capacity, L"\"%ls\" -NoLogo", powershell) > 0)
+        started = terminal_view_start(g_terminalView, command, directory);
+    if (!started)
+        terminal_view_show_message(g_terminalView, L"PowerShell could not be started.");
     free(command);
     free(directory);
     free(powershell);
@@ -264,10 +321,15 @@ static int start_terminal(void) {
 
 /* ---- showing the panel ---- */
 
+static void size_output_panel(HWND panel); /* defined below, in "the panel window" section */
+
 static void select_output_tab(int tab) {
     g_outputTab = tab;
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
         ShowWindow(g_outputPanes[i].view, i == tab ? SW_SHOW : SW_HIDE);
+    /* The Terminal tab's content rect and the input line's visibility both
+       depend on which tab is selected (see output_content_rect()). */
+    if (g_hOutputPanel) size_output_panel(g_hOutputPanel);
     update_output_controls();
     if (tab == OUTPUT_TAB_TERMINAL) start_terminal();
 }
@@ -279,7 +341,7 @@ static void show_output_panel(HWND hwnd, int tab, int focusInput) {
         g_outputPanelVisible = 1;
         relayout_and_save(hwnd);
     }
-    if (focusInput) SetFocus(g_hOutputInput);
+    if (focusInput) SetFocus(active_output_focus_target());
 }
 
 static void hide_output_panel(HWND hwnd) {
@@ -371,8 +433,9 @@ static void browse_output_history(int delta) {
     SendMessageA(g_hOutputInput, SCI_DOCUMENTEND, 0, 0);
 }
 
-/* Enter: sends the line to the visible tab's program, echoing it in the
-   output. On the Terminal tab that starts PowerShell again if it ended. */
+/* Enter: sends the line to the Run tab's program, echoing it in the output.
+   The shared input line is Run-tab-only; the Terminal tab takes keystrokes
+   directly (see terminal_view.c). */
 static void submit_output_input(void) {
     char *text = output_input_text();
     if (!text) return;
@@ -381,15 +444,7 @@ static void submit_output_input(void) {
     g_outputHistoryIndex = g_outputHistoryCount;
     SendMessageA(g_hOutputInput, SCI_CLEARALL, 0, 0);
     size_t length = strlen(text);
-    if (g_outputTab == OUTPUT_TAB_TERMINAL) {
-        if (start_terminal()) {
-            append_output(pane, OUTPUT_STYLE_INPUT, text, length);
-            append_output(pane, OUTPUT_STYLE_INPUT, "\n", 1);
-            char *command = output_terminal_command(text, length);
-            if (command) output_process_write(pane->process, command, strlen(command));
-            free(command);
-        }
-    } else if (output_pane_running(pane)) {
+    if (output_pane_running(pane)) {
         append_output(pane, OUTPUT_STYLE_INPUT, text, length);
         append_output(pane, OUTPUT_STYLE_INPUT, "\n", 1);
         output_process_write(pane->process, text, length);
@@ -482,6 +537,96 @@ static int open_output_location(OutputPane *pane, Sci_Position position) {
 
 /* ---- the panel window ---- */
 
+static void paint_debug_header(HWND header, HDC hdc) {
+    RECT client;
+    GetClientRect(header, &client);
+    fill_rect_color(hdc, &client, theme_bg_color());
+
+    HFONT font = (HFONT)SendMessageW(header, WM_GETFONT, 0, 0);
+    if (!font) font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    int count = (int)SendMessageW(header, HDM_GETITEMCOUNT, 0, 0);
+    for (int column = 0; column < count; column++) {
+        RECT rc = {0};
+        if (!SendMessageW(header, HDM_GETITEMRECT, (WPARAM)column, (LPARAM)&rc)) continue;
+        WCHAR label[64] = L"";
+        HDITEMW item = {0};
+        item.mask = HDI_TEXT;
+        item.pszText = label;
+        item.cchTextMax = sizeof(label) / sizeof(label[0]);
+        SendMessageW(header, HDM_GETITEMW, (WPARAM)column, (LPARAM)&item);
+
+        RECT divider = { rc.right - 1, rc.top, rc.right, rc.bottom };
+        fill_rect_color(hdc, &divider, theme_border_color());
+        rc.left += 7;
+        rc.right -= 5;
+        SetTextColor(hdc, theme_fg_color());
+        SetBkMode(hdc, TRANSPARENT);
+        DrawTextW(hdc, label, -1, &rc,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    RECT bottom = { client.left, client.bottom - 1, client.right, client.bottom };
+    fill_rect_color(hdc, &bottom, theme_border_color());
+    SelectObject(hdc, oldFont);
+}
+
+static LRESULT CALLBACK DebugHeaderSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                                 LPARAM lParam, UINT_PTR id,
+                                                 DWORD_PTR data) {
+    (void)lParam; (void)id; (void)data;
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        paint_debug_header(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_PRINTCLIENT) {
+        paint_debug_header(hwnd, (HDC)wParam);
+        return 0;
+    }
+    if (msg == WM_THEMECHANGED) {
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY)
+        RemoveWindowSubclass(hwnd, DebugHeaderSubclassProc, 1);
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+/* The debug buttons' owner-draw painter; output_panel.inc's own WM_DRAWITEM
+   falls back to it for anything that isn't a tab button (Clear/Stop/Close
+   use it too - a plain bordered push-button looks the same either way). */
+static void draw_debug_panel_button(const DRAWITEMSTRUCT *dis) {
+    int pressed = (dis->itemState & ODS_SELECTED) != 0;
+    int disabled = (dis->itemState & ODS_DISABLED) != 0;
+    COLORREF fill = pressed ? theme_palette()->pressedBg : theme_bg_color();
+    COLORREF text = disabled ? theme_palette()->disabledFg : theme_fg_color();
+    fill_rect_color(dis->hDC, &dis->rcItem, fill);
+
+    HPEN pen = CreatePen(PS_SOLID, 1, theme_border_color());
+    HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top,
+              dis->rcItem.right, dis->rcItem.bottom);
+    SelectObject(dis->hDC, oldBrush);
+    SelectObject(dis->hDC, oldPen);
+    DeleteObject(pen);
+
+    WCHAR label[64];
+    GetWindowTextW(dis->hwndItem, label, sizeof(label) / sizeof(label[0]));
+    RECT textRect = dis->rcItem;
+    SetTextColor(dis->hDC, text);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    DrawTextW(dis->hDC, label, -1, &textRect,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (dis->itemState & ODS_FOCUS) {
+        InflateRect(&textRect, -3, -3);
+        DrawFocusRect(dis->hDC, &textRect);
+    }
+}
+
 static void draw_output_tab_button(const DRAWITEMSTRUCT *dis, int tab) {
     const ThemePalette *p = theme_palette();
     int selected = tab == g_outputTab;
@@ -493,7 +638,7 @@ static void draw_output_tab_button(const DRAWITEMSTRUCT *dis, int tab) {
     WCHAR label[32];
     GetWindowTextW(dis->hwndItem, label, sizeof(label) / sizeof(label[0]));
     /* A running program shows as a dot after its tab's name. */
-    if (output_pane_running(&g_outputPanes[tab]) && wcslen(label) < 28) wcscat(label, L" \x2022");
+    if (tab_running(tab) && wcslen(label) < 28) wcscat(label, L" \x2022");
     RECT textRect = dis->rcItem;
     SetTextColor(dis->hDC, selected ? p->tabSelectedFg : p->tabFg);
     SetBkMode(dis->hDC, TRANSPARENT);
@@ -524,6 +669,50 @@ static OutputPanelLayout output_panel_layout(HWND panel) {
     return layout;
 }
 
+/* The Terminal tab has no separate input line - it takes keystrokes
+   directly - so its content fills the view rect and the input box's space
+   below it; the Run tab keeps the two separate. */
+static RECT output_content_rect(const OutputPanelLayout *layout) {
+    RECT rect = layout->view;
+    if (g_outputTab == OUTPUT_TAB_TERMINAL) rect.bottom = layout->inputBox.bottom;
+    return rect;
+}
+
+#define OUTPUT_HEADER_BUTTON_MAX 5
+
+typedef struct { HWND hwnd; int width; } OutputHeaderButton;
+
+/* The header row's right-aligned buttons for the active tab, built right to
+   left so Close ends up rightmost: Run/Terminal get Clear/Stop/Close; Debug
+   gets its Continue/Step commands instead, in the same order the standalone
+   debug panel used to show them. Returns how many of buttons were filled. */
+static int active_output_buttons(OutputHeaderButton *buttons, int dpi) {
+    int closeWidth = MulDiv(DEBUG_CLOSE_BUTTON_WIDTH, dpi, 96);
+    int n = 0;
+    buttons[n++] = (OutputHeaderButton){ g_hOutputClose, closeWidth };
+    if (g_outputTab == OUTPUT_TAB_DEBUG) {
+        int debugWidth = MulDiv(DEBUG_BUTTON_WIDTH, dpi, 96);
+        buttons[n++] = (OutputHeaderButton){ g_hDebugStepOut, debugWidth };
+        buttons[n++] = (OutputHeaderButton){ g_hDebugStepInto, debugWidth };
+        buttons[n++] = (OutputHeaderButton){ g_hDebugStepOver, debugWidth };
+        buttons[n++] = (OutputHeaderButton){ g_hDebugContinue, debugWidth };
+    } else {
+        int buttonWidth = MulDiv(OUTPUT_BUTTON_WIDTH, dpi, 96);
+        buttons[n++] = (OutputHeaderButton){ g_hOutputStop, buttonWidth };
+        buttons[n++] = (OutputHeaderButton){ g_hOutputClear, buttonWidth };
+    }
+    return n;
+}
+
+/* The tab's status line, shown where the Run tab's input line normally is:
+   the input line itself, or the Debug tab's read-only status label. The
+   Terminal tab has neither - it takes keystrokes directly. */
+static HWND active_output_status_control(void) {
+    if (g_outputTab == OUTPUT_TAB_RUN) return g_hOutputInput;
+    if (g_outputTab == OUTPUT_TAB_DEBUG) return g_hDebugStatus;
+    return NULL;
+}
+
 static void size_output_panel(HWND panel) {
     RECT rc;
     GetClientRect(panel, &rc);
@@ -531,35 +720,47 @@ static void size_output_panel(HWND panel) {
     OutputPanelLayout layout = output_panel_layout(panel);
     int row = layout.header - layout.pad;
     int tabWidth = MulDiv(OUTPUT_TAB_WIDTH, dpi, 96);
-    int buttonWidth = MulDiv(OUTPUT_BUTTON_WIDTH, dpi, 96);
-    int closeWidth = MulDiv(DEBUG_CLOSE_BUTTON_WIDTH, dpi, 96);
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
         MoveWindow(g_outputPanes[i].tab, layout.pad + i * tabWidth, layout.pad / 2, tabWidth, row, TRUE);
     /* The buttons line up from the right edge. Any that would run into the
-       tabs are hidden instead, Clear first and X last, since overlapping
-       controls paint over each other. */
+       tabs are hidden instead, the leftmost first and Close last, since
+       overlapping controls paint over each other. Buttons from a tab that
+       isn't active are hidden outright, rather than left stacked underneath
+       the active tab's. */
+    HWND inactiveButtons[] = { g_hOutputClear, g_hOutputStop, g_hDebugContinue,
+                               g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut };
+    for (size_t i = 0; i < sizeof(inactiveButtons) / sizeof(inactiveButtons[0]); i++)
+        ShowWindow(inactiveButtons[i], SW_HIDE);
     int tabsRight = layout.pad + OUTPUT_TAB_COUNT * tabWidth;
-    HWND buttons[] = { g_hOutputClose, g_hOutputStop, g_hOutputClear };
-    int widths[] = { closeWidth, buttonWidth, buttonWidth };
+    OutputHeaderButton buttons[OUTPUT_HEADER_BUTTON_MAX];
+    int buttonCount = active_output_buttons(buttons, dpi);
     int x = rc.right;
     int room = 1;
-    for (int i = 0; i < 3; i++) {
-        x -= layout.pad + widths[i];
+    for (int i = 0; i < buttonCount; i++) {
+        x -= layout.pad + buttons[i].width;
         room = room && x >= tabsRight + layout.pad;
-        if (room) MoveWindow(buttons[i], x, layout.pad / 2, widths[i], row, TRUE);
-        ShowWindow(buttons[i], room ? SW_SHOW : SW_HIDE);
+        if (room) MoveWindow(buttons[i].hwnd, x, layout.pad / 2, buttons[i].width, row, TRUE);
+        ShowWindow(buttons[i].hwnd, room ? SW_SHOW : SW_HIDE);
     }
     /* A control that only moves can keep the pixels it had, so the tabs and
        buttons redraw themselves at every size. */
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++) InvalidateRect(g_outputPanes[i].tab, NULL, TRUE);
-    for (int i = 0; i < 3; i++) InvalidateRect(buttons[i], NULL, TRUE);
-    /* One pixel inside the borders paint_output_panel() draws. */
-    RECT view = layout.view, input = layout.inputBox;
-    for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
-        MoveWindow(g_outputPanes[i].view, view.left + 1, view.top + 1,
-                   view.right - view.left - 2, view.bottom - view.top - 2, TRUE);
-    MoveWindow(g_hOutputInput, input.left + 1, input.top + 1,
-               input.right - input.left - 2, input.bottom - input.top - 2, TRUE);
+    for (int i = 0; i < buttonCount; i++) InvalidateRect(buttons[i].hwnd, NULL, TRUE);
+    /* One pixel inside the borders paint_output_panel() draws. Each tab's
+       view gets its own content rect: the Terminal tab's spans the input
+       box's space too, since it has no separate input line. */
+    for (int i = 0; i < OUTPUT_TAB_COUNT; i++) {
+        RECT content = i == OUTPUT_TAB_TERMINAL ? output_content_rect(&layout) : layout.view;
+        MoveWindow(g_outputPanes[i].view, content.left + 1, content.top + 1,
+                   content.right - content.left - 2, content.bottom - content.top - 2, TRUE);
+    }
+    RECT input = layout.inputBox;
+    HWND statusControl = active_output_status_control();
+    ShowWindow(g_hOutputInput, statusControl == g_hOutputInput ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hDebugStatus, statusControl == g_hDebugStatus ? SW_SHOW : SW_HIDE);
+    if (statusControl)
+        MoveWindow(statusControl, input.left + 1, input.top + 1,
+                   input.right - input.left - 2, input.bottom - input.top - 2, TRUE);
 }
 
 static void frame_rect(HDC hdc, const RECT *rc, COLORREF colour) {
@@ -578,8 +779,9 @@ static void paint_output_panel(HWND panel, HDC hdc) {
     GetClientRect(panel, &rc);
     fill_rect_color(hdc, &rc, theme_bg_color());
     OutputPanelLayout layout = output_panel_layout(panel);
-    frame_rect(hdc, &layout.view, theme_border_color());
-    frame_rect(hdc, &layout.inputBox, theme_border_color());
+    RECT content = output_content_rect(&layout);
+    frame_rect(hdc, &content, theme_border_color());
+    if (g_outputTab != OUTPUT_TAB_TERMINAL) frame_rect(hdc, &layout.inputBox, theme_border_color());
 }
 
 static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
@@ -615,28 +817,40 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
                 case ID_OUTPUT_TAB_RUN: select_output_tab(OUTPUT_TAB_RUN); SetFocus(g_hOutputInput); return 0;
-                case ID_OUTPUT_TAB_TERMINAL: select_output_tab(OUTPUT_TAB_TERMINAL); SetFocus(g_hOutputInput); return 0;
-                case ID_OUTPUT_CLEAR: {
-                    OutputPane *pane = active_output_pane();
-                    clear_output_pane(pane);
-                    /* A running terminal shows its prompt again. */
-                    if (g_outputTab == OUTPUT_TAB_TERMINAL && pane->process) {
-                        char *prompt = output_terminal_command("", 0);
-                        if (prompt) output_process_write(pane->process, prompt, strlen(prompt));
-                        free(prompt);
-                    }
-                    SetFocus(g_hOutputInput);
+                case ID_OUTPUT_TAB_TERMINAL:
+                    select_output_tab(OUTPUT_TAB_TERMINAL);
+                    SetFocus(terminal_view_window(g_terminalView));
                     return 0;
-                }
-                case ID_OUTPUT_STOP: {
-                    OutputPane *pane = active_output_pane();
-                    if (pane->process) {
-                        end_output_program(pane);
-                        append_output_note(pane, OUTPUT_STYLE_FAILURE, L"[Stopped]");
-                        update_output_controls();
+                case ID_OUTPUT_TAB_DEBUG:
+                    select_output_tab(OUTPUT_TAB_DEBUG);
+                    SetFocus(g_hDebugVariables);
+                    return 0;
+                case IDM_DEBUG_CONTINUE: case IDM_DEBUG_STEP_OVER:
+                case IDM_DEBUG_STEP_INTO: case IDM_DEBUG_STEP_OUT:
+                    /* debugger.inc's run_debugger_command() is reached through
+                       the main window's own WM_COMMAND dispatch. */
+                    SendMessageW(g_hMainWnd, WM_COMMAND, LOWORD(wParam), 0);
+                    return 0;
+                case ID_OUTPUT_CLEAR:
+                    if (g_outputTab == OUTPUT_TAB_TERMINAL) {
+                        terminal_view_clear_scrollback(g_terminalView);
+                    } else {
+                        clear_output_pane(active_output_pane());
+                    }
+                    SetFocus(active_output_focus_target());
+                    return 0;
+                case ID_OUTPUT_STOP:
+                    if (g_outputTab == OUTPUT_TAB_TERMINAL) {
+                        if (terminal_view_running(g_terminalView)) terminal_view_stop(g_terminalView);
+                    } else {
+                        OutputPane *pane = active_output_pane();
+                        if (pane->process) {
+                            end_output_program(pane);
+                            append_output_note(pane, OUTPUT_STYLE_FAILURE, L"[Stopped]");
+                            update_output_controls();
+                        }
                     }
                     return 0;
-                }
                 case ID_OUTPUT_CLOSE:
                     hide_output_panel(g_hMainWnd);
                     return 0;
@@ -649,17 +863,33 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
                     if (notification->hwndFrom == g_outputPanes[i].view)
                         open_output_location(&g_outputPanes[i],
                                              ((struct SCNotification *)lParam)->position);
+            } else if (notification->code == TVN_EXITED) {
+                update_output_controls();
+            } else if (notification->code == TVN_RESTART_REQUESTED) {
+                start_terminal();
             }
             return 0;
         }
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
             if (dis->CtlType != ODT_BUTTON) break;
-            if (dis->hwndItem == g_outputPanes[OUTPUT_TAB_RUN].tab) draw_output_tab_button(dis, OUTPUT_TAB_RUN);
-            else if (dis->hwndItem == g_outputPanes[OUTPUT_TAB_TERMINAL].tab) draw_output_tab_button(dis, OUTPUT_TAB_TERMINAL);
+            int tab = -1;
+            for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
+                if (dis->hwndItem == g_outputPanes[i].tab) { tab = i; break; }
+            if (tab >= 0) draw_output_tab_button(dis, tab);
             else draw_debug_panel_button(dis);
             return TRUE;
         }
+        /* g_hDebugStatus is a plain (non-owner-drawn) STATIC, so Windows asks
+           for its colours here rather than through WM_DRAWITEM. */
+        case WM_CTLCOLORSTATIC:
+            if (g_mainBkBrush) {
+                HDC hdc = (HDC)wParam;
+                SetTextColor(hdc, theme_fg_color());
+                SetBkMode(hdc, TRANSPARENT);
+                return (LRESULT)g_mainBkBrush;
+            }
+            break;
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, OutputPanelSubclassProc, 1);
             break;
@@ -691,24 +921,60 @@ static void create_output_panel(HWND hwnd) {
     g_hOutputPanel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_CLIPCHILDREN,
                                      0, 0, 0, 0, hwnd, (HMENU)ID_OUTPUT_PANEL, GetModuleHandleW(NULL), NULL);
     SetWindowSubclass(g_hOutputPanel, OutputPanelSubclassProc, 1, 0);
-    static const WCHAR *const labels[OUTPUT_TAB_COUNT] = { L"Output", L"Terminal" };
-    static const int tabIds[OUTPUT_TAB_COUNT] = { ID_OUTPUT_TAB_RUN, ID_OUTPUT_TAB_TERMINAL };
-    static const int viewIds[OUTPUT_TAB_COUNT] = { ID_OUTPUT_VIEW, ID_TERMINAL_VIEW };
-    for (int i = 0; i < OUTPUT_TAB_COUNT; i++) {
-        OutputPane *pane = &g_outputPanes[i];
-        pane->tab = create_output_button(g_hOutputPanel, labels[i], tabIds[i]);
-        pane->view = create_output_scintilla(g_hOutputPanel, viewIds[i], i == g_outputTab);
-        SendMessageA(pane->view, SCI_SETREADONLY, TRUE, 0);
-        SendMessageA(pane->view, SCI_SETUNDOCOLLECTION, FALSE, 0);
-        /* Long lines scroll sideways rather than wrap, so output keeps its
-           columns; the scrollbar appears only once a line is too wide. */
-        SendMessageA(pane->view, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
-        SendMessageA(pane->view, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
-        SendMessageA(pane->view, SCI_SETSCROLLWIDTH, 1, 0);
-        themed_scrollbar_attach(pane->view, THEMED_SCROLL_SCINTILLA);
-        SetWindowSubclass(pane->view, OutputViewSubclassProc, (UINT_PTR)(i + 1), 0);
-        output_decoder_init(&pane->decoder);
-    }
+    static const WCHAR *const labels[OUTPUT_TAB_COUNT] = { L"Output", L"Terminal", L"Debug" };
+    static const int tabIds[OUTPUT_TAB_COUNT] = { ID_OUTPUT_TAB_RUN, ID_OUTPUT_TAB_TERMINAL, ID_OUTPUT_TAB_DEBUG };
+    for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
+        g_outputPanes[i].tab = create_output_button(g_hOutputPanel, labels[i], tabIds[i]);
+
+    OutputPane *runPane = &g_outputPanes[OUTPUT_TAB_RUN];
+    runPane->view = create_output_scintilla(g_hOutputPanel, ID_OUTPUT_VIEW, g_outputTab == OUTPUT_TAB_RUN);
+    SendMessageA(runPane->view, SCI_SETREADONLY, TRUE, 0);
+    SendMessageA(runPane->view, SCI_SETUNDOCOLLECTION, FALSE, 0);
+    /* Long lines scroll sideways rather than wrap, so output keeps its
+       columns; the scrollbar appears only once a line is too wide. */
+    SendMessageA(runPane->view, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
+    SendMessageA(runPane->view, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
+    SendMessageA(runPane->view, SCI_SETSCROLLWIDTH, 1, 0);
+    themed_scrollbar_attach(runPane->view, THEMED_SCROLL_SCINTILLA);
+    SetWindowSubclass(runPane->view, OutputViewSubclassProc, (UINT_PTR)(OUTPUT_TAB_RUN + 1), 0);
+    output_decoder_init(&runPane->decoder);
+
+    g_terminalView = terminal_view_create(g_hOutputPanel, ID_TERMINAL_VIEW);
+    g_outputPanes[OUTPUT_TAB_TERMINAL].view = terminal_view_window(g_terminalView);
+    ShowWindow(g_outputPanes[OUTPUT_TAB_TERMINAL].view, g_outputTab == OUTPUT_TAB_TERMINAL ? SW_SHOW : SW_HIDE);
+
+    int dpi = GetDpiForWindow(hwnd);
+    g_hDebugStatus = CreateWindowExW(0, L"STATIC", L"Debugger",
+        WS_CHILD | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP,
+        0, 0, 0, 0, g_hOutputPanel, (HMENU)ID_DEBUG_STATUS, GetModuleHandleW(NULL), NULL);
+    g_hDebugContinue = create_output_button(g_hOutputPanel, L"Continue  F6", IDM_DEBUG_CONTINUE);
+    g_hDebugStepOver = create_output_button(g_hOutputPanel, L"Step Over  F10", IDM_DEBUG_STEP_OVER);
+    g_hDebugStepInto = create_output_button(g_hOutputPanel, L"Step Into  F11", IDM_DEBUG_STEP_INTO);
+    g_hDebugStepOut = create_output_button(g_hOutputPanel, L"Step Out  Shift+F11", IDM_DEBUG_STEP_OUT);
+    HWND debugButtons[] = { g_hDebugContinue, g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut };
+    for (size_t i = 0; i < sizeof(debugButtons) / sizeof(debugButtons[0]); i++)
+        ShowWindow(debugButtons[i], g_outputTab == OUTPUT_TAB_DEBUG ? SW_SHOW : SW_HIDE);
+    g_outputPanes[OUTPUT_TAB_DEBUG].view = CreateWindowExW(0, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
+        0, 0, 0, 0, g_hOutputPanel, (HMENU)ID_DEBUG_VARIABLES, GetModuleHandleW(NULL), NULL);
+    g_hDebugVariables = g_outputPanes[OUTPUT_TAB_DEBUG].view;
+    ListView_SetExtendedListViewStyle(g_hDebugVariables,
+        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+    LVCOLUMNW debugColumn = {0};
+    debugColumn.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    debugColumn.pszText = L"Name"; debugColumn.cx = MulDiv(DEBUG_NAME_COLUMN_WIDTH, dpi, 96);
+    SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 0, (LPARAM)&debugColumn);
+    debugColumn.pszText = L"Value"; debugColumn.cx = MulDiv(DEBUG_VALUE_COLUMN_WIDTH, dpi, 96); debugColumn.iSubItem = 1;
+    SendMessageW(g_hDebugVariables, LVM_INSERTCOLUMNW, 1, (LPARAM)&debugColumn);
+    HWND debugHeader = ListView_GetHeader(g_hDebugVariables);
+    if (debugHeader) SetWindowSubclass(debugHeader, DebugHeaderSubclassProc, 1, 0);
+    ShowWindow(g_hDebugVariables, g_outputTab == OUTPUT_TAB_DEBUG ? SW_SHOW : SW_HIDE);
+    /* create_output_button() already set DEFAULT_GUI_FONT on the four debug
+       buttons; these two aren't made that way. */
+    HFONT debugFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    SendMessageW(g_hDebugStatus, WM_SETFONT, (WPARAM)debugFont, TRUE);
+    SendMessageW(g_hDebugVariables, WM_SETFONT, (WPARAM)debugFont, TRUE);
+
     g_hOutputClear = create_output_button(g_hOutputPanel, L"Clear", ID_OUTPUT_CLEAR);
     g_hOutputStop = create_output_button(g_hOutputPanel, L"Stop", ID_OUTPUT_STOP);
     g_hOutputClose = create_output_button(g_hOutputPanel, L"X", ID_OUTPUT_CLOSE);
@@ -723,11 +989,11 @@ static void create_output_panel(HWND hwnd) {
 
 /* Ends every program the panel started, when MarkEdit closes. */
 static void shutdown_output_panel(void) {
-    for (int i = 0; i < OUTPUT_TAB_COUNT; i++) {
-        end_output_program(&g_outputPanes[i]);
-        free(g_outputPanes[i].directory);
-        g_outputPanes[i].directory = NULL;
-    }
+    end_output_program(&g_outputPanes[OUTPUT_TAB_RUN]);
+    free(g_outputPanes[OUTPUT_TAB_RUN].directory);
+    g_outputPanes[OUTPUT_TAB_RUN].directory = NULL;
+    terminal_view_free(g_terminalView);
+    g_terminalView = NULL;
     for (int i = 0; i < g_outputHistoryCount; i++) free(g_outputHistory[i]);
     g_outputHistoryCount = g_outputHistoryIndex = 0;
 }

@@ -275,6 +275,7 @@ char *run_script(const char *name, const char *code, size_t length,
     char *error = ensure_state();
     if (error) return error;
     int firstCommand = s_commandCount, firstHandler = s_handlerCount;
+    int firstContextMenuItem = s_contextMenuItemCount;
     char chunkName[260];
     snprintf(chunkName, sizeof(chunkName), "=%s", name);
     int pushed = runner ? 3 : 2; /* run_in_environment, the runner and the chunk */
@@ -301,6 +302,7 @@ char *run_script(const char *name, const char *code, size_t length,
     if (error) {
         discard_commands_from(firstCommand);
         discard_handlers_from(firstHandler);
+        discard_context_menu_items_from(firstContextMenuItem);
     }
     return error;
 }
@@ -527,6 +529,7 @@ void plugin_host_shutdown(void) {
     free_menu();
     discard_commands_from(0);
     discard_handlers_from(0);
+    discard_context_menu_items_from(0);
     for (int i = 0; i < s_extensionCount; i++) {
         free(s_extensions[i].name);
         free(s_extensions[i].scope);

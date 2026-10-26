@@ -42,7 +42,7 @@ rem multiple named object files from one -c invocation targeting
 rem COFF/Windows) - the resulting .o list is written to
 rem %OBJ_DIR%\lexilla-objects.rsp for the final link below.
 type nul > %OBJ_DIR%\lexilla-objects.rsp
-for /f "usebackq delims=" %%S in (`findstr /i ".cxx" lexilla-sources.rsp`) do (
+for /f "usebackq delims=" %%S in (`findstr /offline /i ".cxx" lexilla-sources.rsp`) do (
     zig c++ -std=c++17 %COMMON_FLAGS% -DNDEBUG -Ithird_party\lexilla\include -Ithird_party\lexilla\lexlib -Ithird_party\scintilla\include -c "%%S" -o "%OBJ_DIR%\%%~nS.o"
     if !errorlevel! neq 0 (
         echo Lexilla build failed compiling %%S.
@@ -56,9 +56,9 @@ rem vendored code leaves many parameters unused) stays off MarkEdit's own source
 rem cmark-gfm-objects.rsp starts with the .rsp's -D/-I lines, which
 rem src\markdown.c needs to include the cmark-gfm headers, then lists the
 rem objects.
-findstr /r /b "[-]" cmark-gfm-sources.rsp > %OBJ_DIR%\cmark-gfm-flags.rsp
+findstr /offline /r /b "[-]" cmark-gfm-sources.rsp > %OBJ_DIR%\cmark-gfm-flags.rsp
 copy /y %OBJ_DIR%\cmark-gfm-flags.rsp %OBJ_DIR%\cmark-gfm-objects.rsp >nul
-for /f "usebackq delims=" %%S in (`findstr /r /v /b "[-]" cmark-gfm-sources.rsp`) do (
+for /f "usebackq delims=" %%S in (`findstr /offline /r /v /b "[-]" cmark-gfm-sources.rsp`) do (
     zig cc -std=c11 %COMMON_FLAGS% -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-parameter @%OBJ_DIR%\cmark-gfm-flags.rsp -c "%%S" -o "%OBJ_DIR%\%%~nS.o"
     if !errorlevel! neq 0 (
         echo cmark-gfm build failed compiling %%S.

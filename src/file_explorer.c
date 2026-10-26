@@ -90,6 +90,8 @@ static WCHAR **s_pendingDirs = NULL;
 static int s_pendingCount = 0;
 static int s_pendingCapacity = 0;
 
+static void handle_keyboard_context_menu(void);
+
 #define ID_EXPLORER_TREE 900
 
 /* ---- icon cache: a private image list, indexed by extension ---- */
@@ -341,7 +343,8 @@ static int compare_dir_entries(const void *a, const void *b)
     const DirEntry *entryB = (const DirEntry *)b;
     if (entryA->isDirectory != entryB->isDirectory)
         return entryA->isDirectory ? -1 : 1;
-    return _wcsicmp(entryA->name, entryB->name);
+    int order = _wcsicmp(entryA->name, entryB->name);
+    return order ? order : wcscmp(entryA->name, entryB->name);
 }
 
 static void free_dir_entries(DirEntry *entries, int count)
@@ -502,7 +505,10 @@ static void reload_directory_children(HTREEITEM item, ExplorerItemData *data)
         }
         else
         {
-            order = _wcsicmp(PathFindFileNameW(currentData->fullPath), entries[entryIndex].name);
+            const WCHAR *currentName = PathFindFileNameW(currentData->fullPath);
+            order = _wcsicmp(currentName, entries[entryIndex].name);
+            if (!order)
+                order = wcscmp(currentName, entries[entryIndex].name);
         }
 
         if (order < 0)
@@ -570,6 +576,64 @@ static HTREEITEM find_loaded_item_for_path(HTREEITEM item, const WCHAR *path)
                 return found;
             child = TreeView_GetNextSibling(g_hExplorerTree, child);
         }
+    }
+    return NULL;
+}
+
+/* Like find_loaded_item_for_path(), but also walks top-level siblings, so it
+   works in the roots view too (one top-level item per drive/share, with
+   s_rootItem NULL) as well as the normal single-root workspace view. */
+static HTREEITEM find_item_for_path(const WCHAR *path)
+{
+    if (!path)
+        return NULL;
+    for (HTREEITEM top = TreeView_GetRoot(g_hExplorerTree); top;
+        top = TreeView_GetNextSibling(g_hExplorerTree, top))
+    {
+        HTREEITEM found = find_loaded_item_for_path(top, path);
+        if (found)
+            return found;
+    }
+    return NULL;
+}
+
+/* Synthetic parent links can have the same path as their root item (at a
+   drive root), so a context-menu item needs its kind as well as its path to
+   be found again after a live refresh. */
+static HTREEITEM find_loaded_item_for_identity(HTREEITEM item, const WCHAR *path,
+                                               int isParentLink, int isRootChoice)
+{
+    if (!item)
+        return NULL;
+    ExplorerItemData *data = tree_item_data(item);
+    if (data && data->isParentLink == isParentLink &&
+        data->isRootChoice == isRootChoice && _wcsicmp(data->fullPath, path) == 0)
+        return item;
+    if (data && data->isDirectory && data->childrenLoaded)
+    {
+        for (HTREEITEM child = TreeView_GetChild(g_hExplorerTree, item); child;
+             child = TreeView_GetNextSibling(g_hExplorerTree, child))
+        {
+            HTREEITEM found = find_loaded_item_for_identity(child, path, isParentLink,
+                                                            isRootChoice);
+            if (found)
+                return found;
+        }
+    }
+    return NULL;
+}
+
+static HTREEITEM find_item_for_identity(const WCHAR *path, int isParentLink, int isRootChoice)
+{
+    if (!path)
+        return NULL;
+    for (HTREEITEM top = TreeView_GetRoot(g_hExplorerTree); top;
+         top = TreeView_GetNextSibling(g_hExplorerTree, top))
+    {
+        HTREEITEM found = find_loaded_item_for_identity(top, path, isParentLink,
+                                                       isRootChoice);
+        if (found)
+            return found;
     }
     return NULL;
 }
@@ -702,22 +766,35 @@ static void warn_invalid_entry_name(const WCHAR *title)
 
 static void create_new_entry(HTREEITEM containerItem, ExplorerItemData *containerData, int isDirectory)
 {
-    if (!s_promptText)
+    if (!s_promptText || !containerData)
+        return;
+    /* The prompt owns a modal message loop, so the watcher may refresh and
+       free both arguments while it is open. Keep only a copied path across
+       that boundary and resolve the item again afterwards. */
+    WCHAR *containerPath = wcsdup_heap(containerData->fullPath);
+    if (!containerPath)
         return;
     WCHAR name[260] = L"";
     const WCHAR *title = isDirectory ? L"New Folder" : L"New File";
     const WCHAR *prompt = isDirectory ? L"Folder name:" : L"File name:";
     if (!s_promptText(title, prompt, L"", name, sizeof(name) / sizeof(name[0])) || !name[0])
+    {
+        free(containerPath);
         return;
+    }
     if (!is_valid_entry_name(name))
     {
         warn_invalid_entry_name(title);
+        free(containerPath);
         return;
     }
 
-    WCHAR *full = path_join(containerData->fullPath, name);
+    WCHAR *full = path_join(containerPath, name);
     if (!full)
+    {
+        free(containerPath);
         return;
+    }
     int ok;
     if (isDirectory)
     {
@@ -730,25 +807,47 @@ static void create_new_entry(HTREEITEM containerItem, ExplorerItemData *containe
         if (ok)
             CloseHandle(file);
     }
-    free(full);
     if (!ok)
     {
         MessageBoxW(s_hParent, L"That name already exists or could not be created.", title,
                     MB_OK | MB_ICONWARNING);
+        free(full);
+        free(containerPath);
         return;
     }
 
-    if (containerData->childrenLoaded)
+    containerItem = find_item_for_path(containerPath);
+    containerData = containerItem ? tree_item_data(containerItem) : NULL;
+    if (containerData && containerData->childrenLoaded)
         reload_directory_children(containerItem, containerData);
-    TreeView_Expand(g_hExplorerTree, containerItem, TVE_EXPAND);
+    if (containerItem)
+    {
+        TreeView_Expand(g_hExplorerTree, containerItem, TVE_EXPAND);
+        HTREEITEM created = find_item_for_path(full);
+        if (created)
+            TreeView_SelectItem(g_hExplorerTree, created);
+    }
+    free(full);
+    free(containerPath);
 }
 
 static void rename_entry(HTREEITEM item, ExplorerItemData *data)
 {
-    if (!s_promptText || item == s_rootItem)
+    if (!s_promptText || !data || item == s_rootItem)
         return;
+    /* As with New, copy everything needed before showing the modal prompt;
+       its message loop can run the live-refresh timer and invalidate data. */
+    WCHAR *oldPath = wcsdup_heap(data->fullPath);
+    WCHAR *directory = path_directory(data->fullPath);
+    int isDirectory = data->isDirectory;
+    if (!oldPath || !directory)
+    {
+        free(oldPath);
+        free(directory);
+        return;
+    }
     WCHAR currentName[260];
-    wcsncpy(currentName, PathFindFileNameW(data->fullPath), 259);
+    wcsncpy(currentName, PathFindFileNameW(oldPath), 259);
     currentName[259] = 0;
     WCHAR newName[260];
     wcsncpy(newName, currentName, 259);
@@ -756,26 +855,24 @@ static void rename_entry(HTREEITEM item, ExplorerItemData *data)
     if (!s_promptText(L"Rename", L"New name:", currentName, newName,
                       sizeof(newName) / sizeof(newName[0])) ||
         wcscmp(newName, currentName) == 0)
+    {
+        free(oldPath);
+        free(directory);
         return;
+    }
     if (!is_valid_entry_name(newName))
     {
         warn_invalid_entry_name(L"Rename");
+        free(oldPath);
+        free(directory);
         return;
     }
 
-    /* The rename callback can show a message box, and its modal loop lets the
-       watcher's debounced refresh rebuild this part of the tree. Nothing
-       tied to `item` or `data` is used once the callback has run: the old
-       path is copied and the parent is found again by its path. */
-    WCHAR *directory = path_directory(data->fullPath);
-    WCHAR *oldPath = wcsdup_heap(data->fullPath);
     WCHAR *newPath = directory ? path_join(directory, newName) : NULL;
-    int isDirectory = data->isDirectory;
-    if (!newPath || !oldPath)
+    if (!newPath)
     {
         free(directory);
         free(oldPath);
-        free(newPath);
         return;
     }
 
@@ -789,6 +886,9 @@ static void rename_entry(HTREEITEM item, ExplorerItemData *data)
         if (s_renamedPath)
             s_renamedPath(oldPath, newPath, isDirectory);
         reload_loaded_directory(directory);
+        HTREEITEM renamed = find_item_for_path(newPath);
+        if (renamed)
+            TreeView_SelectItem(g_hExplorerTree, renamed);
     }
     free(directory);
     free(oldPath);
@@ -872,6 +972,11 @@ static LRESULT CALLBACK ExplorerTreeSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
         run_pending_navigation();
         return 0;
     }
+    if (msg == WM_CONTEXTMENU && lParam == (LPARAM)-1)
+    {
+        handle_keyboard_context_menu();
+        return 0;
+    }
     if (msg == WM_NCDESTROY)
         RemoveWindowSubclass(hwnd, ExplorerTreeSubclassProc, 1);
     return DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -895,9 +1000,8 @@ static void open_parent_folder(void)
         queue_navigation(NULL);
 }
 
-static void handle_open_selected(void)
+static void handle_open_item(HTREEITEM item)
 {
-    HTREEITEM item = TreeView_GetSelection(g_hExplorerTree);
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
     if (!data)
         return;
@@ -908,12 +1012,27 @@ static void handle_open_selected(void)
     else if (data->isDirectory)
         TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
     else if (s_openFile)
-        s_openFile(data->fullPath);
+    {
+        /* Opening can show a modal error/large-file prompt. Pass a stable
+           copy in case a watcher refresh frees the selected tree item. */
+        WCHAR *path = wcsdup_heap(data->fullPath);
+        if (path)
+        {
+            s_openFile(path);
+            free(path);
+        }
+    }
+}
+
+static void handle_open_selected(void)
+{
+    handle_open_item(TreeView_GetSelection(g_hExplorerTree));
 }
 
 /* The tree item under the cursor position of the message being handled;
-   also stores that position in screen coordinates when asked. */
-static HTREEITEM item_at_message_pos(POINT *screenOut)
+   also stores that position in screen coordinates, and/or the hit-test
+   flags (TVHT_*), when asked. */
+static HTREEITEM item_at_message_pos(POINT *screenOut, UINT *flagsOut)
 {
     DWORD pos = GetMessagePos();
     POINT screen = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
@@ -922,27 +1041,46 @@ static HTREEITEM item_at_message_pos(POINT *screenOut)
     TVHITTESTINFO hit = {0};
     hit.pt = screen;
     ScreenToClient(g_hExplorerTree, &hit.pt);
-    return TreeView_HitTest(g_hExplorerTree, &hit);
+    HTREEITEM item = TreeView_HitTest(g_hExplorerTree, &hit);
+    if (flagsOut)
+        *flagsOut = hit.flags;
+    return item;
 }
 
 static void handle_click(void)
 {
-    HTREEITEM item = item_at_message_pos(NULL);
+    UINT flags = 0;
+    HTREEITEM item = item_at_message_pos(NULL, &flags);
+    /* A click on the expand/collapse glyph itself already toggles the node
+       through the TreeView's own default handling (TVS_HASBUTTONS), before
+       this NM_CLICK notification is even sent; toggling it again here would
+       immediately undo that, making the glyph appear to do nothing. Only a
+       click elsewhere on a directory's row (its icon or label) needs this
+       handler to toggle it. */
+    if (flags & TVHT_ONITEMBUTTON)
+        return;
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
     if (data && data->isDirectory && !data->isParentLink && !data->isRootChoice)
         TreeView_Expand(g_hExplorerTree, item, TVE_TOGGLE);
 }
 
-static void handle_context_menu(void)
+static void show_context_menu(HTREEITEM item, POINT screenPt)
 {
-    POINT screenPt;
-    HTREEITEM item = item_at_message_pos(&screenPt);
     if (item)
         TreeView_SelectItem(g_hExplorerTree, item);
     ExplorerItemData *data = item ? tree_item_data(item) : NULL;
+    int hadClickedItem = data != NULL;
     int isRoot = item && item == s_rootItem;
     int isParentLink = data && data->isParentLink;
     int isRootChoice = data && data->isRootChoice;
+    /* TrackPopupMenu() runs its own modal loop below, which - like the
+       MessageBoxW calls in rename_entry()/delete_entry() - still pumps this
+       thread's WM_TIMER, so the watcher's debounced refresh can rebuild the
+       tree (deleting and recreating items) while the menu is open. `item` is
+       re-resolved by path afterwards rather than trusted to still name the
+       same item; comctl32 can and does reuse a deleted item's HTREEITEM
+       value for an unrelated one. */
+    WCHAR *clickedPath = data ? wcsdup_heap(data->fullPath) : NULL;
 
     HMENU menu = CreatePopupMenu();
     if (can_navigate_up() && !isParentLink && !isRootChoice)
@@ -981,11 +1119,17 @@ static void handle_context_menu(void)
                                   screenPt.x, screenPt.y, 0, s_hParent, NULL);
     DestroyMenu(menu);
     if (!command)
+    {
+        free(clickedPath);
         return;
+    }
+    item = clickedPath ? find_item_for_identity(clickedPath, isParentLink, isRootChoice) : NULL;
+    data = item ? tree_item_data(item) : NULL;
+    free(clickedPath);
 
     /* New File/New Folder/Refresh operate on the clicked directory, or the
        clicked file's parent, or the tree root if nothing was clicked. */
-    HTREEITEM containerItem = item ? item : s_rootItem;
+    HTREEITEM containerItem = item ? item : (hadClickedItem ? NULL : s_rootItem);
     ExplorerItemData *containerData = containerItem ? tree_item_data(containerItem) : NULL;
     if (containerData && (containerData->isParentLink || containerData->isRootChoice))
     {
@@ -1004,7 +1148,7 @@ static void handle_context_menu(void)
         open_parent_folder();
         break;
     case CTX_OPEN:
-        handle_open_selected();
+        handle_open_item(item);
         break;
     case CTX_NEW_FILE:
         if (containerData)
@@ -1037,6 +1181,95 @@ static void handle_context_menu(void)
             reload_directory_children(containerItem, containerData);
         break;
     }
+}
+
+static void handle_mouse_context_menu(void)
+{
+    POINT screenPt;
+    HTREEITEM item = item_at_message_pos(&screenPt, NULL);
+    show_context_menu(item, screenPt);
+}
+
+static void handle_keyboard_context_menu(void)
+{
+    HTREEITEM item = TreeView_GetSelection(g_hExplorerTree);
+    RECT itemRect = {0};
+    POINT screenPt = {0};
+    if (item && TreeView_GetItemRect(g_hExplorerTree, item, &itemRect, TRUE))
+    {
+        screenPt.x = itemRect.left;
+        screenPt.y = itemRect.bottom;
+    }
+    else
+    {
+        RECT client;
+        GetClientRect(g_hExplorerTree, &client);
+        screenPt.x = client.left + 12;
+        screenPt.y = client.top + 12;
+    }
+    ClientToScreen(g_hExplorerTree, &screenPt);
+    show_context_menu(item, screenPt);
+}
+
+static void refresh_selected(void)
+{
+    if (s_showingRoots)
+    {
+        show_roots_view();
+        return;
+    }
+    HTREEITEM item = TreeView_GetSelection(g_hExplorerTree);
+    ExplorerItemData *data = item ? tree_item_data(item) : NULL;
+    if (data && !data->isDirectory)
+    {
+        item = TreeView_GetParent(g_hExplorerTree, item);
+        data = item ? tree_item_data(item) : NULL;
+    }
+    if (!data || data->isParentLink || data->isRootChoice)
+    {
+        item = s_rootItem;
+        data = item ? tree_item_data(item) : NULL;
+    }
+    if (data && data->isDirectory)
+        reload_directory_children(item, data);
+}
+
+int explorer_pretranslate_message(const MSG *message)
+{
+    if (!message || !g_hExplorerTree || GetFocus() != g_hExplorerTree ||
+        (message->message != WM_KEYDOWN && message->message != WM_SYSKEYDOWN))
+        return 0;
+
+    int control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    int shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    int alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    HTREEITEM item = TreeView_GetSelection(g_hExplorerTree);
+    ExplorerItemData *data = item ? tree_item_data(item) : NULL;
+
+    if (!control && !shift && !alt && message->wParam == VK_F2)
+    {
+        if (data && item != s_rootItem && !data->isParentLink && !data->isRootChoice)
+            rename_entry(item, data);
+        return 1;
+    }
+    if (!control && !shift && !alt && message->wParam == VK_DELETE)
+    {
+        if (data && item != s_rootItem && !data->isParentLink && !data->isRootChoice)
+            delete_entry(item, data);
+        return 1;
+    }
+    if (!control && !shift && !alt && message->wParam == VK_F5)
+    {
+        refresh_selected();
+        return 1;
+    }
+    if (control && !shift && !alt && message->wParam == 'C')
+    {
+        if (data)
+            copy_path_to_clipboard(data->fullPath);
+        return 1;
+    }
+    return 0;
 }
 
 static void handle_item_expanding(NMTREEVIEWW *info)
@@ -1076,8 +1309,17 @@ void explorer_handle_notify(NMHDR *notification)
         handle_click();
         return;
     case NM_DBLCLK:
-        handle_open_selected();
+    {
+        UINT flags = 0;
+        HTREEITEM item = item_at_message_pos(NULL, &flags);
+        ExplorerItemData *data = item ? tree_item_data(item) : NULL;
+        /* Real folders already toggle on the first NM_CLICK in the double-
+           click sequence; toggling again here would undo that action. */
+        if (data && !(flags & TVHT_ONITEMBUTTON) &&
+            (!data->isDirectory || data->isParentLink || data->isRootChoice))
+            handle_open_item(item);
         return;
+    }
     case TVN_KEYDOWN:
         if (((NMTVKEYDOWN *)notification)->wVKey == VK_RETURN)
             handle_open_selected();
@@ -1085,7 +1327,7 @@ void explorer_handle_notify(NMHDR *notification)
             open_parent_folder();
         return;
     case NM_RCLICK:
-        handle_context_menu();
+        handle_mouse_context_menu();
         return;
     }
 }
@@ -1358,17 +1600,16 @@ void explorer_set_root(const WCHAR *rootPath)
        already keeps what's shown in step with the disk. */
     if (s_root && s_watcher && _wcsicmp(s_root, rootPath) == 0)
         return;
+    WCHAR *newRoot = wcsdup_heap(rootPath);
+    if (!newRoot)
+        return;
     explorer_stop_watch();
     themed_scrollbar_begin_update(g_hExplorerTree);
     TreeView_DeleteAllItems(g_hExplorerTree); /* frees every ExplorerItemData via TVN_DELETEITEMW */
     s_rootItem = NULL;
     s_showingRoots = 0;
-    replace_wstring(&s_root, rootPath);
-    if (!s_root)
-    {
-        themed_scrollbar_end_update(g_hExplorerTree);
-        return;
-    }
+    free(s_root);
+    s_root = newRoot;
 
     const WCHAR *leaf = PathFindFileNameW(s_root);
     s_rootItem = insert_tree_item(TVI_ROOT, TVI_LAST, s_root, *leaf ? leaf : s_root, 1);
@@ -1403,4 +1644,5 @@ void explorer_shutdown(void)
         ImageList_Destroy(s_iconList);
         s_iconList = NULL;
     }
+    g_hExplorerTree = NULL;
 }

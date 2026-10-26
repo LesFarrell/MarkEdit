@@ -1,4 +1,7 @@
 -- Premake5 script for MarkEdit.
+-- Premake supplies project, files, filter and its other functions as
+-- globals, which a Lua language server doesn't know about.
+---@diagnostic disable: undefined-global, lowercase-global
 -- Alternative to the Zig-based build.bat / test.bat scripts, for three
 -- toolchains (builds markedit.exe, statically linking Lexilla, and the
 -- test programs, then stages dist/ the same way build.bat does):
@@ -12,6 +15,16 @@
 -- w64devkit or MSYS2 provide): the post-build staging uses cp/mkdir. --zig
 -- needs only zig on PATH besides make - zig cc / zig c++ / zig ar / zig rc
 -- stand in for the whole GCC toolchain, including windres.
+
+-- The non-blank lines of a repo-root *.rsp response file, trimmed.
+function rsp_lines(path)
+    local lines = {}
+    for line in io.lines(path) do
+        local entry = line:match("^%s*(.-)%s*$")
+        if entry ~= "" then table.insert(lines, entry) end
+    end
+    return lines
+end
 
 newoption {
     trigger = "zig",
@@ -39,14 +52,11 @@ workspace "MarkEdit"
         }
 
     filter "toolset:gcc or clang"
-        buildoptions {
-            "-ffunction-sections",
-            "-fdata-sections",
-            "-fno-asynchronous-unwind-tables",
-            "-fno-unwind-tables",
-            "-fno-ident",
-            "-fmerge-all-constants",
-        }
+        -- The code-generation flags build.bat and test.bat also read, so every
+        -- project here (the tests too) compiles like the release build. They
+        -- include the unwind tables Lua's longjmp needs on x64 Windows while
+        -- it crosses plugin-host frames.
+        buildoptions(rsp_lines("release-flags.rsp"))
         linkoptions { "-Wl,--gc-sections", "-Wl,--strip-all", "-Wl,--build-id=none" }
 
     filter "toolset:msc"
@@ -66,50 +76,34 @@ SCINTILLA_DIR = "third_party/scintilla"
 LEXILLA_DIR = "third_party/lexilla"
 LUA_DIR = "third_party/lua"
 
-CMARK_GFM_SOURCES = {
-    CMARK_GFM_DIR.."/src/arena.c",
-    CMARK_GFM_DIR.."/src/blocks.c",
-    CMARK_GFM_DIR.."/src/buffer.c",
-    CMARK_GFM_DIR.."/src/cmark.c",
-    CMARK_GFM_DIR.."/src/cmark_ctype.c",
-    CMARK_GFM_DIR.."/src/commonmark.c",
-    CMARK_GFM_DIR.."/src/footnotes.c",
-    CMARK_GFM_DIR.."/src/houdini_href_e.c",
-    CMARK_GFM_DIR.."/src/houdini_html_e.c",
-    CMARK_GFM_DIR.."/src/houdini_html_u.c",
-    CMARK_GFM_DIR.."/src/html.c",
-    CMARK_GFM_DIR.."/src/inlines.c",
-    CMARK_GFM_DIR.."/src/iterator.c",
-    CMARK_GFM_DIR.."/src/latex.c",
-    CMARK_GFM_DIR.."/src/linked_list.c",
-    CMARK_GFM_DIR.."/src/man.c",
-    CMARK_GFM_DIR.."/src/map.c",
-    CMARK_GFM_DIR.."/src/node.c",
-    CMARK_GFM_DIR.."/src/plaintext.c",
-    CMARK_GFM_DIR.."/src/plugin.c",
-    CMARK_GFM_DIR.."/src/references.c",
-    CMARK_GFM_DIR.."/src/registry.c",
-    CMARK_GFM_DIR.."/src/render.c",
-    CMARK_GFM_DIR.."/src/scanners.c",
-    CMARK_GFM_DIR.."/src/syntax_extension.c",
-    CMARK_GFM_DIR.."/src/utf8.c",
-    CMARK_GFM_DIR.."/src/xml.c",
-    CMARK_GFM_DIR.."/extensions/autolink.c",
-    CMARK_GFM_DIR.."/extensions/core-extensions.c",
-    CMARK_GFM_DIR.."/extensions/ext_scanners.c",
-    CMARK_GFM_DIR.."/extensions/strikethrough.c",
-    CMARK_GFM_DIR.."/extensions/table.c",
-    CMARK_GFM_DIR.."/extensions/tagfilter.c",
-    CMARK_GFM_DIR.."/extensions/tasklist.c",
-}
+-- The compiled translation units live in the repo-root *.rsp response files
+-- that build.bat and test.bat hand to the compiler. Reading them here keeps
+-- Premake and the batch builds in step; the .rsp also carry -D/-I flags,
+-- which are filtered out (only .c/.cc/.cpp/.cxx entries are returned). This
+-- is the one place a compiled-source list is read, so a new file only has to
+-- be added to its .rsp.
+function sources_from_rsp(path)
+    local sources = {}
+    for _, entry in ipairs(rsp_lines(path)) do
+        if entry:match("%.[cC]$") or entry:match("%.[cC][xX][xX]$") or
+           entry:match("%.[cC][cC]$") or entry:match("%.[cC][pP][pP]$") then
+            table.insert(sources, entry)
+        end
+    end
+    return sources
+end
+
+CMARK_GFM_SOURCES = sources_from_rsp("cmark-gfm-sources.rsp")
 
 function cmark_gfm_settings()
     files(CMARK_GFM_SOURCES)
     includedirs { CMARK_GFM_DIR.."/src", CMARK_GFM_DIR.."/extensions" }
     defines { "CMARK_GFM_STATIC_DEFINE", "CMARK_GFM_EXTENSIONS_STATIC_DEFINE" }
-    filter "toolset:gcc or clang"
+    -- Scoped to cmark-gfm's own files (as build.bat compiles them apart), so
+    -- MarkEdit's sources keep the unused-parameter warning.
+    filter { "files:"..CMARK_GFM_DIR.."/**.c", "toolset:gcc or clang" }
         buildoptions { "-Wno-unused-parameter" }
-    filter "toolset:msc"
+    filter { "files:"..CMARK_GFM_DIR.."/**.c", "toolset:msc" }
         disablewarnings { "4100" } -- unreferenced parameter, as -Wno-unused-parameter
     filter {}
 end
@@ -117,14 +111,7 @@ end
 -- The Lua core plus the libraries plugins get; keep this list aligned with
 -- lua-sources.rsp (third_party/lua/VERSION.txt says why io/os/package/debug
 -- are left out).
-LUA_SOURCES = {}
-for _, name in ipairs {
-    "lapi", "lcode", "lctype", "ldebug", "ldo", "ldump", "lfunc", "lgc", "llex", "lmem",
-    "lobject", "lopcodes", "lparser", "lstate", "lstring", "ltable", "ltm", "lundump", "lvm",
-    "lzio", "lauxlib", "lbaselib", "lcorolib", "ltablib", "lstrlib", "lmathlib", "lutf8lib",
-} do
-    table.insert(LUA_SOURCES, LUA_DIR.."/src/"..name..".c")
-end
+LUA_SOURCES = sources_from_rsp("lua-sources.rsp")
 
 function lua_settings()
     files(LUA_SOURCES)
@@ -139,26 +126,30 @@ end
 -- script's role as the lighter-weight alternative to build.bat.
 -- All paths are relative to the repo root.
 DIST_FILES = {
-    "markedit.exe", "Scintilla.dll", "WebView2Loader.dll",
+    "build/bin/markedit.exe",
     "preview_shell.html", "github-markdown.css", "mermaid.min.js", "highlight.min.js",
     "highlight-powershell.min.js", "highlight-github.min.css", "highlight-github-dark.min.css",
     "LICENSE", "THIRD_PARTY_NOTICES.md",
 }
 DIST_LICENCES = {
-    ["cmark-gfm"]   = { CMARK_GFM_DIR.."/COPYING" },
+    ["cmark-gfm"]   = { CMARK_GFM_DIR.."/COPYING", CMARK_GFM_DIR.."/VERSION.txt" },
     ["gdb"]         = {
         "third_party/gdb/COPYING.txt", "third_party/gdb/COPYING.MinGW-w64-runtime.txt",
         "third_party/gdb/VERSION.txt", "third_party/gdb/SOURCE.md", "third_party/gdb/SHA256SUMS.txt",
+    },
+    ["github-markdown-css"] = {
+        "third_party/github-markdown-css/LICENSE", "third_party/github-markdown-css/VERSION.txt",
     },
     ["highlightjs"] = { "third_party/highlightjs/LICENSE", "third_party/highlightjs/VERSION.txt" },
     ["katex"]       = { "third_party/katex/LICENSE", "third_party/katex/VERSION.txt" },
     ["lexilla"]     = { LEXILLA_DIR.."/License.txt", LEXILLA_DIR.."/version.txt" },
     ["lua"]         = { LUA_DIR.."/LICENSE", LUA_DIR.."/VERSION.txt" },
+    ["mermaid"]     = { "third_party/mermaid/LICENSE", "third_party/mermaid/VERSION.txt" },
     ["scintilla"]   = { SCINTILLA_DIR.."/License.txt", SCINTILLA_DIR.."/version.txt" },
-    ["webview2"]    = { WEBVIEW2_DIR.."/LICENSE.txt" },
+    ["webview2"]    = { WEBVIEW2_DIR.."/LICENSE.txt", WEBVIEW2_DIR.."/VERSION.txt" },
 }
--- The two runtime DLLs are copied next to markedit.exe first, so the build
--- runs in place as well as from dist/.
+-- The two runtime DLLs go straight into dist/ from where they're vendored,
+-- like markedit.exe from build/bin, so the repo root holds no build output.
 RUNTIME_DLLS = { WEBVIEW2_DIR.."/x64/WebView2Loader.dll", SCINTILLA_DIR.."/bin/Scintilla.dll" }
 
 -- Post-build commands run with cwd = the build/ directory (where both the
@@ -187,9 +178,9 @@ local function staging_commands(posix)
         end
     end
 
-    for _, dll in ipairs(RUNTIME_DLLS) do copy(dll, "") end
     mkdir("dist/katex")
     mkdir("dist/plugins")
+    for _, dll in ipairs(RUNTIME_DLLS) do copy(dll, "dist/") end
     for _, file in ipairs(DIST_FILES) do copy(file, "dist/") end
     if posix then
         table.insert(commands, "cp -rf "..at("katex").."/. "..at("dist/katex").."/")
@@ -221,67 +212,28 @@ project "lexilla"
     targetname "Lexilla"
     objdir "build/obj/lexilla"
 
-    files {
-        LEXILLA_DIR.."/src/Lexilla.cxx",
-        LEXILLA_DIR.."/lexers/LexMarkdown.cxx",
-        LEXILLA_DIR.."/lexers/LexJSON.cxx",
-        LEXILLA_DIR.."/lexers/LexHTML.cxx",
-        LEXILLA_DIR.."/lexers/LexYAML.cxx",
-        LEXILLA_DIR.."/lexers/LexCPP.cxx",
-        LEXILLA_DIR.."/lexers/LexPython.cxx",
-        LEXILLA_DIR.."/lexers/LexBash.cxx",
-        LEXILLA_DIR.."/lexers/LexPowerShell.cxx",
-        LEXILLA_DIR.."/lexers/LexLua.cxx",
-        LEXILLA_DIR.."/lexlib/Accessor.cxx",
-        LEXILLA_DIR.."/lexlib/CharacterCategory.cxx",
-        LEXILLA_DIR.."/lexlib/CharacterSet.cxx",
-        LEXILLA_DIR.."/lexlib/DefaultLexer.cxx",
-        LEXILLA_DIR.."/lexlib/InList.cxx",
-        LEXILLA_DIR.."/lexlib/LexAccessor.cxx",
-        LEXILLA_DIR.."/lexlib/LexerBase.cxx",
-        LEXILLA_DIR.."/lexlib/LexerModule.cxx",
-        LEXILLA_DIR.."/lexlib/LexerSimple.cxx",
-        LEXILLA_DIR.."/lexlib/PropSetSimple.cxx",
-        LEXILLA_DIR.."/lexlib/StyleContext.cxx",
-        LEXILLA_DIR.."/lexlib/WordList.cxx",
-    }
+    files(sources_from_rsp("lexilla-sources.rsp"))
     includedirs { LEXILLA_DIR.."/include", LEXILLA_DIR.."/lexlib", SCINTILLA_DIR.."/include" }
     defines { "NDEBUG" }
     optimize "Size"
-
-    filter "toolset:gcc or clang"
-        buildoptions { "-fno-exceptions", "-fno-rtti" }
-    filter {}
+    -- No -fno-exceptions/-fno-rtti, as in build.bat: lexlib's
+    -- CharacterCategory.cxx uses try/catch.
 
 project "markedit"
     kind "WindowedApp"
     language "C"
     cdialect "C11"
     targetname "markedit"
-    targetdir "."
+    targetdir "build/bin"
     objdir "build/obj/markedit"
 
+    files(sources_from_rsp("markedit-sources.rsp"))
+    -- Not compiled on their own: the unity build's *.inc components, the
+    -- headers, and the scripts and help markedit.rc embeds. Wildcards, so a
+    -- new header or component shows up in the IDE without editing this list.
     files {
-        "src/markedit.c",
-        "src/editor_commands.c", "src/editor_commands.h",
-        "src/editor_language.c", "src/editor_language.h",
-        "src/preview_fallback.c", "src/preview_fallback.h",
-        "src/path_utils.c", "src/path_utils.h",
-        "src/file_io.c", "src/file_io.h",
-        "src/recovery.c", "src/recovery.h",
-        "src/text_codec.c", "src/text_codec.h",
-        "src/workspace_text.c", "src/workspace_text.h",
-        "src/markdown.c", "src/markdown.h",
-        "src/settings.c", "src/settings.h",
-        "src/recent_list.c", "src/recent_list.h",
-        "src/file_explorer.c", "src/file_explorer.h",
-        "src/toolbar_icons.c", "src/toolbar_icons.h",
-        "src/themed_scrollbar.c", "src/themed_scrollbar.h",
-        "src/plugin_host.c", "src/plugin_host.h",
-        "src/menu_commands.c", "src/menu_commands.h", "src/command_ids.h",
-        "src/menus.lua", "src/formatting.lua",
-        "src/help/markdown-reference.md", "src/help/keyboard-shortcuts.lua",
-        "src/theme.h",
+        "src/internal/*.inc", "src/*.h",
+        "src/menus.lua", "src/lua/*.lua", "src/help/*",
         "markedit.rc",
     }
     cmark_gfm_settings()
@@ -298,7 +250,7 @@ project "markedit"
     -- The project name, not its "Lexilla" target name, so Premake treats it as
     -- the sibling project above: it links that project's output wherever it
     -- was built and orders the build after it, for both make and Visual Studio.
-    links { "lexilla", "gdi32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "mpr", "windowscodecs", "uxtheme", "dwmapi" }
+    links { "lexilla", "gdi32", "msimg32", "user32", "comdlg32", "comctl32", "shlwapi", "shell32", "ole32", "mpr", "windowscodecs", "uxtheme", "dwmapi" }
 
     warnings "Extra"
     optimize "Size"
@@ -339,141 +291,69 @@ project "markedit"
         postbuildcommands(staging_commands(false))
     filter {}
 
-project "test_parser"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_parser"
-    targetdir "tests"
-    objdir "build/obj/test_parser"
+-- ---- test programs ----
+-- Each one is tests/<name>.c plus the app sources it exercises, built
+-- warning-free like the app itself, mirroring its test.bat line.
+--   sources  the extra source (and header) files
+--   links    the Windows libraries it needs
+--   uses     "plugins" for the plugin host (plugin-sources.rsp and Lua),
+--            "lua" for Lua alone, "cmark" for the Markdown renderer
+function test_project(name, sources, links_list, uses)
+    project(name)
+        kind "ConsoleApp"
+        language "C"
+        cdialect "C11"
+        targetname(name)
+        -- Beside test.bat's builds; the tests load ..\Scintilla.dll, so
+        -- each one copies it into build/ first.
+        targetdir "build/tests"
+        objdir("build/obj/" .. name)
+        files { "tests/" .. name .. ".c" }
+        files(sources)
+        if uses == "plugins" then
+            files(sources_from_rsp("plugin-sources.rsp"))
+            lua_settings()
+        elseif uses == "lua" then
+            lua_settings()
+        elseif uses == "cmark" then
+            cmark_gfm_settings()
+        end
+        includedirs { "." }
+        links(links_list)
+        warnings "Extra"
+        optimize "Size"
+        filter "toolset:gcc or clang"
+            buildoptions { "-Werror" }
+            prebuildcommands { "cp -f ../"..SCINTILLA_DIR.."/bin/Scintilla.dll ." }
+        filter "toolset:msc"
+            buildoptions { "/WX" }
+            prebuildcommands { 'copy /Y "..\\'..SCINTILLA_DIR:gsub("/", "\\")..'\\bin\\Scintilla.dll" . >nul' }
+        filter {}
+end
 
-    files { "tests/test_parser.c", "src/markdown.c" }
-    cmark_gfm_settings()
-
-    includedirs { "." }
-    warnings "Extra"
-    optimize "Size"
-
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_editor_commands"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_editor_commands"
-    targetdir "tests"
-    objdir "build/obj/test_editor_commands"
-    files { "tests/test_editor_commands.c", "src/editor_commands.c", "src/editor_commands.h" }
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_core"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_core"
-    targetdir "tests"
-    objdir "build/obj/test_core"
-    files { "tests/test_core.c", "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c" }
-    includedirs { "." }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_recovery"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_recovery"
-    targetdir "tests"
-    objdir "build/obj/test_recovery"
-    files { "tests/test_recovery.c", "src/recovery.c", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
-    includedirs { "." }
-    links { "ole32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
-project "test_plugin_host"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_plugin_host"
-    targetdir "tests"
-    objdir "build/obj/test_plugin_host"
-    files { "tests/test_plugin_host.c", "src/plugin_host.c", "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" }
-    lua_settings()
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
--- Run from the repository root: it reads src/menus.lua.
-project "test_menus"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_menus"
-    targetdir "tests"
-    objdir "build/obj/test_menus"
-    files {
-        "tests/test_menus.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
-        "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
-    }
-    lua_settings()
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
-
--- Run from the repository root: it reads src/formatting.lua.
-project "test_formatting"
-    kind "ConsoleApp"
-    language "C"
-    cdialect "C11"
-    targetname "test_formatting"
-    targetdir "tests"
-    objdir "build/obj/test_formatting"
-    files {
-        "tests/test_formatting.c", "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.c",
-        "src/plugin_host.h", "src/file_io.c", "src/text_codec.c", "src/path_utils.c",
-    }
-    lua_settings()
-    includedirs { "." }
-    links { "user32" }
-    warnings "Extra"
-    optimize "Size"
-    filter "toolset:gcc or clang"
-        buildoptions { "-Werror" }
-    filter "toolset:msc"
-        buildoptions { "/WX" }
-    filter {}
+test_project("test_parser", { "src/markdown.c" }, {}, "cmark")
+test_project("test_editor_commands", { "src/editor_commands.c", "src/editor_commands.h" }, { "user32" })
+test_project("test_text_search", { "src/text_search.c", "src/text_search.h" }, { "user32" })
+test_project("test_language", { "src/editor_language.c", "src/editor_language.h", "src/theme.c" },
+             { "user32", "shlwapi", "gdi32", "uxtheme" })
+test_project("test_outline", { "src/outline_minimap.c", "src/outline_minimap.h", "src/theme.c", "src/text_codec.c" },
+             { "user32", "comctl32", "gdi32" })
+test_project("test_theme", { "src/theme.c", "src/theme.h", "src/plugin_host.h" },
+             { "user32", "gdi32", "uxtheme" }, "plugins")
+test_project("test_core", { "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c",
+                            "src/plugin_settings.c", "src/plugin_settings.h" }, {})
+test_project("test_output", { "src/output_text.c", "src/output_text.h", "src/output_process.c",
+                              "src/output_process.h" }, {})
+test_project("test_terminal_grid", { "src/terminal_grid.c", "src/terminal_grid.h" }, {})
+test_project("test_terminal_process", { "src/terminal_process.c", "src/terminal_process.h" }, { "user32" })
+test_project("test_recovery", { "src/recovery.c", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" },
+             { "ole32" })
+test_project("test_plugin_host", { "src/plugin_host.h", "src/lua_editor_api.h" }, { "user32" }, "plugins")
+test_project("test_assemblers", {}, {}, "lua")
+test_project("test_lua_format", {}, {}, "lua")
+-- These two read src/menus.lua and src/lua/formatting_*.lua, so run them
+-- from the repository root (test.bat does).
+test_project("test_menus", { "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h", "src/lua_editor_api.h" },
+             { "user32" }, "plugins")
+test_project("test_formatting", { "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h",
+                                  "src/lua_editor_api.h" }, { "user32" }, "plugins")

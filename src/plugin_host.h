@@ -10,13 +10,18 @@
    system command range. */
 #define PLUGIN_MAX_COMMANDS 1024
 #define PLUGIN_MAX_HANDLERS 100
+/* contextmenu.add()'s items; see also EDITOR_CONTEXT_MENU_PLUGIN_ITEM_MAX in
+   editor_input.inc, which caps how many of these a single right-click popup
+   actually shows. */
+#define PLUGIN_MAX_CONTEXT_ITEMS 256
+#define PLUGIN_MAX_CONTEXT_DEPTH 8
 /* A plugin call (or a script's top-level code) is stopped after this long. */
 #define PLUGIN_TIME_LIMIT_MS 5000
 /* Total heap available to the sandboxed Lua state. This includes all loaded
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 3
+#define MARKEDIT_PLUGIN_API_VERSION 4
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -191,6 +196,27 @@ const char *plugin_host_command_checkbox_key(int index);
 int plugin_host_find_checkbox(const char *owner, const char *key);
 /* The built-in command a command was registered to run for, or NULL. */
 const char *plugin_host_command_overrides(int index);
+
+/* ---- editor right-click context-menu items (contextmenu.add/remove) ---- */
+int plugin_host_context_menu_item_count(void);
+/* UTF-8 label of the item at index, 0 <= index < plugin_host_context_menu_item_count(). */
+const char *plugin_host_context_menu_item_label(int index);
+/* The item's stable id, as returned to Lua by contextmenu.add() - unlike
+   index, it stays valid across a later add/remove (even one from a deferred
+   callback firing while a popup built from an earlier snapshot is still
+   open: see editor_input.inc's show_editor_context_menu()). */
+int plugin_host_context_menu_item_id(int index);
+/* Whether the item came from contextmenu.checkbox, and its current persisted state. */
+int plugin_host_context_menu_item_is_checkable(int index);
+int plugin_host_context_menu_item_is_checked(int index);
+/* Evaluates the optional enabled predicate with editor APIs bound to hEdit.
+   The item is enabled when it has no predicate. On failure it is disabled
+   and an allocated error is returned for the caller to display and free. */
+char *plugin_host_context_menu_item_enabled(int index, HWND hEdit, int *enabled);
+/* Runs the item with this id, the same way a menu command runs (a single
+   undo step, rolled back on failure). Does nothing and returns NULL if no
+   item with this id is registered any more. */
+char *plugin_host_run_context_menu_item(int id, HWND hEdit);
 
 /* Extensions discovered by the directory loaders, including disabled ones. */
 int plugin_host_extension_count(void);

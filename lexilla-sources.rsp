@@ -14,6 +14,7 @@ third_party/lexilla/lexers/LexProps.cxx
 third_party/lexilla/lexers/LexTOML.cxx
 third_party/lexilla/lexers/LexBatch.cxx
 third_party/lexilla/lexers/LexMake.cxx
+third_party/lexilla/lexers/LexInno.cxx
 third_party/lexilla/lexlib/Accessor.cxx
 third_party/lexilla/lexlib/CharacterCategory.cxx
 third_party/lexilla/lexlib/DefaultLexer.cxx

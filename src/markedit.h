@@ -5,6 +5,11 @@
 
 #include "settings_values.h" /* SPLITTER_WIDTH */
 
+/* The output panel's tabs (see output_panel.inc). Declared here, rather than
+   there, so debugger.inc - included before output_panel.inc in markedit.c's
+   unity build - can name OUTPUT_TAB_DEBUG when starting a debug session. */
+enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_DEBUG, OUTPUT_TAB_COUNT };
+
 /* ---- child control IDs ---- */
 #define ID_EDIT    101
 #define ID_PREVIEW 102
@@ -13,10 +18,8 @@
 #define ID_OUTLINE 105
 #define ID_MINIMAP 106
 #define ID_SPLIT_EDIT 107
-#define ID_DEBUG_PANEL 108
 #define ID_DEBUG_VARIABLES 109
 #define ID_DEBUG_STATUS 110
-#define ID_DEBUG_CLOSE 111
 #define ID_OUTPUT_PANEL 112
 #define ID_OUTPUT_VIEW 113
 #define ID_TERMINAL_VIEW 114
@@ -26,6 +29,7 @@
 #define ID_OUTPUT_CLEAR 118
 #define ID_OUTPUT_STOP 119
 #define ID_OUTPUT_CLOSE 120
+#define ID_OUTPUT_TAB_DEBUG 121
 
 /* ---- timer IDs ---- */
 #define IDT_PREVIEW_UPDATE 1
@@ -91,10 +95,6 @@
 #define EXPLORER_MIN_WIDTH 120
 #define OUTLINE_WIDTH 230      /* at most a third of the content width */
 #define MIN_PANE_WIDTH 100     /* the narrowest the editor or preview gets beside the other */
-#define DEBUG_PANEL_HEIGHT 190 /* at most half the content height */
-#define DEBUG_PANEL_MIN_SPACE 160 /* below this much height the panel stays hidden */
-#define DEBUG_PANEL_PADDING 8
-#define DEBUG_PANEL_ROW_HEIGHT 26
 #define DEBUG_BUTTON_WIDTH 112
 #define DEBUG_BUTTON_MIN_WIDTH 48 /* narrower than this, the buttons hide */
 #define DEBUG_CLOSE_BUTTON_WIDTH 30

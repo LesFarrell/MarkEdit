@@ -67,6 +67,72 @@ local function decorated_sort(lines, compare)
   return lines
 end
 
+-- Delimiters that end what comes before them, as in "key: value" and
+-- "a, b", keep the padding after them; others, such as "=" and "|", line up
+-- in a column with a space on each side.
+local TRAILING_DELIMITERS = { [","] = true, [":"] = true, [";"] = true }
+
+local function width(text)
+  return utf8.len(text) or #text
+end
+
+-- Lines up every occurrence of delimiter, column by column. Lines without
+-- it are left alone, and a line's indentation is kept.
+local function align_on(lines, delimiter)
+  local rows, widths = {}, {}
+  for index, line in ipairs(lines) do
+    local cells, position = {}, 1
+    while true do
+      local found = line:find(delimiter, position, true)
+      if not found then break end
+      cells[#cells + 1] = line:sub(position, found - 1)
+      position = found + #delimiter
+    end
+    if #cells > 0 then
+      cells[#cells + 1] = line:sub(position)
+      for column, cell in ipairs(cells) do
+        cells[column] = column == 1 and cell:match("^(.-)%s*$") or cell:match("^%s*(.-)%s*$")
+        if column < #cells then
+          widths[column] = math.max(widths[column] or 0, width(cells[column]))
+        end
+      end
+      rows[index] = cells
+    end
+  end
+  for index, cells in pairs(rows) do
+    local parts = {}
+    for column, cell in ipairs(cells) do
+      if column == #cells then
+        parts[#parts + 1] = cell
+      else
+        local padding = (" "):rep(widths[column] - width(cell))
+        if TRAILING_DELIMITERS[delimiter] then
+          parts[#parts + 1] = cell .. delimiter .. padding .. " "
+        else
+          -- A row of "| a | b |" starts with an empty cell: no space before it.
+          local space = (column == 1 and widths[1] == 0) and "" or " "
+          parts[#parts + 1] = cell .. padding .. space .. delimiter .. " "
+        end
+      end
+    end
+    lines[index] = table.concat(parts):match("^(.-)%s*$")
+  end
+  return lines
+end
+
+menu.add("Line Tools/Align on Delimiter...", function()
+  if not selected_text() then return end
+  local delimiter = ui.prompt("Align the selected lines on:", config.get("align_delimiter", "="))
+  if not delimiter then return end
+  if delimiter == "" then
+    ui.message("Enter the text to align on, such as = or |.", nil, "warning")
+    return
+  end
+  config.set("align_delimiter", delimiter)
+  transform(function(lines) return align_on(lines, delimiter) end)
+end)
+menu.separator("Line Tools")
+
 menu.add("Line Tools/Clean/Remove Blank Lines", function()
   transform(function(lines)
     local kept = {}
@@ -139,24 +205,15 @@ menu.add("Line Tools/Order/Reverse", function()
   end)
 end)
 
--- A small private pseudo-random generator avoids changing Lua's shared
--- math.random state, which could surprise another plugin.
-local random_state = 1
-local seed_text = app.date_time()
-for index = 1, #seed_text do
-  random_state = (random_state * 131 + seed_text:byte(index)) % 2147483647
-end
-
-local function random_index(limit)
-  random_state = (random_state * 48271) % 2147483647
-  return random_state % limit + 1
-end
-
 menu.add("Line Tools/Order/Shuffle", function()
   transform(function(lines)
     local original = table.concat(lines, "\n")
+    -- Lua 5.4 seeds math.random randomly when it starts. Its generator is
+    -- shared by every plugin (only the tables are per plugin), but drawing
+    -- from it without calling math.randomseed changes nothing another
+    -- plugin could rely on, so no private generator is needed.
     for index = #lines, 2, -1 do
-      local other = random_index(index)
+      local other = math.random(index)
       lines[index], lines[other] = lines[other], lines[index]
     end
 

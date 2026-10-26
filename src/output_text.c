@@ -277,39 +277,3 @@ int output_location_next_candidate(const char *line, OutputLocation *location) {
     return 0;
 }
 
-/* ---- the terminal ---- */
-
-#define PROMPT_COMMAND "Write-Host -NoNewline ('PS ' + (Get-Location).Path + '> ')\r\n"
-
-static const char PROMPT_LINE[] = PROMPT_COMMAND;
-
-const char OUTPUT_TERMINAL_STARTUP[] =
-    "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false\r\n" PROMPT_COMMAND;
-
-static const char BASE64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-char *output_terminal_command(const char *command, size_t length) {
-    static const char prefix[] =
-        "Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('";
-    static const char suffix[] = "')))\r\n";
-    size_t encoded = (length + 2) / 3 * 4;
-    char *line = (char *)malloc(sizeof(prefix) + encoded + sizeof(suffix) + sizeof(PROMPT_LINE));
-    if (!line) return NULL;
-    char *out = line;
-    memcpy(out, prefix, sizeof(prefix) - 1);
-    out += sizeof(prefix) - 1;
-    const unsigned char *bytes = (const unsigned char *)command;
-    for (size_t i = 0; i < length; i += 3) {
-        unsigned value = (unsigned)bytes[i] << 16;
-        if (i + 1 < length) value |= (unsigned)bytes[i + 1] << 8;
-        if (i + 2 < length) value |= bytes[i + 2];
-        *out++ = BASE64[(value >> 18) & 63];
-        *out++ = BASE64[(value >> 12) & 63];
-        *out++ = i + 1 < length ? BASE64[(value >> 6) & 63] : '=';
-        *out++ = i + 2 < length ? BASE64[value & 63] : '=';
-    }
-    memcpy(out, suffix, sizeof(suffix) - 1);
-    out += sizeof(suffix) - 1;
-    memcpy(out, PROMPT_LINE, sizeof(PROMPT_LINE));
-    return line;
-}

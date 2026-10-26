@@ -754,224 +754,6 @@ static void draw_toolbar_button(const DRAWITEMSTRUCT *dis) {
     TOOLBAR_BUTTONS[index].paint(dis->hDC, &iconRc, fg);
 }
 
-/* The debugger stays in the main window instead of opening another tool
-   window. Its buttons remain native controls for keyboard/accessibility,
-   with owner-drawing used only to match the app's exact border palette. */
-static void apply_debug_panel_theme(void) {
-    if (!g_hDebugPanel) return;
-    HWND controls[] = { g_hDebugPanel, g_hDebugContinue, g_hDebugStepOver,
-                        g_hDebugStepInto, g_hDebugStepOut, g_hDebugClose,
-                        g_hDebugVariables };
-    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++)
-        if (controls[i]) {
-            apply_explorer_theme(controls[i]);
-            InvalidateRect(controls[i], NULL, TRUE);
-        }
-    if (g_hDebugVariables) {
-        ListView_SetBkColor(g_hDebugVariables, theme_bg_color());
-        ListView_SetTextBkColor(g_hDebugVariables, theme_bg_color());
-        ListView_SetTextColor(g_hDebugVariables, theme_fg_color());
-        HWND header = ListView_GetHeader(g_hDebugVariables);
-        if (header) {
-            apply_explorer_theme(header);
-            InvalidateRect(header, NULL, TRUE);
-        }
-    }
-    InvalidateRect(g_hDebugPanel, NULL, TRUE);
-}
-
-static void paint_debug_header(HWND header, HDC hdc) {
-    RECT client;
-    GetClientRect(header, &client);
-    fill_rect_color(hdc, &client, theme_bg_color());
-
-    HFONT font = (HFONT)SendMessageW(header, WM_GETFONT, 0, 0);
-    if (!font) font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    int count = (int)SendMessageW(header, HDM_GETITEMCOUNT, 0, 0);
-    for (int column = 0; column < count; column++) {
-        RECT rc = {0};
-        if (!SendMessageW(header, HDM_GETITEMRECT, (WPARAM)column, (LPARAM)&rc)) continue;
-        WCHAR label[64] = L"";
-        HDITEMW item = {0};
-        item.mask = HDI_TEXT;
-        item.pszText = label;
-        item.cchTextMax = sizeof(label) / sizeof(label[0]);
-        SendMessageW(header, HDM_GETITEMW, (WPARAM)column, (LPARAM)&item);
-
-        RECT divider = { rc.right - 1, rc.top, rc.right, rc.bottom };
-        fill_rect_color(hdc, &divider, theme_border_color());
-        rc.left += 7;
-        rc.right -= 5;
-        SetTextColor(hdc, theme_fg_color());
-        SetBkMode(hdc, TRANSPARENT);
-        DrawTextW(hdc, label, -1, &rc,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    }
-    RECT bottom = { client.left, client.bottom - 1, client.right, client.bottom };
-    fill_rect_color(hdc, &bottom, theme_border_color());
-    SelectObject(hdc, oldFont);
-}
-
-static LRESULT CALLBACK DebugHeaderSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
-                                                 LPARAM lParam, UINT_PTR id,
-                                                 DWORD_PTR data) {
-    (void)lParam; (void)id; (void)data;
-    if (msg == WM_ERASEBKGND) return 1;
-    if (msg == WM_PAINT) {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        paint_debug_header(hwnd, hdc);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    if (msg == WM_PRINTCLIENT) {
-        paint_debug_header(hwnd, (HDC)wParam);
-        return 0;
-    }
-    if (msg == WM_THEMECHANGED) {
-        InvalidateRect(hwnd, NULL, TRUE);
-        return 0;
-    }
-    if (msg == WM_NCDESTROY)
-        RemoveWindowSubclass(hwnd, DebugHeaderSubclassProc, 1);
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
-}
-
-static void draw_debug_panel_button(const DRAWITEMSTRUCT *dis) {
-    int pressed = (dis->itemState & ODS_SELECTED) != 0;
-    int disabled = (dis->itemState & ODS_DISABLED) != 0;
-    COLORREF fill = pressed ? theme_palette()->pressedBg : theme_bg_color();
-    COLORREF text = disabled ? theme_palette()->disabledFg : theme_fg_color();
-    fill_rect_color(dis->hDC, &dis->rcItem, fill);
-
-    HPEN pen = CreatePen(PS_SOLID, 1, theme_border_color());
-    HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-    Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top,
-              dis->rcItem.right, dis->rcItem.bottom);
-    SelectObject(dis->hDC, oldBrush);
-    SelectObject(dis->hDC, oldPen);
-    DeleteObject(pen);
-
-    WCHAR label[64];
-    GetWindowTextW(dis->hwndItem, label, sizeof(label) / sizeof(label[0]));
-    RECT textRect = dis->rcItem;
-    SetTextColor(dis->hDC, text);
-    SetBkMode(dis->hDC, TRANSPARENT);
-    DrawTextW(dis->hDC, label, -1, &textRect,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    if (dis->itemState & ODS_FOCUS) {
-        InflateRect(&textRect, -3, -3);
-        DrawFocusRect(dis->hDC, &textRect);
-    }
-}
-
-static LRESULT CALLBACK DebugPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
-                                                LPARAM lParam, UINT_PTR id,
-                                                DWORD_PTR data) {
-    (void)id; (void)data;
-    if (msg == WM_SIZE) {
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        int dpi = GetDpiForWindow(hwnd);
-        int pad = MulDiv(DEBUG_PANEL_PADDING, dpi, 96);
-        int row = MulDiv(DEBUG_PANEL_ROW_HEIGHT, dpi, 96);
-        int buttonWidth = MulDiv(DEBUG_BUTTON_WIDTH, dpi, 96);
-        int closeWidth = MulDiv(DEBUG_CLOSE_BUTTON_WIDTH, dpi, 96);
-        int availableForButtons = rc.right - closeWidth - pad * 7;
-        if (availableForButtons > 0 && buttonWidth * 4 > availableForButtons)
-            buttonWidth = availableForButtons / 4;
-        /* A panel too narrow for legible buttons hides them rather than
-           honouring the minimum width, which would push the leftmost button's
-           coordinates off the panel entirely. */
-        int showButtons = buttonWidth >= MulDiv(DEBUG_BUTTON_MIN_WIDTH, dpi, 96);
-        HWND buttons[] = { g_hDebugContinue, g_hDebugStepOver,
-                           g_hDebugStepInto, g_hDebugStepOut };
-        int x = rc.right - pad - closeWidth;
-        MoveWindow(g_hDebugClose, x, pad / 2, closeWidth, row, TRUE);
-        int statusWidth = 0;
-        if (showButtons) {
-            for (int i = 3; i >= 0; i--) {
-                x -= pad + buttonWidth;
-                MoveWindow(buttons[i], x, pad / 2, buttonWidth, row, TRUE);
-                ShowWindow(buttons[i], SW_SHOW);
-            }
-            statusWidth = x - pad * 2;
-        } else {
-            for (int i = 0; i < 4; i++) ShowWindow(buttons[i], SW_HIDE);
-        }
-        if (showButtons && statusWidth > MulDiv(DEBUG_STATUS_MIN_WIDTH, dpi, 96)) {
-            MoveWindow(g_hDebugStatus, pad, pad / 2, statusWidth, row, TRUE);
-            ShowWindow(g_hDebugStatus, SW_SHOW);
-        } else {
-            ShowWindow(g_hDebugStatus, SW_HIDE);
-        }
-        int top = row + pad;
-        MoveWindow(g_hDebugVariables, pad + 1, top + 1, rc.right - pad * 2 - 2,
-                   rc.bottom - top - pad - 2, TRUE);
-        /* Its borders follow the size, and a STATIC repaints only what a
-           resize uncovers, which would leave the old ones behind. */
-        InvalidateRect(hwnd, NULL, TRUE);
-        return 0;
-    }
-    if (msg == WM_COMMAND) {
-        WORD command = LOWORD(wParam);
-        if (command == ID_DEBUG_CLOSE) {
-            g_debugPanelVisible = 0; /* layout() hides the panel */
-            if (g_hMainWnd) {
-                SendMessageW(g_hMainWnd, WM_SIZE, 0, 0);
-                SetFocus(g_hEdit);
-            }
-            return 0;
-        }
-        if (command == IDM_DEBUG_CONTINUE || command == IDM_DEBUG_STEP_OVER ||
-            command == IDM_DEBUG_STEP_INTO || command == IDM_DEBUG_STEP_OUT) {
-            SendMessageW(g_hMainWnd, WM_COMMAND, command, 0);
-            return 0;
-        }
-    }
-    if (msg == WM_ERASEBKGND) {
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        fill_rect_color((HDC)wParam, &rc, theme_bg_color());
-        RECT border = { rc.left, rc.top, rc.right, rc.top + 1 };
-        fill_rect_color((HDC)wParam, &border, theme_border_color());
-        int dpi = GetDpiForWindow(hwnd);
-        int pad = MulDiv(DEBUG_PANEL_PADDING, dpi, 96);
-        int top = MulDiv(DEBUG_PANEL_ROW_HEIGHT, dpi, 96) + pad;
-        RECT edge = { pad, top, rc.right - pad, top + 1 };
-        fill_rect_color((HDC)wParam, &edge, theme_border_color());
-        edge = (RECT){ pad, rc.bottom - pad - 1, rc.right - pad, rc.bottom - pad };
-        fill_rect_color((HDC)wParam, &edge, theme_border_color());
-        edge = (RECT){ pad, top, pad + 1, rc.bottom - pad };
-        fill_rect_color((HDC)wParam, &edge, theme_border_color());
-        edge = (RECT){ rc.right - pad - 1, top, rc.right - pad, rc.bottom - pad };
-        fill_rect_color((HDC)wParam, &edge, theme_border_color());
-        return 1;
-    }
-    if (msg == WM_DRAWITEM) {
-        const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
-        if (dis->CtlType == ODT_BUTTON) {
-            draw_debug_panel_button(dis);
-            return TRUE;
-        }
-    }
-    if (msg == WM_CTLCOLORSTATIC) {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, theme_fg_color());
-        SetBkMode(hdc, TRANSPARENT);
-        return (LRESULT)(g_mainBkBrush ? g_mainBkBrush : GetStockObject(WHITE_BRUSH));
-    }
-    /* An owner-drawn button erases itself with this brush before it is
-       drawn; the default light one flashes on every resize in dark mode. */
-    if (msg == WM_CTLCOLORBTN && g_mainBkBrush)
-        return (LRESULT)g_mainBkBrush;
-    if (msg == WM_NCDESTROY)
-        RemoveWindowSubclass(hwnd, DebugPanelSubclassProc, 1);
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
-}
-
 /* Lay the toolbar buttons out left-to-right along the reserved top strip,
    with a wider gap standing in for a separator between groups. All buttons
    are the same size, sized to the toolbar's height. */
@@ -1142,26 +924,10 @@ static void layout_explorer(HWND hwnd, LayoutArea *area) {
     if (area->width < 0) area->width = 0;
 }
 
-/* A debug session owns a docked strip beneath the editor/preview area. The
-   explorer remains full-height, while code, preview, and outline all give
-   up the same amount of vertical space so their bottoms stay level. */
-static void layout_debug_panel(HWND hwnd, LayoutArea *area) {
-    if (!g_hDebugPanel) return;
-    if (!g_debugPanelVisible || g_focusMode || area->height < DEBUG_PANEL_MIN_SPACE) {
-        ShowWindow(g_hDebugPanel, SW_HIDE);
-        return;
-    }
-    int debugHeight = MulDiv(DEBUG_PANEL_HEIGHT, GetDpiForWindow(hwnd), 96);
-    if (debugHeight > area->height / 2) debugHeight = area->height / 2;
-    MoveWindow(g_hDebugPanel, area->x, area->y + area->height - debugHeight, area->width, debugHeight, TRUE);
-    ShowWindow(g_hDebugPanel, SW_SHOW);
-    area->height -= debugHeight;
-}
-
-/* The output panel docks above the debug panel's strip, under the editor,
-   preview and outline, with a splitter along its top edge for its height.
-   It keeps the height the user dragged it to, within what the window can
-   spare. */
+/* The output panel docks under the editor, preview and outline, with a
+   splitter along its top edge for its height. It keeps the height the user
+   dragged it to, within what the window can spare. Its Debug tab is where a
+   debug session's status and variables show (see output_panel.inc). */
 static void layout_output_panel(HWND hwnd, LayoutArea *area) {
     g_outputSplitterRect = (RECT){0, 0, 0, 0};
     if (!g_hOutputPanel) return;
@@ -1252,7 +1018,6 @@ static void layout(HWND hwnd) {
     layout_status_bar(hwnd, &area);
     layout_toolbar_and_tabs(&area);
     layout_explorer(hwnd, &area);
-    layout_debug_panel(hwnd, &area);
     layout_output_panel(hwnd, &area);
     layout_outline(hwnd, &area);
     layout_editor_and_preview(hwnd, &area);
@@ -1343,7 +1108,7 @@ static void cycle_pane_focus(int reverse) {
     if (target == g_hPreview && g_webviewController) {
         ICoreWebView2Controller_MoveFocus(g_webviewController, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
     } else if (target == g_hOutputPanel) {
-        SetFocus(g_hOutputInput);
+        SetFocus(active_output_focus_target());
     } else {
         SetFocus(target);
     }

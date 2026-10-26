@@ -1,13 +1,13 @@
 -- Text commands. On Edit > Convert:
 --   snake_case, camelCase, PascalCase, kebab-case, CONSTANT_CASE
 -- On the Plugins menu:
---   Lines      Remove Blank Lines, Keep/Remove Lines Containing, Shuffle,
---               Sort Naturally (so "file2" comes before "file10")
---   Text        Count Occurrences
+--   Lines       Keep/Remove Lines Containing
+--   Text        Count Occurrences (reported in the output panel)
 --   Insert      UUID, Lorem Ipsum
 --
--- Built-in Edit menu commands already sort lines, remove duplicate lines,
--- and change to upper, lower and title case, so those aren't repeated here.
+-- edit-convert.lua, line-tools.lua and natural-sort.lua already provide the
+-- standard case, sorting (including natural sorting), deduplication,
+-- blank-line, and shuffle commands, so those aren't repeated here.
 --
 -- Uses only the plugin API documented in README.md in this folder.
 
@@ -28,10 +28,15 @@ local function target_lines()
 end
 
 -- Replaces lines first..last with the strings in lines, rejoined with the
--- document's line ending, and selects them.
+-- document's line ending, and selects them. When no lines are left, one
+-- line ending goes too, so removing every line leaves no blank line behind.
 local function replace_lines(first, last, lines)
   local start = editor.line_range(first)
   local _, finish = editor.line_range(last)
+  if #lines == 0 then
+    if last < editor.line_count() then finish = editor.line_range(last + 1) - 1
+    elseif first > 1 then start = select(2, editor.line_range(first - 1)) + 1 end
+  end
   local text = table.concat(lines, editor.eol())
   editor.replace_range(start, finish, text)
   editor.set_selection(start, start + #text - 1)
@@ -52,8 +57,15 @@ end
 -- "Parse HTTP response" all give parse, HTTP/http, response. Bytes of UTF-8
 -- characters count as letters, so accented words stay whole, but only ASCII
 -- letters change case.
+-- Curly quotes, en/em dash, ellipsis and NBSP are punctuation, not parts of
+-- words: they are blanked with the same number of bytes, so positions in the
+-- result still match the original text.
+local function mask_punctuation(text)
+  return (text:gsub("\226\128[\147\148\152\153\156\157\166]", "   "):gsub("\194\160", "  "))
+end
+
 local function split_words(text)
-  text = text:gsub("(%l)(%u)", "%1 %2"):gsub("(%d)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2")
+  text = mask_punctuation(text):gsub("(%l)(%u)", "%1 %2"):gsub("(%d)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2")
   local words = {}
   for word in text:gmatch("[%w\128-\255]+") do words[#words + 1] = word end
   return words
@@ -102,16 +114,6 @@ menu.add("/Edit/Convert/CONSTANT_CASE", function() change_case("constant") end)
 -- These work on the selected lines, or on the whole document when nothing
 -- is selected.
 
-menu.add("Lines/Remove Blank Lines", function()
-  transform_lines(function(lines)
-    local kept = {}
-    for _, line in ipairs(lines) do
-      if line:find("%S") then kept[#kept + 1] = line end
-    end
-    return kept
-  end)
-end)
-
 -- Keeps (keep = true) or removes the lines that contain some text, matched
 -- exactly as typed, not as a Lua pattern.
 local function filter_lines(keep)
@@ -129,39 +131,6 @@ end
 menu.add("Lines/Keep Lines Containing...", function() filter_lines(true) end)
 menu.add("Lines/Remove Lines Containing...", function() filter_lines(false) end)
 
-menu.add("Lines/Shuffle Lines", function()
-  transform_lines(function(lines)
-    -- Fisher-Yates.
-    for i = #lines, 2, -1 do
-      local j = math.random(i)
-      lines[i], lines[j] = lines[j], lines[i]
-    end
-    return lines
-  end)
-end)
-
--- Compares runs of digits by their value, so "item 9" sorts before
--- "item 10". Letters compare ignoring case, and ties keep byte order.
-local function natural_key(line)
-  return (line:lower():gsub("%d+", function(digits)
-    digits = digits:gsub("^0+", "")
-    -- The length first, so longer numbers sort later.
-    return string.format("%03d", #digits) .. digits
-  end))
-end
-
-menu.add("Lines/Sort Naturally", function()
-  transform_lines(function(lines)
-    local keys = {}
-    for _, line in ipairs(lines) do keys[line] = keys[line] or natural_key(line) end
-    table.sort(lines, function(a, b)
-      if keys[a] ~= keys[b] then return keys[a] < keys[b] end
-      return a < b
-    end)
-    return lines
-  end)
-end)
-
 -- ---- Plugins > Text ----
 
 -- Word characters for Count Occurrences: ASCII letters, digits, _ and any
@@ -173,7 +142,7 @@ local function word_at_caret()
   local line = editor.current_line()
   local lineStart = editor.line_range(line)
   local column = editor.get_caret() - lineStart + 1
-  for wordStart, word, wordEnd in editor.get_line(line):gmatch("()(" .. WORD_BYTE .. "+)()") do
+  for wordStart, word, wordEnd in mask_punctuation(editor.get_line(line)):gmatch("()(" .. WORD_BYTE .. "+)()") do
     if wordStart <= column and column <= wordEnd then return word end
   end
   return ""
@@ -187,11 +156,12 @@ local function count_occurrences(text, needle, eol, wholeWord)
   local count, lines, lastLine, line, scanned = 0, 0, 0, 1, 1
   local checkBefore = wholeWord and needle:find("^" .. WORD_BYTE)
   local checkAfter = wholeWord and needle:find(WORD_BYTE .. "$")
+  local masked = wholeWord and mask_punctuation(text) or text
   local position = 1
   while true do
     local first, last = text:find(needle, position, true)
     if not first then break end
-    local before, after = text:sub(first - 1, first - 1), text:sub(last + 1, last + 1)
+    local before, after = masked:sub(first - 1, first - 1), masked:sub(last + 1, last + 1)
     if not (checkBefore and before:find(WORD_BYTE)) and not (checkAfter and after:find(WORD_BYTE)) then
       count = count + 1
       -- Line endings since the last match give this match's line.
@@ -231,7 +201,7 @@ menu.add("Text/Count Occurrences...", function()
   report[1] = report[1] .. "."
   if anyCase ~= exact then report[#report + 1] = "Ignoring case: " .. times(anyCase) .. "." end
   if wholeWord ~= exact then report[#report + 1] = "As a whole word: " .. times(wholeWord) .. "." end
-  ui.message(table.concat(report, "\n"))
+  output.report("Count Occurrences", table.concat(report, "\n"))
 end)
 
 -- ---- Plugins > Insert ----

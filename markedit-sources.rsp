@@ -21,6 +21,9 @@ src/themed_scrollbar.c
 src/recovery.c
 src/output_text.c
 src/output_process.c
+src/terminal_grid.c
+src/terminal_process.c
+src/terminal_view.c
 src/plugin_host.c
 src/plugin_lua_runtime.c
 src/plugin_registry.c

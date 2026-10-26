@@ -44,6 +44,81 @@ static void expect_text(const WCHAR *directory, int index, const char *expected)
     recovery_entry_free(&entry);
 }
 
+static int is_directory(const WCHAR *path) {
+    DWORD attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Each instance's snapshot lives in its own locked session: a running instance
+   is never offered or cleared by another, and a crashed one survives until a
+   later launch claims it. */
+static void test_sessions(const WCHAR *temp) {
+    WCHAR root[MAX_PATH];
+    CHECK(GetTempFileNameW(temp, L"mrs", 0, root));
+    CHECK(DeleteFileW(root));
+    CHECK(CreateDirectoryW(root, NULL));
+    RecoveryDocument doc = {NULL, 1, 0, TEXT_ENCODING_UTF8, 0};
+    Source source = {"crashed work", -1, NULL, 1};
+    RecoverySession crashed, live, empty, claimed[RECOVERY_MAX_SESSIONS];
+    CHECK(recovery_session_open(root, &crashed));
+    CHECK(recovery_session_open(root, &live));
+    CHECK(recovery_session_open(root, &empty));
+    CHECK(wcscmp(crashed.directory, live.directory));
+    CHECK(recovery_write(crashed.directory, &doc, 1, read_text, &source));
+    source.text = "live work";
+    CHECK(recovery_write(live.directory, &doc, 1, read_text, &source));
+
+    /* Sessions whose instances still run are not claimed. */
+    CHECK(recovery_session_claim_orphans(root, claimed, RECOVERY_MAX_SESSIONS) == 0);
+
+    /* A crash releases the lock without discarding the snapshot; an empty
+       abandoned session is removed rather than offered. */
+    WCHAR crashedDirectory[MAX_PATH], emptyDirectory[MAX_PATH];
+    wcscpy(crashedDirectory, crashed.directory);
+    wcscpy(emptyDirectory, empty.directory);
+    recovery_session_close(&crashed, 0);
+    recovery_session_close(&empty, 0);
+    CHECK(!crashed.directory);
+
+    /* Another instance clearing its own empty snapshot leaves the crash alone. */
+    CHECK(recovery_write(live.directory, NULL, 0, NULL, NULL));
+    CHECK(recovery_count(crashedDirectory) == 1);
+
+    int count = recovery_session_claim_orphans(root, claimed, RECOVERY_MAX_SESSIONS);
+    CHECK(count == 1);
+    CHECK(!is_directory(emptyDirectory));
+    if (count == 1) {
+        CHECK(!wcscmp(claimed[0].directory, crashedDirectory));
+        expect_text(claimed[0].directory, 0, "crashed work");
+        /* A claimed session is locked against a second claimant. */
+        RecoverySession again[RECOVERY_MAX_SESSIONS];
+        CHECK(recovery_session_claim_orphans(root, again, RECOVERY_MAX_SESSIONS) == 0);
+        recovery_session_close(&claimed[0], 1);
+    }
+    CHECK(!is_directory(crashedDirectory));
+
+    /* A snapshot older builds wrote straight into root is still offered. */
+    source.text = "legacy work";
+    CHECK(recovery_write(root, &doc, 1, read_text, &source));
+    count = recovery_session_claim_orphans(root, claimed, RECOVERY_MAX_SESSIONS);
+    CHECK(count == 1);
+    if (count == 1) {
+        CHECK(claimed[0].lock == INVALID_HANDLE_VALUE);
+        expect_text(claimed[0].directory, 0, "legacy work");
+        recovery_session_close(&claimed[0], 1);
+    }
+    CHECK(recovery_count(root) == 0);
+
+    WCHAR liveDirectory[MAX_PATH];
+    wcscpy(liveDirectory, live.directory);
+    recovery_session_close(&live, 1);
+    CHECK(!is_directory(liveDirectory));
+    WCHAR *lock = path_join(root, L"recovery.lock");
+    CHECK(lock && DeleteFileW(lock));
+    free(lock);
+    CHECK(RemoveDirectoryW(root));
+}
+
 int main(void) {
     WCHAR temp[MAX_PATH], directory[MAX_PATH];
     CHECK(GetTempPathW(MAX_PATH, temp));
@@ -123,6 +198,8 @@ int main(void) {
     CHECK(recovery_clear(directory));
     CHECK(!exists(directory, orphan));
     free(manifest);
+
+    test_sessions(temp);
 
     WCHAR *path = path_join(directory, L"document-notes.txt");
     CHECK(DeleteFileW(path)); free(path);

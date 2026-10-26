@@ -66,6 +66,20 @@ static void test_default_definition(void) {
         if (!used[c]) fprintf(stderr, "Not in the default menus: %s\n", menu_command_at(c)->name);
         expect(used[c], "every built-in command is in the default menus");
     }
+
+    /* Plugin-owned tool families must not grow a second registry/menu path
+       in the executable. Their bundled-plugin tests verify the replacements. */
+    static const char *const pluginOnly[] = {
+        "edit.uppercase", "edit.lowercase", "edit.title_case",
+        "edit.sort_ascending", "edit.sort_descending", "edit.remove_duplicate_lines",
+        "edit.tabs_to_spaces", "edit.spaces_to_tabs", "edit.eol_crlf", "edit.eol_lf",
+        "edit.eol_cr", "edit.encoding_utf8", "edit.encoding_utf8_bom",
+        "edit.encoding_utf16le", "edit.encoding_utf16be", "edit.encoding_ansi",
+        "json.format", "json.minify"
+    };
+    for (size_t i = 0; i < sizeof(pluginOnly) / sizeof(pluginOnly[0]); i++)
+        expect(menu_command_find(pluginOnly[i]) == NULL,
+               "plugin-owned commands have no built-in registry entry");
 }
 
 static void test_definitions(void) {
@@ -160,9 +174,15 @@ static void test_shortcuts_page(void) {
     for (int c = 0; menu_command_at(c); c++) {
         const char *shortcut = menu_command_at(c)->shortcut;
         if (!shortcut) continue;
-        char row[64];
-        /* Cells escape Markdown punctuation: Ctrl+\ is written Ctrl+\\. */
-        snprintf(row, sizeof(row), "| %s%s |", shortcut, strcmp(shortcut, "Ctrl+\\") == 0 ? "\\" : "");
+        /* Cells escape Markdown punctuation as keyboard-shortcuts.lua's
+           cell() does: Ctrl+\ is written Ctrl+\\ and Ctrl+` is Ctrl+\`. */
+        char row[64] = "| ";
+        size_t used = 2;
+        for (const char *c = shortcut; *c && used + 4 < sizeof(row); c++) {
+            if (strchr("\\|`*_", *c)) row[used++] = '\\';
+            row[used++] = *c;
+        }
+        snprintf(row + used, sizeof(row) - used, " |");
         if (!strstr(page, row)) fprintf(stderr, "Shortcut missing from the page: %s\n", shortcut);
         expect(strstr(page, row) != NULL, "every shortcut is on the page");
     }
@@ -179,6 +199,23 @@ static void test_shortcuts_page(void) {
                "shortcuts of commands not in the menus are listed separately");
         free(page);
     }
+
+    /* Plugin shortcuts arrive keyed by label, and are listed by menu path. */
+    static const PluginShortcut plugins[] = {
+        { "file.new", "Ctrl+N" },
+        { "/Tools/JSON/Format &JSON", "Ctrl+Alt+J" },
+        { "Line Tools/Salt && &Pepper", "Ctrl+Alt+P" },
+    };
+    char *code = read_utf8_text_file(L"src\\help\\keyboard-shortcuts.lua", 1024 * 1024);
+    page = NULL;
+    if (code) free(plugin_host_render_page("keyboard-shortcuts.lua", code, strlen(code), plugins, 3, &page));
+    free(code);
+    expect(page && strstr(page, "## Plugin commands") &&
+           strstr(page, "| Ctrl+Alt+J | Tools > JSON > Format JSON |") &&
+           strstr(page, "| Ctrl+Alt+P | Plugins > Line Tools > Salt & Pepper |") &&
+           !strstr(page, "/Tools/JSON"),
+           "plugin shortcuts are listed by their plain menu path");
+    free(page);
 
     /* A script error is reported, not crashed on. */
     char *bad = NULL;

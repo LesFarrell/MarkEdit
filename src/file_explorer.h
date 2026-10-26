@@ -66,6 +66,11 @@ void explorer_shutdown(void);
    own WM_NOTIFY handler whenever notification->hwndFrom == g_hExplorerTree. */
 void explorer_handle_notify(NMHDR *notification);
 
+/* Handles explorer-specific keys before the application's accelerator table
+   sees them. This keeps conventional TreeView actions such as F2 (rename)
+   and F5 (refresh) local to the explorer while it has focus. */
+int explorer_pretranslate_message(const MSG *message);
+
 /* Drains the pending-changed-directories queue built up by the watcher
    thread and refreshes just the affected, currently-loaded tree nodes.
    markedit.c calls this from its MARKEDIT_WM_EXPLORER_CHANGED debounce

@@ -1,3 +1,8 @@
+-- NOTE: every command here duplicates one in encoding.lua (Plugins >
+-- Encode), which also handles whole documents, URL-safe Base64 and more
+-- HTML entities, and now rejects non-canonical Base64 padding too. Removing
+-- them would leave this plugin empty, so whether to keep it is pending.
+--
 -- Small, dependency-free transforms for text commonly handled by developers.
 -- Commands intentionally require a selection so they cannot rewrite a whole
 -- document by accident.
@@ -14,6 +19,10 @@ end
 local base64_alphabet =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
+-- One table entry per 3-byte group (joined below) rather than one per output
+-- character: a Lua table entry costs far more than the byte it holds, and
+-- four entries per group instead of one made this blow through the plugin
+-- memory limit on a selection of only a few megabytes.
 local function base64_encode(text)
   local output = {}
   for position = 1, #text, 3 do
@@ -23,12 +32,13 @@ local function base64_encode(text)
     local value = a * 65536 + b * 256 + c
     local remaining = #text - position + 1
 
-    output[#output + 1] = base64_alphabet:sub(value // 262144 + 1, value // 262144 + 1)
-    output[#output + 1] = base64_alphabet:sub(value // 4096 % 64 + 1, value // 4096 % 64 + 1)
-    output[#output + 1] = remaining >= 2
-      and base64_alphabet:sub(value // 64 % 64 + 1, value // 64 % 64 + 1) or "="
-    output[#output + 1] = remaining >= 3
-      and base64_alphabet:sub(value % 64 + 1, value % 64 + 1) or "="
+    local quad = {
+      base64_alphabet:sub(value // 262144 + 1, value // 262144 + 1),
+      base64_alphabet:sub(value // 4096 % 64 + 1, value // 4096 % 64 + 1),
+      remaining >= 2 and base64_alphabet:sub(value // 64 % 64 + 1, value // 64 % 64 + 1) or "=",
+      remaining >= 3 and base64_alphabet:sub(value % 64 + 1, value % 64 + 1) or "=",
+    }
+    output[#output + 1] = table.concat(quad)
   end
   return table.concat(output)
 end
@@ -54,7 +64,11 @@ local function base64_decode(text)
 
     if not a or not b or (third ~= "=" and not c) or (fourth ~= "=" and not d)
       or (third == "=" and fourth ~= "=")
-      or ((third == "=" or fourth == "=") and not final_block) then
+      or ((third == "=" or fourth == "=") and not final_block)
+      -- Padding discards low-order bits. Requiring those bits to be zero
+      -- rejects non-canonical encodings instead of silently changing them.
+      or (third == "=" and b % 16 ~= 0)
+      or (fourth == "=" and third ~= "=" and c % 4 ~= 0) then
       return nil, "The selection is not valid Base64."
     end
 
@@ -111,27 +125,19 @@ local function html_encode(text)
     :gsub("'", "&#39;"))
 end
 
+local HTML_ENTITIES = { quot = '"', apos = "'", lt = "<", gt = ">", amp = "&" }
+
+-- A single pass, so a decoded "&" never starts another entity: "&#38;lt;"
+-- becomes "&lt;", not "<". Unknown or invalid entities are left as they are.
 local function html_decode(text)
-  return (text:gsub("&#[xX](%x+);", function(value)
-      local code = tonumber(value, 16)
-      if not code or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF) then
-        return "&#x" .. value .. ";"
-      end
-      return utf8.char(code)
-    end)
-    :gsub("&#(%d+);", function(value)
-      local code = tonumber(value, 10)
-      if not code or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF) then
-        return "&#" .. value .. ";"
-      end
-      return utf8.char(code)
-    end)
-    :gsub("&quot;", '"')
-    :gsub("&#39;", "'")
-    :gsub("&apos;", "'")
-    :gsub("&lt;", "<")
-    :gsub("&gt;", ">")
-    :gsub("&amp;", "&"))
+  return (text:gsub("&(#?%w+);", function(name)
+    local code
+    if name:match("^#[xX]%x+$") then code = tonumber(name:sub(3), 16)
+    elseif name:match("^#%d+$") then code = tonumber(name:sub(2), 10)
+    else return HTML_ENTITIES[name] end
+    if not code or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF) then return nil end
+    return utf8.char(code)
+  end))
 end
 
 menu.add("Developer Tools/Base64 Encode", function()
@@ -139,16 +145,23 @@ menu.add("Developer Tools/Base64 Encode", function()
   if text then editor.replace_selection(base64_encode(text)) end
 end)
 
-menu.add("Developer Tools/Base64 Decode", function()
+-- Replaces the selection with what `decode` makes of it. Decoded bytes
+-- become document text only if they are UTF-8, as in encoding.lua.
+local function replace_with_decoded(decode, what)
   local text = selection_or_warn()
   if not text then return end
-  local decoded, message = base64_decode(text)
+  local decoded, message = decode(text)
+  if decoded and not utf8.len(decoded) then
+    decoded, message = nil, what .. " decodes to binary data, not UTF-8 text, so it wasn't inserted."
+  end
   if not decoded then
     ui.message(message, nil, "warning")
     return
   end
   editor.replace_selection(decoded)
-end)
+end
+
+menu.add("Developer Tools/Base64 Decode", function() replace_with_decoded(base64_decode, "This Base64") end)
 
 menu.separator("Developer Tools")
 
@@ -157,16 +170,7 @@ menu.add("Developer Tools/Hex Encode", function()
   if text then editor.replace_selection(hex_encode(text)) end
 end)
 
-menu.add("Developer Tools/Hex Decode", function()
-  local text = selection_or_warn()
-  if not text then return end
-  local decoded, message = hex_decode(text)
-  if not decoded then
-    ui.message(message, nil, "warning")
-    return
-  end
-  editor.replace_selection(decoded)
-end)
+menu.add("Developer Tools/Hex Decode", function() replace_with_decoded(hex_decode, "This hex") end)
 
 menu.separator("Developer Tools")
 
@@ -175,16 +179,7 @@ menu.add("Developer Tools/URL Encode", function()
   if text then editor.replace_selection(url_encode(text)) end
 end)
 
-menu.add("Developer Tools/URL Decode", function()
-  local text = selection_or_warn()
-  if not text then return end
-  local decoded, message = url_decode(text)
-  if not decoded then
-    ui.message(message, nil, "warning")
-    return
-  end
-  editor.replace_selection(decoded)
-end)
+menu.add("Developer Tools/URL Decode", function() replace_with_decoded(url_decode, "This URL text") end)
 
 menu.separator("Developer Tools")
 

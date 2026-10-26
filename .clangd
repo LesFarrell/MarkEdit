@@ -1,0 +1,10 @@
+# clangd configuration. The compilation database is generated from the same
+# *.rsp source lists build.bat uses:
+#   pwsh -File gen_compdb.ps1
+# Run it after adding or renaming a source file.
+CompileFlags:
+  CompilationDatabase: .
+  Add:
+    - -Wno-unknown-pragmas
+Diagnostics:
+  UnusedIncludes: None

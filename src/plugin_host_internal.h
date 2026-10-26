@@ -51,6 +51,19 @@ typedef struct {
     char *label;
 } PluginDeferred;
 
+/* contextmenu.add()'s items. Distinct from PluginContext (require()'s
+   per-script module root) below, despite the similar name - this one is the
+   editor's right-click popup. */
+typedef struct {
+    int id;
+    char *label;
+    int ref;
+    int enabledRef;
+    char *owner;
+    char *configKey;
+    int checkDefault;
+} PluginContextMenuItem;
+
 typedef struct {
     char *owner;
     WCHAR *moduleRoot;
@@ -82,6 +95,9 @@ extern int s_handlerCount;
 extern int s_nextHandlerId;
 extern PluginDeferred s_deferred[PLUGIN_MAX_DEFERRED];
 extern int s_nextDeferredToken;
+extern PluginContextMenuItem s_contextMenuItems[PLUGIN_MAX_CONTEXT_ITEMS];
+extern int s_contextMenuItemCount;
+extern int s_nextContextMenuItemId;
 
 /* plugin_discovery.c */
 extern PluginExtension s_extensions[256];
@@ -115,6 +131,7 @@ PluginCommand *append_command(lua_State *L, const char *label, int functionIndex
                               const char *defaultOwner);
 void keep_command_string(lua_State *L, char **field, const char *value);
 void discard_handlers_from(int firstIndex);
+void discard_context_menu_items_from(int firstIndex);
 void plugin_registry_open(lua_State *L);
 
 /* ---- plugin_discovery.c ---- */

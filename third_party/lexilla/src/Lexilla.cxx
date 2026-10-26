@@ -40,6 +40,12 @@ extern const LexerModule lmPython;
 extern const LexerModule lmBash;
 extern const LexerModule lmPowerShell;
 extern const LexerModule lmLua;
+extern const LexerModule lmCss;
+extern const LexerModule lmSQL;
+extern const LexerModule lmProps;
+extern const LexerModule lmTOML;
+extern const LexerModule lmBatch;
+extern const LexerModule lmMake;
 
 namespace {
 
@@ -62,6 +68,12 @@ void AddEachLexer() {
 		&lmBash,
 		&lmPowerShell,
 		&lmLua,
+		&lmCss,
+		&lmSQL,
+		&lmProps,
+		&lmTOML,
+		&lmBatch,
+		&lmMake,
 		});
 
 }

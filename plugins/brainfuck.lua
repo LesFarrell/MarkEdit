@@ -1,4 +1,4 @@
--- Run Brainfuck, on the Plugins menu: runs the selected text as a
+-- Tools > Brainfu*k: runs the selected text as a
 -- Brainfuck program and inserts what it prints on a new line after the
 -- selection, leaving it selected.
 --
@@ -11,6 +11,9 @@
 --
 -- A program that runs for too long, or prints too much, is stopped, with a
 -- message saying why, and what it printed so far is inserted.
+--
+-- examples/HelloWorld.bf in this folder is a program to try: open it,
+-- select all, and run the command.
 --
 -- Uses only the plugin API documented in README.md in this folder.
 
@@ -127,7 +130,7 @@ local function as_document_text(bytes)
   return (bytes:gsub("\r?\n", editor.eol()))
 end
 
-menu.add("Brainfuck", function()
+menu.add("/Tools/Interpreters/Brainfu*k", function()
   local start, finish = editor.get_selection_range()
   if finish < start then
     ui.message("Select the Brainfuck text to run first.")
@@ -158,8 +161,16 @@ menu.add("Brainfuck", function()
   local output, stopped = run(code, input)
   if output ~= "" then
     local text = as_document_text(output)
-    local at = finish + 1 + #editor.eol()
-    editor.insert(editor.eol() .. text, finish + 1)
+    -- The output goes on its own line after the selection. A selection
+    -- that already ends with a line ending needs one after the output
+    -- instead, so it doesn't run into the next line.
+    local eol, at = editor.eol(), finish + 1
+    if program:find("[\r\n]$") then
+      editor.insert(text .. eol, at)
+    else
+      at = at + #eol
+      editor.insert(eol .. text, finish + 1)
+    end
     editor.set_selection(at, at + #text - 1)
   end
   if stopped then

@@ -182,6 +182,9 @@ static void apply_language_to_view(HWND hEdit, const WCHAR *path) {
     SendMessageA(hEdit, SCI_SETILEXER, 0, (LPARAM)lexer);
     if (language->keywords)
         SendMessageA(hEdit, SCI_SETKEYWORDS, 0, (LPARAM)language->keywords);
+    for (size_t i = 0; i < sizeof(language->extraKeywords) / sizeof(language->extraKeywords[0]); i++)
+        if (language->extraKeywords[i])
+            SendMessageA(hEdit, SCI_SETKEYWORDS, (WPARAM)(i + 1), (LPARAM)language->extraKeywords[i]);
 
     /* fold.html is separate from fold: without it the XML/HTML lexer reports no
        fold points at all. The margin is hidden for languages that cannot fold,

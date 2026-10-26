@@ -9,11 +9,11 @@
 #include "../third_party/lexilla/include/SciLexer.h"
 
 const LanguageInfo LANGUAGES[LANGUAGE_COUNT] = {
-    { LANG_MARKDOWN, "markdown", L".md;.markdown;.mdown;.mkd;.mdwn;.text", NULL, "markdown", 0, NULL },
-    { LANG_JSON, "json", L".json;.jsonc;.jsonl;.geojson;.webmanifest", "true false null", "json", 1, NULL },
-    { LANG_XML, "xml", L".xml;.xsd;.xsl;.xslt;.svg;.rss;.atom;.plist;.csproj;.props;.targets", NULL, "xml", 1, NULL },
-    { LANG_HTML, "hypertext", L".html;.htm;.xhtml", NULL, "html", 1, NULL },
-    { LANG_YAML, "yaml", L".yml;.yaml", "true false null yes no on off", "yaml", 1, NULL },
+    { LANG_MARKDOWN, "markdown", L".md;.markdown;.mdown;.mkd;.mdwn;.text", NULL, "markdown", 0, NULL, {0} },
+    { LANG_JSON, "json", L".json;.jsonc;.jsonl;.geojson;.webmanifest", "true false null", "json", 1, NULL, {0} },
+    { LANG_XML, "xml", L".xml;.xsd;.xsl;.xslt;.svg;.rss;.atom;.plist;.csproj;.props;.targets", NULL, "xml", 1, NULL, {0} },
+    { LANG_HTML, "hypertext", L".html;.htm;.xhtml", NULL, "html", 1, NULL, {0} },
+    { LANG_YAML, "yaml", L".yml;.yaml", "true false null yes no on off", "yaml", 1, NULL, {0} },
     { LANG_CPP, "cpp", L".c;.h;.cc;.cpp;.cxx;.hpp;.hxx;.js;.mjs;.cjs;.ts;.tsx;.jsx;.cs;.java;.go;.rs;.php",
       "auto break case char const continue default do double else enum extern float for goto if"
       " inline int long register return short signed sizeof static struct switch typedef union"
@@ -21,25 +21,25 @@ const LanguageInfo LANGUAGES[LANGUAGE_COUNT] = {
       " export false friend mutable namespace new operator private protected public"
       " reinterpret_cast static_cast template this throw true try typeid typename using virtual"
       " nullptr constexpr decltype noexcept override final function var let await async"
-      " import from interface type extends implements", "c", 1, NULL },
+      " import from interface type extends implements", "c", 1, NULL, {0} },
     { LANG_PYTHON, "python", L".py;.pyw;.pyi",
       "and as assert async await break class continue def del elif else except finally for from"
       " global if import in is lambda nonlocal not or pass raise return try while with yield"
-      " None True False self", "python", 1, NULL },
+      " None True False self", "python", 1, NULL, {0} },
     { LANG_BASH, "bash", L".sh;.bash;.zsh;.ksh;.bashrc;.profile",
       "if then else elif fi case esac for while until do done in function select time coproc"
       " break continue return exit export local readonly declare unset shift eval exec source",
-      "bash", 1, NULL },
+      "bash", 1, NULL, {0} },
     { LANG_POWERSHELL, "powershell", L".ps1;.psm1;.psd1",
       "begin break catch continue data do dynamicparam else elseif end exit filter finally for"
       " foreach from function if in local param process return switch throw trap try until"
-      " where while", "powershell", 1, NULL },
+      " where while", "powershell", 1, NULL, {0} },
     { LANG_LUA, "lua", L".lua",
       "and break do else elseif end false for function goto if in local nil not or repeat return"
-      " then true until while", "lua", 1, NULL },
+      " then true until while", "lua", 1, NULL, {0} },
     /* Properties a CSS lexer doesn't know are styled like known ones (see
        apply_css_styles()), so it needs no property list. */
-    { LANG_CSS, "css", L".css", NULL, "css", 1, NULL },
+    { LANG_CSS, "css", L".css", NULL, "css", 1, NULL, {0} },
     /* LexSQL matches keywords in lower case, whatever case they're typed in. */
     { LANG_SQL, "sql", L".sql",
       "add all alter and any as asc begin between by case cascade check column commit constraint"
@@ -47,23 +47,95 @@ const LanguageInfo LANGUAGES[LANGUAGE_COUNT] = {
       " foreign from full function group having if in index inner insert into is join key left"
       " like limit not null offset on or order outer primary procedure references replace"
       " return returns right rollback select set table then top transaction trigger truncate"
-      " union unique update use values view when where while with", "sql", 1, NULL },
-    { LANG_INI, "props", L".ini;.cfg;.conf;.properties;.editorconfig;.gitconfig", NULL, "ini", 1, NULL },
-    { LANG_TOML, "toml", L".toml", "true false inf nan", "toml", 1, NULL },
+      " union unique update use values view when where while with", "sql", 1, NULL, {0} },
+    { LANG_INI, "props", L".ini;.cfg;.conf;.properties;.editorconfig;.gitconfig", NULL, "ini", 1, NULL, {0} },
+    { LANG_TOML, "toml", L".toml", "true false inf nan", "toml", 1, NULL, {0} },
     /* LexBatch matches commands in lower case, whatever case they're typed in. */
     { LANG_BATCH, "batch", L".bat;.cmd",
       "assoc break call cd chdir cls color copy date defined del dir do echo else endlocal equ"
       " erase errorlevel exist exit for ftype geq goto gtr if in leq lss md mkdir mklink move neq"
       " not path pause popd prompt pushd rd rem ren rename rmdir set setlocal shift start time"
-      " title type ver verify vol", "plaintext", 0, NULL },
+      " title type ver verify vol", "plaintext", 0, NULL, {0} },
     { LANG_MAKEFILE, "makefile", L".mk;.mak",
       "define else endef endif export ifdef ifeq ifndef ifneq include override private"
-      " sinclude undefine unexport vpath", "makefile", 0, L"Makefile;GNUmakefile" },
+      " sinclude undefine unexport vpath", "makefile", 0, L"Makefile;GNUmakefile", {0} },
+    /* LexInno matches every one of its six keyword lists in lower case,
+       whatever case a script actually uses them in (it lower-cases each
+       identifier itself before checking InList()). `keywords` here is
+       SCI_SETKEYWORDS list 0 (section names); extraKeywords supplies lists
+       1-5 - [Setup]'s own directives, the colon-style parameter names used
+       across [Files]/[Icons]/[Run]/[Registry]/etc., the preprocessor's
+       directives, and Pascal Script's reserved words, in that order (list 5,
+       user-defined keywords, is intentionally left empty, as upstream
+       SciTE's own Inno language definition does). No fence-tag alias of its
+       own is recognised by the preview's highlighter, so it previews as the
+       nearest well-known relative, INI, which shares its bracketed-section,
+       Name=Value shape. */
+    { LANG_INNO, "inno", L".iss",
+      "code components custommessages dirs files icons ini installdelete issigkeys langoptions"
+      " languages messages registry run setup tasks types uninstalldelete uninstallrun",
+      "ini", 1, NULL,
+      {
+          "allowcancelduringinstall allownetworkdrive allownoicons allowrootdirectory allowuncpath "
+          "alwayscreateuninstallicon alwaysrestart alwaysshowcomponentslist alwaysshowdironreadypage "
+          "alwaysshowgrouponreadypage alwaysusepersonalgroup appcomments appcontact appcopyright "
+          "appenddefaultdirname appenddefaultgroupname appid appmodifypath appmutex appname apppublisher "
+          "apppublisherurl appreadmefile appsupportphone appsupporturl appupdatesurl appvername appversion "
+          "architecturesallowed architecturesinstallin64bitmode archiveextraction aslrcompatible backcolor "
+          "backcolor2 backcolordirection backsolid changesassociations changesenvironment closeapplications "
+          "closeapplicationsfilter closeapplicationsfilterexcludes compression compressionthreads "
+          "createappdir createuninstallregkey defaultdialogfontname defaultdirname defaultgroupname "
+          "defaultuserinfoname defaultuserinfoorg defaultuserinfoserial depcompatible direxistswarning "
+          "disableappenddir disabledirpage disablefinishedpage disableprecompiledfileverifications "
+          "disableprogramgrouppage disablereadymemo disablereadypage disablestartupprompt "
+          "disablewelcomepage diskclustersize diskslicesize diskspanning dontmergeduplicatefiles "
+          "enabledirdoesntexistwarning encryption encryptionkeyderivation extradiskspacerequired "
+          "flatcomponentslist infoafterfile infobeforefile internalcompresslevel languagedetectionmethod "
+          "licensefile lzmaalgorithm lzmablocksize lzmadictionarysize lzmamatchfinder lzmanumblockthreads "
+          "lzmanumfastbytes lzmauseseparateprocess mergeduplicatefiles messagesfile minversion "
+          "missingmessageswarning missingrunonceidswarning notrecognizedmessageswarning onlybelowversion "
+          "output outputbasefilename outputdir outputmanifestfile password privilegesrequired "
+          "privilegesrequiredoverridesallowed redirectionguard reservebytes restartapplications "
+          "restartifneededbyrun setuparchitecture setupiconfile setuplogging setupmutex showcomponentsizes "
+          "showlanguagedialog showtaskstreelines signeduninstaller signeduninstallerdir signtool "
+          "signtoolminimumtimebetween signtoolretrycount signtoolretrydelay signtoolrunminimized "
+          "slicesperdisk solidcompression sourcedir terminalservicesaware timestamprounding timestampsinutc "
+          "touchdate touchtime uninstallable uninstalldisplayicon uninstalldisplayname uninstalldisplaysize "
+          "uninstallfilesdir uninstalliconfile uninstalliconname uninstalllogging uninstalllogmode "
+          "uninstallrestartcomputer uninstallstyle updateuninstalllogappname useduserareaswarning "
+          "usepreviousappdir usepreviousgroup usepreviouslanguage usepreviousprivileges "
+          "useprevioussetuptype useprevioustasks useprevioususerinfo userinfopage usesetupldr "
+          "versioninfocompany versioninfocopyright versioninfodescription versioninfooriginalfilename "
+          "versioninfoproductname versioninfoproducttextversion versioninfoproductversion "
+          "versioninfotextversion versioninfoversion windowresizable windowshowcaption windowstartmaximized "
+          "windowvisible wizardbackcolor wizardbackcolordynamicdark wizardbackimagefile "
+          "wizardbackimagefiledynamicdark wizardbackimageopacity wizardimagealphaformat "
+          "wizardimagebackcolor wizardimagebackcolordynamicdark wizardimagefile wizardimagefiledynamicdark "
+          "wizardimageopacity wizardimagestretch wizardkeepaspectratio wizardresizable wizardsizepercent "
+          "wizardsmallimagebackcolor wizardsmallimagebackcolordynamicdark wizardsmallimagefile "
+          "wizardsmallimagefiledynamicdark wizardstyle wizardstylefile wizardstylefiledynamicdark",
+
+          "appusermodelid appusermodeltoastactivatorclsid attribs comment components description destdir "
+          "destname downloadissigsource downloadpassword downloadusername excludes externalsize "
+          "extractarchivepassword extradiskspacerequired filename flags fontinstall groupdescription hash "
+          "hotkey iconfilename iconindex infoafterfile infobeforefile issigallowedkeys key licensefile "
+          "messagesfile name onlog parameters permissions root runonceid section source statusmsg string "
+          "strongassemblyname subkey type types valuedata valuename valuetype verb workingdir",
+
+          "append call define dim echo elif else emit endif endsub env error expr file for if ifdef"
+          " ifexist ifndef ifnexist include insert pragma redim sub undef",
+
+          "and array begin break case const continue div do downto else end except exit false finally"
+          " for function goto if in label mod nil not of on or out procedure record repeat set shl shr"
+          " then to true try type until uses var while with xor",
+
+          NULL
+      } },
     /* "text" deliberately names no compiled-in lexer (see lexilla-sources.rsp) -
        CreateLexer() returns NULL for it, which apply_document_language() passes
        to SCI_SETILEXER to clear any previous lexer: genuinely
        unstyled plain text rather than a lexer that happens to add no colour. */
-    { LANG_TEXT, "text", L".txt;.log", NULL, "text", 0, NULL },
+    { LANG_TEXT, "text", L".txt;.log", NULL, "text", 0, NULL, {0} },
 };
 
 /* Case-insensitive match of `extension` against one semicolon-delimited list. */
@@ -336,6 +408,21 @@ static void apply_makefile_styles(HWND hEdit, const ThemePalette *p) {
     SendMessageA(hEdit, SCI_STYLESETFORE, SCE_MAKE_IDEOL, (LPARAM)p->keyword);
 }
 
+static void apply_inno_styles(HWND hEdit, const ThemePalette *p) {
+    const int comments[] = { SCE_INNO_COMMENT, SCE_INNO_COMMENT_PASCAL };
+    style_range(hEdit, comments, 2, p->comment);
+    const int strings[] = { SCE_INNO_STRING_DOUBLE, SCE_INNO_STRING_SINGLE };
+    style_range(hEdit, strings, 2, p->string);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_INNO_SECTION, (LPARAM)p->heading);
+    SendMessageA(hEdit, SCI_STYLESETBOLD, SCE_INNO_SECTION, TRUE);
+    const int keywords[] = { SCE_INNO_KEYWORD, SCE_INNO_KEYWORD_PASCAL };
+    style_range(hEdit, keywords, 2, p->keyword);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_INNO_PARAMETER, (LPARAM)p->attribute);
+    SendMessageA(hEdit, SCI_STYLESETFORE, SCE_INNO_KEYWORD_USER, (LPARAM)p->functionName);
+    const int substitutions[] = { SCE_INNO_PREPROC, SCE_INNO_INLINE_EXPANSION };
+    style_range(hEdit, substitutions, 2, p->variable);
+}
+
 /* Applies the current theme colours for whichever language is active. */
 void apply_language_styles(HWND hEdit, Language language, int darkMode) {
     const ThemePalette *palette = theme_palette_for(darkMode);
@@ -360,6 +447,7 @@ void apply_language_styles(HWND hEdit, Language language, int darkMode) {
         case LANG_TOML: apply_toml_styles(hEdit, palette); break;
         case LANG_BATCH: apply_batch_styles(hEdit, palette); break;
         case LANG_MAKEFILE: apply_makefile_styles(hEdit, palette); break;
+        case LANG_INNO: apply_inno_styles(hEdit, palette); break;
         default: break;
     }
 }

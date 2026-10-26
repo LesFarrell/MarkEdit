@@ -1,11 +1,12 @@
--- Example MarkEdit plugin. Every *.lua file in this folder is loaded at
--- startup and again by Plugins > Reload Plugins.
+-- Example bundled MarkEdit plugin. Top-level *.lua files and folders with
+-- init.lua load at startup and again through Plugins > Reload Plugins.
 --
 -- It shows each kind of thing a plugin can do:
 --   menu.add            commands on the Plugins menu, in submenus (Lines,
 --                       Text), in a built-in submenu (Snippets > Markdown)
 --                       and in a built-in top-level menu (Snippets)
 --   menu.separator      a line between groups of commands (in Lines)
+--   contextmenu.*       an editor right-click command that can be removed
 --   ui.*                a message, a text prompt and a list to choose from
 --   events.on           a save handler, switched on by a command
 --
@@ -48,37 +49,28 @@ end)
 
 -- ---- Plugins > Text ----
 
--- Shifts each ASCII letter 13 places, keeping its case. Running it twice
--- gives back the original text. Other characters, including UTF-8, are left
--- alone, because no byte of a multi-byte character is an ASCII letter.
-menu.add("Text/ROT13 Selection", function()
-  local function rotate(c)
-    local base = c:match("[a-z]") and ("a"):byte() or ("A"):byte()
-    return string.char((c:byte() - base + 13) % 26 + base)
-  end
-  editor.replace_selection((editor.get_selection():gsub("[A-Za-z]", rotate)))
-end)
-
 menu.add("Text/Wrap Selection...", function()
   local marker = ui.prompt("Wrap the selection in:", "**")
   if not marker or marker == "" then return end
   -- Closing markers mirror opening brackets, so "(" wraps as "(...)".
-  local closing = marker:reverse():gsub(".", { ["("] = ")", ["["] = "]", ["{"] = "}", ["<"] = ">" })
+  -- Reversed by character, not byte, so UTF-8 markers like "“" stay valid.
+  local reversed = {}
+  for _, code in utf8.codes(marker) do table.insert(reversed, 1, utf8.char(code)) end
+  local closing = table.concat(reversed):gsub(utf8.charpattern,
+    { ["("] = ")", ["["] = "]", ["{"] = "}", ["<"] = ">", ["“"] = "”", ["‘"] = "’" })
   editor.replace_selection(marker .. editor.get_selection() .. closing)
 end)
 
--- An event handler, switched on and off by a command. Off by default, so
--- installing this example never changes anyone's files unasked.
-local trim_on_save = false
-
-menu.add("Text/Toggle Trim Whitespace on Save", function()
-  trim_on_save = not trim_on_save
-  ui.message("Trailing spaces and tabs will " .. (trim_on_save and "now" or "no longer")
+-- A persistent checkable command. MarkEdit stores its state and passes the
+-- new value to the function after each click. Off by default, so installing
+-- this example never changes anyone's files unasked.
+menu.checkbox("Text/Trim Whitespace on Save", "trim_on_save", false, function(checked)
+  ui.message("Trailing spaces and tabs will " .. (checked and "now" or "no longer")
     .. " be removed when a document is saved.")
 end)
 
 events.on("save", function()
-  if not trim_on_save then return end
+  if not config.get("trim_on_save", false) then return end
   -- Line by line from the bottom, so the caret and earlier positions stay put.
   for line = editor.line_count(), 1, -1 do
     local text = editor.get_line(line)
@@ -87,6 +79,39 @@ events.on("save", function()
       local start, finish = editor.line_range(line)
       editor.replace_range(start + #trimmed, finish, "")
     end
+  end
+end)
+
+-- ---- editor right-click menu ----
+
+local context_item
+
+local function add_context_item()
+  context_item = contextmenu.add("Formatting/Inline/Wrap Selection in Backticks", function()
+    local text = editor.get_selection()
+    local marker = config.get("context_fenced_code", true) and "```" or "`"
+    if text ~= "" then editor.replace_selection(marker .. text .. marker) end
+  end, function()
+    return editor.get_selection() ~= ""
+  end)
+end
+
+add_context_item()
+
+contextmenu.checkbox("Formatting/Inline/Use Triple Backticks", "context_fenced_code", true,
+  function(checked)
+    ui.status("Context wrapping now uses " .. (checked and "triple" or "single") .. " backticks")
+  end)
+
+-- This command demonstrates that context items can also be removed and added
+-- again while the plugin is running. The returned handle belongs to this
+-- plugin and becomes invalid once it has been removed.
+menu.add("Text/Toggle Backticks Context Item", function()
+  if context_item then
+    contextmenu.remove(context_item)
+    context_item = nil
+  else
+    add_context_item()
   end
 end)
 

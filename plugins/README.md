@@ -1,19 +1,19 @@
 # Writing MarkEdit plugins
 
-A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't read or write files, start programs, or reach the network.
+A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
 
-This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The other plugins here, `brainfuck.lua`, `calculator.lua`, `encoding.lua`, `text-tools.lua` and `markdown-tools.lua`, are ready-to-use commands (encodings, checksums, case conversion, line tools, a calculator, a Brainfuck interpreter, a table of contents, CSV to table) and more examples to copy from.
+This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, spelling report, readability, anagram, Lua runner, tail (follow a log file), Markdown, text, calculator, assembler, Lua formatting, and developer-oriented extensions.
 
 **Contents:** [Quick start](#quick-start) · [How plugins are loaded](#how-plugins-are-loaded) · [Positions, ranges, and lines](#positions-ranges-and-lines) · [API reference](#api-reference) · [Where commands appear](#where-commands-appear) · [Replacing built-in commands](#replacing-built-in-commands) · [Customizing the menu bar](#customizing-the-menu-bar) · [How commands run](#how-commands-run) · [The Lua environment](#the-lua-environment) · [Limits](#limits) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting)
 
 ## Quick start
 
-1. Create a file ending in `.lua` in this `plugins` folder (the one beside `markedit.exe`), for example `hello.lua`:
+1. Choose **Plugins → New Plugin**, enter `hello.lua`, and edit the file MarkEdit creates in `%APPDATA%\markedit\plugins`:
 
    ```lua
    menu.add("Say Hello", function()
      ui.message("Hello from " .. (editor.file_path() or "an unsaved document"))
-   end)
+   end, "Ctrl+Alt+H")
 
    menu.add("Text/Shout", function()
      editor.replace_selection(editor.get_selection():upper() .. "!")
@@ -22,18 +22,20 @@ This guide covers everything a plugin can do. [`example.lua`](example.lua), in t
 
 2. Choose **Plugins → Reload Plugins** (or restart MarkEdit).
 
-3. **Plugins → Say Hello** and **Plugins → Text → Shout** are now in the menu, and in the Command Palette (Ctrl+Shift+P) as `Plugins: Say Hello` and `Plugins: Text > Shout`.
+3. **Plugins → Say Hello** and **Plugins → Text → Shout** are now in the menu.
 
-For an installed copy of MarkEdit this folder is usually `C:\Program Files\MarkEdit\plugins`, and adding files there needs administrator rights.
+Use **Plugins → Open Plugins Folder** whenever you need the folder in Explorer. Lua Language Server metadata is created there automatically, so compatible editors provide completion and API documentation.
 
 ## How plugins are loaded
 
-- MarkEdit loads every file ending in `.lua` in the `plugins` folder when it starts, in alphabetical order of file name (ignoring case). Other files, including this one, are ignored.
+- MarkEdit loads bundled extensions from `plugins` beside `markedit.exe`, then personal extensions from `%APPDATA%\markedit\plugins`. Within each location, entries load alphabetically (ignoring case), so a personal extension can replace a bundled command.
+- An extension is either a single `.lua` file or a folder containing `init.lua`. A folder extension can split code into private modules and load them at startup or later from a callback with `require("module")`; dots address subfolders, as in `require("text.wrap")`. Paths outside that extension folder are rejected.
+- **Plugins → Manage Plugins** enables or disables discovered extensions. The state is stored in `settings.json`; disabled extensions remain visible in the manager and do not run.
 - Loading a plugin runs its top-level code once. That code normally registers commands and event handlers; the functions it registers run later, when they're used.
 - **Plugins → Reload Plugins** throws away everything loaded (commands, handlers, and all Lua variables) and loads every plugin again. It also reloads the menu definition, so changes to plugins and menus take effect without restarting.
-- If a plugin's top-level code fails, MarkEdit lists the error, with its file name and line, in a message after loading. A plugin that fails part-way adds none of its commands or handlers. The other plugins still load.
+- If a plugin's top-level code fails, MarkEdit lists the error with its file name and line and offers to open the first failing source. A plugin that fails part-way adds none of its commands or handlers. The other plugins still load.
 - Plugin files must be UTF-8 text (with or without a byte-order mark) and at most 1 MiB.
-- All plugins share one Lua environment, together with the menu definition and MarkEdit's own formatting commands, which load first. A global variable in one plugin is visible to the others, so declare everything `local` unless you mean to share it. To share code between plugins, put it in a global table in a file whose name sorts first (for example `0-shared.lua`).
+- Every plugin has a private global environment, private copies of library/API tables, and a private module cache. Globals in one extension cannot overwrite another extension's globals. Modules belonging to the same folder extension share its environment.
 
 ## Positions, ranges, and lines
 
@@ -48,15 +50,27 @@ Functions that take a position, range, or line number raise an error when it's o
 
 ## API reference
 
-Plugins see five tables: `menu`, `commands`, `events`, `editor`, and `ui`. Square brackets mark optional arguments.
+Plugins see the `menu`, `contextmenu`, `commands`, `events`, `editor`, `documents`, `ui`, `config`, `app`, `spell`, and `output` tables. Square brackets mark optional arguments.
 
 Names, labels, menu paths, and dialog text must be valid UTF-8 and cannot contain NUL bytes. Document text passed through `editor.*` is length-counted separately, so those functions preserve every byte in the document.
 
 ### menu
 
-#### `menu.add(label, fn)`
+#### `menu.add(label, fn [, shortcut])`
 
-Adds a command. Choosing it runs `fn()`. `label` decides where it appears; see [Where commands appear](#where-commands-appear). The same label can be added more than once. Each becomes its own item.
+Adds a command. Choosing it runs `fn()`. `label` decides where it appears; see [Where commands appear](#where-commands-appear). The same label can be added more than once. Each becomes its own item. `shortcut` may combine Ctrl and/or Alt, optional Shift, and a letter, digit, F1–F24, Tab, Space, Insert, or Delete, for example `"Ctrl+Alt+M"`. Built-in shortcuts win if two commands use the same keys.
+
+#### `menu.checkbox(label, key, default, fn [, shortcut])`
+
+Adds a command with a check mark. `key` identifies its saved state inside this plugin, `default` is a boolean used until a state has been saved, and choosing the item toggles it before running `fn(checked)` with the new boolean value. If the function fails, MarkEdit restores the previous state. The optional shortcut uses the same format as `menu.add`.
+
+```lua
+menu.checkbox("Text/Trim Whitespace on Save", "trim_on_save", false, function(checked)
+  ui.message(checked and "Trim on save is on." or "Trim on save is off.")
+end)
+```
+
+The state persists across restarts and plugin reloads. Read it elsewhere in the plugin with `config.get(key, default)`.
 
 #### `menu.separator([path])`
 
@@ -78,25 +92,130 @@ menu.add("Lines/Number Lines", number_lines)
 
 Separators follow the same rules as `"-"` in the menu definition: one at the start or end of a menu, or next to another separator, is left out. A separator doesn't create a menu, so add at least one item to a menu before separating items in it. Each separator counts towards the [command limit](#limits).
 
+### contextmenu
+
+#### `contextmenu.add(label, fn [, enabled])`
+
+Adds an item to the editor's right-click menu and returns its numeric handle. Choosing the item runs `fn()` with the editor APIs acting on the pane that was clicked. Items appear after MarkEdit's standard editing and spelling commands. Slash-separated label parts create or reuse submenus, up to eight levels deep; for example, `"Formatting/Inline/Code"` creates **Formatting → Inline → Code**.
+
+When the optional `enabled` function is supplied, MarkEdit evaluates it each time the menu opens and greys out the item when it returns `false` or `nil`. The editor API is available, so `function() return editor.get_selection() ~= "" end` enables a command only while text is selected.
+
+#### `contextmenu.remove(item)`
+
+Removes an item previously added by this plugin. It returns `true` when the item was removed and `false` when the handle is no longer registered. A plugin cannot remove another plugin's items.
+
+#### `contextmenu.checkbox(label, key, default, fn [, enabled])`
+
+Adds a checkable right-click item and returns its numeric handle. Its state is stored in this plugin's settings under `key`, survives restarts and plugin reloads, and begins at the boolean `default` until it has been changed. Choosing it toggles the state before calling `fn(checked)`; if the callback fails, MarkEdit restores the previous state. Slash-separated labels and the optional `enabled` function work as they do for `contextmenu.add`.
+
+```lua
+local item
+
+local function add_item()
+  item = contextmenu.add("Formatting/Inline/Wrap Selection in Backticks", function()
+    editor.replace_selection("`" .. editor.get_selection() .. "`")
+  end, function()
+    return editor.get_selection() ~= ""
+  end)
+end
+
+add_item()
+
+contextmenu.checkbox("Formatting/Inline/Use Triple Backticks", "triple_backticks", false,
+  function(checked)
+    ui.status(checked and "Triple backticks enabled" or "Triple backticks disabled")
+  end)
+
+menu.add("Toggle Backticks Context Item", function()
+  if item then
+    contextmenu.remove(item)
+    item = nil
+  else
+    add_item()
+  end
+end)
+```
+
 ### commands
 
 #### `commands.register(name, fn [, title])`
 
-Makes the built-in command called `name` run `fn()` instead of its usual code, wherever it's used from: menu, toolbar, Command Palette, or keyboard shortcut. `title` is used as the title of dialogs `fn` shows (default `"MarkEdit"`). If several plugins register the same name, the last one loaded wins. See [Replacing built-in commands](#replacing-built-in-commands).
+Makes the built-in command called `name` run `fn()` instead of its usual code, wherever it's used from: menu, toolbar, or keyboard shortcut. `title` is used as the title of dialogs `fn` shows (default `"MarkEdit"`). If several plugins register the same name, the last one loaded wins. See [Replacing built-in commands](#replacing-built-in-commands).
+
+`commands.execute(name)` queues a named built-in command to run after the current plugin callback finishes and returns whether the name exists. The `run.*` commands (run, debug, step, breakpoints) can't be executed from a plugin and raise an error.
 
 ### events
 
 #### `events.on(name, fn)`
 
-Runs `fn(path)` each time the event happens, where `path` is the document's file path, or `nil` if it has never been saved. A plugin can register any number of handlers; they run in the order they were registered.
+Runs `fn(path)` each time the event happens, where `path` is the document's file path, or `nil` if it has never been saved. It returns a subscription number; `events.off(subscription)` removes it. Handlers run in registration order.
 
 | Event | When it happens | `path` |
 |---|---|---|
 | `"save"` | Just before the document is written to disk, so anything the handler changes is saved. | Where it's being saved, including a new name chosen with Save As. |
 | `"open"` | After a file is loaded into the editor, including when a file changed by another program is reloaded. | The loaded file. |
+| `"reload"` | After `"open"`, when the file loaded was the document's own, reloaded because another program changed it. The selection and scroll position have been put back by then, so a handler can move them. | The reloaded file. |
 | `"tab_changed"` | After a different document becomes the active one: switching tabs, opening a new tab, or closing one. Brief switches MarkEdit makes itself, such as Save All visiting each tab, don't count. | The newly active document. |
+| `"before_save"` / `"after_save"` | Immediately before or after a successful write. `"save"` remains the compatibility alias for `"before_save"`. | The save destination. |
+| `"close"` | Before a tab asks to save/discard and closes. | The document being closed. |
+| `"text_changed"` / `"selection_changed"` | After a short debounce following an edit or selection move. | The active document. |
+| `"workspace_changed"` / `"theme_changed"` | After the workspace or editor theme changes. | The active document (workspace handlers can call `app.workspace_path()`). |
+| `"shutdown"` | As the main window shuts down. | The final active document. |
 
 Handlers work on the active document, exactly as commands do. A handler that fails is reported, but doesn't stop what caused the event: a document is still saved if its `save` handler fails.
+
+### config
+
+Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.json` alongside application preferences. Keys are 1 to 64 characters and may contain letters, digits, `.`, `_`, and `-`.
+
+| Function | Does |
+|---|---|
+| `config.get(key [, default])` | Returns the saved value. If none exists, returns `default`, or `nil`. A boolean or number default converts the stored text to that type. |
+| `config.set(key, value)` | Saves a string, number, boolean, nested table, or array. Passing `nil` removes the value. A table default passed to `get` restores structured data. |
+
+### app
+
+`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), while API 4 adds `context_menu`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
+
+### documents
+
+`documents.count()` and `documents.active()` describe the tabs. `documents.activate(index)`, `new()`, `open(path)`, `save([save_as])`, and `close([index])` manage them. `documents.open(path)` asks the user before opening a file that isn't already in a tab, and does nothing if they decline. `documents.path([index])`, `modified([index])`, and `encoding()` return document metadata. `documents.auto_reload([index] [, on])` returns whether a document reloads changes made on disk by another program without asking, and sets it when `on` is given (a boolean); MarkEdit still asks when the document has unsaved edits. It lasts until the tab closes. Passing `"utf-8"`, `"utf-8-bom"`, `"utf-16le"`, `"utf-16be"`, or `"ansi"` to `documents.encoding(value)` changes how the active document will be saved and marks it modified. Save-encoding changes are document metadata and are not reverted by text Undo. Indices are 1-based. File pickers remain user-controlled through `ui.pick_file()` and `ui.pick_folder()`.
+
+### output
+
+These write to the Output tab of the output panel docked under the editor (View → Output Panel), where Run shows a program's output.
+
+| Function | Does |
+|---|---|
+| `output.write(text, ...)` | Appends each string. Text isn't followed by a line break unless it ends with one, and ANSI colour sequences such as `"[32m"` colour it. The panel isn't opened. |
+| `output.clear()` | Empties the Output tab. |
+| `output.show()` | Opens the panel on the Output tab, without moving the keyboard focus. |
+| `output.report(title, text)` | Appends `text` under a coloured heading naming the report and the document ("Grammar Checker - notes.md"), followed by a blank line, and opens the panel. MarkEdit's bundled plugins show their longer reports this way. |
+| `output.hide()` | Closes the panel, whichever tab it is showing. Programs running in it keep running. |
+| `output.visible()` | Returns `true` while the panel is open. |
+
+```lua
+menu.add("Report TODOs", function()
+  output.clear()
+  for n = 1, editor.line_count() do
+    if editor.get_line(n):find("TODO", 1, true) then output.write(("line %d: %s
+"):format(n, editor.get_line(n))) end
+  end
+  output.show()
+end)
+```
+
+### spell
+
+These check words against the Windows spelling dictionary chosen in **View → Spell Check Language**, whether or not spell checking is turned on. Words added to the dictionary count; words ignored with **Ignore Word** don't.
+
+| Function | Does |
+|---|---|
+| `spell.language()` | Returns the dictionary's locale name, such as `"en-GB"`, or `nil` when Windows has no spelling dictionary. The dictionary is opened just after the window appears, so call this from a command rather than a plugin's top-level code. |
+| `spell.check(word)` | Returns `true` when the dictionary accepts `word`. Text containing several words is accepted only if all of them are. A repeated word isn't a spelling mistake. |
+| `spell.check(words)` | Checks a table of up to 50,000 strings at once and returns a table with one boolean for each. Checking a batch is much faster than checking the words one at a time. |
+
+Both `spell.check` forms raise an error when there's no dictionary. Checking takes about a tenth of a millisecond for each rejected word, spread over the processor's cores, and counts towards the [time limit](#how-commands-run), so check large searches in batches of a few thousand. [`anagrams/init.lua`](anagrams/init.lua) is an example.
 
 ### editor
 
@@ -111,7 +230,8 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.get_selection([n])` | The text of selection `n`, or `""` when it is a caret. Defaults to the main selection. |
 | `editor.get_line(n)` | The text of line `n`, without its line ending. |
 | `editor.length()` | The document's length in bytes. |
-| `editor.eol()` | The document's line ending: `"\r\n"`, `"\n"`, or `"\r"`. |
+| `editor.eol([value])` | The document's line ending: `"\r\n"`, `"\n"`, or `"\r"`. Passing one of those values converts existing endings and changes newly inserted endings. |
+| `editor.tab_width()` | The configured number of columns in a tab stop. |
 
 #### Changing text
 
@@ -121,6 +241,7 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.replace_range(start, finish, text)` | Replaces a range with `text`. An empty range inserts `text` there. The selection moves with the text around it. |
 | `editor.insert(text [, position])` | Inserts `text` at `position`, or at the caret. |
 | `editor.set_text(text)` | Replaces the whole document. The caret position isn't kept; prefer `replace_range` for partial changes. |
+| `editor.begin_undo()` / `editor.end_undo()` | Mark the start and end of a group of changes that Undo reverses together. Pairs may nest. A command or event handler is already [one undo step](#how-commands-run), so a group inside one never splits it. A group still open when the callback returns is closed then; `end_undo` without a matching `begin_undo` raises an error. |
 
 #### Selection and caret
 
@@ -129,6 +250,8 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.get_selection_range([n])` | Returns `start, finish` of selection `n` (an empty range at its caret when nothing is selected). Defaults to the main selection. |
 | `editor.set_selection(start, finish [, n])` | Selects a range, or changes selection `n` when supplied. Without `n`, leaves just one selection. |
 | `editor.selection_count()` | Returns the number of selections and carets. |
+| `editor.get_selections()` | Returns a snapshot table containing `{ start, finish, caret, anchor }` for every selection. |
+| `editor.replace_selections(texts)` | Replaces every selection safely. `texts` is one string used for all selections, or a table with one string per selection. Leaves a caret after each replacement. |
 | `editor.add_selection(start, finish)` | Adds a selection (an empty range adds a caret) and returns its number. |
 | `editor.drop_selection(n)` | Removes selection `n`. The only remaining selection cannot be removed. |
 | `editor.get_main_selection()` | Returns the number of the main selection. |
@@ -137,6 +260,17 @@ These work only while a command or event handler is running. Calling them from a
 | `editor.set_caret(position [, n])` | Moves caret `n` there. Without `n`, removes the other selections. |
 
 Selection numbers are 1-based. Existing plugins that omit `n` continue to work on the main selection; selection-changing calls without `n` intentionally leave just one caret.
+
+For a transformation that applies independently to every caret, take one snapshot and replace everything in one call. This avoids offsets changing underneath a Lua loop:
+
+```lua
+local selections = editor.get_selections()
+local replacements = {}
+for i, range in ipairs(selections) do
+  replacements[i] = editor.get_range(range.start, range.finish):upper()
+end
+editor.replace_selections(replacements)
+```
 
 #### Lines
 
@@ -152,7 +286,14 @@ Selection numbers are 1-based. Existing plugins that omit `n` continue to work o
 | Function | Returns |
 |---|---|
 | `editor.file_path()` | The document's full path, or `nil` if it has never been saved. |
-| `editor.language()` | How MarkEdit is treating the document: `"markdown"`, `"json"`, `"xml"`, `"html"`, `"yaml"`, `"cpp"` (C, C++, JavaScript, and TypeScript), `"python"`, `"bash"`, `"powershell"`, `"lua"`, or `"text"`. |
+| `editor.language()` | How MarkEdit is treating the document: `"markdown"`, `"json"`, `"xml"`, `"html"`, `"yaml"`, `"cpp"` (C, C++, JavaScript, and TypeScript), `"python"`, `"bash"`, `"powershell"`, `"lua"`, `"css"`, `"sql"`, `"ini"` (also `.cfg`, `.conf` and `.properties`), `"toml"`, `"batch"` (`.bat` and `.cmd`), `"makefile"`, or `"text"`. |
+| `editor.modified()` / `editor.read_only([value])` | The modified and read-only states. |
+| `editor.visible_range()` / `editor.scroll_to(position)` | The visible byte range, or move the caret to a position and scroll it into view. Moving the caret replaces the selections, so select after scrolling. |
+| `editor.find(text [, start [, options]])` | Finds text; options support `match_case`, `whole_word`, `word_start`, and `regex`. Returns the matching range or `nil`. |
+| `editor.annotation(...)`, `editor.marker(...)` | Adds/removes line annotations and markers; matching clear functions remove them. |
+| `editor.indicator(...)` / `editor.clear_indicator(...)` | Adds or removes temporary highlighted ranges using plugin indicator numbers 8–19. Markers use the same reserved numeric range so they cannot overwrite MarkEdit's bookmarks, debugger markers, folding markers, or spelling indicator. |
+| `editor.fold(line [, expanded])` / `editor.style_at(position)` | Controls folding and reads the lexer style at a position. |
+| `editor.clipboard([text])` | Reads Unicode clipboard text, or replaces it when `text` is supplied. |
 
 ### ui
 
@@ -160,7 +301,7 @@ These show MarkEdit's own dialogs and wait for the user. Time spent waiting does
 
 #### `ui.message(text [, title [, kind]])`
 
-Shows `text` in a message box with an OK button. `kind` chooses the icon: `"info"` (the default), `"warning"`, or `"error"`.
+Shows `text` in a message box with an OK button. `kind` chooses the icon: `"info"` (the default), `"warning"`, or `"error"`. A report longer than a few lines reads better in the output panel: see [`output.report`](#output).
 
 #### `ui.prompt(label [, default [, title]])`
 
@@ -173,6 +314,20 @@ Shows a searchable list of the strings in `items` (1 to 10,000 of them) and lets
 ```lua
 local index, choice = ui.choose({ "Note", "Tip", "Warning" }, "Alert type:")
 if not index then return end
+```
+
+#### `ui.save_binary(default_name, data [, title])`
+
+Shows a Save As dialog initialized with `default_name` and writes the Lua string
+`data` byte-for-byte. It returns `true` after saving and `false` if the user
+cancels. Embedded NUL bytes and all other byte values are preserved. Output is
+limited to 64 MiB; the plugin still cannot choose a destination without the
+user-controlled dialog.
+
+`ui.confirm(text [, title])` asks Yes/No. `ui.pick_file([title])` and `ui.pick_folder([title])` return a user-selected path or `nil`. `ui.status(text)` shows a temporary status message, and `ui.log(text)` writes a plugin-tagged line to the debugger output and to the output panel's Output tab.
+
+```lua
+ui.save_binary("output.bin", string.char(0, 1, 255), "Export binary")
 ```
 
 ## Where commands appear
@@ -193,13 +348,12 @@ A command's label is a path separated by `/`. Each part before the last names a 
 - Submenus are found the same way, by name, and created when they don't exist yet.
 - A label of just `/Name` has no menu to go in, so it goes on the Plugins menu like `Name`.
 - "The Plugins menu" means wherever the menu definition puts its plugins list (see [Customizing the menu bar](#customizing-the-menu-bar)). If the definition has no plugins list, MarkEdit adds a Plugins menu for these commands.
-- Every plugin command is also in the Command Palette as `Plugins: ` followed by its path, for example `Plugins: Snippets > Insert Date`.
 - A path has at most 8 parts; anything beyond that is ignored.
 - Top-level menu names are drawn using the system's ANSI code page, so plain letters, digits, and common punctuation are safest there. Submenu and item names can use any characters.
 
 ## Replacing built-in commands
 
-`commands.register` replaces what a built-in command does, everywhere it can be used: the menu, the formatting toolbar, the Command Palette, and keyboard shortcuts. MarkEdit's own internal actions aren't affected. For example, replacing `file.save` changes the Save command and Ctrl+S, but not the save MarkEdit offers when closing a document with unsaved changes.
+`commands.register` replaces what a built-in command does everywhere it can be used: the menu, the formatting toolbar, and keyboard shortcuts. MarkEdit's own internal actions aren't affected. For example, replacing `file.save` changes the Save command and Ctrl+S, but not the save MarkEdit offers when closing a document with unsaved changes.
 
 ```lua
 -- Bold with __ instead of **.
@@ -209,23 +363,40 @@ commands.register("markdown.bold", function()
 end)
 ```
 
-MarkEdit's own Markdown, HTML, and JSON formatting commands, and the Edit menu's Toggle Comment, Trim Trailing Whitespace, Title Case, and line sorting commands (the ones marked (Lua) below), are written this way, in `src/formatting.lua` (built into `markedit.exe`). They load before any plugin, so a plugin that registers one of their names replaces them. To go back to MarkEdit's own version, remove the plugin and reload.
+MarkEdit's Markdown and HTML formatting commands, plus Toggle Comment and Trim Trailing Whitespace (the ones marked (Lua) below), are written this way in the `src/lua/formatting_*.lua` files built into MarkEdit. General Edit conversions and JSON support are standalone bundled plugins in `plugins/edit-convert.lua` and `plugins/json-tools.lua`; those plugins create their own menu entries rather than overriding built-in command names.
 
 ### Built-in command names
 
 These are the names `commands.register` and the menu definition use.
 
 - **File:** `file.new`, `file.open`, `file.reopen_utf8`, `file.reopen_utf16le`, `file.reopen_utf16be`, `file.reopen_ansi`, `file.quick_open`, `file.find_in_folder`, `file.replace_in_folder`, `file.open_workspace`, `file.insert_file`, `file.save`, `file.save_as`, `file.save_all`, `file.export_html`, `file.export_pdf`, `file.print`, `file.open_terminal`, `file.show_in_explorer`, `file.close_tab`, `file.reopen_closed_tab`, `file.go_back`, `file.exit`
-- **Edit** (Lua): `edit.toggle_comment`, `edit.trim_whitespace`, `edit.title_case`, `edit.sort_ascending`, `edit.sort_descending`, `edit.remove_duplicate_lines`
-- **Edit:** `edit.undo`, `edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, `edit.delete`, `edit.select_all`, `edit.duplicate_line`, `edit.move_line_up`, `edit.move_line_down`, `edit.delete_line`, `edit.join_lines`, `edit.select_next`, `edit.select_all_occurrences`, `edit.match_brace`, `edit.bookmark_toggle`, `edit.bookmark_next`, `edit.bookmark_previous`, `edit.bookmark_clear`, `edit.uppercase`, `edit.lowercase`, `edit.tabs_to_spaces`, `edit.spaces_to_tabs`, `edit.eol_crlf`, `edit.eol_lf`, `edit.eol_cr`, `edit.encoding_utf8`, `edit.encoding_utf8_bom`, `edit.encoding_utf16le`, `edit.encoding_utf16be`, `edit.encoding_ansi`, `edit.find`, `edit.find_next`, `edit.replace`, `edit.go_to_line`
-- **View:** `view.preview`, `view.editor`, `view.next_tab`, `view.previous_tab`, `view.cycle_panes`, `view.theme_light`, `view.theme_dark`, `view.preview_theme_light`, `view.preview_theme_dark`, `view.custom_css`, `view.clear_custom_css`, `view.font`, `view.preview_on_left`, `view.focus_mode`, `view.word_wrap`, `view.spell_check`, `view.spell_check_language`, `view.outline`, `view.file_explorer`, `view.minimap`, `view.split_editor`, `view.reset_split_editor`, `view.show_whitespace`, `view.indent_guides`, `view.use_spaces`, `view.toggle_fold`, `view.fold_all`, `view.unfold_all`, `view.zoom_in`, `view.zoom_out`, `view.zoom_reset`
+- **Edit** (Lua): `edit.toggle_comment`, `edit.trim_whitespace`
+- **Edit:** `edit.undo`, `edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, `edit.delete`, `edit.select_all`, `edit.duplicate_line`, `edit.move_line_up`, `edit.move_line_down`, `edit.delete_line`, `edit.join_lines`, `edit.select_next`, `edit.select_all_occurrences`, `edit.match_brace`, `edit.bookmark_toggle`, `edit.bookmark_next`, `edit.bookmark_previous`, `edit.bookmark_clear`, `edit.find`, `edit.find_next`, `edit.replace`, `edit.go_to_line`
+- **View:** `view.preview`, `view.editor`, `view.next_tab`, `view.previous_tab`, `view.cycle_panes`, `view.theme_light`, `view.theme_dark`, `view.preview_theme_light`, `view.preview_theme_dark`, `view.custom_css`, `view.clear_custom_css`, `view.font`, `view.preview_on_left`, `view.focus_mode`, `view.word_wrap`, `view.spell_check`, `view.spell_check_language`, `view.outline`, `view.file_explorer`, `view.output_panel`, `view.terminal`, `view.minimap`, `view.split_editor`, `view.split_editor_vertical`, `view.reset_split_editor`, `view.show_whitespace`, `view.indent_guides`, `view.use_spaces`, `view.toggle_fold`, `view.fold_all`, `view.unfold_all`, `view.zoom_in`, `view.zoom_out`, `view.zoom_reset`
 - **Markdown** (Lua): `markdown.bold`, `markdown.italic`, `markdown.strikethrough`, `markdown.inline_code`, `markdown.heading1`, `markdown.heading2`, `markdown.heading3`, `markdown.blockquote`, `markdown.bullet_list`, `markdown.numbered_list`, `markdown.task_list`, `markdown.link`, `markdown.image`, `markdown.table`, `markdown.table_editor`, `markdown.table_row_above`, `markdown.table_row_below`, `markdown.table_row_delete`, `markdown.table_column_left`, `markdown.table_column_right`, `markdown.table_column_delete`, `markdown.table_sort_ascending`, `markdown.table_sort_descending`, `markdown.table_align_left`, `markdown.table_align_center`, `markdown.table_align_right`, `markdown.code_block`, `markdown.footnote`, `markdown.horizontal_rule`, `markdown.alert`
-- **JSON** (Lua): `json.format`, `json.minify`
 - **HTML** (Lua): `html.html`, `html.head`, `html.body`, `html.paragraph`, `html.bold`, `html.italic`, `html.underline`, `html.div`, `html.span`, `html.link`, `html.image`, `html.table`, `html.bullet_list`, `html.numbered_list`, `html.line_break`
-- **Tools:** `tools.command_palette`, `tools.settings`
-- **Run:** `run.run_file`, `run.debug_file`, `run.continue`, `run.step_over`, `run.step_into`, `run.step_out`, `run.toggle_breakpoint`, `run.clear_breakpoints`
-- **Plugins:** `plugins.reload`, `plugins.customize_menus`
+- **Tools:** `tools.settings`
+- **Run:** `run.run_file`, `run.debug_file`, `run.continue`, `run.step_over`, `run.step_into`, `run.step_out`, `run.toggle_breakpoint`, `run.clear_breakpoints`, `run.use_console`
+- **Plugins:** `plugins.reload`, `plugins.new`, `plugins.open_folder`, `plugins.manage`, `plugins.customize_menus`, `plugins.customize_theme`
 - **Help:** `help.markdown_reference`, `help.keyboard_shortcuts`, `help.plugin_guide`, `help.about`
+
+## Customizing theme colours
+
+The colours of the light and dark themes come from `%APPDATA%\markedit\themes.lua` when it exists, over the built-in ones. **Plugins → Customize Theme Colours** writes that file (if it isn't there yet), listing every colour with its built-in value and what it paints, and opens it. Edit it, save it, then choose **Plugins → Reload Plugins**. Delete a line to go back to that colour's built-in value, or the file to go back to all of them.
+
+```lua
+return {
+  light = { selectionBg = "#FFE8A3" },
+  dark  = { bg = "#0D1117", keyword = "#FF7B72" },
+}
+```
+
+- Colours are `"#RRGGBB"`; names are the ones the generated file lists. Unknown names and malformed colours are reported and skipped.
+- Only `light` and `dark` exist; **View** and **Settings → Appearance** still switch between them.
+- The file runs in a Lua state of its own with only the base and string libraries, so it can compute colours but can't see plugins or the editor.
+- It covers the editor and window. The rendered preview is styled by CSS; use **View → Custom CSS** for that.
+
+[examples/themes.lua](examples/themes.lua) is a complete example: Solarized colours for both themes, built from one function, with in-between shades computed by a small `mix()` helper. Copy it to `%APPDATA%\markedit\themes.lua` to try it. Folders in `plugins` without an `init.lua`, like `examples`, aren't loaded as plugins.
 
 ## Customizing the menu bar
 
@@ -261,16 +432,20 @@ return {
     { list = "plugins" },
     "-",
     { "&Reload Plugins", "plugins.reload" },
+    { "&New Plugin...", "plugins.new" },
+    { "Open Plugins &Folder", "plugins.open_folder" },
+    { "&Manage Plugins...", "plugins.manage" },
     { "&Customize Menus...", "plugins.customize_menus" },
+    { "Customize &Theme Colours...", "plugins.customize_theme" },
   } },
 }
 ```
 
-- Moving or renaming an item doesn't change its keyboard shortcut. Leaving a command out of the menus doesn't remove its shortcut or its Command Palette entry either.
+- Moving or renaming an item doesn't change its keyboard shortcut. Leaving a command out of the menus doesn't remove its shortcut.
 - `{codepage}` in a label is replaced with the system's ANSI code page number.
 - Separators at the start or end of a menu, or next to another separator, are left out, so a list that turns out to be empty leaves no gap.
 - Plugins place `/Menu/...` commands by menu name, so renaming a menu changes where those commands go.
-- Keep **Reload Plugins** and **Customize Menus** somewhere, or you'll need to restart MarkEdit to apply changes, and find the file yourself to edit it.
+- Keep the plugin management commands somewhere convenient, especially **Reload Plugins** and **Customize Menus**.
 - If the file has a mistake (Lua that doesn't run, or a table in the wrong shape) MarkEdit says what and where, and uses the default menus instead. An unknown command name is reported and just that item is left out.
 
 ## How commands run
@@ -286,7 +461,8 @@ return {
 Plugins run in Lua 5.4, built into `markedit.exe`. No separate Lua installation is needed.
 
 - **Available:** the basic functions (`pairs`, `ipairs`, `tostring`, `tonumber`, `pcall`, `error`, `assert`, `select`, `type`, `setmetatable`, and so on) and the `string`, `table`, `math`, `utf8`, and `coroutine` libraries.
-- **Not available:** `io`, `os`, `package` and `require`, `debug`, `dofile`, and `loadfile`. Plugins can't touch files, run programs, or read the clock (there is no `os.date` or `os.time`).
+- **Not available:** `io`, `os`, `package`, `debug`, `dofile`, and `loadfile`. Plugins can't touch arbitrary files or run programs.
+- **Folder extension modules:** `require` works both during startup and later in that extension's commands/events. It reads Lua source only below the extension folder and caches each module privately. Single-file extensions cannot load other files.
 - **`load`** accepts Lua source text only, not precompiled chunks.
 - **`print`** writes nowhere visible. To see a value while developing a plugin, use `ui.message(tostring(value))`.
 - **Strings are bytes.** `string.upper`, `string.lower`, and character classes such as `%a` only understand ASCII letters, and `#text` counts bytes. Use `utf8.len`, `utf8.codes`, and `utf8.offset` for characters.
@@ -296,12 +472,16 @@ Plugins run in Lua 5.4, built into `markedit.exe`. No separate Lua installation 
 | Limit | Value |
 |---|---|
 | Size of a plugin file | 1 MiB |
-| Commands, in total | 256, shared by plugins (`menu.add`, `menu.separator` and `commands.register`), functions in the menu definition, and MarkEdit's own 53 formatting and text commands |
+| Commands, in total | 1,024, shared by plugins (`menu.add`, `menu.checkbox`, `menu.separator` and `commands.register`), functions in the menu definition, and MarkEdit's built-in Lua commands |
 | Event handlers, in total | 100 |
+| Editor context-menu items, in total | 256 registered; the first 64 are shown |
 | Time a call may run | 5 seconds (not counting dialogs) |
-| Parts in a menu label | 8 |
+| Lua heap | 64 MiB shared by the sandboxed state |
+| Deferred callbacks | 64 pending; delays from 0 to 60 seconds |
+| Parts in a menu or context-menu label | 8 |
 | Top-level menus | 24, including the ones from the menu definition |
 | Items in `ui.choose` | 10,000 |
+| Words in one `spell.check` | 50,000 |
 | Text returned by `ui.prompt` | One line, about 4,000 characters |
 | Menu definition nesting | 8 levels, 4,000 items |
 
@@ -370,17 +550,15 @@ events.on("save", function()
 end)
 ```
 
-### Keep a setting while MarkEdit runs
+### Keep a setting
 
-Plugin variables last until MarkEdit closes or plugins are reloaded. There's no way to store anything permanently, since plugins can't write files.
+Use `config` for values that should survive plugin reloads and MarkEdit restarts.
 
 ```lua
-local wrapWidth = 80
-
 menu.add("Text/Set Wrap Width...", function()
-  local answer = ui.prompt("Wrap width:", tostring(wrapWidth))
+  local answer = ui.prompt("Wrap width:", tostring(config.get("wrap_width", 80)))
   local value = answer and tonumber(answer)
-  if value and value >= 10 then wrapWidth = math.floor(value) end
+  if value and value >= 10 then config.set("wrap_width", math.floor(value)) end
 end)
 ```
 
@@ -388,10 +566,11 @@ end)
 
 | Problem | What to check |
 |---|---|
-| The plugin's commands don't appear. | Is the file in the `plugins` folder beside `markedit.exe`, and does its name end in `.lua`? Did you reload plugins? Was a load error reported? |
+| The plugin's commands don't appear. | Is it a `.lua` file in `%APPDATA%\markedit\plugins`, or a folder there with `init.lua`? Is it enabled in **Manage Plugins**? Did you reload plugins? Was a load error reported? |
 | "the editor is only available while a plugin command runs" | `editor` functions were called from a plugin's top-level code. Move that code into the function passed to `menu.add` or `events.on`. |
 | "stopped after 5 seconds without finishing" | A loop that never ends, or work that's too slow on a large document. Read only the lines or range you need rather than the whole text. |
 | A command does nothing visible. | Check for an `if ... then return end` that always returns. `ui.message` is the quickest way to see what a command is doing. |
-| Two plugins interfere. | They probably share a global variable or function name. Make everything `local`. |
+| Two plugins appear to interfere. | Their Lua globals are isolated; check whether both replace the same built-in command, use the same editor indicator/marker number, or respond to the same event. |
 | A `commands.register` replacement doesn't take effect. | The name must match a [built-in command name](#built-in-command-names) exactly. If two plugins replace the same command, the one whose file name sorts later wins. |
-| Plugins can't be added to the installed copy. | `C:\Program Files\MarkEdit\plugins` needs administrator rights to change. |
+| A shortcut does nothing. | Use Ctrl or Alt, optionally Shift, with a supported key. Built-in shortcuts take priority when keys conflict. |
+| A module cannot be loaded. | `require` works only for folder extensions and searches only inside that folder, both at startup and from callbacks. Use dots for subfolders and omit `.lua`. |

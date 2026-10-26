@@ -1,5 +1,5 @@
 -- Calculate Selection, on the Plugins menu: adds the value after each
--- selected line of arithmetic, with math functions and constants,
+-- selected line of arithmetic, with math and everyday calculator functions,
 -- hex/octal/binary numbers and bitwise operations.
 --
 -- Uses only the plugin API documented in README.md in this folder.
@@ -9,7 +9,8 @@
 -- value in another base. Names are matched ignoring case, so PI works too.
 local CALCULATOR = {}
 for _, name in ipairs({ "abs", "ceil", "floor", "sqrt", "exp", "log", "sin", "cos", "tan",
-                        "asin", "acos", "atan", "min", "max", "fmod", "deg", "rad", "pi", "huge" }) do
+                        "asin", "acos", "atan", "min", "max", "fmod", "modf", "deg", "rad",
+                        "pi", "huge" }) do
   CALCULATOR[name] = math[name]
 end
 CALCULATOR.tau = 2 * math.pi
@@ -18,7 +19,65 @@ CALCULATOR.phi = (1 + math.sqrt(5)) / 2
 CALCULATOR.inf = math.huge
 CALCULATOR.maxint = math.maxinteger
 CALCULATOR.minint = math.mininteger
+CALCULATOR.ans = 0
 setmetatable(CALCULATOR, { __index = function(names, name) return rawget(names, name:lower()) end })
+
+local function whole_number(value, name)
+  local whole = math.tointeger(value)
+  if not whole then error(name .. " needs whole numbers") end
+  return whole
+end
+
+CALCULATOR.round = function(value, places)
+  places = places == nil and 0 or whole_number(places, "round")
+  if places < -308 or places > 308 then error("round places must be from -308 to 308") end
+  local scale = 10 ^ places
+  local scaled = value * scale
+  local rounded = scaled < 0 and math.ceil(scaled - 0.5) or math.floor(scaled + 0.5)
+  return rounded / scale
+end
+CALCULATOR.sign = function(value) return value < 0 and -1 or value > 0 and 1 or 0 end
+CALCULATOR.clamp = function(value, low, high)
+  if low > high then error("clamp's minimum must not exceed its maximum") end
+  return math.max(low, math.min(high, value))
+end
+CALCULATOR.percent = function(value, rate) return value * rate / 100 end
+CALCULATOR.sum = function(...)
+  local count, total = select("#", ...), 0
+  if count == 0 then error("sum needs at least one number") end
+  for i = 1, count do total = total + select(i, ...) end
+  return total
+end
+CALCULATOR.avg = function(...)
+  local count = select("#", ...)
+  if count == 0 then error("avg needs at least one number") end
+  return CALCULATOR.sum(...) / count
+end
+CALCULATOR.gcd = function(a, b)
+  a, b = math.abs(whole_number(a, "gcd")), math.abs(whole_number(b, "gcd"))
+  while b ~= 0 do a, b = b, a % b end
+  return a
+end
+CALCULATOR.lcm = function(a, b)
+  a, b = whole_number(a, "lcm"), whole_number(b, "lcm")
+  if a == 0 or b == 0 then return 0 end
+  return math.abs((a // CALCULATOR.gcd(a, b)) * b)
+end
+CALCULATOR.fact = function(value)
+  value = whole_number(value, "fact")
+  if value < 0 or value > 170 then error("fact needs a whole number from 0 to 170") end
+  local result = 1.0
+  for n = 2, value do result = result * n end
+  return result
+end
+CALCULATOR.log10 = function(value) return math.log(value, 10) end
+CALCULATOR.log2 = function(value) return math.log(value, 2) end
+CALCULATOR.sinh = function(value) return (math.exp(value) - math.exp(-value)) / 2 end
+CALCULATOR.cosh = function(value) return (math.exp(value) + math.exp(-value)) / 2 end
+CALCULATOR.tanh = function(value)
+  local positive, negative = math.exp(value), math.exp(-value)
+  return (positive - negative) / (positive + negative)
+end
 
 -- A whole number to show in a base: what hex(), oct() and bin() return.
 local BASED = {}
@@ -62,9 +121,11 @@ end
 local WORD_OPERATORS = { ["and"] = "&", ["or"] = "|", xor = "~", ["not"] = "~", shl = "<<", shr = ">>" }
 
 -- Rewrites what Lua doesn't read itself: binary (0b101) and octal (0o17)
--- numbers, and the word operators. Lua reads hex (0xFF) as it is.
+-- numbers, and the word operators. Lua reads hex (0xFF) as it is. Runs of
+-- minus signs are spaced out, as "--" would otherwise start a Lua comment.
 local function to_lua_expression(expression)
   return (expression
+    :gsub("%-%-+", function(minuses) return (minuses:gsub("%-", "- ")) end)
     :gsub("%f[%w_.]0[bB]([01]+)%f[^%w_.]", function(digits) return tostring(tonumber(digits, 2)) end)
     :gsub("%f[%w_.]0[oO]([0-7]+)%f[^%w_.]", function(digits) return tostring(tonumber(digits, 8)) end)
     :gsub("%f[%w_]([%a_][%w_]*)", function(word) return WORD_OPERATORS[word:lower()] end))
@@ -73,14 +134,26 @@ end
 -- One line of arithmetic with " = " and its value added, or just the value
 -- added when the line already ends in "=". Returns nil and the reason when
 -- the line can't be calculated.
-local function calculate_line(line)
-  local expression, equals = line:match("^(.-)(%s*=%s*)$")
-  expression = expression or line
+local function calculate_line(line, previous)
+  -- An existing result is replaced, so running the command again refreshes
+  -- calculations rather than trying to evaluate the old "= result" suffix.
+  local expression = line:match("^(.-)%s*=%s*.*$") or line
   -- Only numbers, operators, brackets and names: no quotes, so no strings,
   -- and only the names in CALCULATOR mean anything.
   if not expression:find("^[%w%s%.%+%-%*/%%%^%(%),_&|~<>]+$") then
     return nil, "Only numbers, + - * / % ^ // & | ~ << >>, brackets, and functions such as sqrt() can be calculated."
   end
+  -- Commas only separate function arguments. Outside brackets Lua would read
+  -- "1,000 * 2" as two values and quietly keep the first.
+  local depth = 0
+  for character in expression:gmatch("[(),]") do
+    if character == "(" then depth = depth + 1
+    elseif character == ")" then depth = depth - 1
+    elseif depth <= 0 then
+      return nil, "Commas can only separate function arguments, as in max(1, 2). Write 1000 rather than 1,000."
+    end
+  end
+  CALCULATOR.ans = previous
   local chunk = load("return " .. to_lua_expression(expression), "=expression", "t", CALCULATOR)
   local ok, value = false, nil
   if chunk then ok, value = pcall(chunk) end
@@ -88,8 +161,8 @@ local function calculate_line(line)
     return nil, "\"" .. expression .. "\" isn't an expression that can be calculated."
   end
   local result = format_number(value)
-  if not equals then return line:match("^(.-)%s*$") .. " = " .. result end
-  return line .. (equals:find(" $") and "" or " ") .. result
+  local numeric = getmetatable(value) == BASED and value.value or value
+  return expression:match("^(.-)%s*$") .. " = " .. result, nil, numeric
 end
 
 -- Adds the value after each selected line of arithmetic, such as
@@ -101,24 +174,32 @@ end
 -- written as words. Numbers can be written in hex (0xFF), octal (0o17) or
 -- binary (0b101), and hex(), oct() and bin() show the answer in that base.
 -- Trigonometry is in radians: rad() converts degrees, deg() converts back.
-menu.add("Calculate Selection", function()
+-- ans is the previous result, including the preceding line in a selection.
+-- Everyday helpers include round(), sum(), avg(), percent(), fact(), gcd(),
+-- lcm(), clamp() and sign(); log2(), log10(), sinh(), cosh() and tanh() are
+-- also available.
+menu.add("/Tools/Calculate Selection", function()
   local start = editor.get_selection_range()
   local selected = editor.get_selection()
   if not selected:find("%S") then
-    ui.message("Select an expression to calculate, such as (2 + 3) * 4.")
-    return
+    selected = ui.prompt("Expression to calculate:", "")
+    if not selected or not selected:find("%S") then return end
   end
-  local problem
+  local problem, originalAnswer = nil, CALCULATOR.ans
+  local answer = originalAnswer
   local text = selected:gsub("[^\r\n]+", function(line)
     if problem or not line:find("%S") then return nil end
-    local result, reason = calculate_line(line)
+    local result, reason, value = calculate_line(line, answer)
     problem = problem or reason
+    if value ~= nil then answer = value end
     return result
   end)
   if problem then
+    CALCULATOR.ans = originalAnswer
     ui.message(problem, nil, "warning")
     return
   end
+  CALCULATOR.ans = answer
   editor.replace_selection(text)
   editor.set_selection(start, start + #text - 1)
 end)

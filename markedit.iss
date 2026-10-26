@@ -68,12 +68,15 @@ Source: "dist\plugins\*"; DestDir: "{app}\plugins"; Flags: ignoreversion recurse
 Source: "dist\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\third_party\cmark-gfm\COPYING"; DestDir: "{app}\third_party\cmark-gfm"; Flags: ignoreversion
+Source: "dist\third_party\cmark-gfm\VERSION.txt"; DestDir: "{app}\third_party\cmark-gfm"; Flags: ignoreversion
 Source: "dist\third_party\gdb\bin\gdb.exe"; DestDir: "{app}\third_party\gdb\bin"; Flags: ignoreversion
 Source: "dist\third_party\gdb\COPYING.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\COPYING.MinGW-w64-runtime.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\VERSION.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\SOURCE.md"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
 Source: "dist\third_party\gdb\SHA256SUMS.txt"; DestDir: "{app}\third_party\gdb"; Flags: ignoreversion
+Source: "dist\third_party\github-markdown-css\LICENSE"; DestDir: "{app}\third_party\github-markdown-css"; Flags: ignoreversion
+Source: "dist\third_party\github-markdown-css\VERSION.txt"; DestDir: "{app}\third_party\github-markdown-css"; Flags: ignoreversion
 Source: "dist\third_party\highlightjs\LICENSE"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
 Source: "dist\third_party\highlightjs\VERSION.txt"; DestDir: "{app}\third_party\highlightjs"; Flags: ignoreversion
 Source: "dist\third_party\katex\LICENSE"; DestDir: "{app}\third_party\katex"; Flags: ignoreversion
@@ -82,9 +85,14 @@ Source: "dist\third_party\lexilla\License.txt"; DestDir: "{app}\third_party\lexi
 Source: "dist\third_party\lexilla\version.txt"; DestDir: "{app}\third_party\lexilla"; Flags: ignoreversion
 Source: "dist\third_party\lua\LICENSE"; DestDir: "{app}\third_party\lua"; Flags: ignoreversion
 Source: "dist\third_party\lua\VERSION.txt"; DestDir: "{app}\third_party\lua"; Flags: ignoreversion
+Source: "dist\third_party\mermaid\LICENSE"; DestDir: "{app}\third_party\mermaid"; Flags: ignoreversion
+Source: "dist\third_party\mermaid\VERSION.txt"; DestDir: "{app}\third_party\mermaid"; Flags: ignoreversion
 Source: "dist\third_party\scintilla\License.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
 Source: "dist\third_party\scintilla\version.txt"; DestDir: "{app}\third_party\scintilla"; Flags: ignoreversion
+Source: "dist\third_party\scowl\COPYING"; DestDir: "{app}\third_party\scowl"; Flags: ignoreversion
+Source: "dist\third_party\scowl\VERSION.txt"; DestDir: "{app}\third_party\scowl"; Flags: ignoreversion
 Source: "dist\third_party\webview2\LICENSE.txt"; DestDir: "{app}\third_party\webview2"; Flags: ignoreversion
+Source: "dist\third_party\webview2\VERSION.txt"; DestDir: "{app}\third_party\webview2"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -111,6 +119,7 @@ Root: HKA; Subkey: "Software\Classes\MarkEdit.source"; ValueType: string; ValueN
 Root: HKA; Subkey: "Software\Classes\MarkEdit.source\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\MarkEdit.source\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.txt\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.log\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.json\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.jsonc\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.jsonl\OpenWithProgids"; ValueType: string; ValueName: "MarkEdit.source"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
@@ -174,6 +183,6 @@ Type: filesandordirs; Name: "{localappdata}\MarkEdit\WebView2"
 ; get_settings_path() (settings.c) writes here, under %APPDATA%, not {app} -
 ; the app is never installed with write access to Program Files, so settings
 ; were never going to end up next to the exe.
-Type: files; Name: "{userappdata}\markedit\markedit.ini"
+Type: files; Name: "{userappdata}\markedit\settings.json"
 ; %LOCALAPPDATA%\MarkEdit\Recovery (unsaved-document snapshots) is left in
 ; place deliberately: it can hold work that was never saved anywhere else.

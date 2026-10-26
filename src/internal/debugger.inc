@@ -462,9 +462,11 @@ static void set_debug_panel_status(const WCHAR *status) {
     if (g_hDebugStatus) SetWindowTextW(g_hDebugStatus, status ? status : L"Debugger");
 }
 
+/* Shows the output panel's Debug tab, where the session's status and
+   variables are (see output_panel.inc) - without moving focus away from the
+   editor, same as this did before the debug and output panels were merged. */
 static void show_debug_panel(void) {
-    g_debugPanelVisible = 1;
-    if (g_hMainWnd) layout(g_hMainWnd);
+    show_output_panel(g_hMainWnd, OUTPUT_TAB_DEBUG, 0);
 }
 
 static void add_debug_variable(const char *name, const char *value) {

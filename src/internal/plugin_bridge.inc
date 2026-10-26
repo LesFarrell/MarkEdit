@@ -367,7 +367,7 @@ static void install_plugin_editor_metadata(const WCHAR *directory) {
     WCHAR *luarc = path_join(directory, L".luarc.json");
     static const char metadata[] =
         "{\n  \"workspace.library\": [\"types\"],\n  \"diagnostics.globals\": "
-        "[\"editor\", \"ui\", \"menu\", \"commands\", \"events\", \"config\", \"app\"]\n}\n";
+        "[\"editor\", \"ui\", \"menu\", \"contextmenu\", \"commands\", \"events\", \"config\", \"app\"]\n}\n";
     if (luarc && !file_exists(luarc))
         write_bytes_file(luarc, metadata, sizeof(metadata) - 1);
     free(luarc);
@@ -938,6 +938,18 @@ static void run_plugin_command(int index) {
     update_view_menu(g_hMainWnd);
     if (!plugin_host_is_busy()) queue_plugin_tab_check();
     SetFocus(active_edit_view());
+}
+
+static void run_plugin_context_menu_item(int id, HWND hEdit) {
+    int wasDirty = g_dirty;
+    g_pluginChangedSaveEncoding = 0;
+    char *error = plugin_host_run_context_menu_item(id, hEdit);
+    sync_dirty_after_plugin(wasDirty);
+    if (error) show_plugin_error(error);
+    free(error);
+    update_view_menu(g_hMainWnd);
+    if (!plugin_host_is_busy()) queue_plugin_tab_check();
+    SetFocus(hEdit);
 }
 
 static void handle_main_command(HWND hwnd, WORD cmd) {

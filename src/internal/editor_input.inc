@@ -417,6 +417,107 @@ static int smart_pair_backspace(HWND hEdit) {
     return 1;
 }
 
+#define EDITOR_CONTEXT_MENU_PLUGIN_ITEM_MAX 64
+#define EDITOR_CONTEXT_MENU_PLUGIN_FIRST 100
+
+/* Adds a snapshot of the registered plugin items. Stable registry ids are
+   kept separately from the popup's small, temporary Win32 command ids: a
+   deferred callback can add or remove registrations while TrackPopupMenu's
+   modal loop is open. */
+static int append_plugin_context_menu_items(HMENU menu, int *itemIds, HWND hEdit) {
+    int available = plugin_host_context_menu_item_count();
+    int count = available < EDITOR_CONTEXT_MENU_PLUGIN_ITEM_MAX
+        ? available : EDITOR_CONTEXT_MENU_PLUGIN_ITEM_MAX;
+    if (count && GetMenuItemCount(menu) > 0) AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    int appended = 0;
+    for (int i = 0; i < count; i++) {
+        WCHAR *label = to_wide(plugin_host_context_menu_item_label(i));
+        if (!label) continue;
+        int itemId = plugin_host_context_menu_item_id(i);
+        int checked = plugin_host_context_menu_item_is_checked(i);
+        WCHAR *parts[PLUGIN_MAX_CONTEXT_DEPTH];
+        int partCount = split_plugin_label(label, parts);
+        HMENU destination = menu;
+        for (int part = 0; destination && part < partCount - 1; part++)
+            destination = plugin_submenu(destination, parts[part], NULL);
+        UINT flags = MF_STRING;
+        int enabled = 0;
+        char *error = plugin_host_context_menu_item_enabled(i, hEdit, &enabled);
+        if (error) show_plugin_error(error);
+        free(error);
+        if (!enabled) flags |= MF_GRAYED;
+        if (checked) flags |= MF_CHECKED;
+        if (destination && partCount &&
+            AppendMenuW(destination, flags,
+                        EDITOR_CONTEXT_MENU_PLUGIN_FIRST + appended, parts[partCount - 1])) {
+            itemIds[appended] = itemId;
+            appended++;
+        }
+        free(label);
+    }
+    return appended;
+}
+
+static int run_plugin_context_menu_command(UINT command, const int *itemIds,
+                                           int itemCount, HWND hEdit) {
+    int index = (int)command - EDITOR_CONTEXT_MENU_PLUGIN_FIRST;
+    if (index < 0 || index >= itemCount) return 0;
+    run_plugin_context_menu_item(itemIds[index], hEdit);
+    return 1;
+}
+
+static POINT editor_context_menu_point(HWND hwnd, LPARAM lParam) {
+    POINT point;
+    if ((int)GET_X_LPARAM(lParam) == -1 && (int)GET_Y_LPARAM(lParam) == -1) {
+        if (!GetCaretPos(&point)) point = (POINT){0, 0};
+        ClientToScreen(hwnd, &point);
+    } else {
+        point.x = GET_X_LPARAM(lParam);
+        point.y = GET_Y_LPARAM(lParam);
+    }
+    return point;
+}
+
+static void show_editor_context_menu(HWND hwnd, LPARAM lParam) {
+    enum {
+        EDIT_CONTEXT_UNDO = 1, EDIT_CONTEXT_REDO, EDIT_CONTEXT_CUT,
+        EDIT_CONTEXT_COPY, EDIT_CONTEXT_PASTE, EDIT_CONTEXT_DELETE,
+        EDIT_CONTEXT_SELECT_ALL
+    };
+    Sci_Position selectionStart = (Sci_Position)SendMessageA(hwnd, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selectionEnd = (Sci_Position)SendMessageA(hwnd, SCI_GETSELECTIONEND, 0, 0);
+    int hasSelection = selectionStart != selectionEnd;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING | (SendMessageA(hwnd, SCI_CANUNDO, 0, 0) ? 0 : MF_GRAYED),
+                EDIT_CONTEXT_UNDO, L"Undo");
+    AppendMenuW(menu, MF_STRING | (SendMessageA(hwnd, SCI_CANREDO, 0, 0) ? 0 : MF_GRAYED),
+                EDIT_CONTEXT_REDO, L"Redo");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), EDIT_CONTEXT_CUT, L"Cut");
+    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), EDIT_CONTEXT_COPY, L"Copy");
+    AppendMenuW(menu, MF_STRING | (SendMessageA(hwnd, SCI_CANPASTE, 0, 0) ? 0 : MF_GRAYED),
+                EDIT_CONTEXT_PASTE, L"Paste");
+    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), EDIT_CONTEXT_DELETE, L"Delete");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, EDIT_CONTEXT_SELECT_ALL, L"Select All");
+
+    int itemIds[EDITOR_CONTEXT_MENU_PLUGIN_ITEM_MAX];
+    int itemCount = append_plugin_context_menu_items(menu, itemIds, hwnd);
+    POINT point = editor_context_menu_point(hwnd, lParam);
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                  point.x, point.y, 0, g_hMainWnd, NULL);
+    DestroyMenu(menu);
+    if (run_plugin_context_menu_command(command, itemIds, itemCount, hwnd)) return;
+    if (command == EDIT_CONTEXT_UNDO) SendMessageA(hwnd, SCI_UNDO, 0, 0);
+    else if (command == EDIT_CONTEXT_REDO) SendMessageA(hwnd, SCI_REDO, 0, 0);
+    else if (command == EDIT_CONTEXT_CUT) SendMessageA(hwnd, SCI_CUT, 0, 0);
+    else if (command == EDIT_CONTEXT_COPY) SendMessageA(hwnd, SCI_COPY, 0, 0);
+    else if (command == EDIT_CONTEXT_PASTE) SendMessageA(hwnd, SCI_PASTE, 0, 0);
+    else if (command == EDIT_CONTEXT_DELETE) SendMessageA(hwnd, SCI_REPLACESEL, 0, (LPARAM)"");
+    else if (command == EDIT_CONTEXT_SELECT_ALL) SendMessageA(hwnd, SCI_SELECTALL, 0, 0);
+}
+
 static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
     if (!g_spellCheckEnabled || !g_spellChecker ||
         (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT))
@@ -488,10 +589,15 @@ static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
     AppendMenuW(menu, MF_STRING, SPELL_PASTE, L"Paste");
     AppendMenuW(menu, MF_STRING, SPELL_SELECT_ALL, L"Select All");
 
+    int itemIds[EDITOR_CONTEXT_MENU_PLUGIN_ITEM_MAX];
+    int itemCount = append_plugin_context_menu_items(menu, itemIds, hwnd);
+
     UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                   screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL);
     DestroyMenu(menu);
-    if (command >= SPELL_SUGGESTION_FIRST && command <= (UINT)suggestionCount) {
+    if (run_plugin_context_menu_command(command, itemIds, itemCount, hwnd)) {
+        /* handled by the plugin */
+    } else if (command >= SPELL_SUGGESTION_FIRST && command <= (UINT)suggestionCount) {
         char *replacement = to_utf8(suggestions[command - SPELL_SUGGESTION_FIRST]);
         if (replacement) {
             SendMessageA(hwnd, SCI_BEGINUNDOACTION, 0, 0);
@@ -587,6 +693,8 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         if (wParam < 128 && smart_pair_character(hwnd, (char)wParam)) return 0;
     } else if (msg == WM_CONTEXTMENU) {
         if (show_spelling_context_menu(hwnd, lParam)) return 0;
+        show_editor_context_menu(hwnd, lParam);
+        return 0;
     } else if (msg == WM_LBUTTONDOWN) {
         if ((wParam & MK_CONTROL) && (GetKeyState(VK_MENU) & 0x8000) &&
             ctrl_click_jump_to_occurrence(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
