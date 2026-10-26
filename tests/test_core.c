@@ -24,10 +24,14 @@ static int probe_progress(size_t completed, size_t total, void *context) {
 }
 
 static void test_codecs(void) {
-    char *escaped = json_escape("quote ' slash \\ line\n\xE2\x80\xA8");
+    size_t escapedLength = 0;
+    char *escaped = json_escape_length("quote ' slash \\ line\n\xE2\x80\xA8", &escapedLength);
     CHECK(escaped && strcmp(escaped, "quote \\' slash \\\\ line\\n\\u2028") == 0);
+    CHECK(escapedLength == strlen(escaped));
     free(escaped);
     CHECK(json_escape(NULL) == NULL);
+    escapedLength = 99;
+    CHECK(json_escape_length(NULL, &escapedLength) == NULL && escapedLength == 0);
 
     WCHAR *decoded = decode_json_string(L"\"line\\n\\u20ac\"");
     CHECK(decoded && wcscmp(decoded, L"line\n\u20ac") == 0);

@@ -28,6 +28,13 @@ struct TerminalView {
     HFONT font;
     TerminalPalette palette;
 
+    /* Cached back buffer; output repaints reuse it instead of recreating a
+       compatible bitmap and memory DC for every WM_PAINT. */
+    HDC backDc;
+    HBITMAP backBitmap;
+    HGDIOBJ backPreviousBitmap;
+    int backWidth, backHeight;
+
     int scrollOffset; /* lines scrolled up from the live bottom; 0 = pinned to it */
     int wheelDeltaRemainder; /* preserves partial high-resolution wheel turns */
 
@@ -106,16 +113,6 @@ static void normalized_selection(const TerminalView *view, int *startLine, int *
         *startLine = view->pointLine; *startCol = view->pointCol;
         *endLine = view->anchorLine; *endCol = view->anchorCol;
     }
-}
-
-static int cell_selected(const TerminalView *view, int lineIndex, int col) {
-    if (!view->selecting_any) return 0;
-    int startLine, startCol, endLine, endCol;
-    normalized_selection(view, &startLine, &startCol, &endLine, &endCol);
-    if (lineIndex < startLine || lineIndex > endLine) return 0;
-    if (lineIndex == startLine && col < startCol) return 0;
-    if (lineIndex == endLine && col > endCol) return 0;
-    return 1;
 }
 
 /* The total-line index and column under a client point, clamped to the grid. */
@@ -203,10 +200,44 @@ static void paste_clipboard(TerminalView *view) {
 
 /* ---- painting ---- */
 
+/* Keeps one compatible bitmap and memory DC for the life of the window,
+   reallocating only when the client size changes. The shell repaints on
+   every output chunk, so creating them per WM_PAINT was measurable churn. */
+static int ensure_back_buffer(TerminalView *view, HDC hdc, int width, int height) {
+    if (width <= 0 || height <= 0) return 0;
+    if (view->backBitmap && view->backWidth == width && view->backHeight == height) return 1;
+    if (!view->backDc) {
+        view->backDc = CreateCompatibleDC(hdc);
+        if (!view->backDc) return 0;
+    }
+    if (view->backBitmap) {
+        SelectObject(view->backDc, view->backPreviousBitmap);
+        DeleteObject(view->backBitmap);
+        view->backBitmap = NULL;
+    }
+    view->backBitmap = CreateCompatibleBitmap(hdc, width, height);
+    if (!view->backBitmap) return 0;
+    view->backPreviousBitmap = SelectObject(view->backDc, view->backBitmap);
+    view->backWidth = width;
+    view->backHeight = height;
+    return 1;
+}
+
+static void release_back_buffer(TerminalView *view) {
+    if (view->backBitmap) {
+        SelectObject(view->backDc, view->backPreviousBitmap);
+        DeleteObject(view->backBitmap);
+        view->backBitmap = NULL;
+    }
+    if (view->backDc) {
+        DeleteDC(view->backDc);
+        view->backDc = NULL;
+    }
+}
+
 static void paint_view(TerminalView *view, HDC hdc, const RECT *client) {
-    HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP bitmap = CreateCompatibleBitmap(hdc, client->right, client->bottom);
-    HBITMAP previousBitmap = (HBITMAP)SelectObject(memDC, bitmap);
+    if (!ensure_back_buffer(view, hdc, client->right, client->bottom)) return;
+    HDC memDC = view->backDc;
     HFONT previousFont = (HFONT)SelectObject(memDC, view->font);
     SetBkMode(memDC, OPAQUE);
 
@@ -215,6 +246,9 @@ static void paint_view(TerminalView *view, HDC hdc, const RECT *client) {
     if (firstLine < 0) firstLine = 0;
     int cursorCol = 0, cursorRow = 0, cursorVisible = 0;
     terminal_grid_cursor(view->grid, &cursorCol, &cursorRow, &cursorVisible);
+    int startLine = 0, startCol = 0, endLine = 0, endCol = 0;
+    if (view->selecting_any)
+        normalized_selection(view, &startLine, &startCol, &endLine, &endCol);
 
     for (int screenRow = 0; screenRow < view->rows; screenRow++) {
         int lineIndex = firstLine + screenRow;
@@ -222,17 +256,32 @@ static void paint_view(TerminalView *view, HDC hdc, const RECT *client) {
         const TerminalCell *cells = lineIndex < totalLines
             ? terminal_grid_line_at(view->grid, lineIndex, &width) : NULL;
         int y = screenRow * view->cellHeight;
+        if (!cells || width <= 0) {
+            RECT blankRect = { 0, y, client->right, y + view->cellHeight };
+            SetBkColor(memDC, view->palette.defaultBg);
+            ExtTextOutW(memDC, 0, y, ETO_OPAQUE, &blankRect, L"", 0, NULL);
+            continue;
+        }
         int x = 0;
         int runStart = 0;
         int isCursorRow = view->scrollOffset == 0 && cursorVisible && lineIndex == firstLine + cursorRow;
+        int firstSelected = 0, lastSelected = -1;
+        if (view->selecting_any && lineIndex >= startLine && lineIndex <= endLine) {
+            firstSelected = lineIndex == startLine ? startCol : 0;
+            lastSelected = lineIndex == endLine ? endCol : INT_MAX;
+        }
 
-        for (int c = 0; c <= view->cols; c++) {
-            int atRunEnd = c == view->cols || c >= width;
+        /* Stop at the line's own width: a scrollback row can be narrower than
+           the current terminal, and reading past it was out of bounds. */
+        for (int c = 0; c <= view->cols && c <= width; c++) {
+            int atRunEnd = c == view->cols || c == width;
             int breaksRun = atRunEnd;
             if (!atRunEnd && c > runStart) {
+                int selected = c >= firstSelected && c <= lastSelected;
+                int previousSelected = c - 1 >= firstSelected && c - 1 <= lastSelected;
                 int sameAsPrev = cells[c].fg == cells[c - 1].fg && cells[c].bg == cells[c - 1].bg &&
                                  cells[c].underline == cells[c - 1].underline &&
-                                 cell_selected(view, lineIndex, c) == cell_selected(view, lineIndex, c - 1) &&
+                                 selected == previousSelected &&
                                  (!isCursorRow || (c != cursorCol && c - 1 != cursorCol));
                 breaksRun = !sameAsPrev;
             }
@@ -241,11 +290,11 @@ static void paint_view(TerminalView *view, HDC hdc, const RECT *client) {
                 WCHAR text[512];
                 int textLength = runLength < 512 ? runLength : 511;
                 for (int i = 0; i < textLength; i++) text[i] = cells[runStart + i].ch;
-                int selected = cell_selected(view, lineIndex, runStart);
+                int runSelected = runStart >= firstSelected && runStart <= lastSelected;
                 int isCursorCell = isCursorRow && runStart == cursorCol && runLength == 1;
                 COLORREF fg = terminal_grid_resolve_colour(cells[runStart].fg, 0, &view->palette);
                 COLORREF bg = terminal_grid_resolve_colour(cells[runStart].bg, 1, &view->palette);
-                if (selected || isCursorCell) { COLORREF t = fg; fg = bg; bg = t; }
+                if (runSelected || isCursorCell) { COLORREF t = fg; fg = bg; bg = t; }
                 SetTextColor(memDC, fg);
                 SetBkColor(memDC, bg);
                 RECT runRect = { x, y, x + runLength * view->cellWidth, y + view->cellHeight };
@@ -263,11 +312,7 @@ static void paint_view(TerminalView *view, HDC hdc, const RECT *client) {
                 runStart = c;
             }
         }
-        if (width <= 0 || !cells) {
-            RECT blankRect = { 0, y, client->right, y + view->cellHeight };
-            SetBkColor(memDC, view->palette.defaultBg);
-            ExtTextOutW(memDC, 0, y, ETO_OPAQUE, &blankRect, L"", 0, NULL);
-        } else if (x < client->right) {
+        if (x < client->right) {
             RECT tailRect = { x, y, client->right, y + view->cellHeight };
             SetBkColor(memDC, view->palette.defaultBg);
             ExtTextOutW(memDC, x, y, ETO_OPAQUE, &tailRect, L"", 0, NULL);
@@ -282,9 +327,6 @@ static void paint_view(TerminalView *view, HDC hdc, const RECT *client) {
 
     BitBlt(hdc, 0, 0, client->right, client->bottom, memDC, 0, 0, SRCCOPY);
     SelectObject(memDC, previousFont);
-    SelectObject(memDC, previousBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memDC);
 }
 
 /* ---- keyboard ---- */
@@ -548,6 +590,7 @@ void terminal_view_free(TerminalView *view) {
     if (!view) return;
     terminal_process_free(view->process);
     terminal_grid_free(view->grid);
+    release_back_buffer(view);
     if (view->hwnd) DestroyWindow(view->hwnd);
     free(view);
 }

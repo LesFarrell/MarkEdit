@@ -11,6 +11,9 @@ WCHAR *to_wide_n(const char *utf8, size_t length, int *wideLength);
 char *to_utf8(const WCHAR *wide);
 WCHAR *decode_json_string(const WCHAR *json);
 char *json_escape(const char *utf8);
+/* As json_escape(), also reporting the escaped byte length so callers that
+   splice the result don't need a second strlen() over a large document. */
+char *json_escape_length(const char *utf8, size_t *outLength);
 int hex_digit_value(WCHAR character);
 
 /* ---- text file encodings: the editor holds UTF-8; files may be any of these ---- */

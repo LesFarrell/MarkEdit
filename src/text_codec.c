@@ -102,6 +102,11 @@ WCHAR *decode_json_string(const WCHAR *json) {
 }
 
 char *json_escape(const char *utf8) {
+    return json_escape_length(utf8, NULL);
+}
+
+char *json_escape_length(const char *utf8, size_t *outLength) {
+    if (outLength) *outLength = 0;
     if (!utf8) return NULL;
     size_t length = strlen(utf8);
     if (length > (SIZE_MAX - 1) / 6) return NULL;
@@ -139,6 +144,7 @@ char *json_escape(const char *utf8) {
         }
     }
     output[outputLength] = 0;
+    if (outLength) *outLength = outputLength;
     return output;
 }
 

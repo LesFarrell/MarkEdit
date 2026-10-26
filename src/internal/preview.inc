@@ -16,9 +16,10 @@ static HRESULT execute_webview_script(const char *script,
 /* Runs `prefix` + `text` escaped for a single-quoted JS string + `suffix`
    in the preview. */
 static void execute_webview_string_call(const char *prefix, const char *text, const char *suffix) {
-    char *escaped = json_escape(text);
+    size_t escapedLength = 0;
+    char *escaped = json_escape_length(text, &escapedLength);
     if (!escaped) return;
-    size_t prefixLength = strlen(prefix), escapedLength = strlen(escaped);
+    size_t prefixLength = strlen(prefix);
     char *script = (char *)malloc(prefixLength + escapedLength + strlen(suffix) + 1);
     if (script) {
         memcpy(script, prefix, prefixLength);
@@ -872,7 +873,8 @@ static void init_webview(void) {
    fence is one backtick longer than the longest run of backticks in the
    text - CommonMark fences can be any length from three - so nothing in
    the source can close it early. */
-static char *source_as_markdown(const char *text, size_t length, const char *tag) {
+static char *source_as_markdown(const char *text, size_t length, const char *tag,
+                                size_t *resultLength) {
     size_t longest = 0, run = 0;
     for (size_t i = 0; i < length; i++) {
         run = text[i] == '`' ? run + 1 : 0;
@@ -891,6 +893,7 @@ static char *source_as_markdown(const char *text, size_t length, const char *tag
     memset(markdown + o, '`', fence); o += fence;
     markdown[o++] = '\n';
     markdown[o] = 0;
+    if (resultLength) *resultLength = o;
     return markdown;
 }
 
@@ -929,11 +932,12 @@ static void update_preview(void) {
        Markdown, as a saved file of an unknown type does. */
     if (g_activeLanguage != LANG_MARKDOWN && !(g_activeLanguage == LANG_TEXT && !g_currentFile)) {
         const char *tag = len > PREVIEW_HIGHLIGHT_MAX_LENGTH ? "" : LANGUAGES[g_activeLanguage].fenceTag;
-        char *source = source_as_markdown(text, (size_t)len, tag);
+        size_t sourceLength = 0;
+        char *source = source_as_markdown(text, (size_t)len, tag, &sourceLength);
         free(text);
         if (!source) return;
         text = source;
-        len = (Sci_Position)strlen(source);
+        len = (Sci_Position)sourceLength;
     }
 
     int showWaitCursor = len >= PREVIEW_SLOW_RENDER_THRESHOLD;

@@ -20,10 +20,13 @@ static const char *next_line(const char *line_end) {
     return line_end;
 }
 
-static const char *skip_yaml_front_matter(const char *text) {
+/* Returns the Markdown body and its length, hiding a leading YAML front
+   matter block. The length lets callers skip a second full scan of the
+   document on every preview render. */
+static const char *skip_yaml_front_matter(const char *text, size_t text_length,
+                                          size_t *body_length) {
     const char *start = text;
     const char *line_end;
-    size_t text_length = strlen(text);
 
     if (text_length >= 3 &&
         (unsigned char)start[0] == 0xEF &&
@@ -34,6 +37,7 @@ static const char *skip_yaml_front_matter(const char *text) {
 
     line_end = strpbrk(start, "\r\n");
     if (!line_end || line_end - start != 3 || memcmp(start, "---", 3) != 0) {
+        *body_length = text_length;
         return text;
     }
 
@@ -41,19 +45,22 @@ static const char *skip_yaml_front_matter(const char *text) {
     while (*start) {
         size_t length;
         line_end = strpbrk(start, "\r\n");
-        length = line_end ? (size_t)(line_end - start) : strlen(start);
+        length = line_end ? (size_t)(line_end - start) : text_length - (size_t)(start - text);
         size_t trimmed = length;
         while (trimmed > 0 && (start[trimmed - 1] == ' ' || start[trimmed - 1] == '\t'))
             trimmed--;
         if (trimmed == 3 &&
             (memcmp(start, "---", 3) == 0 || memcmp(start, "...", 3) == 0)) {
-            return line_end ? next_line(line_end) : start + length;
+            const char *body = line_end ? next_line(line_end) : start + length;
+            *body_length = text_length - (size_t)(body - text);
+            return body;
         }
         if (!line_end) break;
         start = next_line(line_end);
     }
 
     /* An unterminated opening marker is ordinary Markdown, not metadata. */
+    *body_length = text_length;
     return text;
 }
 
@@ -88,7 +95,8 @@ char *markdown_to_html(const char *text) {
         }
     }
 
-    const char *body = skip_yaml_front_matter(text);
+    size_t body_length = 0;
+    const char *body = skip_yaml_front_matter(text, strlen(text), &body_length);
     /* Keep source positions aligned with the editor after hiding metadata. */
     for (const char *cursor = text; cursor < body; cursor++) {
         if (*cursor == '\r') {
@@ -98,7 +106,7 @@ char *markdown_to_html(const char *text) {
             cmark_parser_feed(parser, "\n", 1);
         }
     }
-    cmark_parser_feed(parser, body, strlen(body));
+    cmark_parser_feed(parser, body, body_length);
     document = cmark_parser_finish(parser);
     if (!document) {
         cmark_llist_free(mem, render_extensions);
