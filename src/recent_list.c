@@ -2,12 +2,11 @@
 #include "recent_list.h"
 
 #include <stdio.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <wchar.h>
 
 #include "path_utils.h"
-#include "settings.h"
+#include "settings_io.h"
 
 static int recent_list_find(const RecentList *list, const WCHAR *path) {
     for (int i = 0; i < *list->count; i++)
@@ -37,42 +36,14 @@ void recent_list_load(const RecentList *list) {
     free(path);
 }
 
-/* WritePrivateProfileSectionW replaces the whole section in one file
-   read-modify-write pass, rather than the N+1 passes that clearing the
-   section and then calling WritePrivateProfileStringW once per entry would
-   cost - this runs on every single file open, so it isn't a one-off. */
 static void recent_list_save(const RecentList *list) {
     WCHAR *path = get_settings_path();
     if (!path) return;
-    size_t prefixLen = wcslen(list->keyPrefix);
-    size_t cap = 1;
+    if (!clear_setting_section(list->section, path)) { free(path); return; }
     for (int i = 0; i < *list->count; i++) {
-        size_t itemLength = wcslen(list->items[i]);
-        if (itemLength > SIZE_MAX - cap - prefixLen - 16) {
-            free(path);
-            return;
-        }
-        cap += prefixLen + 16 + itemLength;
-    }
-    if (cap > SIZE_MAX / sizeof(WCHAR)) {
-        free(path);
-        return;
-    }
-    WCHAR *section = (WCHAR *)malloc(cap * sizeof(WCHAR));
-    if (section) {
-        size_t pos = 0;
-        for (int i = 0; i < *list->count; i++) {
-            int written = swprintf(section + pos, cap - pos, L"%ls%d=%ls", list->keyPrefix, i, list->items[i]);
-            if (written < 0) {
-                free(section);
-                free(path);
-                return;
-            }
-            pos += (size_t)written + 1; /* step past the entry's own NUL */
-        }
-        section[pos] = 0; /* second, block-terminating NUL */
-        WritePrivateProfileSectionW(list->section, *list->count ? section : NULL, path);
-        free(section);
+        WCHAR key[32];
+        swprintf(key, 32, L"%ls%d", list->keyPrefix, i);
+        write_setting_string(list->section, key, list->items[i], path);
     }
     free(path);
 }

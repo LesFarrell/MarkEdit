@@ -1,6 +1,5 @@
 -DCMARK_GFM_STATIC_DEFINE
 -DCMARK_GFM_EXTENSIONS_STATIC_DEFINE
--Wno-unused-parameter
 -Ithird_party/cmark-gfm/src
 -Ithird_party/cmark-gfm/extensions
 third_party/cmark-gfm/src/arena.c

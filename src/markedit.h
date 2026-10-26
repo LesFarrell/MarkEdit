@@ -3,7 +3,7 @@
 
 #include <windows.h>
 
-#include "settings.h" /* SPLITTER_WIDTH is used by save_layout_settings() too */
+#include "settings_values.h" /* SPLITTER_WIDTH */
 
 /* ---- child control IDs ---- */
 #define ID_EDIT    101
@@ -17,6 +17,15 @@
 #define ID_DEBUG_VARIABLES 109
 #define ID_DEBUG_STATUS 110
 #define ID_DEBUG_CLOSE 111
+#define ID_OUTPUT_PANEL 112
+#define ID_OUTPUT_VIEW 113
+#define ID_TERMINAL_VIEW 114
+#define ID_OUTPUT_INPUT 115
+#define ID_OUTPUT_TAB_RUN 116
+#define ID_OUTPUT_TAB_TERMINAL 117
+#define ID_OUTPUT_CLEAR 118
+#define ID_OUTPUT_STOP 119
+#define ID_OUTPUT_CLOSE 120
 
 /* ---- timer IDs ---- */
 #define IDT_PREVIEW_UPDATE 1
@@ -30,6 +39,29 @@
 #define IDT_STATUS_UPDATE 9
 #define IDT_EXPLORER_REFRESH 10
 #define IDT_HTML_EXPORT 11
+#define IDT_PLUGIN_STATUS 12
+#define IDT_PLUGIN_SELECTION 13
+#define IDT_PLUGIN_DEFER_BASE 1000
+
+/* ---- timer intervals, in milliseconds ----
+   The debounce delays let a burst of typing, scrolling or file changes
+   settle into one update; the intervals poll. */
+#define PREVIEW_UPDATE_DELAY_MS 150
+#define FILE_WATCH_INTERVAL_MS 1500
+#define SCROLL_SYNC_DELAY_MS 35              /* after the editor scrolls */
+#define SCROLL_SYNC_AFTER_RENDER_DELAY_MS 40 /* after the preview re-renders */
+#define SPELL_CHECK_DELAY_MS 350
+#define AUTOSAVE_INTERVAL_MS 5000
+#define OUTLINE_UPDATE_DELAY_MS 500
+#define PRINT_PREVIEW_DELAY_MS 300           /* lets the preview render before printing */
+#define DEBUG_LOCATION_POLL_MS 150
+#define STATUS_UPDATE_DELAY_MS 200
+#define EXPLORER_REFRESH_DELAY_MS 400
+#define HTML_EXPORT_TIMEOUT_MS 30000
+#define PLUGIN_STATUS_DURATION_MS 1800       /* how long a plugin reload message shows */
+#define PLUGIN_SELECTION_DELAY_MS 100
+#define PLUGIN_DEFER_RETRY_MS 50             /* retry while a plugin is still running */
+#define DEBUGGER_EXIT_WAIT_MS 1000           /* for a stopped debugger to release its files */
 
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
@@ -37,20 +69,60 @@
 /* WM_APP + 3 is MARKEDIT_WM_EXPLORER_CHANGED (file_explorer.h). */
 #define WM_APP_PLUGIN_TAB_CHECK (WM_APP + 4)
 #define WM_APP_APPLY_LARGE_FILE_MODE (WM_APP + 5)
+#define WM_APP_PLUGIN_DOCUMENT_ACTION (WM_APP + 6)
+#define WM_APP_OUTPUT (WM_APP + 7) /* an OutputChunk from output_process.c */
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
+#define TAB_ITEM_WIDTH 120 /* each document tab, in 96-DPI pixels like the sizes below */
+#define TAB_ITEM_HEIGHT 22
+#define TAB_TOOLTIP_MAX_WIDTH 700 /* the full-path tooltip wraps past this */
+#define DEFAULT_WINDOW_WIDTH 1100  /* first run, before a size is saved */
+#define DEFAULT_WINDOW_HEIGHT 750
+#define DEBUG_LINE_ALPHA 110       /* the current-line highlight while debugging (0-255) */
 #define MINIMAP_WIDTH 120
 #define MINIMAP_SPLITTER_WIDTH 1
-#define SPLIT_EDITOR_SPLITTER_HEIGHT 4
+#define SPLIT_EDITOR_SPLITTER_SIZE 4
+#define STATUS_BAR_HEIGHT 22
+/* Right edges of the status bar's Ln/Col, word count and encoding parts;
+   the save-state part fills the rest. */
+#define STATUS_POSITION_PART_RIGHT 150
+#define STATUS_COUNT_PART_RIGHT 345
+#define STATUS_ENCODING_PART_RIGHT 510
+#define EXPLORER_MIN_WIDTH 120
+#define OUTLINE_WIDTH 230      /* at most a third of the content width */
+#define MIN_PANE_WIDTH 100     /* the narrowest the editor or preview gets beside the other */
+#define DEBUG_PANEL_HEIGHT 190 /* at most half the content height */
+#define DEBUG_PANEL_MIN_SPACE 160 /* below this much height the panel stays hidden */
+#define DEBUG_PANEL_PADDING 8
+#define DEBUG_PANEL_ROW_HEIGHT 26
+#define DEBUG_BUTTON_WIDTH 112
+#define DEBUG_BUTTON_MIN_WIDTH 48 /* narrower than this, the buttons hide */
+#define DEBUG_CLOSE_BUTTON_WIDTH 30
+#define DEBUG_STATUS_MIN_WIDTH 40
+#define DEBUG_NAME_COLUMN_WIDTH 220
+#define DEBUG_VALUE_COLUMN_WIDTH 640
+#define OUTPUT_PANEL_HEIGHT 220     /* until the user drags the splitter above it */
+#define OUTPUT_PANEL_MIN_HEIGHT 90
+#define OUTPUT_PANEL_MIN_SPACE 200  /* below this much height the panel stays hidden */
+#define OUTPUT_PANEL_PADDING 6
+#define OUTPUT_HEADER_HEIGHT 30
+#define OUTPUT_INPUT_HEIGHT 24
+#define OUTPUT_TAB_WIDTH 90
+#define OUTPUT_BUTTON_WIDTH 64
+
+/* Larger custom preview stylesheets are refused rather than loaded. */
+#define CUSTOM_CSS_MAX_BYTES (4 * 1024 * 1024)
 
 #include "command_ids.h"
 
 /* ---- resource IDs (markedit.rc) ---- */
 #define IDI_APPICON 1
 #define IDR_DEFAULT_MENUS 2 /* src/menus.lua, the menu bar used without a user copy */
-#define IDR_BUILTIN_FORMATTING 3 /* src/formatting.lua */
+#define IDR_BUILTIN_FORMATTING_BASE 3 /* src/lua/formatting_base.lua */
 #define IDR_HELP_MARKDOWN 4 /* src/help/markdown-reference.md, Help > Markdown Reference */
 #define IDR_HELP_SHORTCUTS 5 /* src/help/keyboard-shortcuts.lua, builds Help > Keyboard Shortcuts */
+#define IDR_BUILTIN_FORMATTING_TABLES 7
+#define IDR_BUILTIN_FORMATTING_TEXT 8
 
 /* ---- forward declarations for functions defined in markedit.c ----
    Grouped roughly by area: preview/theme, menu/layout, spell check,
@@ -60,8 +132,8 @@ static int do_save(void);
 static void update_preview(void);
 static void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
+static void apply_preview_theme(void);
 static void apply_editor_theme(HWND hEdit);
-static void apply_word_wrap(HWND hEdit);
 static void apply_preview_host_theme(void);
 static void refresh_menu(HWND hwnd);
 static void layout(HWND hwnd);
@@ -70,9 +142,8 @@ static void schedule_spell_check(void);
 static void perform_spell_check(void);
 static void update_status_position(void);
 static void update_status_bar(void);
-static void update_outline(void);
 static void write_recovery_snapshot(void);
-static int clear_recovery_snapshot(void);
+static void close_recovery_session(void);
 static int restore_recovery_snapshot(void);
 static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
                               WCHAR **labels, int count, const WCHAR *okLabel);
@@ -80,17 +151,18 @@ static void fire_plugin_event(const char *event, const WCHAR *path);
 static int show_text_input(const WCHAR *title, const WCHAR *prompt,
                            const WCHAR *initial, WCHAR *output, int outputCapacity);
 static void toggle_preview(HWND hwnd);
-static void toggle_minimap(HWND hwnd);
-static void update_minimap_viewport(void);
 static void update_document_mapping(void);
 static void update_title(void);
 static void set_dirty(int dirty);
 static void update_tab_label(int index);
+struct Document;
+static void format_document_label(const struct Document *doc, WCHAR *label, size_t capacity);
 static void switch_document(int index);
 static int create_document_tab(void);
 static int active_document_is_reusable(void);
 static void check_external_file_change(void);
 static void prompt_reload_active_external_change(void);
+static void prompt_reload_external_change(int index);
 static void do_close_document_at(int index);
 static void do_reopen_closed_tab(void);
 static void save_session_documents(void);

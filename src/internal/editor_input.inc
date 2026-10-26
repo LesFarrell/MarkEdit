@@ -1,0 +1,713 @@
+static int line_has_list_marker(const char *line, Sci_Position length) {
+    Sci_Position i = 0;
+    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i + 1 < length && (line[i] == '-' || line[i] == '*' || line[i] == '+') &&
+        (line[i + 1] == ' ' || line[i + 1] == '\t')) return 1;
+    Sci_Position digits = i;
+    while (i < length && line[i] >= '0' && line[i] <= '9') i++;
+    return i > digits && i + 1 < length && (line[i] == '.' || line[i] == ')') &&
+        (line[i + 1] == ' ' || line[i + 1] == '\t');
+}
+
+/* Preserve real tabs for indentation, but use spaces for alignment after
+   ordinary text. A collapsed caret anywhere in a Markdown list item indents
+   the entire item, which makes nesting work without first moving the caret. */
+static int editor_tab_width(HWND hEdit) {
+    int tabWidth = (int)SendMessageA(hEdit, SCI_GETTABWIDTH, 0, 0);
+    return tabWidth < 1 ? 4 : tabWidth;
+}
+
+static int smart_tab(HWND hEdit, int reverse) {
+    if (g_largeFile) return 0; /* copies the whole line, see smart_newline() */
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (start != end) return 0; /* retain Scintilla's block-selection behavior */
+
+    Sci_Position lineNumber = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    Sci_Position lineLength = lineEnd - lineStart;
+    char *line = get_text_range(hEdit, lineStart, lineEnd);
+    if (!line) return 0;
+
+    int leadingLength = 0;
+    while (leadingLength < lineLength &&
+           (line[leadingLength] == ' ' || line[leadingLength] == '\t')) leadingLength++;
+    int listItem = line_has_list_marker(line, lineLength);
+
+    if (reverse && leadingLength > 0) {
+        int remove = 0;
+        int tabWidth = editor_tab_width(hEdit);
+        if (line[0] == '\t') remove = 1;
+        else while (remove < leadingLength && remove < tabWidth && line[remove] == ' ') remove++;
+        SendMessageA(hEdit, SCI_SETTARGETSTART, (WPARAM)lineStart, 0);
+        SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)(lineStart + remove), 0);
+        SendMessageA(hEdit, SCI_REPLACETARGET, 0, (LPARAM)"");
+        free(line);
+        return 1;
+    }
+
+    if (!reverse && listItem) {
+        SendMessageA(hEdit, SCI_INSERTTEXT, (WPARAM)lineStart, (LPARAM)"\t");
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
+        free(line);
+        return 1;
+    }
+
+    free(line);
+    if (reverse || start <= lineStart + leadingLength) return 0;
+
+    int tabWidth = editor_tab_width(hEdit);
+    Sci_Position column = (Sci_Position)SendMessageA(hEdit, SCI_GETCOLUMN, (WPARAM)start, 0);
+    int spaces = tabWidth - column % tabWidth;
+    char padding[32];
+    if (spaces >= (int)sizeof(padding)) spaces = (int)sizeof(padding) - 1;
+    memset(padding, ' ', (size_t)spaces);
+    padding[spaces] = 0;
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)padding);
+    return 1;
+}
+
+static int smart_markdown_newline(HWND hEdit) {
+    Sci_Position selectionStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selectionEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (selectionStart != selectionEnd) return 0;
+    Sci_Position caret = selectionEnd;
+    if (caret > 0 && (int)SendMessageA(hEdit, SCI_GETSTYLEAT, (WPARAM)(caret - 1), 0) == SCE_MARKDOWN_CODEBK)
+        return 0;
+    Sci_Position line = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    Sci_Position beforeLength = caret - lineStart;
+    if (beforeLength <= 0) return 0;
+    char *before = get_text_range(hEdit, lineStart, caret);
+    if (!before) return 0;
+
+    int i = 0;
+    while (i < beforeLength && (before[i] == ' ' || before[i] == '\t')) i++;
+    int indentEnd = i;
+    while (i < beforeLength && before[i] == '>') {
+        i++;
+        if (i < beforeLength && before[i] == ' ') i++;
+    }
+    int quoteEnd = i;
+    int markerStart = i, markerEnd = i, ordered = 0, nextNumber = 0;
+    char punctuation = 0;
+    if (i + 1 < beforeLength && (before[i] == '-' || before[i] == '*' || before[i] == '+') &&
+        (before[i + 1] == ' ' || before[i + 1] == '\t')) {
+        i += 2;
+        markerEnd = i;
+        if (i + 3 < beforeLength && before[i] == '[' &&
+            (before[i + 1] == ' ' || before[i + 1] == 'x' || before[i + 1] == 'X') &&
+            before[i + 2] == ']' && (before[i + 3] == ' ' || before[i + 3] == '\t')) {
+            i += 4;
+            markerEnd = i;
+        }
+    } else {
+        int digits = i;
+        unsigned long number = 0;
+        while (i < beforeLength && before[i] >= '0' && before[i] <= '9') {
+            if (number < 9999999) number = number * 10 + (unsigned)(before[i] - '0');
+            i++;
+        }
+        if (i > digits && i + 1 < beforeLength && (before[i] == '.' || before[i] == ')') &&
+            (before[i + 1] == ' ' || before[i + 1] == '\t')) {
+            punctuation = before[i];
+            i += 2;
+            markerEnd = i;
+            ordered = 1;
+            nextNumber = (int)number + 1;
+        }
+    }
+    int hasMarker = markerEnd > markerStart;
+    int hasQuote = quoteEnd > indentEnd;
+    if (!hasMarker && !hasQuote) { free(before); return 0; }
+    int contentStart = hasMarker ? markerEnd : quoteEnd;
+    int contentEmpty = 1;
+    for (Sci_Position p = contentStart; p < beforeLength; p++) {
+        if (before[p] != ' ' && before[p] != '\t') { contentEmpty = 0; break; }
+    }
+
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    if (contentEmpty) {
+        /* An empty list item or quote terminates that construct. Nested quote
+           prefixes remain when terminating a list nested inside a quote. */
+        int keep = hasMarker ? quoteEnd : indentEnd;
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(lineStart + keep), (LPARAM)caret);
+        SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
+    } else {
+        const char *eol = editor_eol_sequence();
+        char orderedMarker[48] = "";
+        const char *markerText = NULL;
+        int prefixLength = contentStart;
+        if (ordered) {
+            snprintf(orderedMarker, sizeof(orderedMarker), "%d%c ", nextNumber, punctuation);
+            markerText = orderedMarker;
+            prefixLength = markerStart;
+        }
+        size_t insertLength = strlen(eol) + (size_t)prefixLength +
+            (markerText ? strlen(markerText) : 0);
+        char *insert = (char *)malloc(insertLength + 1);
+        if (insert) {
+            strcpy(insert, eol);
+            memcpy(insert + strlen(eol), before, (size_t)prefixLength);
+            size_t used = strlen(eol) + (size_t)prefixLength;
+            if (markerText) {
+                strcpy(insert + used, markerText);
+            } else if (hasMarker && markerEnd - markerStart >= 5 &&
+                       before[markerStart + 2] == '[') {
+                /* Continue task lists unchecked, even when the previous item was checked. */
+                memcpy(insert + strlen(eol) + markerStart, before + markerStart,
+                       (size_t)(markerEnd - markerStart));
+                insert[strlen(eol) + markerStart + 3] = ' ';
+                insert[insertLength] = 0;
+            } else {
+                insert[insertLength] = 0;
+            }
+            SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
+            free(insert);
+        }
+    }
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(before);
+    return 1;
+}
+
+static int ends_with_word(const char *text, Sci_Position length, const char *word) {
+    int wordLength = (int)strlen(word);
+    if (length < wordLength || memcmp(text + length - wordLength, word,
+                                      (size_t)wordLength) != 0) return 0;
+    return length == wordLength || !(isalnum((unsigned char)text[length - wordLength - 1]) ||
+                                      text[length - wordLength - 1] == '_');
+}
+
+static int style_allows_indent(HWND hEdit, Sci_Position position) {
+    int style = (int)SendMessageA(hEdit, SCI_GETSTYLEAT, (WPARAM)position, 0);
+    switch (g_activeLanguage) {
+        case LANG_CPP:
+            return !(style == SCE_C_COMMENT || style == SCE_C_COMMENTLINE ||
+                     style == SCE_C_COMMENTDOC || style == SCE_C_COMMENTLINEDOC ||
+                     style == SCE_C_STRING || style == SCE_C_CHARACTER ||
+                     style == SCE_C_STRINGEOL || style == SCE_C_VERBATIM ||
+                     style == SCE_C_REGEX || style == SCE_C_STRINGRAW ||
+                     style == SCE_C_TRIPLEVERBATIM || style == SCE_C_HASHQUOTEDSTRING);
+        case LANG_JSON:
+            return !(style == SCE_JSON_STRING || style == SCE_JSON_STRINGEOL ||
+                     style == SCE_JSON_LINECOMMENT || style == SCE_JSON_BLOCKCOMMENT);
+        case LANG_PYTHON:
+            return !(style == SCE_P_COMMENTLINE || style == SCE_P_COMMENTBLOCK ||
+                     style == SCE_P_STRING || style == SCE_P_CHARACTER ||
+                     style == SCE_P_TRIPLE || style == SCE_P_TRIPLEDOUBLE ||
+                     style == SCE_P_STRINGEOL || style == SCE_P_FSTRING ||
+                     style == SCE_P_FCHARACTER || style == SCE_P_FTRIPLE ||
+                     style == SCE_P_FTRIPLEDOUBLE);
+        case LANG_YAML:
+            return style != SCE_YAML_COMMENT;
+        case LANG_BASH:
+            return !(style == SCE_SH_COMMENTLINE || style == SCE_SH_STRING ||
+                     style == SCE_SH_CHARACTER || style == SCE_SH_HERE_DELIM ||
+                     style == SCE_SH_HERE_Q);
+        case LANG_POWERSHELL:
+            return !(style == SCE_POWERSHELL_COMMENT ||
+                     style == SCE_POWERSHELL_COMMENTSTREAM ||
+                     style == SCE_POWERSHELL_COMMENTDOCKEYWORD ||
+                     style == SCE_POWERSHELL_STRING ||
+                     style == SCE_POWERSHELL_CHARACTER ||
+                     style == SCE_POWERSHELL_HERE_STRING ||
+                     style == SCE_POWERSHELL_HERE_CHARACTER);
+        default:
+            return 1;
+    }
+}
+
+static int line_opens_indent(HWND hEdit, const char *before, Sci_Position contentStart,
+                             Sci_Position trimmedEnd, Sci_Position lineStart, char *closingOut) {
+    if (closingOut) *closingOut = 0;
+    if (trimmedEnd <= contentStart || before[contentStart] == '#') return 0;
+    if (!style_allows_indent(hEdit, lineStart + trimmedEnd - 1)) return 0;
+    char last = before[trimmedEnd - 1];
+    switch (g_activeLanguage) {
+        case LANG_CPP:
+        case LANG_POWERSHELL:
+            if (last == '{') { if (closingOut) *closingOut = '}'; return 1; }
+            break;
+        case LANG_JSON:
+            if (last == '{') { if (closingOut) *closingOut = '}'; return 1; }
+            if (last == '[') { if (closingOut) *closingOut = ']'; return 1; }
+            break;
+        case LANG_PYTHON:
+        case LANG_YAML:
+            return last == ':';
+        case LANG_BASH:
+            if (last == '{') { if (closingOut) *closingOut = '}'; return 1; }
+            return ends_with_word(before + contentStart, trimmedEnd - contentStart, "then") ||
+                   ends_with_word(before + contentStart, trimmedEnd - contentStart, "do") ||
+                   ends_with_word(before + contentStart, trimmedEnd - contentStart, "in");
+        default:
+            break;
+    }
+    return 0;
+}
+
+/* Carry the current line's leading whitespace onto the next line and add one
+   real tab after language-specific block openers. When the caret is between a
+   paired opener and closer, expand both onto properly aligned lines at once. */
+static int smart_indented_newline(HWND hEdit) {
+    Sci_Position selectionStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selectionEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (selectionStart != selectionEnd) return 0;
+    Sci_Position caret = selectionEnd;
+    Sci_Position lineNumber = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)caret, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
+    Sci_Position lineEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
+    Sci_Position beforeLength = caret - lineStart;
+    if (beforeLength < 0) return 0;
+    char *before = get_text_range(hEdit, lineStart, caret);
+    if (!before) return 0;
+
+    int indentLength = 0;
+    while (indentLength < beforeLength &&
+           (before[indentLength] == ' ' || before[indentLength] == '\t')) indentLength++;
+    Sci_Position trimmedEnd = beforeLength;
+    while (trimmedEnd > indentLength &&
+           (before[trimmedEnd - 1] == ' ' || before[trimmedEnd - 1] == '\t')) trimmedEnd--;
+    char closing = 0;
+    int addIndent = line_opens_indent(hEdit, before, indentLength, trimmedEnd, lineStart, &closing);
+
+    Sci_Position after = caret;
+    while (after < lineEnd) {
+        char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)after, 0);
+        if (character != ' ' && character != '\t') break;
+        after++;
+    }
+    int pairedClose = addIndent && closing && after < lineEnd &&
+        (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)after, 0) == closing;
+    if (pairedClose) {
+        Sci_Position rest = after + 1;
+        while (rest < lineEnd) {
+            char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)rest, 0);
+            if (character != ' ' && character != '\t') { pairedClose = 0; break; }
+            rest++;
+        }
+    }
+
+    if (!indentLength && !addIndent) { free(before); return 0; }
+    const char *eol = editor_eol_sequence();
+    size_t eolLength = strlen(eol);
+    size_t firstLength = eolLength + (size_t)indentLength + (addIndent ? 1 : 0);
+    size_t insertLength = firstLength + (pairedClose ? eolLength + (size_t)indentLength : 0);
+    char *insert = (char *)malloc(insertLength + 1);
+    if (!insert) { free(before); return 0; }
+    size_t used = 0;
+    memcpy(insert + used, eol, eolLength); used += eolLength;
+    memcpy(insert + used, before, (size_t)indentLength); used += (size_t)indentLength;
+    if (addIndent) insert[used++] = '\t';
+    if (pairedClose) {
+        memcpy(insert + used, eol, eolLength); used += eolLength;
+        memcpy(insert + used, before, (size_t)indentLength); used += (size_t)indentLength;
+    }
+    insert[used] = 0;
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    if (pairedClose && after > caret)
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)caret, (LPARAM)after);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)insert);
+    if (pairedClose)
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(caret + (int)firstLength),
+                     (LPARAM)(caret + (int)firstLength));
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(insert);
+    free(before);
+    return 1;
+}
+
+static int smart_newline(HWND hEdit) {
+    /* Both copy the line up to the caret - in a large file with few line
+       breaks, that can be most of the document on every Enter. */
+    if (g_largeFile) return 0;
+    if (g_activeLanguage == LANG_MARKDOWN && smart_markdown_newline(hEdit)) return 1;
+    return smart_indented_newline(hEdit);
+}
+
+/* Typing a closing brace on an otherwise blank indented line brings it back
+   one indentation level. Existing auto-paired closers are still skipped by
+   smart_pair_character() instead of being replaced. */
+static int smart_closing_indent(HWND hEdit, char typed) {
+    int valid = typed == '}' && (g_activeLanguage == LANG_CPP ||
+        g_activeLanguage == LANG_BASH || g_activeLanguage == LANG_POWERSHELL ||
+        g_activeLanguage == LANG_JSON);
+    if (typed == ']' && g_activeLanguage == LANG_JSON) valid = 1;
+    if (!valid) return 0;
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (start != end || (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed)
+        return 0;
+    Sci_Position line = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)start, 0);
+    Sci_Position lineStart = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    for (Sci_Position position = lineStart; position < start; position++) {
+        char character = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)position, 0);
+        if (character != ' ' && character != '\t') return 0;
+    }
+    if (start == lineStart) return 0;
+    Sci_Position removeStart = start;
+    if ((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '\t') {
+        removeStart--;
+    } else {
+        int tabWidth = editor_tab_width(hEdit);
+        while (removeStart > lineStart && start - removeStart < tabWidth &&
+               (char)SendMessageA(hEdit, SCI_GETCHARAT,
+                                  (WPARAM)(removeStart - 1), 0) == ' ') removeStart--;
+    }
+    char replacement[2] = { typed, 0 };
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)removeStart, (LPARAM)start);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
+    return 1;
+}
+
+static int smart_pair_character(HWND hEdit, char typed) {
+    char closing = typed == '(' ? ')' : typed == '[' ? ']' : typed == '{' ? '}' : typed == '`' ? '`' : 0;
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (typed == '`' && start == end) {
+        if ((char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == '`') {
+            SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
+            return 1;
+        }
+        if (start >= 2 && (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0) == '`' &&
+            (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 2), 0) == '`') return 0;
+    }
+    if (!closing) {
+        if ((typed == ')' || typed == ']' || typed == '}') && start == end &&
+            (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)end, 0) == typed) {
+            SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(end + 1), (LPARAM)(end + 1));
+            return 1;
+        }
+        return 0;
+    }
+    Sci_Position length = end - start;
+    char *selected = get_text_range(hEdit, start, end);
+    if (!selected) return 0;
+    size_t cap = (size_t)length + 3;
+    char *replacement = (char *)malloc(cap);
+    if (!replacement) { free(selected); return 0; }
+    replacement[0] = typed;
+    if (length > 0) memcpy(replacement + 1, selected, (size_t)length);
+    replacement[length + 1] = closing;
+    replacement[length + 2] = 0;
+    SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)replacement);
+    if (length > 0) SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1 + length));
+    else SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start + 1), (LPARAM)(start + 1));
+    SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
+    free(replacement);
+    free(selected);
+    return 1;
+}
+
+static int smart_pair_backspace(HWND hEdit) {
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position end = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
+    if (start != end || start <= 0) return 0;
+    char before = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)(start - 1), 0);
+    char after = (char)SendMessageA(hEdit, SCI_GETCHARAT, (WPARAM)start, 0);
+    if (!((before == '(' && after == ')') || (before == '[' && after == ']') ||
+          (before == '{' && after == '}') || (before == '`' && after == '`'))) return 0;
+    SendMessageA(hEdit, SCI_SETSEL, (WPARAM)(start - 1), (LPARAM)(start + 1));
+    SendMessageA(hEdit, SCI_REPLACESEL, 0, (LPARAM)"");
+    return 1;
+}
+
+static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
+    if (!g_spellCheckEnabled || !g_spellChecker ||
+        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT))
+        return 0;
+
+    POINT screenPoint;
+    Sci_Position position;
+    if ((int)GET_X_LPARAM(lParam) == -1 && (int)GET_Y_LPARAM(lParam) == -1) {
+        position = (Sci_Position)SendMessageA(hwnd, SCI_GETCURRENTPOS, 0, 0);
+        if (!GetCaretPos(&screenPoint)) screenPoint = (POINT){0, 0};
+        ClientToScreen(hwnd, &screenPoint);
+    } else {
+        screenPoint.x = GET_X_LPARAM(lParam);
+        screenPoint.y = GET_Y_LPARAM(lParam);
+        POINT clientPoint = screenPoint;
+        ScreenToClient(hwnd, &clientPoint);
+        position = (Sci_Position)SendMessageA(hwnd, SCI_POSITIONFROMPOINTCLOSE,
+                                     (WPARAM)clientPoint.x, (LPARAM)clientPoint.y);
+    }
+    if (position < 0) return 0;
+
+    SendMessageA(hwnd, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
+    if (!SendMessageA(hwnd, SCI_INDICATORVALUEAT, INDICATOR_SPELLING, position) && position > 0)
+        position--;
+    if (!SendMessageA(hwnd, SCI_INDICATORVALUEAT, INDICATOR_SPELLING, position)) return 0;
+
+    Sci_Position start = (Sci_Position)SendMessageA(hwnd, SCI_INDICATORSTART, INDICATOR_SPELLING, position);
+    Sci_Position end = (Sci_Position)SendMessageA(hwnd, SCI_INDICATOREND, INDICATOR_SPELLING, position);
+    if (start < 0 || end <= start) return 0;
+    char *utf8Word = get_text_range(hwnd, start, end);
+    if (!utf8Word) return 1;
+    WCHAR *word = to_wide(utf8Word);
+    free(utf8Word);
+    if (!word) return 1;
+
+    enum {
+        SPELL_SUGGESTION_FIRST = 1, SPELL_SUGGESTION_LAST = 8,
+        SPELL_IGNORE = 20, SPELL_ADD = 21,
+        SPELL_UNDO = 30, SPELL_CUT = 31, SPELL_COPY = 32,
+        SPELL_PASTE = 33, SPELL_SELECT_ALL = 34
+    };
+    WCHAR *suggestions[SPELL_SUGGESTION_LAST] = {0};
+    int suggestionCount = 0;
+    IEnumString *suggestionEnum = NULL;
+    if (SUCCEEDED(ISpellChecker_Suggest(g_spellChecker, word, &suggestionEnum)) && suggestionEnum) {
+        while (suggestionCount < SPELL_SUGGESTION_LAST) {
+            LPOLESTR suggestion = NULL;
+            ULONG fetched = 0;
+            if (IEnumString_Next(suggestionEnum, 1, &suggestion, &fetched) != S_OK || !suggestion)
+                break;
+            suggestions[suggestionCount++] = suggestion;
+        }
+        IEnumString_Release(suggestionEnum);
+    }
+
+    HMENU menu = CreatePopupMenu();
+    for (int i = 0; i < suggestionCount; i++)
+        AppendMenuW(menu, MF_STRING, SPELL_SUGGESTION_FIRST + i, suggestions[i]);
+    if (suggestionCount == 0)
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(No suggestions)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, SPELL_IGNORE, L"Ignore Word");
+    AppendMenuW(menu, MF_STRING, SPELL_ADD, L"Add to Dictionary");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING | (SendMessageA(hwnd, SCI_CANUNDO, 0, 0) ? 0 : MF_GRAYED),
+                SPELL_UNDO, L"Undo");
+    AppendMenuW(menu, MF_STRING, SPELL_CUT, L"Cut");
+    AppendMenuW(menu, MF_STRING, SPELL_COPY, L"Copy");
+    AppendMenuW(menu, MF_STRING, SPELL_PASTE, L"Paste");
+    AppendMenuW(menu, MF_STRING, SPELL_SELECT_ALL, L"Select All");
+
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                  screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL);
+    DestroyMenu(menu);
+    if (command >= SPELL_SUGGESTION_FIRST && command <= (UINT)suggestionCount) {
+        char *replacement = to_utf8(suggestions[command - SPELL_SUGGESTION_FIRST]);
+        if (replacement) {
+            SendMessageA(hwnd, SCI_BEGINUNDOACTION, 0, 0);
+            SendMessageA(hwnd, SCI_SETTARGETSTART, (WPARAM)start, 0);
+            SendMessageA(hwnd, SCI_SETTARGETEND, (WPARAM)end, 0);
+            Sci_Position inserted = (Sci_Position)SendMessageA(hwnd, SCI_REPLACETARGET,
+                                              (WPARAM)-1, (LPARAM)replacement);
+            SendMessageA(hwnd, SCI_SETSEL, (WPARAM)(start + inserted),
+                         (LPARAM)(start + inserted));
+            SendMessageA(hwnd, SCI_ENDUNDOACTION, 0, 0);
+            free(replacement);
+            schedule_spell_check();
+        }
+    } else if (command == SPELL_IGNORE) {
+        ISpellChecker_Ignore(g_spellChecker, word);
+        schedule_spell_check();
+    } else if (command == SPELL_ADD) {
+        ISpellChecker_Add(g_spellChecker, word);
+        schedule_spell_check();
+    } else if (command == SPELL_UNDO) SendMessageA(hwnd, SCI_UNDO, 0, 0);
+    else if (command == SPELL_CUT) SendMessageA(hwnd, SCI_CUT, 0, 0);
+    else if (command == SPELL_COPY) SendMessageA(hwnd, SCI_COPY, 0, 0);
+    else if (command == SPELL_PASTE) SendMessageA(hwnd, SCI_PASTE, 0, 0);
+    else if (command == SPELL_SELECT_ALL) SendMessageA(hwnd, SCI_SELECTALL, 0, 0);
+
+    for (int i = 0; i < suggestionCount; i++) CoTaskMemFree(suggestions[i]);
+    free(word);
+    return 1;
+}
+
+/* Ctrl+Alt+click jumps to the next occurrence of the word under the pointer -
+   a lightweight stand-in for "go to definition" without a real per-language
+   symbol index: for an identifier this typically lands on its declaration,
+   and repeated Ctrl+Alt+clicks cycle through every other use in the file.
+   (Plain Ctrl+click is already Scintilla's native gesture for adding a
+   multi-cursor selection - see SCI_SETMULTIPLESELECTION in configure_scintilla()
+   - so this needs its own modifier combination instead.)
+   Returns 0 (unhandled, so the caller falls back to a normal click) when
+   there's no word under the pointer to jump from. */
+static int ctrl_click_jump_to_occurrence(HWND hEdit, int x, int y) {
+    Sci_Position position = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMPOINTCLOSE, (WPARAM)x, (LPARAM)y);
+    if (position < 0) return 0;
+
+    Sci_Position wordStart = (Sci_Position)SendMessageA(hEdit, SCI_WORDSTARTPOSITION, (WPARAM)position, (LPARAM)1);
+    Sci_Position wordEnd = (Sci_Position)SendMessageA(hEdit, SCI_WORDENDPOSITION, (WPARAM)position, (LPARAM)1);
+    if (wordEnd <= wordStart) return 0;
+
+    Sci_Position wordLength = wordEnd - wordStart;
+    char *word = get_text_range(hEdit, wordStart, wordEnd);
+    if (!word) return 1;
+
+    Sci_Position docLength = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(hEdit, SCI_SETSEARCHFLAGS, SCFIND_WHOLEWORD | SCFIND_MATCHCASE, 0);
+
+    /* Search past the clicked word first, wrapping back to the start of the
+       document if nothing turns up after it - the same wrap-around shape
+       Find Next uses (search_find() in text_search.c). */
+    SendMessageA(hEdit, SCI_SETTARGETSTART, (WPARAM)wordEnd, 0);
+    SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
+    Sci_Position foundAt = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
+    if (foundAt < 0) {
+        SendMessageA(hEdit, SCI_SETTARGETSTART, 0, 0);
+        SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)wordStart, 0);
+        foundAt = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)wordLength, (LPARAM)word);
+    }
+    free(word);
+
+    if (foundAt >= 0) {
+        Sci_Position foundEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETTARGETEND, 0, 0);
+        SendMessageA(hEdit, SCI_SETSEL, (WPARAM)foundAt, (LPARAM)foundEnd);
+        SendMessageA(hEdit, SCI_SCROLLCARET, 0, 0);
+    } else {
+        MessageBeep(MB_ICONASTERISK); /* only occurrence in the file */
+    }
+    return 1;
+}
+
+/* The smart_* handlers read and edit only the main selection, so several
+   carets or a rectangular selection keep Scintilla's own multi-caret typing. */
+static int has_single_stream_selection(HWND hEdit) {
+    return SendMessageA(hEdit, SCI_GETSELECTIONS, 0, 0) == 1 &&
+        !SendMessageA(hEdit, SCI_SELECTIONISRECTANGLE, 0, 0);
+}
+
+static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                         UINT_PTR id, DWORD_PTR data) {
+    (void)data;
+    if (msg == WM_CHAR && has_single_stream_selection(hwnd)) {
+        if (wParam == '\t' && smart_tab(hwnd, (GetKeyState(VK_SHIFT) & 0x8000) != 0)) return 0;
+        if (wParam == '\r' && smart_newline(hwnd)) return 0;
+        if (wParam == '\b' && smart_pair_backspace(hwnd)) return 0;
+        if (wParam < 128 && smart_closing_indent(hwnd, (char)wParam)) return 0;
+        if (wParam < 128 && smart_pair_character(hwnd, (char)wParam)) return 0;
+    } else if (msg == WM_CONTEXTMENU) {
+        if (show_spelling_context_menu(hwnd, lParam)) return 0;
+    } else if (msg == WM_LBUTTONDOWN) {
+        if ((wParam & MK_CONTROL) && (GetKeyState(VK_MENU) & 0x8000) &&
+            ctrl_click_jump_to_occurrence(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+            return 0;
+    } else if (msg == WM_NCDESTROY) {
+        /* This proc is shared by both g_hEdit (subclass id 2) and
+           g_hSplitEdit (id 3) - remove whichever one this hwnd was actually
+           registered under rather than a hardcoded id. */
+        RemoveWindowSubclass(hwnd, EditSubclassProc, id);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void move_document_tab(int from, int to) {
+    if (from < 0 || to < 0 || from >= g_documentStore.count || to >= g_documentStore.count || from == to) return;
+    save_active_document_view();
+    Document moving = g_documentStore.documents[from];
+    if (from < to) {
+        for (int i = from; i < to; i++) g_documentStore.documents[i] = g_documentStore.documents[i + 1];
+    } else {
+        for (int i = from; i > to; i--) g_documentStore.documents[i] = g_documentStore.documents[i - 1];
+    }
+    g_documentStore.documents[to] = moving;
+    if (g_documentStore.active == from) g_documentStore.active = to;
+    else if (from < g_documentStore.active && to >= g_documentStore.active) g_documentStore.active--;
+    else if (from > g_documentStore.active && to <= g_documentStore.active) g_documentStore.active++;
+
+    TabCtrl_DeleteItem(g_hTabs, from);
+    TCITEMW item = {0};
+    item.mask = TCIF_TEXT; item.pszText = L"";
+    SendMessageW(g_hTabs, TCM_INSERTITEMW, (WPARAM)to, (LPARAM)&item);
+    for (int i = 0; i < g_documentStore.count; i++) update_tab_label(i);
+    TabCtrl_SetCurSel(g_hTabs, g_documentStore.active);
+    update_title();
+}
+
+static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                        UINT_PTR subclassId, DWORD_PTR refData) {
+    (void)subclassId; (void)refData;
+    if (msg == WM_ERASEBKGND) {
+        return 1; /* WM_PAINT fills the whole strip from a back buffer */
+    } else if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client;
+        GetClientRect(hwnd, &client);
+
+        /* Draw the strip and every tab into a back buffer: the tabs are
+           owner-drawn one at a time, which visibly flickers on-screen. */
+        HDC buffer = CreateCompatibleDC(dc);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
+        HBITMAP oldBitmap = (HBITMAP)SelectObject(buffer, bitmap);
+
+        /* The recessed strip behind the tabs, matching the editor's
+           line-number gutter immediately below it. */
+        fill_rect_color(buffer, &client, theme_palette()->subtleBg);
+
+        int selected = TabCtrl_GetCurSel(hwnd);
+        for (int i = 0; i < g_documentStore.count; i++) {
+            RECT itemRect;
+            if (!TabCtrl_GetItemRect(hwnd, i, &itemRect)) continue;
+            DRAWITEMSTRUCT dis = {0};
+            dis.CtlType = ODT_TAB;
+            dis.CtlID = ID_TABS;
+            dis.itemID = (UINT)i;
+            dis.itemAction = ODA_DRAWENTIRE;
+            dis.itemState = i == selected ? ODS_SELECTED : 0;
+            dis.hwndItem = hwnd;
+            dis.hDC = buffer;
+            dis.rcItem = itemRect;
+            draw_tab_item(&dis);
+        }
+
+        BitBlt(dc, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
+        SelectObject(buffer, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(buffer);
+        EndPaint(hwnd, &ps);
+        return 0;
+    } else if (msg == WM_LBUTTONDOWN) {
+        TCHITTESTINFO hit = {0};
+        hit.pt.x = GET_X_LPARAM(lParam); hit.pt.y = GET_Y_LPARAM(lParam);
+        g_tabDragIndex = TabCtrl_HitTest(hwnd, &hit);
+        g_tabDragged = 0;
+        if (g_tabDragIndex >= 0) SetCapture(hwnd);
+    } else if (msg == WM_MOUSEMOVE && g_tabDragIndex >= 0 && (wParam & MK_LBUTTON)) {
+        TCHITTESTINFO hit = {0};
+        hit.pt.x = GET_X_LPARAM(lParam); hit.pt.y = GET_Y_LPARAM(lParam);
+        int target = TabCtrl_HitTest(hwnd, &hit);
+        if (target >= 0 && target != g_tabDragIndex) {
+            move_document_tab(g_tabDragIndex, target);
+            g_tabDragIndex = target;
+            g_tabDragged = 1;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    } else if (msg == WM_LBUTTONUP || msg == WM_MBUTTONUP) {
+        if (msg == WM_LBUTTONUP && g_tabDragIndex >= 0) {
+            ReleaseCapture();
+            g_tabDragIndex = -1;
+            if (g_tabDragged) { g_tabDragged = 0; return 0; }
+        }
+        TCHITTESTINFO hit = {0};
+        hit.pt.x = GET_X_LPARAM(lParam);
+        hit.pt.y = GET_Y_LPARAM(lParam);
+        int index = TabCtrl_HitTest(hwnd, &hit);
+        if (index >= 0) {
+            RECT tabRect;
+            TabCtrl_GetItemRect(hwnd, index, &tabRect);
+            RECT close = tab_close_rectangle(&tabRect);
+            POINT point = hit.pt;
+            if (msg == WM_MBUTTONUP || PtInRect(&close, point)) {
+                PostMessageW(g_hMainWnd, WM_APP_CLOSE_TAB, (WPARAM)index, 0);
+                return 0;
+            }
+        }
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, TabSubclassProc, 1);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+/* explorer_init()'s callback: file_explorer.c cannot call open_file_in_tab()
+   by name since it's static to this translation unit. */

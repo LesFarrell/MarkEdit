@@ -2,13 +2,17 @@
 
 #define IDI_APPICON 1
 #define IDR_DEFAULT_MENUS 2
-#define IDR_BUILTIN_FORMATTING 3
+#define IDR_BUILTIN_FORMATTING_BASE 3
 #define IDR_HELP_MARKDOWN 4
 #define IDR_HELP_SHORTCUTS 5
+#define IDR_BUILTIN_FORMATTING_TABLES 7
+#define IDR_BUILTIN_FORMATTING_TEXT 8
 
 IDI_APPICON ICON "markedit.ico"
 IDR_DEFAULT_MENUS RCDATA "src/menus.lua"
-IDR_BUILTIN_FORMATTING RCDATA "src/formatting.lua"
+IDR_BUILTIN_FORMATTING_BASE RCDATA "src/lua/formatting_base.lua"
+IDR_BUILTIN_FORMATTING_TABLES RCDATA "src/lua/formatting_tables.lua"
+IDR_BUILTIN_FORMATTING_TEXT RCDATA "src/lua/formatting_text.lua"
 IDR_HELP_MARKDOWN RCDATA "src/help/markdown-reference.md"
 IDR_HELP_SHORTCUTS RCDATA "src/help/keyboard-shortcuts.lua"
 1 24 "markedit.manifest"

@@ -1,0 +1,7 @@
+-Os
+-ffunction-sections
+-fdata-sections
+-funwind-tables
+-fasynchronous-unwind-tables
+-fno-ident
+-fmerge-all-constants

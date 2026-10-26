@@ -6,7 +6,7 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library. Every file type previews: Markdown renders as a document, HTML files render as the saved web page, and any other recognised type (source code, JSON, YAML, `.txt`) shows as its own syntax-highlighted source, with highlighting skipped above 512 KB. Files of an unrecognised type, and new untitled tabs, preview as Markdown.
 - A formatting toolbar above the editor for bold, italic, strikethrough, inline code, fenced code blocks, headings, blockquotes, bullet/numbered/task lists, links, images, tables, footnotes, horizontal rules, alerts, toggling the preview pane, and swapping the panel sides.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
-- GitHub Light and GitHub Dark themes (View → Editor Theme and View → Markdown Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash).
+- GitHub Light and GitHub Dark themes (View → Editor Theme and View → Markdown Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash). Their colours can be changed in Lua: Plugins → Customize Theme Colours writes `%APPDATA%\markedit\themes.lua` listing every colour, and `plugins/examples/themes.lua` is a complete example.
 - The window appears immediately on launch; spell-check activation, the WebView2 preview engine, and reopening the previous session's files happen in the background right after, instead of delaying the window's appearance.
 
 Launching with no arguments opens the editor with the saved workspace layout; launching with a Markdown file path shows just the rendered preview (`markedit.exe notes.md`), and any other file opens in the editor.
@@ -18,21 +18,24 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Emoji shortcodes (`:tada:`, `:rocket:`, and similar) render as their Unicode emoji in the preview; unrecognised shortcodes are left as plain text.
 - Wiki-style `[[Page Name]]` and `[[Page Name|label]]` links open the named Markdown file from the same folder as the current document, offering to create it if it doesn't exist yet. File → Go Back (Alt+Left) returns to wherever the jump was made from.
 - Local syntax highlighting for named code fences in the preview, and for Markdown source in the editor, with matching light and dark themes.
-- Editor syntax highlighting follows the file extension: Markdown, JSON, XML, HTML, YAML, C/C++/JavaScript/TypeScript, Python, Bash, PowerShell, and Lua. Unrecognised extensions fall back to Markdown.
+- Editor syntax highlighting follows the file extension: Markdown, JSON, XML, HTML, YAML, C/C++/JavaScript/TypeScript, Python, Bash, PowerShell, Lua, CSS, SQL, INI-style configuration (`.ini`, `.cfg`, `.conf`, `.properties`, `.editorconfig`), TOML, Windows batch files (`.bat`, `.cmd`), and makefiles (`Makefile`, `GNUmakefile`, `.mk`, `.mak`). Unrecognised extensions fall back to Markdown.
 - Python files can be run with Ctrl+F5 or debugged with F5 through the standard `pdb` debugger. At every stop, an integrated panel shows local variable names and values alongside Continue, Step Over, Step Into, and Step Out controls. The current execution line has a full-line highlight and gutter arrow. The same values are still printed in the console, where `vars` and `globals` remain available. MarkEdit prefers an activated virtual environment, then a project-local `.venv`/`venv`, then Python on `PATH`.
-- Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. GDB itself stays hidden while the debugged program opens its own visible console for input and output. Editor breakpoints are loaded before execution; at every stop, the integrated debugger shows function arguments and local values and highlights the current line. Use F10 to step over, F11 to step into, Shift+F11 to step out, and F6 to continue from the panel, editor, or Run menu; `print expression`, `watch expression`, and `vars` remain available in the console. Running can use GCC/G++, Clang, Zig, or MSVC (`cl.exe`, found via a standard Visual Studio/Build Tools install or `[Compiler] VcvarsallPath` in `markedit.ini`); debugging requires GCC/G++ or Clang and uses the bundled GDB 17.1. `[Compiler] GdbPath` can select another GDB folder, and `PATH` remains a fallback if the bundled copy is absent. MSVC is Run-only. `[Compiler] Backend` pins Run/Debug to one of GCC, Clang, Zig, or MSVC instead of the default auto-detect order.
-- Lua files (`.lua`) can be run with Ctrl+F5 using `lua`, a versioned `lua5.x`, or `luajit` found on `PATH`. Lua is Run-only; there is no Lua debugger integration.
+- Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. GDB itself stays hidden while the debugged program opens its own visible console for input and output. Editor breakpoints are loaded before execution; at every stop, the integrated debugger shows function arguments and local values and highlights the current line. Use F10 to step over, F11 to step into, Shift+F11 to step out, and F6 to continue from the panel, editor, or Run menu; `print expression`, `watch expression`, and `vars` remain available in the console. Running can use GCC/G++, Clang, Zig, or MSVC (`cl.exe`, found via the `Compiler.VcvarsallPath` value in `settings.json`); debugging requires GCC/G++ or Clang and uses the bundled GDB 17.1. `Compiler.GdbPath` can select another GDB folder, and `PATH` remains a fallback if the bundled copy is absent. MSVC is Run-only. `Compiler.Backend` pins Run/Debug to one of GCC, Clang, Zig, or MSVC instead of the default auto-detect order.
+- Lua files (`.lua`) can be run with Ctrl+F5 using `lua`, a versioned `lua5.x`, or `luajit` found on `PATH`. Without one, Tools → Interpreters → Lua → Run Document runs the file with MarkEdit's built-in Lua 5.4, in the plugin sandbox. Lua is Run-only; there is no Lua debugger integration.
+- Run sends a program's output to the output panel docked under the editor (View → Output Panel, Ctrl+\`), with its ANSI colours. A program waiting for input reads it from the line along the panel's bottom, Stop ends the program and everything it started, and double-clicking a file location in an error message (GCC, Clang, MSVC, Python, Lua or PowerShell style) opens the file at that line. Run → Run in Separate Console keeps the old behaviour of a console window that stays open. Long lines scroll sideways rather than wrap. Bundled plugins show their longer reports on the same tab: Grammar Checker → Check, Constraint Writer → Check Constraints, CSV → Inspect and Validate, Logs → CLEF → Inspect, Count Occurrences, and Document Personality's Analyse and Readability. C and C++ programs fill their output buffer before writing to the panel, so a prompt printed without `fflush(stdout)` appears only after the input it asks for; use the separate console for programs like that.
+- The panel's Terminal tab (View → Terminal, Ctrl+Shift+\`) runs Windows PowerShell in the workspace folder: type a command on the bottom line and press Enter, and Up/Down recall earlier ones. It is line-based rather than a full terminal, so full-screen console programs such as editors don't work in it, and Stop ends the shell (Enter starts a new one) rather than sending Ctrl+C.
 - F9 (or a click in the marker gutter) toggles per-file Python/C/C++ breakpoints. Breakpoints follow edited lines and are restored for that file in later MarkEdit sessions; Run → Clear All Breakpoints removes them together.
 - Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
 - Tabs can be reordered by dragging. Dirty and unsaved tabs are snapshotted every five seconds to a recovery area under Local AppData and can be restored after an interrupted session.
 - A formatting toolbar (Bold, Italic, Strikethrough, Inline code, Code block, Headings, Blockquote, Lists, Link, Image, Table, Footnote, Horizontal rule, Alert, Toggle preview, Swap panel sides), shown while the editor pane is visible.
 - Smart Markdown editing continues blockquotes and bullet, numbered, and task lists on Enter (incrementing numbered lists and resetting task items), terminates empty items, and pairs brackets and inline backticks.
 - Smart four-column tabs use real tabs for leading indentation, nest a list item from anywhere on its line, and use spaces only for alignment within ordinary text. Enter preserves the current indentation, adds a level after C-family/JSON braces, Python/YAML colons, and shell block openers, and expands paired braces or brackets onto aligned lines. Closing braces typed on a blank indented line move back one level automatically.
+- Changed lines are marked by a thin bar beside the text: amber for a change not yet saved, green for one saved since the file was opened. A line edited and then undone back to how it was loses its bar. View → Mark Changed Lines turns the bars off; the colours (`lineChanged`, `lineSaved`) can be changed in `themes.lua`.
 - Line editing commands: duplicate, delete, join, and move lines up or down, plus trimming trailing whitespace across the document in a single undo step.
 - Toggle Comment wraps the selected lines in an HTML comment (Markdown has no line-comment syntax) and unwraps them again.
 - Select All Occurrences (Ctrl+Shift+L) turns every match of the word under the caret, or of the current selection, into its own selection for multi-caret editing.
 - Convert Line Endings (Edit → Convert → Line Endings) rewrites the document to CRLF, LF, or CR and switches the editor's save format to match.
-- Format JSON and Minify JSON (Tools menu) reindent the fenced code block at the caret, or the current selection. Input is validated first; malformed JSON, including trailing commas or missing separators, is left untouched.
+- Format JSON and Minify JSON (Tools menu) operate on the current selection, the fenced code block at the caret, or the whole document. Input is validated first; malformed JSON, including trailing commas or missing separators, is left untouched and its error is highlighted.
 - Word wrap (View → Word Wrap or Alt+Z), remembered between sessions.
 - A live status bar reports the caret line/column, word and Unicode character counts, UTF-8/BOM state, line endings, and save/recovery state.
 - Native Windows spell checking (View → Spell Check), remembered between sessions. Misspelled Markdown prose gets a themed squiggle; links, inline code, and fenced code are excluded. Right-click a marked word for corrections, Ignore Word, or Add to Dictionary. View → Spell Check Language selects any installed Windows dictionary.
@@ -47,10 +50,11 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - The table editor resizes an existing GFM table while preserving its cells, or creates a new table with a chosen number of rows and columns.
 - A persistent workspace sidebar remembers the chosen folder and provides a hierarchical file tree with Open, New, Rename, and Refresh actions. Open the `..` entry, choose “Open Parent Folder”, or press Backspace while the tree is focused to move the workspace up one directory. Moving up from a filesystem root shows available drives and mapped network shares. Renaming a file or folder updates matching inline and reference-style Markdown links across the workspace, including links in open unsaved buffers.
 - Quick Open searches file names in the active workspace, while Find in Folder searches supported text files and opens results at the matching line. If no workspace is open, either command first asks for a folder. Generated/dependency folders are skipped.
-- A searchable command palette (Tools → Command Palette or Ctrl+Shift+P) exposes the editor's commands without navigating menus.
-- Lua plugins: every `.lua` file in the `plugins` folder beside `markedit.exe` is loaded at startup and can add commands to the Plugins menu (in submenus), to new top-level menus, or to the built-in menus, and run code when a document is saved, opened, or switched to. Plugins → Reload Plugins picks up changes without restarting. The plugin guide, `plugins/README.md` (also Help → Plugin Guide), documents the whole API, and `plugins/example.lua` shows each of these in use.
+- Lua plugins: bundled extensions load from `plugins` beside `markedit.exe`, followed by personal extensions in `%APPDATA%\markedit\plugins`. **Plugins → New Plugin**, **Open Plugins Folder**, **Manage Plugins**, and **Reload Plugins** cover the full edit/test/enable workflow without administrator rights. A plugin may be one `.lua` file or a folder containing `init.lua` and private modules. Commands can have keyboard shortcuts, check marks and persistent settings. The plugin guide, `plugins/README.md` (also Help → Plugin Guide), documents the API, and `plugins/example.lua` is a working example.
+- CSV tools under **Tools → CSV** parse comma-, semicolon-, and tab-separated data with quoted fields. Commands inspect, normalize, visually align columns, convert, sort, filter, deduplicate, transpose, edit columns, and export to JSON or Markdown tables.
+- Additional bundled plugins provide CLEF-aware log inspection and filtering, SQL formatting, natural line sorting, integer-base, Roman-numeral and Unix timestamp/ISO 8601 date conversion, aligning lines on a delimiter (`plugins/line-tools.lua`), readability scores (Flesch, Flesch-Kincaid, Gunning fog, Coleman-Liau) in `plugins/document-personality.lua`, a spelling report that lists every misspelled word and selects all its occurrences (`plugins/spelling-report.lua`), JSON Lines/query-string/key-value conversion, Base64/hex/URL/HTML-entity encoding and CRC-32/16/NMEA checksums (`plugins/encoding.lua`), JSON syntax checking with live highlighting and JSON-path copying (`plugins/json-check.lua`), an offline heuristic grammar checker whose rules can each be switched off, with English-only rules skipped for other spelling languages, and whose report lists every issue as a location to double-click (`plugins/grammar-checker.lua`), an anagram solver, phrase maker and word scrambler that uses a bundled British English word list from SCOWL for English, and checks words against the Windows spelling dictionary for other languages (`plugins/anagrams/`, using the plugin API's `spell` table), conservative Lua reindentation of the document or the selected lines (**Tools → Interpreters → Lua → Format Document** or **Format Selection**, described in `plugins/lua-format/README.md`), following the end of a file as another program writes to it, like `tail -f`, for watching logs (**View → Follow EOF**, in `plugins/tail.lua`: the file reloads without asking and moves to its last line), running Lua with MarkEdit's own built-in Lua, with no installation needed (**Tools → Interpreters → Lua → Run Document**, **Run Selection** and **Evaluate Selection**, in `plugins/lua-runner.lua`; output and errors go to the output panel, `io.read()` asks for input in a box, and scripts run in the plugin sandbox, so they can use `editor` but have no file access), and assemblers for the Z80 (ZX Spectrum TAP), CHIP-8/SUPER-CHIP, 6502 (Commodore 64 PRG) and Game Boy SM83 (`.gb` ROM) described in `plugins/assemblers/README.md`.
 - The whole menu bar is defined in Lua. Plugins → Customize Menus copies the default definition to `%APPDATA%\markedit\menus.lua` and opens it; items there can be reordered, renamed, removed, or point at Lua functions, and Reload Plugins applies the changes. A definition with a mistake is reported and the default menus are used instead.
-- The Markdown, HTML, and JSON formatting commands (Snippets → Markdown and HTML, Tools → JSON, and the formatting toolbar), and the Edit menu's Toggle Comment, Trim Trailing Whitespace, Title Case, Sort Lines, and Remove Duplicate Lines, are written in Lua (`src/formatting.lua`, built into `markedit.exe`). A plugin can replace any of them, or any other built-in command, with `commands.register`, and the replacement runs wherever the command is used from: menu, toolbar, palette, or shortcut.
+- Markdown and HTML formatting, plus their Markdown-aware Edit commands, are written in focused Lua files under `src/lua/` and built into `markedit.exe`. The Edit → Convert submenu is supplied entirely by `plugins/edit-convert.lua`; JSON syntax checking and error highlighting come from `plugins/json-check.lua`, and formatting, key sorting, string escaping, and JSON/YAML conversion from `plugins/json-tools.lua`. Bundled plugins are ordinary files in `plugins/`, so their commands and menus can be changed without duplicating native command implementations.
 - Detection of files changed by another program, with an offer to reload the active document and an indicator on changed background tabs.
 - Synchronized scrolling between the Markdown editor and rendered preview.
 - Recently opened files (File → Recent Files), persisted across runs and pruned automatically if a file no longer exists.
@@ -61,13 +65,13 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - An optional UTF-8 custom preview stylesheet (View → Markdown Theme → Custom Preview CSS), embedded into rendered HTML exports and remembered between sessions.
 - Focus mode (View → Focus Mode or Ctrl+Shift+F11) hides the menu, tabs, and formatting toolbar and is remembered between sessions.
 - Window position/size/maximized state, editor/preview order, workspace visibility, active workspace folder, and splitter position are remembered between sessions; View → Preview on Left controls the editor/preview order.
-- Find/Replace, Go to Line, Undo/Redo, standard clipboard shortcuts. The search and replacement text, match-case setting, and search direction are remembered between sessions.
+- Find and Replace (Ctrl+F, Ctrl+H) in a window that stays open while you edit: Find Next and Find Previous (F3, Shift+F3, also from the editor), match case, whole word, and regular expressions (ECMAScript syntax; `\1` in the replacement inserts a group). Count shows how many matches there are, and Replace All replaces them in one undo step; with In selection on, both work only within the selected text. The window's status line says when a search wraps round the document, finds nothing, or has an invalid regular expression. The search and replacement text and the options are remembered between sessions.
 - A Markdown syntax reference (Help → Markdown Reference), opened as a live Markdown document so the preview renders every construct it documents. Help → Keyboard Shortcuts opens the shortcut list the same way, and Help → About MarkEdit shows the version.
 - Tools → Settings gathers appearance, font, word wrap, preview, editor, and compiler options in one dialog.
 - Unicode filenames, long Windows paths, drag-and-drop, and document-relative links/images.
 - Text encodings: UTF-8 (with or without a BOM), UTF-16 LE/BE (with or without a BOM), and the system ANSI code page are detected on open and kept on save; the status bar shows which one a document uses. File → Reopen with Encoding rereads a file whose encoding was guessed wrong, and Edit → Convert → Encoding changes the one it's saved in. Saving warns first if the document has characters the chosen encoding can't store (anything outside the ANSI code page, or bytes that aren't valid text when saving UTF-16). Insert File, Find in Folder, and Replace in Folder decode files the same way; Replace in Folder writes each file back in its own encoding and leaves alone any file it can't store the replacement in.
 - Failure-safe saves: content is flushed to a temporary file before atomically replacing the destination.
-- Large files, including ones past 2 GB, open in large-file mode once they reach `[View] LargeFileThresholdMB` in `markedit.ini` (64 MB by default); a smaller open document that grows past the threshold switches modes too. Large opens and saves show cancellable progress. The file is shown as plain text with word wrap off; the preview, outline, word count, word completion, brace matching, smart Enter/Tab, and autosave recovery are switched off for that document so editing stays responsive. Find/Replace, Go to Line, bookmarks, and saving work as normal.
+- Large files, including ones past 2 GB, open in large-file mode once they reach `View.LargeFileThresholdMB` in `settings.json` (64 MB by default); a smaller open document that grows past the threshold switches modes too. Large opens and saves show cancellable progress. The file is shown as plain text with word wrap off; the preview, outline, word count, word completion, brace matching, smart Enter/Tab, and autosave recovery are switched off for that document so editing stays responsive. Find/Replace, Go to Line, bookmarks, and saving work as normal.
 - Preview hardening for untrusted documents: raw HTML and dangerous URLs are disabled, Mermaid runs in strict mode, and the shell uses a restrictive content-security policy.
 
 ### Keyboard shortcuts
@@ -98,16 +102,17 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 | Ctrl+Shift+L | Select all occurrences |
 | Ctrl+] | Jump to matching brace |
 | Ctrl+F | Find |
-| F3 | Find Next |
+| F3 / Shift+F3 | Find Next / Find Previous |
 | Ctrl+H | Replace |
 | Ctrl+G | Go to Line |
 | Ctrl+F2 | Toggle bookmark |
 | F2 / Shift+F2 | Next / previous bookmark |
-| Ctrl+Shift+P | Command palette |
 | Ctrl+Shift+V | Toggle preview pane |
 | Ctrl+Shift+E | Toggle editor pane |
 | Ctrl+Shift+X | Toggle file explorer |
-| Ctrl+\\ | Toggle split editor |
+| Ctrl+` | Toggle the output panel |
+| Ctrl+Shift+` | Open the terminal |
+| Ctrl+\\ | Toggle horizontal editor split |
 | Ctrl+F6 / Ctrl+Shift+F6 | Cycle panes forward / back |
 | Ctrl+Shift+F11 | Toggle focus mode |
 | Alt+Z | Toggle word wrap |
@@ -131,7 +136,7 @@ build.bat
 
 This uses Zig's C/C++ toolchain with size optimization, dead-section elimination, and symbol stripping. After compiling, it safely clears and recreates `dist/`, then stages `markedit.exe`, the required runtime DLLs, offline preview assets, and licence files there.
 
-A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC, Zig, and MSVC builds. Each builds the same targets (`markedit.exe`, statically linking Lexilla and Lua, and the test programs under `tests\`) and stages `dist/` the way `build.bat` does:
+A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC, Zig, and MSVC builds. Each builds the same targets (`markedit.exe` in `build\bin`, statically linking Lexilla and Lua, and the test programs under `build\tests`) and stages `dist/` the way `build.bat` does:
 
 ```bat
 rem MinGW-w64 GCC
@@ -149,14 +154,11 @@ msbuild build\MarkEdit.sln /p:Configuration=Release /p:Platform=x64
 
 The two `gmake` builds need GNU make running its recipes under a POSIX shell, as [w64devkit](https://github.com/skeeto/w64devkit) or MSYS2 provide.
 
-Run the tests (Markdown parsing, editor commands, file and text handling, recovery, the plugin host, the menu definition, the formatting commands, and, when Node.js is installed, the preview bridge) with:
+Run the tests (Markdown parsing, editor commands, language detection, outline/minimap, themes, file and text handling, recovery, the plugin host, the menu definition, the formatting and Lua-formatting commands, the assemblers, and, when Node.js is installed, the preview bridge) with:
 
 ```
 test.bat
 ```
-
-GitHub Actions runs `test.bat` and `build.bat`. Successful workflow runs
-produce a self-contained Windows artifact.
 
 Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) to be installed (present by default on current Windows 10/11).
 
@@ -166,36 +168,55 @@ Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https
 
 - `markedit.exe` (Lexilla is linked straight into it, not shipped separately), the two required runtime DLLs (`Scintilla.dll` and `WebView2Loader.dll`), and the standalone bundled GDB 17.1 executable;
 - the preview shell, Mermaid, Highlight.js, GitHub Markdown CSS, and the complete `katex/` asset tree needed for offline rendering;
-- the `plugins/` folder with the plugin guide and the example Lua plugin (Lua itself is linked into `markedit.exe`); and
+- the `plugins/` folder with bundled extensions, the plugin guide, examples, and Lua Language Server definitions (Lua itself is linked into `markedit.exe`); and
 - `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`. The packaged GDB folder contains only `gdb.exe` and its small licence/provenance files; corresponding source remains in the MarkEdit source repository rather than the binary distribution.
 
-Do not package `markedit.ini`, debug symbols, import libraries, compiler objects, or temporary archives. Per-user state is created on first run outside the install folder: settings in `%APPDATA%\markedit\markedit.ini`, and the WebView2 browser profile and recovery snapshots under `%LOCALAPPDATA%\MarkEdit`. The Inno Setup and GitHub Actions manifests mirror this runtime-and-licences layout.
+Do not package `settings.json`, debug symbols, import libraries, compiler objects, or temporary archives. Application preferences and Lua plugin settings share `%APPDATA%\markedit\settings.json`; the WebView2 browser profile and recovery snapshots live under `%LOCALAPPDATA%\MarkEdit`. The Inno Setup manifest mirrors this runtime-and-licences layout.
 
 ## Project layout
 
 ```
 src/                     application sources, including:
   markedit.c / .h          Win32 application and UI orchestration
+  internal/                named private Win32 subsystems included by markedit.c
   command_ids.h            WM_COMMAND IDs of the built-in commands
   menus.lua                default menu bar definition, built into markedit.exe
-  formatting.lua           formatting and text commands written in Lua, built into markedit.exe
+  lua/formatting_*.lua     Markdown, HTML and Markdown-aware Edit commands built into markedit.exe
   menu_commands.c / .h     built-in command names used by menus.lua, with their shortcut text
-  settings.c / .h          markedit.ini persistence
+  settings.c / settings*.h  settings.json persistence; settings_values.h holds the persisted
+                            values, settings_io.h the load/save surface, settings.h the umbrella
   help/                    Help pages built into markedit.exe: markdown-reference.md, and keyboard-shortcuts.lua,
                            which generates the Keyboard Shortcuts page from the menus and shortcut table
   file_explorer.c / .h     workspace file explorer panel
+  layout_metrics.c / .h    explorer panel geometry shared by layout and settings
   toolbar_icons.c / .h     formatting-toolbar icon painters
   path_utils.c / .h        Windows path and heap-string utilities
   text_codec.c / .h        UTF conversion, text-file encoding detection and conversion, JSON string encoding
   markdown.c / .h          cmark-gfm rendering adapter
-  plugin_host.c / .h       Lua plugin loading and the editor/ui/menu API plugins call
-  theme.h                  shared native light/dark palette and paint helpers
-plugins/                 Lua plugins loaded at startup: the plugin guide (README.md) and example.lua
+  plugin_host.c / .h       plugin host entry points, menu definition and help page rendering
+  plugin_lua_runtime.c     sandboxed Lua state, memory and time limits, protected calls
+  plugin_registry.c        plugin API tables and the command/event registries
+  plugin_discovery.c       extension discovery and the folder-local require loader
+  lua_editor_api.c / .h    Scintilla-facing Lua editor API and multi-selection operations
+  outline_minimap.c / .h   outline panel and minimap subsystem
+  scintilla_config.c / .h  Scintilla view setup: margins, markers, wrap/whitespace/indent
+  progress_dialog.c / .h   cancellable IProgressDialog wrapper for large opens and saves
+  output_process.c / .h    output-panel programs on pipes, in a job, with a reader thread
+  output_text.c / .h       output decoding (ANSI colours, OEM fallback), file locations in
+                           error messages, and the terminal's PowerShell command lines
+  theme.c / .h             light/dark palettes by role, their themes.lua names and template,
+                           and paint helpers
+plugins/                 bundled Lua extensions, plugin guide, examples, and language-server types
 docs/lua.md              developer guide to MarkEdit's Lua files: what each is, load order, how commands reach Lua
-cmark-gfm-sources.rsp    vendored renderer source list and compile flags
+docs/architecture.md     native/Lua boundaries and subsystem ownership
+release-flags.rsp        release code-generation flags shared by build.bat, test.bat and premake
+cmark-gfm-sources.rsp    vendored renderer source list and its defines/include paths
 markedit-sources.rsp     application source list used by build.bat
 lexilla-sources.rsp      supported lexer source list used by build.bat
 lua-sources.rsp          Lua core and plugin-library source list used by build.bat and test.bat
+plugin-sources.rsp       plugin host sources the plugin, menu, formatting and theme tests link
+check_structure.ps1      checks the source-layout rules in AGENTS.md; run by test.bat
+gen_compdb.ps1, .clangd  generate compile_commands.json for the clangd language server
 markedit.rc / .ico       Win32 resources (icon, version info)
 markedit.manifest        DPI-awareness and long-path declarations
 preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid
@@ -208,7 +229,8 @@ build.bat                size-optimized Zig build script
 premake5.lua             alternative build for MinGW GCC, Zig (make) or MSVC (Visual Studio)
 markedit.iss             Inno Setup installer script
 dist/                    clean unpacked release staging folder (generated, not tracked)
-test.bat / tests/        test programs: parser, editor commands, core, recovery, plugin host, menus, formatting, preview bridge
+test.bat / tests/        test programs: parser, editor commands, language, outline, theme, core,
+                         recovery, plugin host, menus, formatting, Lua formatting, assemblers, preview bridge
 third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
 third_party/lexilla/     Lexilla 5.5.1 lexer sources and licence, trimmed to the supported languages
@@ -217,6 +239,7 @@ third_party/gdb/         standalone GDB 17.1 runtime, GPLv3 text, corresponding 
 third_party/lua/         Lua 5.4.9 library sources (unmodified), MIT licence and provenance
 third_party/highlightjs/ Highlight.js 11.11.1 licence and provenance
 third_party/katex/       KaTeX 0.17.0 licence and provenance
+third_party/scowl/       SCOWL 2026.02.25 licence and provenance for the anagram word list
 ```
 
 ## GitHub-style preview
@@ -235,10 +258,11 @@ relative links resolve from the Markdown document's directory.
 
 Plugins are code, and run with full access to the open document. They're
 limited to Lua's string, table, math, UTF-8, and coroutine libraries, so they
-can't read or write files, start programs, or use the network, and a plugin
+can't access arbitrary files, start programs, or use the network, and a plugin
 that runs for more than five seconds is stopped. Only install plugins you
-trust. In an installed copy the `plugins` folder is under Program Files, so
-adding one there needs administrator rights.
+trust. Personal extensions live in `%APPDATA%\markedit\plugins`; folder
+extensions can read only their own Lua modules through MarkEdit's restricted
+`require` loader.
 
 ## Licence
 

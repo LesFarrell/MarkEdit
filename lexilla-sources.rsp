@@ -8,6 +8,12 @@ third_party/lexilla/lexers/LexPython.cxx
 third_party/lexilla/lexers/LexBash.cxx
 third_party/lexilla/lexers/LexPowerShell.cxx
 third_party/lexilla/lexers/LexLua.cxx
+third_party/lexilla/lexers/LexCSS.cxx
+third_party/lexilla/lexers/LexSQL.cxx
+third_party/lexilla/lexers/LexProps.cxx
+third_party/lexilla/lexers/LexTOML.cxx
+third_party/lexilla/lexers/LexBatch.cxx
+third_party/lexilla/lexers/LexMake.cxx
 third_party/lexilla/lexlib/Accessor.cxx
 third_party/lexilla/lexlib/CharacterCategory.cxx
 third_party/lexilla/lexlib/DefaultLexer.cxx

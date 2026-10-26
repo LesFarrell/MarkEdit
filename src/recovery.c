@@ -17,6 +17,16 @@ static HANDLE lock_directory(const WCHAR *directory) {
     return lock;
 }
 
+/* prefix followed by a fresh GUID in lowercase hex. */
+static int unique_name(const WCHAR *prefix, WCHAR *name, size_t capacity) {
+    GUID id;
+    if (FAILED(CoCreateGuid(&id))) return 0;
+    return swprintf(name, capacity, L"%ls%08lx-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x",
+        prefix, (unsigned long)id.Data1, id.Data2, id.Data3,
+        id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
+        id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]) > 0;
+}
+
 static int digits(const WCHAR *start, const WCHAR *end) {
     if (start == end) return 0;
     for (; start < end; start++) if (*start < L'0' || *start > L'9') return 0;
@@ -114,16 +124,10 @@ static int write_unlocked(const WCHAR *directory, const RecoveryDocument *docume
                           int count, RecoveryReadText readText, void *context) {
     if (!count) return clear_unlocked(directory);
     WCHAR *manifest = path_join(directory, L"manifest.ini");
-    GUID generation;
     WCHAR generationName[80];
-    if (!directory || !manifest || FAILED(CoCreateGuid(&generation))) {
+    if (!directory || !manifest || !unique_name(L"document-", generationName, 80)) {
         free(manifest); return 0;
     }
-    swprintf(generationName, 80,
-        L"document-%08lx-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x",
-        (unsigned long)generation.Data1, generation.Data2, generation.Data3,
-        generation.Data4[0], generation.Data4[1], generation.Data4[2], generation.Data4[3],
-        generation.Data4[4], generation.Data4[5], generation.Data4[6], generation.Data4[7]);
     WCHAR stagedName[128];
     swprintf(stagedName, 128, L"%ls.ini", generationName);
     WCHAR *stagedManifest = path_join(directory, stagedName);
@@ -234,7 +238,8 @@ static int read_unlocked(const WCHAR *directory, int index, RecoveryEntry *entry
     free(path);
     if (!entry->text) { free(manifest); return 0; }
     swprintf(key, 32, L"Path%d", index);
-    GetPrivateProfileStringW(L"Recovery", key, L"", entry->path, 32768, manifest);
+    GetPrivateProfileStringW(L"Recovery", key, L"", entry->path,
+                             (DWORD)(sizeof(entry->path) / sizeof(entry->path[0])), manifest);
     swprintf(key, 32, L"Untitled%d", index);
     entry->untitledNumber = GetPrivateProfileIntW(L"Recovery", key, 0, manifest);
     swprintf(key, 32, L"Bom%d", index);
@@ -260,4 +265,87 @@ int recovery_read(const WCHAR *directory, int index, RecoveryEntry *entry) {
 void recovery_entry_free(RecoveryEntry *entry) {
     free(entry->text);
     entry->text = NULL;
+}
+
+/* FILE_SHARE_DELETE lets a discarded session remove its own lock while still
+   holding it; any other open of a held lock fails. */
+static HANDLE lock_session(const WCHAR *directory) {
+    WCHAR *path = directory ? path_join(directory, L"session.lock") : NULL;
+    HANDLE lock = path ? CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_DELETE,
+        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    free(path);
+    return lock;
+}
+
+static void delete_in(const WCHAR *directory, const WCHAR *name) {
+    WCHAR *path = path_join(directory, name);
+    if (path) DeleteFileW(path);
+    free(path);
+}
+
+int recovery_session_open(const WCHAR *root, RecoverySession *session) {
+    session->directory = NULL;
+    session->lock = INVALID_HANDLE_VALUE;
+    /* Another instance scanning for orphans may claim and remove a folder in
+       the moment before its lock exists; a fresh name is then tried. */
+    for (int attempt = 0; root && attempt < 4; attempt++) {
+        WCHAR name[80];
+        if (!unique_name(L"session-", name, 80)) return 0;
+        WCHAR *directory = path_join(root, name);
+        if (!directory) return 0;
+        if (CreateDirectoryW(directory, NULL)) {
+            HANDLE lock = lock_session(directory);
+            if (lock != INVALID_HANDLE_VALUE) {
+                session->directory = directory;
+                session->lock = lock;
+                return 1;
+            }
+            RemoveDirectoryW(directory);
+        }
+        free(directory);
+    }
+    return 0;
+}
+
+int recovery_session_claim_orphans(const WCHAR *root, RecoverySession *sessions, int max) {
+    if (!root || max <= 0) return 0;
+    int claimed = 0;
+    recovery_cleanup(root);
+    if (recovery_count(root) > 0) {
+        sessions[claimed] = (RecoverySession){ wcsdup_heap(root), INVALID_HANDLE_VALUE };
+        if (sessions[claimed].directory) claimed++;
+    }
+    WCHAR *pattern = path_join(root, L"session-*");
+    WIN32_FIND_DATAW data;
+    HANDLE find = pattern ? FindFirstFileW(pattern, &data) : INVALID_HANDLE_VALUE;
+    free(pattern);
+    if (find == INVALID_HANDLE_VALUE) return claimed;
+    do {
+        if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        RecoverySession session = { path_join(root, data.cFileName), INVALID_HANDLE_VALUE };
+        session.lock = lock_session(session.directory);
+        if (session.lock == INVALID_HANDLE_VALUE) { free(session.directory); continue; } /* live */
+        recovery_cleanup(session.directory);
+        int count = recovery_count(session.directory);
+        if (count > 0 && claimed < max) sessions[claimed++] = session;
+        else recovery_session_close(&session, count == 0);
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return claimed;
+}
+
+void recovery_session_close(RecoverySession *session, int discard) {
+    if (!session->directory) return;
+    int cleared = discard && recovery_clear(session->directory);
+    if (session->lock != INVALID_HANDLE_VALUE) {
+        if (cleared) {
+            delete_in(session->directory, L"recovery.lock");
+            delete_in(session->directory, L"session.lock");
+        }
+        CloseHandle(session->lock);
+        if (cleared) RemoveDirectoryW(session->directory);
+    }
+    free(session->directory);
+    session->directory = NULL;
+    session->lock = INVALID_HANDLE_VALUE;
 }

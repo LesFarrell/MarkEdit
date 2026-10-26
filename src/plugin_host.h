@@ -4,12 +4,19 @@
 #include <stddef.h>
 #include <windows.h>
 
-/* Shared with the built-in formatting.lua, which registers about 50, and
-   with functions in the menu definition. */
-#define PLUGIN_MAX_COMMANDS 256
+/* Shared with the built-in formatting Lua chunk, which registers about 50, and
+   with functions in the menu definition. Command IDs run from
+   IDM_PLUGIN_COMMAND_0 (2000) upwards, so this stays well clear of the
+   system command range. */
+#define PLUGIN_MAX_COMMANDS 1024
 #define PLUGIN_MAX_HANDLERS 100
 /* A plugin call (or a script's top-level code) is stopped after this long. */
 #define PLUGIN_TIME_LIMIT_MS 5000
+/* Total heap available to the sandboxed Lua state. This includes all loaded
+   plugins and modules, and prevents a script from exhausting the process. */
+#define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
+
+#define MARKEDIT_PLUGIN_API_VERSION 3
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -26,11 +33,60 @@ typedef struct {
     const char *(*language)(void);
     /* Shows a message; kind is "info", "warning" or "error". */
     void (*message)(const char *title, const char *text, const char *kind);
-    /* Reads/writes a value in this plugin's private markedit.ini section.
+    /* Reads/writes a value in this plugin's private persistent settings.
        config_get returns a heap string, or NULL when absent. config_set
        receives NULL to delete a value and returns nonzero on success. */
     char *(*config_get)(const char *plugin, const char *key);
     int (*config_set)(const char *plugin, const char *key, const char *value);
+    /* Whether a discovered extension should load. scope is supplied by the
+       application (for example "bundled" or "user"). */
+    int (*plugin_enabled)(const char *scope, const char *name);
+    /* Shows a Save As dialog initialized with defaultName, then writes data
+       byte-for-byte. Returns 1 when saved, 0 when cancelled, or -1 on error. */
+    int (*save_binary)(const char *title, const char *defaultName,
+                       const char *data, size_t length);
+    /* Optional richer host services. Strings returned by a callback are heap
+       allocated and are freed by the plugin host. */
+    int (*confirm)(const char *title, const char *text);
+    void (*status)(const char *text);
+    void (*log)(const char *plugin, const char *text);
+    char *(*pick_path)(const char *title, int folder);
+    int (*invoke_command)(const char *name);
+    int (*document_count)(void);
+    int (*document_active)(void); /* zero based */
+    int (*document_activate)(int index);
+    int (*document_new)(void);
+    int (*document_open)(const char *path);
+    int (*document_save)(int saveAs);
+    int (*document_close)(int index);
+    char *(*document_path)(int index);
+    int (*document_modified)(int index);
+    /* Whether a document reloads changes on disk without asking (while it
+       has no unsaved edits). value is 0 or 1 to set it, or -1 to only ask;
+       returns the setting afterwards. */
+    int (*document_auto_reload)(int index, int value);
+    const char *(*document_encoding)(void);
+    /* Changes the active document's save encoding. The value is one of
+       "utf-8", "utf-8-bom", "utf-16le", "utf-16be" or "ansi". */
+    int (*document_set_encoding)(const char *encoding);
+    char *(*workspace_path)(void);
+    /* Schedules or cancels a one-shot callback on the UI thread. */
+    int (*schedule_deferred)(int token, unsigned delayMs, int cancel);
+    /* The Windows spelling dictionary's locale name, e.g. "en-GB", or NULL
+       when there is none. */
+    char *(*spell_language)(void);
+    /* Sets misspelled[i] to 1 for each of words[0..count) the dictionary
+       rejects, and to 0 otherwise. Returns 0 when checking isn't possible. */
+    int (*spell_check)(const char *const *words, int count, unsigned char *misspelled);
+    /* The output panel's Output tab: output_write appends UTF-8 text (ANSI
+       colour sequences allowed), output_clear empties it, output_show opens
+       the panel on it, output_hide closes the panel and output_visible
+       reports whether it is open. */
+    void (*output_write)(const char *text);
+    void (*output_clear)(void);
+    void (*output_show)(void);
+    void (*output_hide)(void);
+    int (*output_visible)(void);
 } PluginHostCallbacks;
 
 /* Copied; call before running commands. */
@@ -82,11 +138,21 @@ typedef struct {
 char *plugin_host_render_page(const char *name, const char *code, size_t length,
                               const PluginShortcut *shortcuts, int shortcutCount, char **page);
 
-/* Runs every *.lua file in directory in name order, adding to whatever is
-   loaded (call plugin_host_shutdown() first to start afresh). A missing
-   directory is not an error. Files that fail to load are reported and
-   skipped; the rest stay loaded. */
-char *plugin_host_load_directory(const WCHAR *directory);
+/* Called for each colour a themes.lua sets: dark is 0 for the light theme.
+   Returns NULL when the colour was applied, or why it wasn't. */
+typedef const char *(*PluginThemeColourFn)(void *context, int dark, const char *name, const char *value);
+
+/* Runs a themes.lua in a Lua state of its own. The file returns
+   { light = { name = "#RRGGBB", ... }, dark = { ... } }; each colour goes to
+   setColour. Returns NULL, or a report of every problem (heap, caller frees).
+   Colours before a Lua error may already have been applied. */
+char *plugin_host_load_theme(const char *name, const char *code, size_t length,
+                             PluginThemeColourFn setColour, void *context);
+
+/* Runs every top-level *.lua file and folder containing init.lua in name
+   order, adding to what is loaded. scope identifies the source to the
+   enable-state callback. A missing directory is not an error. */
+char *plugin_host_load_directory(const WCHAR *directory, const char *scope);
 /* Runs one plugin script's top-level code, starting the Lua state if needed. */
 char *plugin_host_load_chunk(const char *name, const char *code, size_t length);
 /* The same, for a script built into MarkEdit: its commands have no time limit. */
@@ -102,20 +168,39 @@ int plugin_host_command_count(void);
 /* UTF-8 menu label of a registered command. For one from the menu
    definition it is the item's path, e.g. "/File/Insert Date". */
 const char *plugin_host_command_label(int index);
+/* Optional shortcut registered by menu.add/menu.checkbox, e.g. "Ctrl+Alt+J". */
+const char *plugin_host_command_shortcut(int index);
+/* Parsed accelerator for that shortcut. Returns zero when it has none. */
+int plugin_host_command_accelerator(int index, BYTE *flags, WORD *key);
 /* Whether the menu definition already placed the command, so it shouldn't
    be placed again by its label. */
 int plugin_host_command_is_placed(int index);
 /* Whether the entry is a menu.separator(path) rather than a command: its
-   label is the menu path, it has nothing to run, and it belongs in no
-   palette. Separators share the command list so they keep their order
+   label is the menu path and it has nothing to run. Separators share the
+   command list so they keep their order
    among the commands placed around them. */
 int plugin_host_command_is_separator(int index);
 /* Whether a command was registered with menu.checkbox, and its persisted
    state. A missing/unavailable setting uses the checkbox's default. */
 int plugin_host_command_is_checkable(int index);
 int plugin_host_command_is_checked(int index);
+/* Owner/key metadata for menu.checkbox settings; NULL for other commands. */
+const char *plugin_host_command_checkbox_owner(int index);
+const char *plugin_host_command_checkbox_key(int index);
+/* Finds the menu.checkbox command that owns a plugin config key, or -1. */
+int plugin_host_find_checkbox(const char *owner, const char *key);
 /* The built-in command a command was registered to run for, or NULL. */
 const char *plugin_host_command_overrides(int index);
+
+/* Extensions discovered by the directory loaders, including disabled ones. */
+int plugin_host_extension_count(void);
+const char *plugin_host_extension_name(int index);
+const char *plugin_host_extension_scope(int index);
+int plugin_host_extension_is_enabled(int index);
+
+/* First script which failed during the current load, for actionable UI. */
+const WCHAR *plugin_host_error_path(void);
+int plugin_host_error_line(void);
 /* The command registered (last) to run for the built-in command called
    name, or -1 when there is none. */
 int plugin_host_find_override(const char *name);
@@ -127,5 +212,7 @@ char *plugin_host_run(int index, HWND hEdit);
    NULL). Does nothing while plugin code is already running, since events
    can arrive from a message loop a plugin dialog is running. */
 char *plugin_host_fire(const char *event, const char *argument, HWND hEdit);
+/* Runs a one-shot callback scheduled by app.defer(). */
+char *plugin_host_run_deferred(int token, HWND hEdit);
 
 #endif

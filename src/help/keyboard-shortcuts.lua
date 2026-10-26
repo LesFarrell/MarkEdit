@@ -16,15 +16,23 @@
 --                "function"   label (Lua code in the definition)
 --                "list"       list ("recent_files", "plugins", ...)
 --                "separator"
---   shortcuts  built-in command name -> shortcut text, for every command
---              that has one, e.g. shortcuts["file.new"] == "Ctrl+N"
---              (from src/menu_commands.c)
+--   shortcuts  command -> shortcut text, for every command that has one:
+--              built-in commands by name, e.g. shortcuts["file.new"] ==
+--              "Ctrl+N" (from src/menu_commands.c), and plugin commands by
+--              their menu label, e.g. shortcuts["/Tools/JSON/Format JSON"]
+--              == "Ctrl+Alt+J" (from src/internal/help_and_menu.inc)
 --
 -- and returns the page. Changes here need a rebuild; tests/test_menus.c
 -- checks the page lists every shortcut.
 
 local data = ...
 local menus, shortcuts = data.menus, data.shortcuts
+
+-- Built-in command names are lower case and dotted, "file.new"; anything
+-- else in shortcuts is a plugin command's label.
+local function is_builtin(name)
+  return name:match("^[%l%d_]+%.[%l%d_.]+$") ~= nil
+end
 
 -- Keys that aren't built-in commands, so neither the menus nor the command
 -- table know about them.
@@ -75,11 +83,9 @@ local function collect(items, path, rows)
   return rows
 end
 
-local palette = shortcuts["tools.command_palette"]
 line("# MarkEdit Keyboard Shortcuts")
 line()
-line("Every command is also in the menus"
-  .. (palette and " and the Command Palette (" .. palette .. ")" or "") .. ".")
+line("Every command is also in the menus.")
 line("This page is built from MarkEdit's current menus each time it opens. It's an")
 line("unsaved document, so editing it changes nothing.")
 line()
@@ -88,13 +94,29 @@ for _, menu in ipairs(menus) do
   section(plain(menu.label), collect(menu.items, "", {}))
 end
 
--- Commands left out of the menus keep their shortcuts.
-local unlisted = {}
-for name, keys in pairs(shortcuts) do
-  if not listed[name] then unlisted[#unlisted + 1] = { keys, name } end
+-- A plugin command's label as the menu path it appears at: a leading "/"
+-- places it relative to the menu bar, anything else (or a lone "/Name") on
+-- the Plugins menu, as plugins/README.md describes.
+local function plugin_path(label)
+  local parts = {}
+  for part in label:gmatch("[^/]+") do parts[#parts + 1] = plain(part) end
+  if label:sub(1, 1) ~= "/" or #parts < 2 then table.insert(parts, 1, "Plugins") end
+  return table.concat(parts, " > ")
 end
-table.sort(unlisted, function(a, b) return a[2] < b[2] end)
+
+-- Built-in commands left out of the menus keep their shortcuts. Plugin
+-- commands are never in the menu definition, so they get a section of
+-- their own.
+local unlisted, plugins = {}, {}
+for name, keys in pairs(shortcuts) do
+  if not is_builtin(name) then plugins[#plugins + 1] = { keys, plugin_path(name) }
+  elseif not listed[name] then unlisted[#unlisted + 1] = { keys, name } end
+end
+local function by_action(a, b) return a[2] < b[2] end
+table.sort(unlisted, by_action)
+table.sort(plugins, by_action)
 section("Not in the menus", unlisted)
+section("Plugin commands", plugins)
 
 section("Other keys", OTHER_KEYS)
 

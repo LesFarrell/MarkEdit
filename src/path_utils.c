@@ -31,7 +31,7 @@ WCHAR *get_module_path(void) {
         DWORD length = GetModuleFileNameW(NULL, path, capacity);
         if (length > 0 && length < capacity) return path;
         free(path);
-        if (capacity >= 32768) return NULL;
+        if (capacity >= LONG_PATH_CAPACITY) return NULL;
         capacity *= 2;
     }
 }
@@ -139,4 +139,30 @@ int path_has_skipped_component(const WCHAR *path) {
     }
     free(copy);
     return found;
+}
+
+/* %LOCALAPPDATA%\MarkEdit\<name>, created if needed: per-user, machine-local
+   state that has to be writable wherever markedit.exe itself lives -
+   including a Program Files install a standard user can't write to. */
+WCHAR *get_local_app_directory(const WCHAR *name) {
+    DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", NULL, 0);
+    if (!needed) return NULL;
+    WCHAR *local = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));
+    if (!local || !GetEnvironmentVariableW(L"LOCALAPPDATA", local, needed)) {
+        free(local);
+        return NULL;
+    }
+    WCHAR *app = path_join(local, L"MarkEdit");
+    free(local);
+    if (!app) return NULL;
+    CreateDirectoryW(app, NULL);
+    WCHAR *directory = path_join(app, name);
+    free(app);
+    if (directory) CreateDirectoryW(directory, NULL);
+    return directory;
+}
+
+int file_exists(const WCHAR *path) {
+    DWORD attributes = path ? GetFileAttributesW(path) : INVALID_FILE_ATTRIBUTES;
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
