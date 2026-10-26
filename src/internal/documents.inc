@@ -289,9 +289,10 @@ static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEnc
                                        LargeOperationProgress *progress) {
     *outOfMemory = 0;
     char *chunk = (char *)malloc(LARGE_FILE_READ_CHUNK);
-    char *decoded = (char *)malloc(text_decode_capacity(LARGE_FILE_READ_CHUNK));
-    if (!chunk || !decoded) {
-        free(chunk); free(decoded);
+    char *decoded = NULL;
+    size_t decodedCapacity = text_decode_capacity(LARGE_FILE_READ_CHUNK);
+    if (!chunk || !decodedCapacity) {
+        free(chunk);
         *outOfMemory = 1;
         return 0;
     }
@@ -333,9 +334,13 @@ static sptr_t read_large_file_document(HANDLE file, size_t length, int forcedEnc
             if (!large_operation_progress_update(progress, total, length)) { ok = 0; break; }
             if (validating && !utf8_validator_feed(&validator, data, dataLength)) { restart = 1; break; }
             if (codec.encoding != TEXT_ENCODING_UTF8) {
+                if (!decoded) {
+                    decoded = (char *)malloc(decodedCapacity);
+                    if (!decoded) { *outOfMemory = 1; ok = 0; break; }
+                }
                 size_t produced = 0;
                 if (!text_decode(&codec, data, dataLength, total == length, decoded,
-                                 text_decode_capacity(LARGE_FILE_READ_CHUNK), &produced)) { ok = 0; break; }
+                                 decodedCapacity, &produced)) { ok = 0; break; }
                 data = decoded;
                 dataLength = produced;
             }
@@ -414,16 +419,44 @@ static LoadResult load_large_file(HANDLE file, size_t length, int forcedEncoding
     return LOAD_OK;
 }
 
+/* Builds a style-less, 64-bit-position document from text that was decoded by
+   the ordinary loader but expanded past the large-file threshold. The loader
+   takes ownership of its own storage; `content` remains the caller's. */
+static sptr_t large_document_from_utf8(const char *content, size_t length, int *outOfMemory) {
+    *outOfMemory = 0;
+    SciLoader *loader = (SciLoader *)SendMessageA(g_hEdit, SCI_CREATELOADER, (WPARAM)length,
+        (LPARAM)(SC_DOCUMENTOPTION_STYLES_NONE | SC_DOCUMENTOPTION_TEXT_LARGE));
+    if (!loader) {
+        *outOfMemory = 1;
+        return 0;
+    }
+    int status = length ? loader->lpVtbl->AddData(loader, content, (Sci_Position)length)
+                        : SC_STATUS_OK;
+    if (status != SC_STATUS_OK) {
+        *outOfMemory = status == SC_STATUS_BADALLOC;
+        loader->lpVtbl->Release(loader);
+        return 0;
+    }
+    return (sptr_t)loader->lpVtbl->ConvertToDocument(loader);
+}
+
 /* Puts already-decoded UTF-8 text into the active tab as its loaded,
    unmodified content. */
-static void set_loaded_text(const char *content, size_t contentLength, int hasBom,
-                            TextEncoding encoding, int forcedEncoding) {
+static LoadResult set_loaded_text(const char *content, size_t contentLength, int hasBom,
+                                  TextEncoding encoding, int forcedEncoding) {
     /* The threshold describes editor size, not merely bytes on disk: ANSI
        text can expand to three UTF-8 bytes per source byte. */
     int largeMode = (long long)contentLength >= large_file_threshold_bytes();
-    /* Reloading a tab that was in large-file mode with a file that's since
-       shrunk needs an ordinary, lexable document again. */
-    if (g_largeFile) {
+    int loadedThroughLoader = 0;
+    if (largeMode && !g_largeFile) {
+        int outOfMemory = 0;
+        sptr_t sciDoc = large_document_from_utf8(content, contentLength, &outOfMemory);
+        if (!sciDoc) return outOfMemory ? LOAD_OUT_OF_MEMORY : LOAD_READ_FAILED;
+        replace_active_scintilla_document(sciDoc, 1);
+        loadedThroughLoader = 1;
+    } else if (!largeMode && g_largeFile) {
+        /* Reloading a tab that was in large-file mode with a file that's since
+           shrunk needs an ordinary, lexable document again. */
         sptr_t sciDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);
         if (sciDoc) replace_active_scintilla_document(sciDoc, 0);
         else largeMode = 1; /* keep the existing style-less document mode */
@@ -433,7 +466,12 @@ static void set_loaded_text(const char *content, size_t contentLength, int hasBo
     g_encoding = encoding;
     g_documentStore.documents[g_documentStore.active].encodingForced = forcedEncoding >= 0;
     g_documentStore.switching = 1;
-    set_edit_text(g_hEdit, content, (Sci_Position)contentLength);
+    if (loadedThroughLoader) {
+        apply_detected_eol_mode(g_hEdit);
+        SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, TRUE, 0);
+    } else {
+        set_edit_text(g_hEdit, content, (Sci_Position)contentLength);
+    }
     /* Matches toggle_indent_use_spaces(): when the setting is on, a file
        opened (or dropped) with tab-indentation should come in already
        converted rather than leaving a mix of tabs and spaces. Done inside the
@@ -444,6 +482,7 @@ static void set_loaded_text(const char *content, size_t contentLength, int hasBo
     reset_undo_history(g_hEdit);
     SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
     g_documentStore.switching = 0;
+    return LOAD_OK;
 }
 
 /* Reads all of `file` into memory, converts it to UTF-8, and loads it into
@@ -479,7 +518,8 @@ static LoadResult load_ordinary_file(HANDLE file, size_t length, int forcedEncod
         else if (contentLength > INT_MAX) result = LOAD_TOO_LARGE;
         content = decoded;
     }
-    if (result == LOAD_OK) set_loaded_text(content, contentLength, bom > 0, encoding, forcedEncoding);
+    if (result == LOAD_OK)
+        result = set_loaded_text(content, contentLength, bom > 0, encoding, forcedEncoding);
     free(decoded);
     free(buf);
     return result;
@@ -530,8 +570,11 @@ static int file_ends_with_loaded_tail(HANDLE file, const Document *doc) {
    the next append in appendCodec. Undo isn't collected, as for a load. */
 static int append_file_bytes(HANDLE file, Document *doc, long long size) {
     int decode = doc->encoding != TEXT_ENCODING_UTF8;
-    char *chunk = (char *)malloc(LARGE_FILE_READ_CHUNK);
-    char *decoded = decode ? (char *)malloc(text_decode_capacity(LARGE_FILE_READ_CHUNK)) : NULL;
+    long long growth = size - doc->loadedBytes;
+    size_t chunkCapacity = growth < LARGE_FILE_READ_CHUNK ? (size_t)growth : LARGE_FILE_READ_CHUNK;
+    size_t decodedCapacity = decode ? text_decode_capacity(chunkCapacity) : 0;
+    char *chunk = chunkCapacity ? (char *)malloc(chunkCapacity) : NULL;
+    char *decoded = decode && decodedCapacity ? (char *)malloc(decodedCapacity) : NULL;
     LARGE_INTEGER at;
     at.QuadPart = doc->loadedBytes;
     int ok = chunk && (!decode || decoded) && SetFilePointerEx(file, at, NULL, FILE_BEGIN);
@@ -539,7 +582,7 @@ static int append_file_bytes(HANDLE file, Document *doc, long long size) {
     long long total = doc->loadedBytes;
     SendMessageA(g_hEdit, SCI_SETUNDOCOLLECTION, FALSE, 0);
     while (ok && total < size) {
-        DWORD want = (DWORD)((size - total) > LARGE_FILE_READ_CHUNK ? LARGE_FILE_READ_CHUNK : (size - total));
+        DWORD want = (DWORD)((size - total) > (long long)chunkCapacity ? chunkCapacity : (size - total));
         DWORD got = 0;
         if (!ReadFile(file, chunk, want, &got, NULL) || got == 0) { ok = 0; break; }
         total += got;
@@ -547,7 +590,7 @@ static int append_file_bytes(HANDLE file, Document *doc, long long size) {
         size_t dataLength = got;
         if (decode) {
             if (!text_decode(&codec, chunk, got, 0, decoded,
-                             text_decode_capacity(LARGE_FILE_READ_CHUNK), &dataLength)) { ok = 0; break; }
+                             decodedCapacity, &dataLength)) { ok = 0; break; }
             data = decoded;
         }
         if (dataLength) SendMessageA(g_hEdit, SCI_APPENDTEXT, (WPARAM)dataLength, (LPARAM)data);

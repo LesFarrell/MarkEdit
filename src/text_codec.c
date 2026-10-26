@@ -255,10 +255,17 @@ size_t text_encode_capacity(size_t inputLength) {
     return inputLength <= (SIZE_MAX - 16) / 2 ? inputLength * 2 + 16 : 0;
 }
 
-/* Joins the bytes carried over from the previous call with this call's
-   input. Callers stay well under INT_MAX per call, which is what the Win32
-   conversion functions below take. */
-static char *join_carry(TextCodecState *state, const char *input, size_t inputLength, size_t *outLength) {
+/* Makes carried bytes contiguous with this call's input only when there
+   actually are carried bytes. The common case returns input directly,
+   avoiding a multi-megabyte allocation and copy for every streaming chunk.
+   *owned receives the allocation to free, or NULL. */
+static const char *join_carry(TextCodecState *state, const char *input, size_t inputLength,
+                              size_t *outLength, char **owned) {
+    *owned = NULL;
+    if (!state->carryLength) {
+        *outLength = inputLength;
+        return input;
+    }
     if (inputLength > SIZE_MAX - state->carryLength - 1) return NULL;
     char *work = (char *)malloc(state->carryLength + inputLength + 1);
     if (!work) return NULL;
@@ -266,6 +273,7 @@ static char *join_carry(TextCodecState *state, const char *input, size_t inputLe
     if (inputLength) memcpy(work + state->carryLength, input, inputLength);
     *outLength = state->carryLength + inputLength;
     state->carryLength = 0;
+    *owned = work;
     return work;
 }
 
@@ -284,7 +292,8 @@ int text_decode(TextCodecState *state, const char *input, size_t inputLength, in
         return 1;
     }
     size_t length = 0;
-    char *work = join_carry(state, input, inputLength, &length);
+    char *owned = NULL;
+    const char *work = join_carry(state, input, inputLength, &length, &owned);
     if (!work) return 0;
     const unsigned char *b = (const unsigned char *)work;
     WCHAR *wide = NULL;
@@ -300,7 +309,7 @@ int text_decode(TextCodecState *state, const char *input, size_t inputLength, in
             if (unit >= 0xD800 && unit <= 0xDBFF) units--;
         }
         wide = (WCHAR *)malloc((units ? units : 1) * sizeof(WCHAR));
-        if (!wide) { free(work); return 0; }
+        if (!wide) { free(owned); return 0; }
         for (size_t i = 0; i < units; i++)
             wide[i] = bigEndian ? (WCHAR)(b[2 * i] << 8 | b[2 * i + 1]) : (WCHAR)(b[2 * i + 1] << 8 | b[2 * i]);
         wideLength = (int)units;
@@ -309,7 +318,7 @@ int text_decode(TextCodecState *state, const char *input, size_t inputLength, in
         else if (rest) {
             /* A dangling odd byte at the very end can't be a character. */
             WCHAR *grown = (WCHAR *)realloc(wide, (units + 1) * sizeof(WCHAR));
-            if (!grown) { free(wide); free(work); return 0; }
+            if (!grown) { free(wide); free(owned); return 0; }
             wide = grown;
             wide[wideLength++] = 0xFFFD;
         }
@@ -343,7 +352,7 @@ int text_decode(TextCodecState *state, const char *input, size_t inputLength, in
         else *outLength = (size_t)written;
     }
     free(wide);
-    free(work);
+    free(owned);
     return ok;
 }
 
@@ -357,7 +366,8 @@ int text_encode(TextCodecState *state, const char *input, size_t inputLength, in
         return 1;
     }
     size_t length = 0;
-    char *work = join_carry(state, input, inputLength, &length);
+    char *owned = NULL;
+    const char *work = join_carry(state, input, inputLength, &length, &owned);
     if (!work) return 0;
     size_t usable = length;
     if (!final) {
@@ -396,7 +406,7 @@ int text_encode(TextCodecState *state, const char *input, size_t inputLength, in
         }
         free(wide);
     }
-    free(work);
+    free(owned);
     return ok;
 }
 

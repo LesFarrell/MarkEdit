@@ -8,6 +8,8 @@
 
 #include "path_utils.h"
 
+/* Keeps long operations responsive to cancellation while still amortizing
+   syscall and conversion setup costs. */
 enum { FILE_IO_CHUNK_SIZE = 1024 * 1024 };
 
 static int write_all(HANDLE file, const char *bytes, size_t length) {
@@ -144,7 +146,7 @@ int write_file_atomic_progress(const WCHAR *target, const char *text, size_t len
             swprintf(temporary, temporaryCapacity, L"%ls.markedit-%lu-%u.tmp",
                      target, GetCurrentProcessId(), attempt);
             hFile = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW,
-                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
+                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
             if (hFile == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
         }
     }
@@ -183,6 +185,10 @@ int write_file_atomic_progress(const WCHAR *target, const char *text, size_t len
         }
     }
     free(encoded);
+    /* One flush after the complete sequential write provides the durability
+       needed before the atomic replace. FILE_FLAG_WRITE_THROUGH here would
+       redundantly force every chunk to storage and makes large saves much
+       slower without strengthening the final published state. */
     if (ok) ok = FlushFileBuffers(hFile);
     if (!CloseHandle(hFile)) ok = FALSE;
     if (ok) {
