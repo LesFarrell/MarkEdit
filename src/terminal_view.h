@@ -5,9 +5,10 @@
 
 /* The Terminal tab's control: owns one TerminalProcess (src/terminal_process.h,
    a ConPTY-backed shell) and one TerminalGrid (src/terminal_grid.h, the
-   VT100/ANSI screen it renders), and takes keyboard/mouse input directly -
-   unlike the Output/Run tab's read-only Scintilla log and shared input line,
-   typing here goes straight to the shell, the same as any other terminal.
+   VT100/ANSI screen it renders), and takes keyboard/mouse input directly.
+   Focused keyboard messages are routed here before application accelerators,
+   so control and Meta keys reach the shell instead of invoking editor commands.
+   The Output/Run tab instead uses a read-only log and shared input line.
 
    Built the same way as the output panel's own children
    (output_panel.inc's create_output_scintilla/create_output_button): a
@@ -31,8 +32,10 @@ TerminalView *terminal_view_create(HWND parent, int id);
 HWND terminal_view_window(const TerminalView *view);
 void terminal_view_free(TerminalView *view);
 
-/* Gives terminal-focused key presses priority over the main window's editor
-   accelerators. Returns nonzero after translating and dispatching the key. */
+/* Call before TranslateAccelerator()/IsDialogMessage() in the application
+   message loop. It translates and dispatches keyboard messages addressed to
+   this control, preventing editor accelerators and menu mnemonics from taking
+   terminal input. Returns nonzero when it consumed the message. */
 int terminal_view_pretranslate_message(TerminalView *view, const MSG *message);
 
 /* Starts commandLine (a shell) in directory, sized to the control's current

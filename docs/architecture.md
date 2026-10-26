@@ -114,7 +114,7 @@ they are included into the `markedit.c` translation unit.
 - `dialogs.inc`: modal choices, text input, find/replace and help windows, and the shared popup-dialog theming and buttons.
 - `ui_shell.inc`: menus, toolbar, status bar, layout, view toggles and editor presentation.
 - `debugger.inc`: source launching, compiler discovery, GDB/Python debugger control and breakpoint persistence.
-- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, and the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`). The Output tab's programs run through `output_process.c`, decoded by `output_text.c`; the Terminal tab is `terminal_view.c`, self-contained around `terminal_process.c` (ConPTY) and `terminal_grid.c` (the VT100 screen).
+- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, and the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`). The Output tab's programs run through `output_process.c`, decoded by `output_text.c`; the Terminal tab is `terminal_view.c`, built around `terminal_process.c` (ConPTY), `terminal_grid.c` (the VT100 screen), and `terminal_input.c` (Win32-key to VT-sequence translation).
 - `editor_input.inc`: smart Tab/Enter, paired characters, spelling context actions and editor navigation gestures.
 - `outline_host.inc`, `workspace.inc` and `settings_dialog.inc`: their named UI subsystems.
 - `command_dispatch.inc`: native command-family handlers.
@@ -173,7 +173,8 @@ depend on a UI module.
 | `output_text.c` | `output_text.h` | Output decoding (ANSI colours, carriage returns, OEM fallback), file locations in messages | windows.h |
 | `terminal_process.c` | `terminal_process.h` | A shell on a Windows pseudoconsole (ConPTY) in a kill-on-close job, its output posted to a window by a reader thread | windows.h |
 | `terminal_grid.c` | `terminal_grid.h` | VT100/ECMA-48 screen buffer: cursor-addressed cells, SGR colours, scroll regions, the alternate screen, scrollback | none (pure logic) |
-| `terminal_view.c` | `terminal_view.h` | The Terminal tab's rendering and input control, owning one `TerminalProcess` and one `TerminalGrid` | `terminal_process.h`, `terminal_grid.h` |
+| `terminal_input.c` | `terminal_input.h` | Pure translation of Win32 virtual keys and modifier flags into xterm-compatible VT input sequences | windows.h for virtual-key constants |
+| `terminal_view.c` | `terminal_view.h` | The Terminal tab's rendering and input control, owning one `TerminalProcess` and one `TerminalGrid`; focused keyboard messages are handled before application accelerators | `terminal_process.h`, `terminal_grid.h`, `terminal_input.h` |
 | `markedit.c` + `src/internal/*.inc` | `markedit.h` | Application shell and subsystems | everything above |
 
 Two dependency rules fall out of the table:

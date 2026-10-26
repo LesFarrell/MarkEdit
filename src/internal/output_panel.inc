@@ -14,8 +14,9 @@
 
    output_process.c runs the Output tab's programs and output_text.c decodes
    what they write; this file only connects them to the Scintilla views.
-   terminal_view.c is self-contained (it owns its TerminalProcess and
-   TerminalGrid), so this file only starts, sizes, themes and stops it. */
+   terminal_view.c owns its TerminalProcess and TerminalGrid, while
+   terminal_input.c encodes non-text keys as VT sequences; this file only
+   starts, sizes, themes and stops the terminal. */
 
 #define OUTPUT_MAX_LENGTH (4 * 1024 * 1024) /* older output is dropped beyond this */
 #define OUTPUT_HISTORY_SIZE 50

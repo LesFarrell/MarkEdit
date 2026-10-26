@@ -25,11 +25,14 @@ size_t terminal_input_sequence(unsigned int key, unsigned int modifiers,
                                int applicationCursorKeys,
                                char *sequence, size_t capacity) {
     modifiers &= TERMINAL_MOD_SHIFT | TERMINAL_MOD_ALT | TERMINAL_MOD_CONTROL;
+    /* xterm numbers modifiers as 1 + Shift(1) + Alt(2) + Control(4). */
     unsigned int xtermModifier = modifiers + 1;
     char final = 0;
 
     switch (key) {
         case VK_BACK: {
+            /* Terminal Backspace is DEL; Ctrl+Backspace uses readline's
+               backward-kill-word control character. Alt adds Meta/Escape. */
             char bytes[3];
             size_t length = 0;
             if (modifiers & TERMINAL_MOD_ALT) bytes[length++] = '\x1b';

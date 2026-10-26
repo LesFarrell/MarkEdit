@@ -399,11 +399,10 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         case WM_GETDLGCODE:
-            /* markedit.c's message loop runs every message through
-               IsDialogMessage(); without DLGC_WANTALLKEYS it treats Enter
-               (and Escape) as a dialog default-button press instead of
-               passing them through as WM_CHAR, so typing Enter into the
-               shell would silently do nothing. */
+            /* The pretranslation path normally bypasses IsDialogMessage(),
+               but these flags also protect keys delivered directly or by a
+               future dialog host: the terminal, not dialog navigation, owns
+               Enter, Escape, Tab, characters, and cursor keys. */
             return DLGC_WANTARROWS | DLGC_WANTCHARS | DLGC_WANTTAB | DLGC_WANTALLKEYS;
         case WM_LBUTTONDOWN: {
             SetFocus(hwnd);
@@ -482,8 +481,8 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
         case WM_CHAR: case WM_SYSCHAR: {
             if (view->consumeCharCount) { view->consumeCharCount--; return 0; }
             if (!view->running) return 0;
-            /* Right Alt plus Control is AltGr, which types a layout character
-               rather than a Meta-prefixed character. */
+            /* WM_SYSCHAR represents Alt/Meta and gets an Escape prefix. Right
+               Alt plus Control is AltGr, so it remains a layout character. */
             int altGr = (GetKeyState(VK_RMENU) & 0x8000) &&
                         (GetKeyState(VK_CONTROL) & 0x8000);
             send_character(view, (WCHAR)wParam, msg == WM_SYSCHAR && !altGr);
@@ -506,6 +505,9 @@ int terminal_view_pretranslate_message(TerminalView *view, const MSG *message) {
         return 0;
     switch (message->message) {
         case WM_KEYDOWN: case WM_SYSKEYDOWN:
+            /* Translate first so layout-aware WM_(SYS)CHAR is queued, then let
+               the key handler emit any non-text VT sequence. If it did, count
+               the queued character so repeats cannot leak or swallow input. */
             view->suppressTranslatedChar = 0;
             int translated = TranslateMessage(message);
             DispatchMessage(message);
