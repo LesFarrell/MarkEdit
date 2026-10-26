@@ -1,0 +1,8 @@
+Microsoft WebView2 SDK 1.0.4078.44
+Source package: https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.4078.44
+
+Vendored files:
+- include/
+- x64/WebView2Loader.dll
+- x64/WebView2Loader.dll.lib
+- x64/WebView2LoaderStatic.lib (unused and git-ignored; see .gitignore)
