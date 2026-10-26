@@ -247,7 +247,7 @@ local function each_event(visitor)
   while position <= last do
     local finish = math.min(last, position + INPUT_CHUNK_BYTES - 1)
     local text = pending .. editor.get_range(position, finish)
-    position, pending = finish + 1, ""
+    position = finish + 1
     local start = 1
     while true do
       local ending = text:find("[\r\n]", start)

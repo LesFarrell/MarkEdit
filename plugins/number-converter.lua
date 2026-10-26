@@ -164,9 +164,7 @@ local function iso_to_timestamp(text)
     if s then second, rest = tonumber(s), after_seconds end
     local f, after_fraction = rest:match("^[.,](%d+)(.*)$")
     if f then fraction, rest = tonumber((f .. "00"):sub(1, 3)), after_fraction end
-    if rest == "Z" or rest == "z" then
-      rest = ""
-    elseif rest ~= "" then
+    if rest ~= "Z" and rest ~= "z" and rest ~= "" then
       local sign, oh, om = rest:match("^([+-])(%d%d):?(%d%d)$")
       if not sign or tonumber(oh) > 23 or tonumber(om) > 59 then return nil end
       offset = (tonumber(oh) * 3600 + tonumber(om) * 60) * (sign == "-" and -1 or 1)

@@ -301,14 +301,13 @@ local function words_from_letters()
     editor.replace_selection(like(choice, text))
     return
   end
-  local lines, length, group = {}, nil, nil
+  local lines, length = {}, nil
   for _, word in ipairs(words) do
     if utf8.len(word) ~= length then
-      length, group = utf8.len(word), {}
-      lines[#lines + 1] = group
-      group.length = length
+      length = utf8.len(word)
+      lines[#lines + 1] = { length = length }
     end
-    group[#group + 1] = word
+    table.insert(lines[#lines], word)
   end
   for index, line in ipairs(lines) do
     lines[index] = string.format("%d letters: %s", line.length, table.concat(line, ", "))

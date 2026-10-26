@@ -799,7 +799,7 @@ local function parse_yaml(text)
       local value, err
       if value_text == "" then
         if index <= #lines and lines[index].indent > indent then
-          value, index, err = parse_block(index, lines[index].indent)
+          value, index = parse_block(index, lines[index].indent)
           if not value then return nil, index end
         elseif index <= #lines and lines[index].indent == indent
             and (lines[index].content == "-" or lines[index].content:match("^%-%s")) then

@@ -175,15 +175,15 @@ local function format_tokens(tokens)
     local lower = value:lower()
     local phrase = lower
     local clause_start = kind == "keyword" and (clause_starts[lower] or join_qualifiers[lower])
-    if not clause_start then
-      -- not a clause keyword
-    elseif lower == "group" or lower == "order" then
-      clause_start = index + 1 <= tokens.n and tokens.value[index + 1]:lower() == "by"
-      if clause_start then phrase = lower .. " by"; index = index + 1 end
-    elseif lower == "join" then
-      clause_start = not is_qualifier(tokens, index - 1)
-    elseif join_qualifiers[lower] then
-      clause_start = starts_join(tokens, index)
+    if clause_start then
+      if lower == "group" or lower == "order" then
+        clause_start = index + 1 <= tokens.n and tokens.value[index + 1]:lower() == "by"
+        if clause_start then phrase = lower .. " by"; index = index + 1 end
+      elseif lower == "join" then
+        clause_start = not is_qualifier(tokens, index - 1)
+      elseif join_qualifiers[lower] then
+        clause_start = starts_join(tokens, index)
+      end
     end
     if value == ")" then depth = math.max(0, depth - 1) end
     if clause_start then flush() end

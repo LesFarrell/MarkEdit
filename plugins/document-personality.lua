@@ -274,7 +274,8 @@ local function prose_blocks(text)
     current = {}
   end
   text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
-  for line in (text .. "\n"):gmatch("(.-)\n") do
+  for source_line in (text .. "\n"):gmatch("(.-)\n") do
+    local line = source_line
     local marker = line:match("^ ? ? ?(```+)") or line:match("^ ? ? ?(~~~+)")
     if fence then
       if marker and marker:sub(1, 1) == fence:sub(1, 1) and #marker >= #fence then fence = nil end

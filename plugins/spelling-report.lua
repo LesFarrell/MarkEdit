@@ -36,7 +36,8 @@ local function skipped_ranges(text)
       while true do
         local open, open_last = line:find("`+", at)
         if not open then break end
-        local close, close_last = open_last, open_last
+        local close
+        local close_last = open_last
         repeat
           close, close_last = line:find("`+", close_last + 1)
         until not close or close_last - close == open_last - open
@@ -98,7 +99,8 @@ local function words_in(text, offset)
   local masked = mask_separators(text)
   local skipped, next_skip = skipped_ranges(text), 1
   local words = {}
-  for first, word in masked:gmatch("()([%a\128-\255][%a\128-\255']*)") do
+  for match_first, match_word in masked:gmatch("()([%a\128-\255][%a\128-\255']*)") do
+    local first, word = match_first, match_word
     local after = first + #word
     -- Apostrophes around a word ('tis, dogs') aren't part of it.
     for _, mark in ipairs(APOSTROPHES) do

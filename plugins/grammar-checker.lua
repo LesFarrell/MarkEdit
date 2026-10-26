@@ -50,7 +50,8 @@ local function code_ranges(text)
       while true do
         local open, open_last = line:find("`+", at)
         if not open then break end
-        local close, close_last = open_last, open_last
+        local close
+        local close_last = open_last
         repeat
           close, close_last = line:find("`+", close_last + 1)
         until not close or close_last - close == open_last - open
