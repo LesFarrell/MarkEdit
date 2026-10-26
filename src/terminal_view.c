@@ -584,7 +584,6 @@ void terminal_view_show_message(TerminalView *view, const WCHAR *message) {
 }
 
 int terminal_view_running(const TerminalView *view) { return view->running; }
-DWORD terminal_view_exit_code(const TerminalView *view) { return view->exitCode; }
 
 void terminal_view_stop(TerminalView *view) {
     if (view->process) terminal_process_stop(view->process);

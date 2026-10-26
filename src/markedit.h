@@ -96,9 +96,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_DEBUG, OUTPUT_TAB_COUNT }
 #define OUTLINE_WIDTH 230      /* at most a third of the content width */
 #define MIN_PANE_WIDTH 100     /* the narrowest the editor or preview gets beside the other */
 #define DEBUG_BUTTON_WIDTH 112
-#define DEBUG_BUTTON_MIN_WIDTH 48 /* narrower than this, the buttons hide */
 #define DEBUG_CLOSE_BUTTON_WIDTH 30
-#define DEBUG_STATUS_MIN_WIDTH 40
 #define DEBUG_NAME_COLUMN_WIDTH 220
 #define DEBUG_VALUE_COLUMN_WIDTH 640
 #define OUTPUT_PANEL_HEIGHT 220     /* until the user drags the splitter above it */

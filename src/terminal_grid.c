@@ -580,9 +580,6 @@ void terminal_grid_resize(TerminalGrid *grid, int cols, int rows) {
     grid->dirty = 1;
 }
 
-int terminal_grid_cols(const TerminalGrid *grid) { return grid->cols; }
-int terminal_grid_rows(const TerminalGrid *grid) { return grid->rows; }
-
 void terminal_grid_cursor(const TerminalGrid *grid, int *col, int *row, int *visible) {
     if (col) *col = grid->cursorCol;
     if (row) *row = grid->cursorRow;

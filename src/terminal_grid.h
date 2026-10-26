@@ -53,8 +53,6 @@ void terminal_grid_free(TerminalGrid *grid);
 /* Clips or pads the screen in place; scrollback and its rows are untouched
    (no reflow - see the Terminal tab's stated non-goals). */
 void terminal_grid_resize(TerminalGrid *grid, int cols, int rows);
-int terminal_grid_cols(const TerminalGrid *grid);
-int terminal_grid_rows(const TerminalGrid *grid);
 
 /* Parses bytes as UTF-8 VT/xterm output, updating the screen, cursor and
    scrollback. May call reply (possibly more than once) with bytes to send
@@ -81,7 +79,7 @@ int terminal_grid_total_lines(const TerminalGrid *grid);
 /* The line at lineIndex (0 is the oldest scrollback line; scrollback_count()
    and up are the screen rows), and how many cells it holds - a scrollback
    line keeps the width it was pushed off the screen with, which may differ
-   from today's terminal_grid_cols(). NULL when lineIndex is out of range. */
+   from the screen's current width. NULL when lineIndex is out of range. */
 const TerminalCell *terminal_grid_line_at(const TerminalGrid *grid, int lineIndex, int *width);
 
 /* Whether anything has changed since the last call, which also clears the

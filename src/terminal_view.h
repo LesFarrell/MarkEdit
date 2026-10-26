@@ -46,8 +46,6 @@ int terminal_view_start(TerminalView *view, const WCHAR *commandLine, const WCHA
    shell to have printed anything itself (e.g. it couldn't be started). */
 void terminal_view_show_message(TerminalView *view, const WCHAR *message);
 int terminal_view_running(const TerminalView *view);
-/* The shell's exit code, valid once TVN_EXITED has been sent. */
-DWORD terminal_view_exit_code(const TerminalView *view);
 /* Ends the shell and everything it started, without waiting for its last output. */
 void terminal_view_stop(TerminalView *view);
 /* Drops scrollback and clears the screen, keeping the shell running - like
