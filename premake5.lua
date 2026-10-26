@@ -345,6 +345,7 @@ test_project("test_core", { "src/text_codec.c", "src/workspace_text.c", "src/fil
 test_project("test_output", { "src/output_text.c", "src/output_text.h", "src/output_process.c",
                               "src/output_process.h" }, {})
 test_project("test_terminal_grid", { "src/terminal_grid.c", "src/terminal_grid.h" }, {})
+test_project("test_terminal_input", { "src/terminal_input.c", "src/terminal_input.h" }, {})
 test_project("test_terminal_process", { "src/terminal_process.c", "src/terminal_process.h" }, { "user32" })
 test_project("test_recovery", { "src/recovery.c", "src/file_io.c", "src/text_codec.c", "src/path_utils.c" },
              { "ole32" })

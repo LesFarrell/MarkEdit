@@ -2,11 +2,13 @@
 
 #include <commctrl.h> /* SetWindowSubclass */
 #include <windowsx.h> /* GET_X_LPARAM/GET_Y_LPARAM */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "terminal_grid.h"
+#include "terminal_input.h"
 #include "terminal_process.h"
 
 /* Private message the process's reader thread posts chunks with; scoped to
@@ -34,7 +36,8 @@ struct TerminalView {
     int selecting_any;
     int anchorLine, anchorCol, pointLine, pointCol;
 
-    int consumeNextChar; /* WM_KEYDOWN fully handled a key that may still produce a WM_CHAR */
+    unsigned int consumeCharCount; /* queued WM_(SYS)CHAR messages already handled as keys */
+    int suppressTranslatedChar; /* set while the current pretranslated key is dispatched */
 };
 
 static int next_session = 1;
@@ -286,44 +289,43 @@ static void paint_view(TerminalView *view, HDC hdc, const RECT *client) {
 
 /* ---- keyboard ---- */
 
-static void send_text(TerminalView *view, const char *text) {
-    if (view->running) terminal_process_write(view->process, text, strlen(text));
+static void send_bytes(TerminalView *view, const char *bytes, size_t length) {
+    if (view->running) terminal_process_write(view->process, bytes, length);
 }
 
-/* Virtual keys with no WM_CHAR translation of their own; everything else
-   (letters, digits, Enter, Tab, Backspace, Escape, Ctrl+letter) arrives as
-   WM_CHAR instead, via the app's normal TranslateMessage() pipeline, and is
-   forwarded to the shell byte for byte. */
+static unsigned int key_modifiers(void) {
+    unsigned int modifiers = 0;
+    if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= TERMINAL_MOD_SHIFT;
+    if (GetKeyState(VK_MENU) & 0x8000) modifiers |= TERMINAL_MOD_ALT;
+    if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= TERMINAL_MOD_CONTROL;
+    return modifiers;
+}
+
+/* Virtual keys that need VT sequences instead of their WM_CHAR translation.
+   Printable keys and control characters still use TranslateMessage(), which
+   preserves the active keyboard layout and dead-key composition. */
 static int handle_special_key(TerminalView *view, WPARAM key) {
-    int app = terminal_grid_app_cursor_keys(view->grid);
-    switch (key) {
-        case VK_UP: send_text(view, app ? "\x1bOA" : "\x1b[A"); return 1;
-        case VK_DOWN: send_text(view, app ? "\x1bOB" : "\x1b[B"); return 1;
-        case VK_RIGHT: send_text(view, app ? "\x1bOC" : "\x1b[C"); return 1;
-        case VK_LEFT: send_text(view, app ? "\x1bOD" : "\x1b[D"); return 1;
-        case VK_HOME: send_text(view, "\x1b[H"); return 1;
-        case VK_END: send_text(view, "\x1b[F"); return 1;
-        case VK_PRIOR: send_text(view, "\x1b[5~"); return 1;
-        case VK_NEXT: send_text(view, "\x1b[6~"); return 1;
-        case VK_INSERT:
-            if (GetKeyState(VK_SHIFT) & 0x8000) { paste_clipboard(view); return 1; }
-            send_text(view, "\x1b[2~");
-            return 1;
-        case VK_DELETE: send_text(view, "\x1b[3~"); return 1;
-        case VK_F1: case VK_F2: case VK_F3: case VK_F4:
-            send_text(view, key == VK_F1 ? "\x1bOP" : key == VK_F2 ? "\x1bOQ" :
-                            key == VK_F3 ? "\x1bOR" : "\x1bOS");
-            return 1;
-        case VK_F5: case VK_F6: case VK_F7: case VK_F8:
-        case VK_F9: case VK_F10: case VK_F11: case VK_F12: {
-            static const int codes[] = {15, 17, 18, 19, 20, 21, 23, 24};
-            char sequence[16];
-            snprintf(sequence, sizeof(sequence), "\x1b[%d~", codes[key - VK_F5]);
-            send_text(view, sequence);
-            return 1;
-        }
-        default: return 0;
+    unsigned int modifiers = key_modifiers();
+    if (key == VK_INSERT && (modifiers & TERMINAL_MOD_SHIFT)) {
+        paste_clipboard(view);
+        return 1;
     }
+    char sequence[24];
+    size_t length = terminal_input_sequence((unsigned int)key, modifiers,
+                                            terminal_grid_app_cursor_keys(view->grid),
+                                            sequence, sizeof(sequence));
+    if (!length) return 0;
+    send_bytes(view, sequence, length);
+    return 1;
+}
+
+static void send_character(TerminalView *view, WCHAR ch, int prefixEscape) {
+    char utf8[8];
+    int offset = prefixEscape ? 1 : 0;
+    if (prefixEscape) utf8[0] = '\x1b';
+    int length = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, utf8 + offset,
+                                     (int)sizeof(utf8) - offset, NULL, NULL);
+    if (length > 0) send_bytes(view, utf8, (size_t)(length + offset));
 }
 
 /* ---- the process's output ---- */
@@ -448,40 +450,76 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             }
             return 0;
         }
-        case WM_KEYDOWN: {
+        case WM_KEYDOWN: case WM_SYSKEYDOWN: {
             int ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             int shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (ctrl && shift && (wParam == 'C')) { copy_selection(view); view->consumeNextChar = 1; return 0; }
-            if (ctrl && shift && (wParam == 'V')) { paste_clipboard(view); view->consumeNextChar = 1; return 0; }
+            if (ctrl && shift && (wParam == 'C')) {
+                copy_selection(view);
+                view->suppressTranslatedChar = 1;
+                return 0;
+            }
+            if (ctrl && shift && (wParam == 'V')) {
+                paste_clipboard(view);
+                view->suppressTranslatedChar = 1;
+                return 0;
+            }
             if (!view->running) {
                 if (wParam != VK_SHIFT && wParam != VK_CONTROL && wParam != VK_MENU) {
-                    view->consumeNextChar = 1;
+                    view->suppressTranslatedChar = 1;
                     send_notification(view, TVN_RESTART_REQUESTED);
                 }
                 return 0;
             }
             if (view->scrollOffset != 0 && wParam != VK_SHIFT && wParam != VK_CONTROL && wParam != VK_MENU)
                 view->scrollOffset = 0; /* typing returns the view to the live tail */
-            if (handle_special_key(view, wParam)) { InvalidateRect(hwnd, NULL, FALSE); return 0; }
-            return 0;
-        }
-        case WM_CHAR: {
-            if (view->consumeNextChar) { view->consumeNextChar = 0; return 0; }
-            if (!view->running) return 0;
-            WCHAR ch = (WCHAR)wParam;
-            int utf8Length = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, NULL, 0, NULL, NULL);
-            if (utf8Length > 0 && utf8Length < 8 && view->running) {
-                char utf8[8];
-                WideCharToMultiByte(CP_UTF8, 0, &ch, 1, utf8, utf8Length, NULL, NULL);
-                terminal_process_write(view->process, utf8, (size_t)utf8Length);
+            if (handle_special_key(view, wParam)) {
+                view->suppressTranslatedChar = 1;
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
             }
             return 0;
         }
+        case WM_CHAR: case WM_SYSCHAR: {
+            if (view->consumeCharCount) { view->consumeCharCount--; return 0; }
+            if (!view->running) return 0;
+            /* Right Alt plus Control is AltGr, which types a layout character
+               rather than a Meta-prefixed character. */
+            int altGr = (GetKeyState(VK_RMENU) & 0x8000) &&
+                        (GetKeyState(VK_CONTROL) & 0x8000);
+            send_character(view, (WCHAR)wParam, msg == WM_SYSCHAR && !altGr);
+            return 0;
+        }
+        case WM_DEADCHAR:
+        case WM_SYSDEADCHAR:
+        case WM_SYSKEYUP:
+            return 0; /* keep Alt input from activating the application menu */
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, TerminalViewSubclassProc, 1);
             break;
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+int terminal_view_pretranslate_message(TerminalView *view, const MSG *message) {
+    if (!view || !view->hwnd || !message ||
+        (message->hwnd != view->hwnd && !IsChild(view->hwnd, message->hwnd)))
+        return 0;
+    switch (message->message) {
+        case WM_KEYDOWN: case WM_SYSKEYDOWN:
+            view->suppressTranslatedChar = 0;
+            int translated = TranslateMessage(message);
+            DispatchMessage(message);
+            if (translated && view->suppressTranslatedChar && view->consumeCharCount < UINT_MAX)
+                view->consumeCharCount++;
+            return 1;
+        case WM_KEYUP: case WM_SYSKEYUP:
+        case WM_CHAR: case WM_SYSCHAR:
+        case WM_DEADCHAR: case WM_SYSDEADCHAR:
+            DispatchMessage(message);
+            return 1;
+        default:
+            return 0;
+    }
 }
 
 /* ---- lifecycle ---- */

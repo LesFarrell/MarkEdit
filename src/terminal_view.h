@@ -31,6 +31,10 @@ TerminalView *terminal_view_create(HWND parent, int id);
 HWND terminal_view_window(const TerminalView *view);
 void terminal_view_free(TerminalView *view);
 
+/* Gives terminal-focused key presses priority over the main window's editor
+   accelerators. Returns nonzero after translating and dispatching the key. */
+int terminal_view_pretranslate_message(TerminalView *view, const MSG *message);
+
 /* Starts commandLine (a shell) in directory, sized to the control's current
    client area. Ends any shell already running first. Returns 0 when ConPTY
    isn't available on this Windows or the shell can't be started. */

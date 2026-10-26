@@ -1259,6 +1259,7 @@ static int run_message_loop(HWND mainWindow) {
     MSG message;
     int result;
     while ((result = GetMessage(&message, NULL, 0, 0)) > 0) {
+        if (terminal_view_pretranslate_message(g_terminalView, &message)) continue;
         if (find_dialog_shortcut(&message)) continue;
         if (g_hFindDlg && IsDialogMessage(g_hFindDlg, &message)) continue;
         if (explorer_pretranslate_message(&message)) continue;

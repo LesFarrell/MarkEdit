@@ -46,3 +46,4 @@ third_party/webview2/x64/WebView2LoaderStatic.lib
 # Interrupted atomic writes
 *.markedit-*.tmp
 /tests/*
+test.bat
