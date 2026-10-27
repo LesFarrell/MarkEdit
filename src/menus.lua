@@ -130,6 +130,7 @@ return {
     { "&File Explorer", "view.file_explorer" },
     { "Output Pa&nel", "view.output_panel" },
     { "Te&rminal", "view.terminal" },
+    { "&Problems", "view.problems" },
     { "Mini&map", "view.minimap" },
     { "Split Editor &Horizontally", "view.split_editor" },
     { "Split Editor &Vertically", "view.split_editor_vertical" },
@@ -150,6 +151,12 @@ return {
   } },
 
   { "&Tools", {
+    { "&Git", {
+      { "&Status", "git.status" },
+      { "Diff Current &File", "git.diff_file" },
+      { "Diff &Workspace", "git.diff_workspace" },
+    } },
+    "-",
     { "Settin&gs...", "tools.settings" },
   } },
 
@@ -160,6 +167,8 @@ return {
     { "&New Plugin...", "plugins.new" },
     { "Open Plugins &Folder", "plugins.open_folder" },
     { "&Manage Plugins...", "plugins.manage" },
+    { "Performance &Diagnostics", "plugins.performance" },
+    { "Clear Performance D&iagnostics", "plugins.clear_performance" },
     { "&Customize Menus...", "plugins.customize_menus" },
     { "Customize &Theme Colours...", "plugins.customize_theme" },
   } },

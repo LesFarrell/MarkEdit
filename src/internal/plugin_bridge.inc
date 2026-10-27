@@ -112,6 +112,33 @@ static void plugin_output_show(void) { show_output_panel(g_hMainWnd, OUTPUT_TAB_
 static void plugin_output_hide(void) { hide_output_panel(g_hMainWnd); }
 static int plugin_output_visible(void) { return g_outputPanelVisible; }
 
+static void plugin_problems_report(const char *source, const char *text) {
+    WCHAR *directory = g_currentFile ? path_directory(g_currentFile)
+                                     : (g_currentWorkspaceFolder ? _wcsdup(g_currentWorkspaceFolder) : NULL);
+    set_problem_report(source, text, directory);
+    free(directory);
+}
+
+static void refresh_plugin_performance_problems(void) {
+    char *warnings = plugin_host_performance_report(1);
+    set_problem_report("Plugin Performance", warnings, NULL);
+    free(warnings);
+}
+
+static void show_plugin_performance(void) {
+    char *report = plugin_host_performance_report(0);
+    set_problem_report("Plugin Performance",
+        report ? report : "No plugin callbacks have run since plugins were loaded.", NULL);
+    free(report);
+    show_output_panel(g_hMainWnd, OUTPUT_TAB_PROBLEMS, 1);
+}
+
+static void clear_plugin_performance(void) {
+    plugin_host_clear_performance();
+    set_problem_report("Plugin Performance", NULL, NULL);
+    show_plugin_reload_status(L"Plugin diagnostics cleared");
+}
+
 static char *plugin_pick_path(const char *title, int folder) {
     if (folder) {
         WCHAR *path = choose_workspace_folder();
@@ -627,7 +654,7 @@ static void load_menus_and_plugins(void) {
         .spell_language = plugin_spell_language, .spell_check = plugin_spell_check,
         .output_write = plugin_output_write, .output_clear = plugin_output_clear,
         .output_show = plugin_output_show, .output_hide = plugin_output_hide,
-        .output_visible = plugin_output_visible,
+        .output_visible = plugin_output_visible, .problems_report = plugin_problems_report,
     };
     plugin_host_set_callbacks(&callbacks);
     plugin_host_shutdown();
@@ -929,6 +956,7 @@ static void run_plugin_command(int index) {
     int wasDirty = g_dirty;
     g_pluginChangedSaveEncoding = 0;
     char *error = plugin_host_run(index, active_edit_view());
+    refresh_plugin_performance_problems();
     sync_dirty_after_plugin(wasDirty);
     if (error) show_plugin_error(error);
     free(error);
@@ -944,6 +972,7 @@ static void run_plugin_context_menu_item(int id, HWND hEdit) {
     int wasDirty = g_dirty;
     g_pluginChangedSaveEncoding = 0;
     char *error = plugin_host_run_context_menu_item(id, hEdit);
+    refresh_plugin_performance_problems();
     sync_dirty_after_plugin(wasDirty);
     if (error) show_plugin_error(error);
     free(error);
@@ -978,6 +1007,8 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
     if (cmd == IDM_PLUGIN_OPEN_FOLDER) { open_plugin_folder(); return; }
     if (cmd == IDM_PLUGIN_NEW) { new_plugin(); return; }
     if (cmd == IDM_PLUGIN_MANAGE) { manage_plugins(); return; }
+    if (cmd == IDM_PLUGIN_PERFORMANCE) { show_plugin_performance(); return; }
+    if (cmd == IDM_PLUGIN_CLEAR_PERFORMANCE) { clear_plugin_performance(); return; }
     if (cmd >= IDM_FILE_RECENT_0 && cmd < IDM_FILE_RECENT_0 + MAX_RECENT_FILES) {
         do_open_recent(cmd - IDM_FILE_RECENT_0);
         return;
@@ -992,6 +1023,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
     if (handle_edit_command(cmd)) return;
     if (handle_format_command(cmd)) return;
     if (handle_debug_command(cmd)) return;
+    if (handle_git_command(cmd)) return;
     if (handle_view_command(hwnd, cmd)) return;
     if (handle_help_command(cmd)) return;
 }

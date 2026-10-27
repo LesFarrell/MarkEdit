@@ -417,6 +417,16 @@ end
 local function mark(result, start)
   clear_marks()
   local notes, order = {}, {}
+  local problem_lines = {}
+  local path = editor.file_path()
+  local function location(position)
+    local line = editor.line_at(position)
+    local line_start = editor.line_range(line)
+    local before = editor.get_range(line_start, position - 1)
+    local column = (utf8.len(before) or #before) + 1
+    return path and string.format("%s:%d:%d", path, line, column)
+      or string.format("Line %d, column %d", line, column)
+  end
   local function note(line, text)
     if not notes[line] then
       notes[line] = {}
@@ -433,6 +443,8 @@ local function mark(result, start)
     note(editor.line_at(position), string.format(
       "JSON warning: \"%s\" is repeated in this object; most readers ignore the earlier one on line %d.",
       key, editor.line_at(start + repeated.first - 1)))
+    problem_lines[#problem_lines + 1] = string.format("%s: Repeated key \"%s\".",
+      location(position), key)
   end
 
   local position, line, column
@@ -450,12 +462,18 @@ local function mark(result, start)
       editor.indicator(position, math.min(position + #character - 1, length), ERROR_INDICATOR, ERROR_COLOUR)
     end
     note(line, "JSON: " .. result.error_message)
+    problem_lines[#problem_lines + 1] = string.format("%s: %s", location(position), result.error_message)
   end
 
   for _, noteLine in ipairs(order) do
     editor.annotation(noteLine, table.concat(notes[noteLine], "\n"))
   end
   marked = #order > 0
+  if #problem_lines > 0 then
+    problems.report("JSON", table.concat(problem_lines, "\n"))
+  else
+    problems.clear("JSON")
+  end
   return position, line, column, result.error_message
 end
 
@@ -536,6 +554,7 @@ local function live_check()
     mark(scan_range(1, length, mode), 1)
   elseif marked then
     clear_marks()
+    problems.clear("JSON")
   end
 end
 

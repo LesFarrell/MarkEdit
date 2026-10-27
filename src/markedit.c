@@ -351,6 +351,25 @@ static int g_recentFileCount = 0;
 static WCHAR *g_recentFolders[MAX_RECENT_FOLDERS];
 static int g_recentFolderCount = 0;
 static WCHAR *g_currentWorkspaceFolder = NULL;
+/* Updated by the hidden asynchronous Git status process. The status bar can
+   paint this without waiting for git, and document tabs use the path table
+   below for their one-character working-tree decorations. */
+static WCHAR g_gitStatusText[128] = L"";
+#define GIT_STATUS_FILE_MAX 4096
+typedef struct { WCHAR *path; WCHAR status; } GitStatusFile;
+static GitStatusFile g_gitStatusFiles[GIT_STATUS_FILE_MAX];
+static int g_gitStatusFileCount = 0;
+
+static WCHAR git_status_for_path(const WCHAR *path) {
+    if (!path || !g_currentWorkspaceFolder) return 0;
+    size_t rootLength = wcslen(g_currentWorkspaceFolder);
+    if (_wcsnicmp(path, g_currentWorkspaceFolder, rootLength) != 0) return 0;
+    const WCHAR *relative = path + rootLength;
+    while (*relative == L'\\' || *relative == L'/') relative++;
+    for (int i = 0; i < g_gitStatusFileCount; i++)
+        if (_wcsicmp(relative, g_gitStatusFiles[i].path) == 0) return g_gitStatusFiles[i].status;
+    return 0;
+}
 
 static HWND g_hFindDlg = NULL;
 WCHAR g_findWhat[256] = L"";
@@ -606,6 +625,7 @@ static void run_deferred_startup_init(void) {
     } else if (!restore_recovery_snapshot()) {
         restore_session_documents();
     }
+    refresh_git_status();
 }
 
 static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotification *scn) {
@@ -832,6 +852,7 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
         int wasDirty = g_dirty;
         g_pluginChangedSaveEncoding = 0;
         char *error = plugin_host_run_deferred((int)(timerId - IDT_PLUGIN_DEFER_BASE), g_hEdit);
+        refresh_plugin_performance_problems();
         sync_dirty_after_plugin(wasDirty);
         if (error) show_plugin_error(error);
         free(error);
@@ -991,6 +1012,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         case WM_APP_OUTPUT:
             handle_output_chunk((OutputChunk *)lParam);
+            return 0;
+        case WM_APP_GIT_STATUS:
+            handle_git_status_chunk((OutputChunk *)lParam);
             return 0;
         case WM_CREATE:
             initialize_main_window(hwnd);

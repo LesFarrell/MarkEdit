@@ -57,15 +57,25 @@ static const WCHAR *document_short_name(const Document *doc) {
 
 static void format_document_label(const Document *doc, WCHAR *label, size_t capacity) {
     const WCHAR *shortName = document_short_name(doc);
+    WCHAR git = git_status_for_path(doc->path);
+    WCHAR suffix[8] = L"";
+    if (doc->dirty) wcscat(suffix, L" *");
+    if (git) {
+        size_t used = wcslen(suffix);
+        if (used + 2 < sizeof(suffix) / sizeof(suffix[0])) {
+            suffix[used++] = L' ';
+            suffix[used++] = git;
+            suffix[used] = 0;
+        }
+    }
     if (doc->isReference && !shortName) {
-        swprintf(label, capacity, L"%ls%ls", reference_title(doc->isReference), doc->dirty ? L" *" : L"");
+        swprintf(label, capacity, L"%ls%ls", reference_title(doc->isReference), suffix);
     } else if (shortName && shortName[0]) {
-        swprintf(label, capacity, L"%ls%ls", shortName, doc->dirty ? L" *" : L"");
+        swprintf(label, capacity, L"%ls%ls", shortName, suffix);
     } else if (doc->untitledNumber == 0) {
-        swprintf(label, capacity, L"Untitled.txt%ls", doc->dirty ? L" *" : L"");
+        swprintf(label, capacity, L"Untitled.txt%ls", suffix);
     } else {
-        swprintf(label, capacity, L"Untitled %u%ls",
-                 doc->untitledNumber, doc->dirty ? L" *" : L"");
+        swprintf(label, capacity, L"Untitled %u%ls", doc->untitledNumber, suffix);
     }
 }
 
@@ -1395,7 +1405,10 @@ static int save_to_path(const WCHAR *requestedPath) {
     fire_plugin_event("before_save", path);
     fire_plugin_event("save", path);
     int ok = write_active_document(path);
-    if (ok) fire_plugin_event("after_save", path);
+    if (ok) {
+        fire_plugin_event("after_save", path);
+        refresh_git_status();
+    }
     free(path);
     return ok;
 }

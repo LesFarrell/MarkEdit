@@ -191,6 +191,15 @@ function output.hide() end
 ---@return boolean
 function output.visible() end
 
+problems = {}
+---Replaces a named source's report in the Problems tab without removing other sources.
+---@param source string
+---@param text string
+function problems.report(source, text) end
+---Removes one named source's report from the Problems tab.
+---@param source string
+function problems.clear(source) end
+
 spell = {}
 ---The Windows spelling dictionary's locale name, such as "en-GB", or nil when
 ---Windows has none.

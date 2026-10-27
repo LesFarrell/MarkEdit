@@ -8,7 +8,7 @@
 /* The output panel's tabs (see output_panel.inc). Declared here, rather than
    there, so debugger.inc - included before output_panel.inc in markedit.c's
    unity build - can name OUTPUT_TAB_DEBUG when starting a debug session. */
-enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_DEBUG, OUTPUT_TAB_COUNT };
+enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBUG, OUTPUT_TAB_COUNT };
 
 /* ---- child control IDs ---- */
 #define ID_EDIT    101
@@ -30,6 +30,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_DEBUG, OUTPUT_TAB_COUNT }
 #define ID_OUTPUT_STOP 119
 #define ID_OUTPUT_CLOSE 120
 #define ID_OUTPUT_TAB_DEBUG 121
+#define ID_OUTPUT_TAB_PROBLEMS 122
 
 /* ---- timer IDs ---- */
 #define IDT_PREVIEW_UPDATE 1
@@ -75,6 +76,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_DEBUG, OUTPUT_TAB_COUNT }
 #define WM_APP_APPLY_LARGE_FILE_MODE (WM_APP + 5)
 #define WM_APP_PLUGIN_DOCUMENT_ACTION (WM_APP + 6)
 #define WM_APP_OUTPUT (WM_APP + 7) /* an OutputChunk from output_process.c */
+#define WM_APP_GIT_STATUS (WM_APP + 8) /* hidden asynchronous git status */
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
 #define TAB_ITEM_WIDTH 120 /* each document tab, in 96-DPI pixels like the sizes below */
@@ -140,6 +142,8 @@ static void schedule_spell_check(void);
 static void perform_spell_check(void);
 static void update_status_position(void);
 static void update_status_bar(void);
+static void refresh_git_status(void);
+static void refresh_plugin_performance_problems(void);
 static void write_recovery_snapshot(void);
 static void close_recovery_session(void);
 static int restore_recovery_snapshot(void);

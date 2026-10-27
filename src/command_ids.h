@@ -66,6 +66,12 @@
 #define IDM_VIEW_TERMINAL          405
 #define IDM_RUN_USE_CONSOLE        406
 #define IDM_VIEW_CHANGED_LINES     407
+#define IDM_VIEW_PROBLEMS          408
+#define IDM_GIT_REFRESH            409
+#define IDM_GIT_DIFF_FILE          410
+#define IDM_GIT_DIFF_WORKSPACE     411
+#define IDM_PLUGIN_PERFORMANCE     412
+#define IDM_PLUGIN_CLEAR_PERFORMANCE 413
 #define IDM_PLUGIN_COMMAND_0      2000 /* IDM_PLUGIN_COMMAND_0 .. IDM_PLUGIN_COMMAND_0+PLUGIN_MAX_COMMANDS-1 */
 
 /* ---- menu command IDs: Markdown formatting toolbar/menu ---- */

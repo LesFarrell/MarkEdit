@@ -548,6 +548,7 @@ void plugin_host_shutdown(void) {
         s_lua = NULL;
     }
     s_memory.used = 0;
+    plugin_host_clear_performance();
 }
 
 int plugin_host_is_busy(void) {

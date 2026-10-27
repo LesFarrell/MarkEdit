@@ -175,7 +175,7 @@ Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.
 
 ### app
 
-`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), while API 4 adds `context_menu`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
+`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), API 4 adds `context_menu`, and API 5 adds the [`problems`](#problems) diagnostics table. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
 
 ### documents
 

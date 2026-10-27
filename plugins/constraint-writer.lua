@@ -260,7 +260,10 @@ local function check_constraints()
     failures = failures + count
   end
   if failures == 0 then lines[#lines + 1] = "All active constraints are satisfied." end
-  output.report("Constraint Writer", table.concat(lines, "\n"))
+  local report = table.concat(lines, "\n")
+  if failures > 0 then problems.report("Constraint Writer", report)
+  else problems.clear("Constraint Writer") end
+  output.report("Constraint Writer", report)
 end
 
 local function set_number(key, label, default, maximum)

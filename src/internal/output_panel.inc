@@ -1,4 +1,4 @@
-/* ---- The output panel: Run's output, a real terminal, and the debugger --
+/* ---- The output panel: Run output, a terminal, problems, and debugger --
    Docked under the editor and preview with a splitter above it (see
    layout_output_panel()). The Output tab is a read-only Scintilla log that
    scrolls sideways rather than wraps, showing whatever Run started plus
@@ -20,6 +20,7 @@
 
 #define OUTPUT_MAX_LENGTH (4 * 1024 * 1024) /* older output is dropped beyond this */
 #define OUTPUT_HISTORY_SIZE 50
+#define PROBLEM_REPORT_MAX 64
 
 /* Styles of the panel's own text, after the decoder's ANSI colours. */
 enum { OUTPUT_STYLE_NOTE = OUTPUT_STYLE_COUNT, OUTPUT_STYLE_FAILURE, OUTPUT_STYLE_INPUT };
@@ -45,6 +46,18 @@ static HWND g_hOutputClear, g_hOutputStop, g_hOutputClose;
 static char *g_outputHistory[OUTPUT_HISTORY_SIZE];
 static int g_outputHistoryCount = 0;
 static int g_outputHistoryIndex = 0; /* g_outputHistoryCount while not browsing it */
+static OutputProcess *g_gitStatusProcess;
+static int g_gitStatusSession;
+static char *g_gitStatusOutput;
+static size_t g_gitStatusOutputLength;
+
+typedef struct ProblemReport {
+    char *source;
+    char *text;
+    WCHAR *directory;
+} ProblemReport;
+static ProblemReport g_problemReports[PROBLEM_REPORT_MAX];
+static int g_problemReportCount = 0;
 
 /* The 16 ANSI colours, as most terminals show them on a light and on a dark
    background. Dark's "black" is grey, so text in it stays readable. */
@@ -82,8 +95,8 @@ static int focus_outside_editor_area(void) {
 /* Whether the given tab has something running - the Run tab's OutputProcess,
    or the Terminal tab's own shell. */
 static int tab_running(int tab) {
-    return tab == OUTPUT_TAB_TERMINAL ? terminal_view_running(g_terminalView)
-                                      : output_pane_running(&g_outputPanes[tab]);
+    if (tab == OUTPUT_TAB_TERMINAL) return terminal_view_running(g_terminalView);
+    return tab == OUTPUT_TAB_RUN && output_pane_running(&g_outputPanes[tab]);
 }
 
 /* Where Tab/pane-cycling (ui_shell.inc's cycle_pane_focus) should send focus
@@ -92,6 +105,7 @@ static int tab_running(int tab) {
    Debug tab's variables list. */
 static HWND active_output_focus_target(void) {
     if (g_outputTab == OUTPUT_TAB_TERMINAL) return terminal_view_window(g_terminalView);
+    if (g_outputTab == OUTPUT_TAB_PROBLEMS) return g_outputPanes[OUTPUT_TAB_PROBLEMS].view;
     if (g_outputTab == OUTPUT_TAB_DEBUG) return g_hDebugVariables;
     return g_hOutputInput;
 }
@@ -156,13 +170,15 @@ static void apply_debug_tab_theme(void) {
 static void apply_output_panel_theme(void) {
     if (!g_hOutputPanel) return;
     apply_output_view_theme(g_outputPanes[OUTPUT_TAB_RUN].view);
+    apply_output_view_theme(g_outputPanes[OUTPUT_TAB_PROBLEMS].view);
     apply_output_view_theme(g_hOutputInput);
     const ThemePalette *p = theme_palette();
     const COLORREF *ansi = g_editorDarkMode ? OUTPUT_ANSI_DARK : OUTPUT_ANSI_LIGHT;
     terminal_view_apply_theme(g_terminalView, ansi, p->fg, p->bg);
     apply_debug_tab_theme();
     InvalidateRect(g_hOutputPanel, NULL, TRUE);
-    HWND buttons[] = { g_outputPanes[0].tab, g_outputPanes[1].tab, g_outputPanes[2].tab,
+    HWND buttons[] = { g_outputPanes[0].tab, g_outputPanes[1].tab,
+                       g_outputPanes[2].tab, g_outputPanes[3].tab,
                        g_hOutputClear, g_hOutputStop, g_hOutputClose,
                        g_hDebugContinue, g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut };
     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++)
@@ -173,7 +189,8 @@ static void apply_output_panel_theme(void) {
    and the Terminal tab. */
 static void apply_output_panel_font(const char *faceUtf8) {
     if (!g_hOutputPanel) return;
-    HWND views[] = { g_outputPanes[OUTPUT_TAB_RUN].view, g_hOutputInput };
+    HWND views[] = { g_outputPanes[OUTPUT_TAB_RUN].view,
+                     g_outputPanes[OUTPUT_TAB_PROBLEMS].view, g_hOutputInput };
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); i++) {
         SendMessageA(views[i], SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)faceUtf8);
         SendMessageA(views[i], SCI_STYLESETSIZE, STYLE_DEFAULT, g_fontPointSize);
@@ -258,6 +275,256 @@ static void clear_output_pane(OutputPane *pane) {
     pane->replaceLine = 0;
 }
 
+static void render_problem_reports(void) {
+    OutputPane *pane = &g_outputPanes[OUTPUT_TAB_PROBLEMS];
+    clear_output_pane(pane);
+    free(pane->directory);
+    pane->directory = NULL;
+    for (int i = 0; i < g_problemReportCount; i++) {
+        ProblemReport *report = &g_problemReports[i];
+        if (!pane->directory && report->directory) pane->directory = _wcsdup(report->directory);
+        if (i) append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+        append_output(pane, OUTPUT_STYLE_NOTE, "[", 1);
+        append_output(pane, OUTPUT_STYLE_NOTE, report->source, strlen(report->source));
+        append_output(pane, OUTPUT_STYLE_NOTE, "]\n", 2);
+        append_output(pane, OUTPUT_STYLE_DEFAULT, report->text, strlen(report->text));
+        size_t length = strlen(report->text);
+        if (!length || report->text[length - 1] != '\n')
+            append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+    }
+}
+
+/* Replaces one diagnostics producer's contribution without disturbing other
+   sources. Passing empty text removes it. Reports are bounded by source count
+   and the Problems Scintilla's existing output cap. */
+static void set_problem_report(const char *source, const char *text, const WCHAR *directory) {
+    if (!source || !source[0]) return;
+    int index = -1;
+    for (int i = 0; i < g_problemReportCount; i++)
+        if (strcmp(g_problemReports[i].source, source) == 0) { index = i; break; }
+    if (!text || !text[0]) {
+        if (index < 0) return;
+        free(g_problemReports[index].source);
+        free(g_problemReports[index].text);
+        free(g_problemReports[index].directory);
+        memmove(&g_problemReports[index], &g_problemReports[index + 1],
+                (size_t)(g_problemReportCount - index - 1) * sizeof(g_problemReports[0]));
+        g_problemReportCount--;
+        memset(&g_problemReports[g_problemReportCount], 0, sizeof(g_problemReports[0]));
+        render_problem_reports();
+        return;
+    }
+    if (index < 0) {
+        if (g_problemReportCount >= PROBLEM_REPORT_MAX) return;
+        index = g_problemReportCount++;
+        g_problemReports[index].source = _strdup(source);
+    }
+    char *copy = _strdup(text);
+    WCHAR *directoryCopy = directory ? _wcsdup(directory) : NULL;
+    if (!g_problemReports[index].source || !copy) {
+        free(copy); free(directoryCopy);
+        return;
+    }
+    free(g_problemReports[index].text);
+    free(g_problemReports[index].directory);
+    g_problemReports[index].text = copy;
+    g_problemReports[index].directory = directoryCopy;
+    render_problem_reports();
+}
+
+static void clear_problem_reports(void) {
+    for (int i = 0; i < g_problemReportCount; i++) {
+        free(g_problemReports[i].source);
+        free(g_problemReports[i].text);
+        free(g_problemReports[i].directory);
+    }
+    memset(g_problemReports, 0, sizeof(g_problemReports));
+    g_problemReportCount = 0;
+    render_problem_reports();
+}
+
+static char *collect_output_locations(OutputPane *pane) {
+    Sci_Position length = (Sci_Position)SendMessageA(pane->view, SCI_GETLENGTH, 0, 0);
+    if (length <= 0) return NULL;
+    char *all = (char *)malloc((size_t)length + 1);
+    if (!all) return NULL;
+    SendMessageA(pane->view, SCI_GETTEXT, (WPARAM)length + 1, (LPARAM)all);
+    char *report = NULL;
+    size_t used = 0;
+    for (char *line = all; *line;) {
+        char *end = strchr(line, '\n');
+        size_t lineLength = end ? (size_t)(end - line) : strlen(line);
+        OutputLocation location;
+        if (output_find_location(line, lineLength, &location)) {
+            size_t needed = used + lineLength + 2;
+            char *grown = (char *)realloc(report, needed);
+            if (!grown) break;
+            report = grown;
+            memcpy(report + used, line, lineLength);
+            used += lineLength;
+            report[used++] = '\n';
+            report[used] = 0;
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    free(all);
+    return report;
+}
+
+/* ---- Git -------------------------------------------------------------- */
+
+static WCHAR *terminal_directory(void);
+static int run_in_output_panel(const WCHAR *file, const WCHAR *parameters,
+                               const WCHAR *directory, const WCHAR *title);
+
+static void clear_git_status_files(void) {
+    for (int i = 0; i < g_gitStatusFileCount; i++) free(g_gitStatusFiles[i].path);
+    memset(g_gitStatusFiles, 0, sizeof(g_gitStatusFiles));
+    g_gitStatusFileCount = 0;
+}
+
+static void apply_git_status_output(void) {
+    clear_git_status_files();
+    g_gitStatusText[0] = 0;
+    if (!g_gitStatusOutput || strstr(g_gitStatusOutput, "fatal:")) goto finished;
+    char *cursor = g_gitStatusOutput;
+    char branch[96] = "";
+    int staged = 0, changed = 0, untracked = 0, conflicts = 0;
+    while (*cursor) {
+        char *end = strchr(cursor, '\n');
+        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (length && cursor[length - 1] == '\r') length--;
+        if (length > 3 && cursor[0] == '#' && cursor[1] == '#' && cursor[2] == ' ') {
+            size_t n = 0;
+            const char *name = cursor + 3;
+            while (n < length - 3 && n + 1 < sizeof(branch) &&
+                   name[n] != '.' && name[n] != ' ' && name[n] != '\t') {
+                branch[n] = name[n]; n++;
+            }
+            branch[n] = 0;
+        } else if (length >= 4) {
+            char x = cursor[0], y = cursor[1];
+            int conflict = x == 'U' || y == 'U' || (x == 'A' && y == 'A') ||
+                           (x == 'D' && y == 'D');
+            if (x == '?' && y == '?') untracked++;
+            else {
+                if (x != ' ') staged++;
+                if (y != ' ') changed++;
+                if (conflict) conflicts++;
+            }
+            if (g_gitStatusFileCount < GIT_STATUS_FILE_MAX) {
+                const char *path = cursor + 3;
+                const char *arrow = strstr(path, " -> ");
+                if (arrow && arrow < cursor + length) path = arrow + 4;
+                size_t pathLength = (size_t)(cursor + length - path);
+                char *utf8 = (char *)malloc(pathLength + 1);
+                if (utf8) {
+                    memcpy(utf8, path, pathLength); utf8[pathLength] = 0;
+                    WCHAR *wide = to_wide(utf8);
+                    free(utf8);
+                    if (wide) {
+                        for (WCHAR *c = wide; *c; c++) if (*c == L'/') *c = L'\\';
+                        WCHAR mark = conflict ? L'!' : x == '?' ? L'?' :
+                                     (y != ' ' ? (WCHAR)y : (WCHAR)x);
+                        g_gitStatusFiles[g_gitStatusFileCount++] = (GitStatusFile){ wide, mark };
+                    }
+                }
+            }
+        }
+        if (!end) break;
+        cursor = end + 1;
+    }
+    if (branch[0]) {
+        WCHAR *wideBranch = to_wide(branch);
+        int total = staged + changed + untracked;
+        if (wideBranch) {
+            if (total) swprintf(g_gitStatusText, 128, L"git %ls · %d change%ls%ls",
+                wideBranch, total, total == 1 ? L"" : L"s", conflicts ? L" · conflicts" : L"");
+            else swprintf(g_gitStatusText, 128, L"git %ls", wideBranch);
+            free(wideBranch);
+        }
+    }
+finished:
+    for (int i = 0; i < g_documentStore.count; i++) update_tab_label(i);
+    update_status_position();
+}
+
+static void handle_git_status_chunk(OutputChunk *chunk) {
+    if (g_gitStatusProcess && chunk->session == g_gitStatusSession) {
+        if (chunk->length && g_gitStatusOutputLength + chunk->length <= 1024 * 1024) {
+            char *grown = (char *)realloc(g_gitStatusOutput,
+                g_gitStatusOutputLength + chunk->length + 1);
+            if (grown) {
+                g_gitStatusOutput = grown;
+                memcpy(g_gitStatusOutput + g_gitStatusOutputLength, chunk->data, chunk->length);
+                g_gitStatusOutputLength += chunk->length;
+                g_gitStatusOutput[g_gitStatusOutputLength] = 0;
+            }
+        }
+        if (chunk->finished) {
+            output_process_free(g_gitStatusProcess);
+            g_gitStatusProcess = NULL;
+            g_gitStatusSession = 0;
+            apply_git_status_output();
+        }
+    }
+    free(chunk);
+}
+
+static void refresh_git_status(void) {
+    if (!g_hMainWnd || !g_currentWorkspaceFolder) return;
+    if (g_gitStatusProcess) output_process_free(g_gitStatusProcess);
+    g_gitStatusProcess = NULL;
+    free(g_gitStatusOutput);
+    g_gitStatusOutput = NULL;
+    g_gitStatusOutputLength = 0;
+    int session = g_outputNextSession++;
+    g_gitStatusProcess = output_process_start(
+        L"git.exe status --porcelain=v1 --branch --untracked-files=normal",
+        g_currentWorkspaceFolder, NULL, g_hMainWnd, WM_APP_GIT_STATUS, session);
+    if (g_gitStatusProcess) g_gitStatusSession = session;
+    else {
+        clear_git_status_files();
+        g_gitStatusText[0] = 0;
+        update_status_position();
+    }
+}
+
+static int run_git_output(const WCHAR *parameters, const WCHAR *title) {
+    WCHAR *directory = g_currentWorkspaceFolder ? _wcsdup(g_currentWorkspaceFolder)
+                                                : terminal_directory();
+    int started = directory && run_in_output_panel(L"git.exe", parameters, directory, title);
+    free(directory);
+    if (!started)
+        MessageBoxW(g_hMainWnd, L"Git could not be started. Check that git.exe is on PATH.",
+                    L"Git", MB_OK | MB_ICONWARNING);
+    return started;
+}
+
+static void show_git_status(void) {
+    refresh_git_status();
+    run_git_output(L"status --short --branch", L"Git Status");
+}
+
+static void show_git_workspace_diff(void) {
+    run_git_output(L"diff --no-ext-diff", L"Git Workspace Diff");
+}
+
+static void show_git_file_diff(void) {
+    if (!g_currentFile) {
+        MessageBoxW(g_hMainWnd, L"Save the document before opening its Git diff.",
+                    L"Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    size_t capacity = wcslen(g_currentFile) + 40;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"diff --no-ext-diff -- \"%ls\"", g_currentFile);
+    run_git_output(parameters, L"Git File Diff");
+    free(parameters);
+}
+
 /* ---- programs ---- */
 
 /* Ends the pane's program, if any, without waiting for its last output. */
@@ -291,6 +558,11 @@ static void handle_output_chunk(OutputChunk *chunk) {
     if (pane->process && pane->session == chunk->session) {
         output_decoder_feed(&pane->decoder, chunk->data, chunk->length, &OUTPUT_PANE_SINK, pane);
         if (chunk->finished) {
+            char *locations = collect_output_locations(pane);
+            set_problem_report("Build", locations, pane->directory);
+            free(locations);
+            if (chunk->exitCode && g_problemReportCount)
+                show_output_panel(g_hMainWnd, OUTPUT_TAB_PROBLEMS, 0);
             end_output_program(pane);
             update_output_controls();
         }
@@ -371,6 +643,10 @@ static void toggle_output_panel(HWND hwnd) {
 /* View > Terminal (Ctrl+Shift+`). */
 static void show_terminal(HWND hwnd) {
     show_output_panel(hwnd, OUTPUT_TAB_TERMINAL, 1);
+}
+
+static void show_problems(HWND hwnd) {
+    show_output_panel(hwnd, OUTPUT_TAB_PROBLEMS, 1);
 }
 
 /* Run's way into the panel: runs `"file" parameters` on the Output tab,
@@ -701,7 +977,8 @@ static OutputPanelLayout output_panel_layout(HWND panel) {
    below it; the Run tab keeps the two separate. */
 static RECT output_content_rect(const OutputPanelLayout *layout) {
     RECT rect = layout->view;
-    if (g_outputTab == OUTPUT_TAB_TERMINAL) rect.bottom = layout->inputBox.bottom;
+    if (g_outputTab == OUTPUT_TAB_TERMINAL || g_outputTab == OUTPUT_TAB_PROBLEMS)
+        rect.bottom = layout->inputBox.bottom;
     return rect;
 }
 
@@ -723,6 +1000,9 @@ static int active_output_buttons(OutputHeaderButton *buttons, int dpi) {
         buttons[n++] = (OutputHeaderButton){ g_hDebugStepInto, debugWidth };
         buttons[n++] = (OutputHeaderButton){ g_hDebugStepOver, debugWidth };
         buttons[n++] = (OutputHeaderButton){ g_hDebugContinue, debugWidth };
+    } else if (g_outputTab == OUTPUT_TAB_PROBLEMS) {
+        int buttonWidth = MulDiv(OUTPUT_BUTTON_WIDTH, dpi, 96);
+        buttons[n++] = (OutputHeaderButton){ g_hOutputClear, buttonWidth };
     } else {
         int buttonWidth = MulDiv(OUTPUT_BUTTON_WIDTH, dpi, 96);
         buttons[n++] = (OutputHeaderButton){ g_hOutputStop, buttonWidth };
@@ -777,7 +1057,8 @@ static void size_output_panel(HWND panel) {
        view gets its own content rect: the Terminal tab's spans the input
        box's space too, since it has no separate input line. */
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++) {
-        RECT content = i == OUTPUT_TAB_TERMINAL ? output_content_rect(&layout) : layout.view;
+        RECT content = (i == OUTPUT_TAB_TERMINAL || i == OUTPUT_TAB_PROBLEMS)
+                     ? output_content_rect(&layout) : layout.view;
         MoveWindow(g_outputPanes[i].view, content.left + 1, content.top + 1,
                    content.right - content.left - 2, content.bottom - content.top - 2, TRUE);
     }
@@ -808,7 +1089,8 @@ static void paint_output_panel(HWND panel, HDC hdc) {
     OutputPanelLayout layout = output_panel_layout(panel);
     RECT content = output_content_rect(&layout);
     frame_rect(hdc, &content, theme_border_color());
-    if (g_outputTab != OUTPUT_TAB_TERMINAL) frame_rect(hdc, &layout.inputBox, theme_border_color());
+    if (g_outputTab != OUTPUT_TAB_TERMINAL && g_outputTab != OUTPUT_TAB_PROBLEMS)
+        frame_rect(hdc, &layout.inputBox, theme_border_color());
 }
 
 static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
@@ -848,6 +1130,10 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
                     select_output_tab(OUTPUT_TAB_TERMINAL);
                     SetFocus(terminal_view_window(g_terminalView));
                     return 0;
+                case ID_OUTPUT_TAB_PROBLEMS:
+                    select_output_tab(OUTPUT_TAB_PROBLEMS);
+                    SetFocus(g_outputPanes[OUTPUT_TAB_PROBLEMS].view);
+                    return 0;
                 case ID_OUTPUT_TAB_DEBUG:
                     select_output_tab(OUTPUT_TAB_DEBUG);
                     SetFocus(g_hDebugVariables);
@@ -861,6 +1147,8 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
                 case ID_OUTPUT_CLEAR:
                     if (g_outputTab == OUTPUT_TAB_TERMINAL) {
                         terminal_view_clear_scrollback(g_terminalView);
+                    } else if (g_outputTab == OUTPUT_TAB_PROBLEMS) {
+                        clear_problem_reports();
                     } else {
                         clear_output_pane(active_output_pane());
                     }
@@ -948,8 +1236,9 @@ static void create_output_panel(HWND hwnd) {
     g_hOutputPanel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_CLIPCHILDREN,
                                      0, 0, 0, 0, hwnd, (HMENU)ID_OUTPUT_PANEL, GetModuleHandleW(NULL), NULL);
     SetWindowSubclass(g_hOutputPanel, OutputPanelSubclassProc, 1, 0);
-    static const WCHAR *const labels[OUTPUT_TAB_COUNT] = { L"Output", L"Terminal", L"Debug" };
-    static const int tabIds[OUTPUT_TAB_COUNT] = { ID_OUTPUT_TAB_RUN, ID_OUTPUT_TAB_TERMINAL, ID_OUTPUT_TAB_DEBUG };
+    static const WCHAR *const labels[OUTPUT_TAB_COUNT] = { L"Output", L"Terminal", L"Problems", L"Debug" };
+    static const int tabIds[OUTPUT_TAB_COUNT] = { ID_OUTPUT_TAB_RUN, ID_OUTPUT_TAB_TERMINAL,
+                                                  ID_OUTPUT_TAB_PROBLEMS, ID_OUTPUT_TAB_DEBUG };
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
         g_outputPanes[i].tab = create_output_button(g_hOutputPanel, labels[i], tabIds[i]);
 
@@ -965,6 +1254,18 @@ static void create_output_panel(HWND hwnd) {
     themed_scrollbar_attach(runPane->view, THEMED_SCROLL_SCINTILLA);
     SetWindowSubclass(runPane->view, OutputViewSubclassProc, (UINT_PTR)(OUTPUT_TAB_RUN + 1), 0);
     output_decoder_init(&runPane->decoder);
+
+    OutputPane *problemsPane = &g_outputPanes[OUTPUT_TAB_PROBLEMS];
+    problemsPane->view = create_output_scintilla(g_hOutputPanel, ID_OUTPUT_VIEW + 1,
+                                                  g_outputTab == OUTPUT_TAB_PROBLEMS);
+    SendMessageA(problemsPane->view, SCI_SETREADONLY, TRUE, 0);
+    SendMessageA(problemsPane->view, SCI_SETUNDOCOLLECTION, FALSE, 0);
+    SendMessageA(problemsPane->view, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
+    SendMessageA(problemsPane->view, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
+    SendMessageA(problemsPane->view, SCI_SETSCROLLWIDTH, 1, 0);
+    themed_scrollbar_attach(problemsPane->view, THEMED_SCROLL_SCINTILLA);
+    SetWindowSubclass(problemsPane->view, OutputViewSubclassProc,
+                      (UINT_PTR)(OUTPUT_TAB_PROBLEMS + 1), 0);
 
     g_terminalView = terminal_view_create(g_hOutputPanel, ID_TERMINAL_VIEW);
     g_outputPanes[OUTPUT_TAB_TERMINAL].view = terminal_view_window(g_terminalView);
@@ -1019,6 +1320,14 @@ static void shutdown_output_panel(void) {
     end_output_program(&g_outputPanes[OUTPUT_TAB_RUN]);
     free(g_outputPanes[OUTPUT_TAB_RUN].directory);
     g_outputPanes[OUTPUT_TAB_RUN].directory = NULL;
+    if (g_gitStatusProcess) output_process_free(g_gitStatusProcess);
+    g_gitStatusProcess = NULL;
+    free(g_gitStatusOutput);
+    g_gitStatusOutput = NULL;
+    clear_git_status_files();
+    clear_problem_reports();
+    free(g_outputPanes[OUTPUT_TAB_PROBLEMS].directory);
+    g_outputPanes[OUTPUT_TAB_PROBLEMS].directory = NULL;
     terminal_view_free(g_terminalView);
     g_terminalView = NULL;
     for (int i = 0; i < g_outputHistoryCount; i++) free(g_outputHistory[i]);

@@ -274,6 +274,9 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_TERMINAL:
             show_terminal(hwnd);
             break;
+        case IDM_VIEW_PROBLEMS:
+            show_problems(hwnd);
+            break;
         case IDM_VIEW_TOGGLESPLIT:
             toggle_split_editor(hwnd, 0);
             break;
@@ -314,6 +317,16 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
             break;
         default:
             return 0;
+    }
+    return 1;
+}
+
+static int handle_git_command(WORD cmd) {
+    switch (cmd) {
+        case IDM_GIT_REFRESH: show_git_status(); break;
+        case IDM_GIT_DIFF_FILE: show_git_file_diff(); break;
+        case IDM_GIT_DIFF_WORKSPACE: show_git_workspace_diff(); break;
+        default: return 0;
     }
     return 1;
 }
@@ -377,6 +390,7 @@ static void fire_plugin_event(const char *event, const WCHAR *path) {
     g_pluginChangedSaveEncoding = 0;
     char *argument = path ? to_utf8(path) : NULL;
     char *report = plugin_host_fire(event, argument, g_hEdit);
+    refresh_plugin_performance_problems();
     free(argument);
     sync_dirty_after_plugin(wasDirty);
     if (report) show_plugin_error(report);

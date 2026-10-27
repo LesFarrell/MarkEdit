@@ -33,8 +33,10 @@ static void update_status_position(void) {
         default: wcscpy(encodingName, L"UTF-8"); break;
     }
     swprintf(g_statusPartText[2], 128, L"%ls%ls   %ls", encodingName, g_hasBom ? L" BOM" : L"", eolName);
-    swprintf(g_statusPartText[3], 128, L"%ls", !g_dirty ? L"Saved"
-             : g_largeFile ? L"Modified" : L"Modified · recovery enabled");
+    const WCHAR *saveState = !g_dirty ? L"Saved"
+             : g_largeFile ? L"Modified" : L"Modified · recovery enabled";
+    if (g_gitStatusText[0]) swprintf(g_statusPartText[3], 128, L"%ls   %ls", g_gitStatusText, saveState);
+    else swprintf(g_statusPartText[3], 128, L"%ls", saveState);
     InvalidateRect(g_hStatus, NULL, FALSE);
 }
 

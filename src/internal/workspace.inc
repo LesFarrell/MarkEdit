@@ -204,6 +204,7 @@ static void adopt_workspace_folder(HWND hwnd, const WCHAR *root) {
     save_workspace_settings();
     refresh_menu(hwnd);
     if (g_explorerVisible) explorer_set_root(g_currentWorkspaceFolder);
+    refresh_git_status();
     fire_plugin_event("workspace_changed", g_currentWorkspaceFolder);
 }
 

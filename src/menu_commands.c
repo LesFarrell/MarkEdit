@@ -81,6 +81,7 @@ static const MenuCommand COMMANDS[] = {
     {"view.file_explorer", IDM_VIEW_EXPLORER, "Ctrl+Shift+X"},
     {"view.output_panel", IDM_VIEW_OUTPUT_PANEL, "Ctrl+`"},
     {"view.terminal", IDM_VIEW_TERMINAL, "Ctrl+Shift+`"},
+    {"view.problems", IDM_VIEW_PROBLEMS, "Ctrl+Shift+M"},
     {"view.minimap", IDM_VIEW_MINIMAP, NULL},
     {"view.split_editor", IDM_VIEW_TOGGLESPLIT, "Ctrl+\\"},
     {"view.split_editor_vertical", IDM_VIEW_SPLIT_VERTICAL, NULL},
@@ -144,6 +145,9 @@ static const MenuCommand COMMANDS[] = {
     {"html.line_break", IDM_FMT_HTML_BREAK, NULL},
 
     {"tools.settings", IDM_SETTINGS, NULL},
+    {"git.status", IDM_GIT_REFRESH, NULL},
+    {"git.diff_file", IDM_GIT_DIFF_FILE, NULL},
+    {"git.diff_workspace", IDM_GIT_DIFF_WORKSPACE, NULL},
 
     {"run.run_file", IDM_RUN_FILE, "Ctrl+F5"},
     {"run.debug_file", IDM_DEBUG_FILE, "F5"},
@@ -161,6 +165,8 @@ static const MenuCommand COMMANDS[] = {
     {"plugins.open_folder", IDM_PLUGIN_OPEN_FOLDER, NULL},
     {"plugins.new", IDM_PLUGIN_NEW, NULL},
     {"plugins.manage", IDM_PLUGIN_MANAGE, NULL},
+    {"plugins.performance", IDM_PLUGIN_PERFORMANCE, NULL},
+    {"plugins.clear_performance", IDM_PLUGIN_CLEAR_PERFORMANCE, NULL},
 
     {"help.markdown_reference", IDM_HELP_REFERENCE, NULL},
     {"help.keyboard_shortcuts", IDM_HELP_SHORTCUTS, NULL},

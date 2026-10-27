@@ -21,7 +21,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 4
+#define MARKEDIT_PLUGIN_API_VERSION 5
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -92,6 +92,9 @@ typedef struct {
     void (*output_show)(void);
     void (*output_hide)(void);
     int (*output_visible)(void);
+    /* Replaces a named producer's text in the Problems tab. Empty text
+       removes that producer without disturbing other diagnostics. */
+    void (*problems_report)(const char *source, const char *text);
 } PluginHostCallbacks;
 
 /* Copied; call before running commands. */
@@ -240,5 +243,11 @@ char *plugin_host_run(int index, HWND hEdit);
 char *plugin_host_fire(const char *event, const char *argument, HWND hEdit);
 /* Runs a one-shot callback scheduled by app.defer(). */
 char *plugin_host_run_deferred(int token, HWND hEdit);
+
+/* Aggregated wall-free CPU time and retained-memory deltas for Lua callbacks.
+   The returned report is heap allocated. warningsOnly keeps callbacks that
+   failed, used >=50 ms once, or retained >=1 MiB in one call. */
+char *plugin_host_performance_report(int warningsOnly);
+void plugin_host_clear_performance(void);
 
 #endif

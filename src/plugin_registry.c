@@ -1116,6 +1116,26 @@ static const luaL_Reg output_functions[] = {
     {"write", output_write}, {"clear", output_clear}, {"show", output_show},
     {"hide", output_hide}, {"visible", output_visible}, {"report", output_report}, {NULL, NULL}
 };
+static int problems_report(lua_State *L) {
+    const char *source = checked_cstring(L, 1, "problem source");
+    const char *text = checked_cstring(L, 2, "problem report");
+    if (!s_callbacks.problems_report)
+        return luaL_error(L, "problems.report is not available here");
+    s_callbacks.problems_report(source, text);
+    return 0;
+}
+
+static int problems_clear(lua_State *L) {
+    const char *source = checked_cstring(L, 1, "problem source");
+    if (!s_callbacks.problems_report)
+        return luaL_error(L, "problems.clear is not available here");
+    s_callbacks.problems_report(source, NULL);
+    return 0;
+}
+
+static const luaL_Reg problems_functions[] = {
+    {"report", problems_report}, {"clear", problems_clear}, {NULL, NULL}
+};
 static const luaL_Reg spell_functions[] = {
     {"language", spell_language}, {"check", spell_check}, {NULL, NULL}
 };
@@ -1141,6 +1161,8 @@ void plugin_registry_open(lua_State *L) {
     lua_setglobal(L, "spell");
     luaL_newlib(L, output_functions);
     lua_setglobal(L, "output");
+    luaL_newlib(L, problems_functions);
+    lua_setglobal(L, "problems");
 }
 
 int plugin_host_command_count(void) {
@@ -1298,6 +1320,87 @@ static int call_with_argument(lua_State *L) {
     return 0;
 }
 
+#define PLUGIN_PERFORMANCE_MAX 512
+typedef struct PluginPerformance {
+    char *owner, *label;
+    unsigned calls, failures;
+    ULONGLONG cpuTotal, cpuMax;
+    ptrdiff_t retainedMax;
+} PluginPerformance;
+static PluginPerformance s_performance[PLUGIN_PERFORMANCE_MAX];
+static int s_performanceCount;
+
+static ULONGLONG thread_cpu_time(void) {
+    FILETIME created, exited, kernel, user;
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return 0;
+    ULARGE_INTEGER k = { .LowPart = kernel.dwLowDateTime, .HighPart = kernel.dwHighDateTime };
+    ULARGE_INTEGER u = { .LowPart = user.dwLowDateTime, .HighPart = user.dwHighDateTime };
+    return k.QuadPart + u.QuadPart;
+}
+
+static void record_performance(const char *owner, const char *label, ULONGLONG elapsed,
+                               ptrdiff_t retained, int failed) {
+    int index = -1;
+    for (int i = 0; i < s_performanceCount; i++)
+        if (strcmp(s_performance[i].owner, owner) == 0 &&
+            strcmp(s_performance[i].label, label) == 0) { index = i; break; }
+    if (index < 0) {
+        if (s_performanceCount >= PLUGIN_PERFORMANCE_MAX) return;
+        index = s_performanceCount++;
+        s_performance[index].owner = dup_string(owner);
+        s_performance[index].label = dup_string(label);
+        if (!s_performance[index].owner || !s_performance[index].label) {
+            free(s_performance[index].owner); free(s_performance[index].label);
+            memset(&s_performance[index], 0, sizeof(s_performance[index]));
+            s_performanceCount--;
+            return;
+        }
+    }
+    PluginPerformance *entry = &s_performance[index];
+    entry->calls++;
+    if (failed) entry->failures++;
+    entry->cpuTotal += elapsed;
+    if (elapsed > entry->cpuMax) entry->cpuMax = elapsed;
+    if (retained > entry->retainedMax) entry->retainedMax = retained;
+}
+
+void plugin_host_clear_performance(void) {
+    for (int i = 0; i < s_performanceCount; i++) {
+        free(s_performance[i].owner);
+        free(s_performance[i].label);
+    }
+    memset(s_performance, 0, sizeof(s_performance));
+    s_performanceCount = 0;
+}
+
+char *plugin_host_performance_report(int warningsOnly) {
+    char *report = NULL;
+    size_t used = 0;
+    for (int i = 0; i < s_performanceCount; i++) {
+        const PluginPerformance *entry = &s_performance[i];
+        if (warningsOnly && !entry->failures && entry->cpuMax < 500000 &&
+            entry->retainedMax < 1024 * 1024) continue;
+        double totalMs = (double)entry->cpuTotal / 10000.0;
+        double maxMs = (double)entry->cpuMax / 10000.0;
+        double memoryKiB = (double)entry->retainedMax / 1024.0;
+        char failures[48] = "";
+        if (entry->failures)
+            snprintf(failures, sizeof(failures), ", %u failure%s", entry->failures,
+                     entry->failures == 1 ? "" : "s");
+        size_t needed = used + strlen(entry->owner) + strlen(entry->label) + 160;
+        char *grown = (char *)realloc(report, needed);
+        if (!grown) break;
+        report = grown;
+        int written = snprintf(report + used, needed - used,
+            "%s — %s: %u call%s, %.2f ms total, %.2f ms max, +%.1f KiB retained%s\n",
+            entry->owner, entry->label, entry->calls, entry->calls == 1 ? "" : "s",
+            totalMs, maxMs, memoryKiB, failures);
+        if (written < 0) break;
+        used += (size_t)written;
+    }
+    return report;
+}
+
 /* Calls a registered function against hEdit as a single undo step, undoing
    its edits if it fails. argument is its one parameter (nil when NULL). */
 static char *call_registered(int ref, const char *label, const char *owner,
@@ -1309,6 +1412,8 @@ static char *call_registered(int ref, const char *label, const char *owner,
         free(stableLabel); free(stableOwner);
         return dup_string("out of memory starting plugin callback");
     }
+    ULONGLONG cpuBefore = thread_cpu_time();
+    size_t memoryBefore = s_memory.used;
     s_busy = 1;
     lua_editor_api_set_editor(hEdit);
     s_runningLabel = stableLabel;
@@ -1328,6 +1433,11 @@ static char *call_registered(int ref, const char *label, const char *owner,
     SendMessageA(hEdit, SCI_ENDUNDOACTION, 0, 0);
     if (error && (intptr_t)SendMessageA(hEdit, SCI_GETUNDOCURRENT, 0, 0) != undoBefore)
         SendMessageA(hEdit, SCI_UNDO, 0, 0);
+    ULONGLONG cpuAfter = thread_cpu_time();
+    ptrdiff_t retained = (ptrdiff_t)s_memory.used - (ptrdiff_t)memoryBefore;
+    record_performance(stableOwner, stableLabel,
+                       cpuAfter >= cpuBefore ? cpuAfter - cpuBefore : 0,
+                       retained, error != NULL);
     /* A command on a large document can build temporaries that use a big
        share of the shared plugin heap; left to Lua's own incremental pacing,
        that garbage can sit uncollected for many further commands (event

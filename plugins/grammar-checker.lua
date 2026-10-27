@@ -485,7 +485,11 @@ end
 local function check()
   local text, first = source_range()
   local issues = inspect(text, first - 1)
-  if #issues == 0 then ui.message("No heuristic grammar issues found.", "Grammar Checker"); return end
+  if #issues == 0 then
+    problems.clear("Grammar Checker")
+    ui.message("No heuristic grammar issues found.", "Grammar Checker")
+    return
+  end
   -- In the output panel, where a saved document's "path:line:column" is
   -- double-clicked to go there.
   local path = editor.file_path()
@@ -505,7 +509,9 @@ local function check()
   if #issues > REPORT_LIMIT then
     lines[#lines + 1] = string.format("...and %d more.", #issues - REPORT_LIMIT)
   end
-  output.report("Grammar Checker", table.concat(lines, "\n"))
+  local report = table.concat(lines, "\n")
+  problems.report("Grammar Checker", report)
+  output.report("Grammar Checker", report)
 end
 
 local function fix_safe()
