@@ -18,7 +18,7 @@ static void expect(int condition, const char *what) {
    {n}, a lone carriage return as <CR> ---- */
 
 typedef struct {
-    char text[1024];
+    char text[8192];
     size_t length;
     int style;
 } Captured;
@@ -88,6 +88,14 @@ static void test_decoder(void) {
     expect(decoded[0] == 'x' && (unsigned char)decoded[1] >= 0xc2 && decoded[strlen(decoded) - 1] == 'y',
            "bytes that aren't UTF-8 are read in the OEM code page");
     expect_decoded("bell\x07\x08", "bell", "other control characters are dropped");
+
+    char plain[4097];
+    memset(plain, 'x', sizeof(plain) - 1);
+    plain[sizeof(plain) - 1] = 0;
+    const char *decodedPlain = decode(plain, sizeof(plain) - 1);
+    expect(strlen(decodedPlain) == sizeof(plain) - 1 &&
+           memcmp(decodedPlain, plain, sizeof(plain) - 1) == 0,
+           "large plain runs are emitted whole");
 }
 
 /* ---- file locations ---- */

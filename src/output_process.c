@@ -8,7 +8,7 @@
 /* Large enough that a line typed into the panel never blocks the UI thread
    while the program is busy elsewhere. */
 #define OUTPUT_PIPE_SIZE (64 * 1024)
-#define OUTPUT_READ_SIZE 4096
+#define OUTPUT_BATCH_SIZE (64 * 1024)
 /* How long freeing waits for the reader thread before cancelling its read,
    which a program that left the job could otherwise keep open. */
 #define OUTPUT_READER_WAIT_MS 2000
@@ -36,10 +36,21 @@ static void post_chunk(OutputProcess *process, const char *data, size_t length,
 
 static unsigned __stdcall read_output(void *argument) {
     OutputProcess *process = (OutputProcess *)argument;
-    char buffer[OUTPUT_READ_SIZE];
+    char buffer[OUTPUT_BATCH_SIZE];
     DWORD read = 0;
-    while (ReadFile(process->output, buffer, sizeof(buffer), &read, NULL) && read > 0)
-        post_chunk(process, buffer, read, 0, 0);
+    size_t used = 0;
+    while (ReadFile(process->output, buffer + used, (DWORD)(OUTPUT_BATCH_SIZE - used),
+                    &read, NULL) && read > 0) {
+        used += read;
+        DWORD available = 0;
+        while (used < OUTPUT_BATCH_SIZE &&
+               PeekNamedPipe(process->output, NULL, 0, NULL, &available, NULL) && available > 0 &&
+               ReadFile(process->output, buffer + used, (DWORD)(OUTPUT_BATCH_SIZE - used),
+                        &read, NULL) && read > 0)
+            used += read;
+        post_chunk(process, buffer, used, 0, 0);
+        used = 0;
+    }
     DWORD exitCode = 0;
     WaitForSingleObject(process->process, INFINITE);
     GetExitCodeProcess(process->process, &exitCode);

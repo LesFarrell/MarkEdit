@@ -38,8 +38,9 @@ int terminal_process_available(void);
 TerminalProcess *terminal_process_start(const WCHAR *commandLine, const WCHAR *directory,
                                         int cols, int rows, HWND window, UINT message,
                                         int session);
-/* Sends bytes (keystrokes, already VT-encoded) to the shell. Returns 0 once
-   it has closed. */
+/* Queues bytes (keystrokes, already VT-encoded) for the shell. The pipe write
+   happens on a worker so a busy console program cannot block the UI thread.
+   Returns 0 once it has closed or when the input cannot be queued. */
 int terminal_process_write(TerminalProcess *process, const char *bytes, size_t length);
 /* Tells the pseudoconsole the terminal view resized; the shell sees this the
    way any console program learns its window changed size. */

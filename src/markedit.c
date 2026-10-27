@@ -390,6 +390,7 @@ static void load_workspace_settings(void) {
     /* Give the file explorer a useful root on a fresh install without
        interrupting its first open with a folder-picker dialog. */
     replace_wstring(&g_currentWorkspaceFolder, value && value[0] ? value : L"C:\\");
+    SetCurrentDirectoryW(g_currentWorkspaceFolder);
     free(value);
     free(path);
 }
@@ -1258,7 +1259,18 @@ static void rebuild_main_accelerators(void) {
 static int run_message_loop(HWND mainWindow) {
     MSG message;
     int result;
-    while ((result = GetMessage(&message, NULL, 0, 0)) > 0) {
+    for (;;) {
+        /* GetMessage normally returns posted messages before hardware input.
+           A command producing output continuously can therefore keep the
+           terminal's posted chunks ahead of keys that are already waiting.
+           Pull a pending terminal key explicitly so input is delayed by at
+           most the one output chunk currently being dispatched. */
+        HWND terminal = terminal_view_window(g_terminalView);
+        if (terminal && PeekMessageW(&message, terminal, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE))
+            result = 1;
+        else
+            result = GetMessage(&message, NULL, 0, 0);
+        if (result <= 0) break;
         /* A focused terminal owns Ctrl/Alt, navigation, and function keys;
            route them before editor accelerators and dialog/menu handling. */
         if (terminal_view_pretranslate_message(g_terminalView, &message)) continue;

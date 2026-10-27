@@ -943,7 +943,7 @@ static void update_preview(void) {
     int showWaitCursor = len >= PREVIEW_SLOW_RENDER_THRESHOLD;
     HCURSOR oldCursor = showWaitCursor ? SetCursor(LoadCursorA(NULL, IDC_WAIT)) : NULL;
 
-    char *html = markdown_to_html(text);
+    char *html = markdown_to_html_n(text, (size_t)len);
     free(text);
 
     if (showWaitCursor) SetCursor(oldCursor);

@@ -41,7 +41,7 @@ struct TerminalGrid {
     unsigned char reverseVideo; /* SGR 7; applied to cells as they're written */
 
     TerminalScrollRow *scrollback;
-    int scrollbackCount, scrollbackCapacity;
+    int scrollbackStart, scrollbackCount, scrollbackCapacity;
 
     int dirty;
 
@@ -86,22 +86,32 @@ static void push_scrollback(TerminalGrid *g, const TerminalCell *row, int width)
     memcpy(copy, row, (size_t)width * sizeof(TerminalCell));
     if (g->scrollbackCount == g->scrollbackCapacity) {
         if (g->scrollbackCapacity >= TERMINAL_SCROLLBACK_MAX_ROWS) {
-            free(g->scrollback[0].cells);
-            memmove(g->scrollback, g->scrollback + 1,
-                   (size_t)(g->scrollbackCount - 1) * sizeof(TerminalScrollRow));
-            g->scrollbackCount--;
+            /* Reuse the oldest ring slot. This used to shift every pointer
+               in the full history on every new line, making sustained output
+               O(scrollback size) per line once the limit was reached. */
+            int slot = g->scrollbackStart;
+            free(g->scrollback[slot].cells);
+            g->scrollback[slot].cells = copy;
+            g->scrollback[slot].width = width;
+            g->scrollbackStart = (g->scrollbackStart + 1) % g->scrollbackCapacity;
+            return;
         } else {
             int capacity = g->scrollbackCapacity ? g->scrollbackCapacity * 2 : 256;
             if (capacity > TERMINAL_SCROLLBACK_MAX_ROWS) capacity = TERMINAL_SCROLLBACK_MAX_ROWS;
-            TerminalScrollRow *grown = (TerminalScrollRow *)realloc(
-                g->scrollback, (size_t)capacity * sizeof(TerminalScrollRow));
+            TerminalScrollRow *grown = (TerminalScrollRow *)malloc(
+                (size_t)capacity * sizeof(TerminalScrollRow));
             if (!grown) { free(copy); return; }
+            for (int i = 0; i < g->scrollbackCount; i++)
+                grown[i] = g->scrollback[(g->scrollbackStart + i) % g->scrollbackCapacity];
+            free(g->scrollback);
             g->scrollback = grown;
+            g->scrollbackStart = 0;
             g->scrollbackCapacity = capacity;
         }
     }
-    g->scrollback[g->scrollbackCount].cells = copy;
-    g->scrollback[g->scrollbackCount].width = width;
+    int slot = (g->scrollbackStart + g->scrollbackCount) % g->scrollbackCapacity;
+    g->scrollback[slot].cells = copy;
+    g->scrollback[slot].width = width;
     g->scrollbackCount++;
 }
 
@@ -517,7 +527,8 @@ TerminalGrid *terminal_grid_create(int cols, int rows) {
 
 void terminal_grid_free(TerminalGrid *grid) {
     if (!grid) return;
-    for (int i = 0; i < grid->scrollbackCount; i++) free(grid->scrollback[i].cells);
+    for (int i = 0; i < grid->scrollbackCount; i++)
+        free(grid->scrollback[(grid->scrollbackStart + i) % grid->scrollbackCapacity].cells);
     free(grid->scrollback);
     free(grid->screen);
     free(grid->altScreen);
@@ -556,8 +567,8 @@ void terminal_grid_resize(TerminalGrid *grid, int cols, int rows) {
     if (!grid || cols < 1 || rows < 1) return;
     if (cols == grid->cols && rows == grid->rows) return;
     TerminalCell blank = { L' ', TERM_COLOR_DEFAULT, TERM_COLOR_DEFAULT, 0 };
-    TerminalCell *newScreen = (TerminalCell *)malloc((size_t)cols * rows * sizeof(TerminalCell));
-    TerminalCell *newAlt = (TerminalCell *)malloc((size_t)cols * rows * sizeof(TerminalCell));
+    TerminalCell *newScreen = (TerminalCell *)calloc((size_t)cols * rows, sizeof(TerminalCell));
+    TerminalCell *newAlt = (TerminalCell *)calloc((size_t)cols * rows, sizeof(TerminalCell));
     if (!newScreen || !newAlt) { free(newScreen); free(newAlt); return; }
     for (int i = 0; i < cols * rows; i++) { newScreen[i] = blank; newAlt[i] = blank; }
     int copyRows = rows < grid->rows ? rows : grid->rows;
@@ -594,8 +605,9 @@ int terminal_grid_total_lines(const TerminalGrid *grid) { return grid->scrollbac
 const TerminalCell *terminal_grid_line_at(const TerminalGrid *grid, int lineIndex, int *width) {
     if (lineIndex < 0 || lineIndex >= terminal_grid_total_lines(grid)) return NULL;
     if (lineIndex < grid->scrollbackCount) {
-        if (width) *width = grid->scrollback[lineIndex].width;
-        return grid->scrollback[lineIndex].cells;
+        int slot = (grid->scrollbackStart + lineIndex) % grid->scrollbackCapacity;
+        if (width) *width = grid->scrollback[slot].width;
+        return grid->scrollback[slot].cells;
     }
     int row = lineIndex - grid->scrollbackCount;
     if (width) *width = grid->cols;

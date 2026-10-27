@@ -111,15 +111,22 @@ WCHAR *extended_path(const WCHAR *path) {
 /* Shared by the workspace-scoped file enumeration (Quick Open/Find-in-Folder,
    in markedit.c) and the file explorer's live watcher (file_explorer.c), so
    both agree on which directories are noisy/uninteresting to recurse into. */
-int skipped_workspace_directory(const WCHAR *name) {
-    if (!name) return 0;
-    static const WCHAR *skipped[] = {
-        L".git", L".svn", L".hg", L"node_modules", L"build", L"dist", L"Output",
-        L"webview2_data", L".vs", L".vscode"
-    };
-    for (size_t i = 0; i < sizeof(skipped) / sizeof(skipped[0]); i++)
-        if (_wcsicmp(name, skipped[i]) == 0) return 1;
+static const WCHAR *const SKIPPED_WORKSPACE_DIRECTORIES[] = {
+    L".git", L".svn", L".hg", L"node_modules", L"build", L"dist", L"Output",
+    L"webview2_data", L".vs", L".vscode"
+};
+
+static int skipped_workspace_directory_n(const WCHAR *name, size_t length) {
+    for (size_t i = 0; i < sizeof(SKIPPED_WORKSPACE_DIRECTORIES) /
+                            sizeof(SKIPPED_WORKSPACE_DIRECTORIES[0]); i++) {
+        const WCHAR *skipped = SKIPPED_WORKSPACE_DIRECTORIES[i];
+        if (wcslen(skipped) == length && _wcsnicmp(name, skipped, length) == 0) return 1;
+    }
     return 0;
+}
+
+int skipped_workspace_directory(const WCHAR *name) {
+    return name && skipped_workspace_directory_n(name, wcslen(name));
 }
 
 /* True if any path component (not just the last one) is a skipped
@@ -129,16 +136,17 @@ int skipped_workspace_directory(const WCHAR *name) {
    notifications from deep inside a skipped directory, where checking only
    the immediate parent would miss almost everything git itself writes. */
 int path_has_skipped_component(const WCHAR *path) {
-    WCHAR *copy = wcsdup_heap(path);
-    if (!copy) return 0;
-    int found = 0;
-    WCHAR *context = NULL;
-    for (WCHAR *token = wcstok_s(copy, L"\\/", &context); token;
-         token = wcstok_s(NULL, L"\\/", &context)) {
-        if (skipped_workspace_directory(token)) { found = 1; break; }
+    if (!path) return 0;
+    const WCHAR *component = path;
+    while (*component) {
+        while (*component == L'\\' || *component == L'/') component++;
+        const WCHAR *end = component;
+        while (*end && *end != L'\\' && *end != L'/') end++;
+        size_t length = (size_t)(end - component);
+        if (length && skipped_workspace_directory_n(component, length)) return 1;
+        component = end;
     }
-    free(copy);
-    return found;
+    return 0;
 }
 
 /* %LOCALAPPDATA%\MarkEdit\<name>, created if needed: per-user, machine-local

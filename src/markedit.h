@@ -155,6 +155,7 @@ static void set_dirty(int dirty);
 static void update_tab_label(int index);
 struct Document;
 static void format_document_label(const struct Document *doc, WCHAR *label, size_t capacity);
+static int focus_outside_editor_area(void);
 static void switch_document(int index);
 static int create_document_tab(void);
 static int active_document_is_reusable(void);

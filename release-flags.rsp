@@ -1,4 +1,5 @@
 -Os
+-flto
 -ffunction-sections
 -fdata-sections
 -funwind-tables

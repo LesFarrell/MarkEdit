@@ -23,7 +23,7 @@ Launching with no arguments opens the editor with the saved workspace layout; la
 - Single-file C and C++ programs (`.c`, `.cc`, `.cpp`, `.cxx`) can likewise be built and run with Ctrl+F5 or compiled with debug symbols and opened in GDB with F5. GDB itself stays hidden while the debugged program opens its own visible console for input and output. Editor breakpoints are loaded before execution; at every stop, the Debug tab shows function arguments and local values and highlights the current line. Use F10 to step over, F11 to step into, Shift+F11 to step out, and F6 to continue from the tab, editor, or Run menu; `print expression`, `watch expression`, and `vars` remain available in the console. Running can use GCC/G++, Clang, Zig, or MSVC (`cl.exe`, found via the `Compiler.VcvarsallPath` value in `settings.json`); debugging requires GCC/G++ or Clang and uses the bundled GDB 17.1. `Compiler.GdbPath` can select another GDB folder, and `PATH` remains a fallback if the bundled copy is absent. MSVC is Run-only. `Compiler.Backend` pins Run/Debug to one of GCC, Clang, Zig, or MSVC instead of the default auto-detect order.
 - Lua files (`.lua`) can be run with Ctrl+F5 using `lua`, a versioned `lua5.x`, or `luajit` found on `PATH`. Without one, Tools → Interpreters → Lua → Run Document runs the file with MarkEdit's built-in Lua 5.4, in the plugin sandbox. Lua is Run-only; there is no Lua debugger integration.
 - Run sends a program's output to the output panel docked under the editor (View → Output Panel, Ctrl+\`), with its ANSI colours. A program waiting for input reads it from the line along the panel's bottom, Stop ends the program and everything it started, and double-clicking a file location in an error message (GCC, Clang, MSVC, Python, Lua or PowerShell style) opens the file at that line. Run → Run in Separate Console keeps the old behaviour of a console window that stays open. Long lines scroll sideways rather than wrap. Bundled plugins show their longer reports on the same tab: Grammar Checker → Check, Constraint Writer → Check Constraints, CSV → Inspect and Validate, Logs → CLEF → Inspect, Count Occurrences, and Document Personality's Analyse and Readability. C and C++ programs fill their output buffer before writing to the panel, so a prompt printed without `fflush(stdout)` appears only after the input it asks for; use the separate console for programs like that.
-- The panel's Terminal tab (View → Terminal, Ctrl+Shift+\`) is a real terminal: Windows PowerShell in the workspace folder, on a Windows pseudoconsole (ConPTY), so full-screen console programs (vim, less, PSReadLine's live completion) work as they would in any other terminal. While the terminal has focus, its input takes priority over MarkEdit's editor shortcuts: control characters go to the shell, Alt plus a printable key sends the usual Meta sequence (for example, Alt+F sends `Escape`, `f`), and modified navigation and function keys use xterm-compatible VT sequences. Ctrl+Shift+C copies a selection, Ctrl+Shift+V or Shift+Insert pastes, and the mouse wheel scrolls back through its history. AltGr remains available for keyboard-layout characters. Stop ends the shell and everything it started; pressing any key afterwards starts it again.
+- The panel's Terminal tab (View → Terminal, Ctrl+Shift+\`) is a real terminal: Windows PowerShell in the workspace folder, on a Windows pseudoconsole (ConPTY), so full-screen console programs (vim, less, PSReadLine's live completion) work as they would in any other terminal. While the terminal has focus, its input takes priority over queued output and MarkEdit's editor shortcuts: control characters go to the shell, Alt plus a printable key sends the usual Meta sequence (for example, Alt+F sends `Escape`, `f`), and modified navigation and function keys use xterm-compatible VT sequences. Input is written through an ordered background queue, so a console program that is busy or producing heavy output does not block keyboard handling. Ctrl+Shift+C copies a selection, Ctrl+Shift+V or Shift+Insert pastes, and the mouse wheel scrolls back through its bounded history. AltGr remains available for keyboard-layout characters. Stop ends the shell and everything it started; pressing any key afterwards starts it again.
 - The panel's Debug tab opens automatically when a debug session starts (F5), showing its status, variables, and Continue/Step Over/Step Into/Step Out controls; it stays selectable afterwards like Output and Terminal.
 - F9 (or a click in the marker gutter) toggles per-file Python/C/C++ breakpoints. Breakpoints follow edited lines and are restored for that file in later MarkEdit sessions; Run → Clear All Breakpoints removes them together.
 - Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
@@ -137,7 +137,7 @@ The standard build requires [Zig](https://ziglang.org/) on `PATH`.
 build.bat
 ```
 
-This uses Zig's C/C++ toolchain with size optimization, dead-section elimination, and symbol stripping. After compiling, it safely clears and recreates `dist/`, then stages `markedit.exe`, the required runtime DLLs, offline preview assets, and licence files there.
+This uses Zig's C/C++ toolchain with size and link-time optimization (LTO), dead-section elimination, and symbol stripping. LTO makes a clean release build slower because the final link optimizes across MarkEdit and its statically linked dependencies; Zig's cache makes subsequent unchanged builds much quicker. After compiling, the script safely clears and recreates `dist/`, then stages `markedit.exe`, the required runtime DLLs, offline preview assets, and licence files there.
 
 A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC, Zig, and MSVC builds. Each builds the same targets (`markedit.exe` in `build\bin`, statically linking Lexilla and Lua, and the test programs under `build\tests`) and stages `dist/` the way `build.bat` does:
 
@@ -157,7 +157,7 @@ msbuild build\MarkEdit.sln /p:Configuration=Release /p:Platform=x64
 
 The two `gmake` builds need GNU make running its recipes under a POSIX shell, as [w64devkit](https://github.com/skeeto/w64devkit) or MSYS2 provide.
 
-Run the tests (Markdown parsing, editor commands, language detection, outline/minimap, themes, file and text handling, recovery, the plugin host, the menu definition, the formatting and Lua-formatting commands, the assemblers, and, when Node.js is installed, the preview bridge) with:
+Run the tests (Markdown parsing, editor commands, language detection, outline/minimap, themes, file and text handling, output decoding/processes, terminal grid/input/ConPTY processes, recovery, the plugin host, the menu definition, the formatting and Lua-formatting commands, the assemblers, and, when Node.js is installed, the preview bridge) with:
 
 ```
 test.bat
@@ -204,22 +204,22 @@ src/                     application sources, including:
   outline_minimap.c / .h   outline panel and minimap subsystem
   scintilla_config.c / .h  Scintilla view setup: margins, markers, wrap/whitespace/indent
   progress_dialog.c / .h   cancellable IProgressDialog wrapper for large opens and saves
-  output_process.c / .h    output-panel programs on pipes, in a job, with a reader thread
+  output_process.c / .h    output-panel programs on pipes, in a job, with a batched reader thread
   output_text.c / .h       output decoding (ANSI colours, OEM fallback), file locations in
                            error messages
   terminal_process.c / .h  the Terminal tab's shell on a Windows pseudoconsole (ConPTY),
-                           in a job, with a reader thread
+                           in a job, with reader, queued-input writer and exit-watcher threads
   terminal_grid.c / .h     VT100/ECMA-48 screen buffer: cursor-addressed cells, SGR colours,
-                           scroll regions, the alternate screen, scrollback
+                           scroll regions, the alternate screen, bounded ring-buffer scrollback
   terminal_input.c / .h    Win32 virtual keys to xterm-compatible VT input sequences
-  terminal_view.c / .h     the Terminal tab's rendering and input control; routes focused
-                           keyboard messages ahead of application accelerators
+  terminal_view.c / .h     the Terminal tab's rendering and input control; batches key repeats
+                           and routes focused keys ahead of queued output and app accelerators
   theme.c / .h             light/dark palettes by role, their themes.lua names and template,
                            and paint helpers
 plugins/                 bundled Lua extensions, plugin guide, examples, and language-server types
 docs/lua.md              developer guide to MarkEdit's Lua files: what each is, load order, how commands reach Lua
 docs/architecture.md     native/Lua boundaries and subsystem ownership
-release-flags.rsp        release code-generation flags shared by build.bat, test.bat and premake
+release-flags.rsp        release optimization/LTO flags shared by build.bat, test.bat and premake
 cmark-gfm-sources.rsp    vendored renderer source list and its defines/include paths
 markedit-sources.rsp     application source list used by build.bat
 lexilla-sources.rsp      supported lexer source list used by build.bat
@@ -240,7 +240,8 @@ premake5.lua             alternative build for MinGW GCC, Zig (make) or MSVC (Vi
 markedit.iss             Inno Setup installer script
 dist/                    clean unpacked release staging folder (generated, not tracked)
 test.bat / tests/        test programs: parser, editor commands, language, outline, theme, core,
-                         recovery, plugin host, menus, formatting, Lua formatting, assemblers, preview bridge
+                         output, terminal grid/input/process, recovery, plugin host, menus,
+                         formatting, Lua formatting, assemblers, preview bridge
 third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll
 third_party/lexilla/     Lexilla 5.5.1 lexer sources and licence, trimmed to the supported languages

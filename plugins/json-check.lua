@@ -531,8 +531,9 @@ end
 -- command describe text that has since changed, so they're removed.
 local function live_check()
   local mode = json_mode()
-  if live_errors_enabled() and mode and editor.length() > 0 and editor.length() <= LIVE_LIMIT then
-    mark(scan_range(1, editor.length(), mode), 1)
+  local length = editor.length()
+  if live_errors_enabled() and mode and length > 0 and length <= LIVE_LIMIT then
+    mark(scan_range(1, length, mode), 1)
   elseif marked then
     clear_marks()
   end
@@ -540,25 +541,71 @@ end
 
 local function live_path()
   local mode = json_mode()
-  if live_path_enabled() and mode and editor.length() <= LIVE_LIMIT then
+  local length = editor.length()
+  if live_path_enabled() and mode and length <= LIVE_LIMIT then
     local path = path_at_caret(mode)
     if path then ui.status(path) end
   end
+end
+
+-- Parsing on every key or caret message makes a large JSON document feel
+-- sticky. Keep only the newest scheduled pass; opening or switching a tab
+-- still refreshes immediately.
+local LIVE_DELAY = 75
+local check_token, path_token
+
+local function cancel_check()
+  if check_token then app.cancel(check_token); check_token = nil end
+end
+
+local function cancel_path()
+  if path_token then app.cancel(path_token); path_token = nil end
+end
+
+local function schedule_check()
+  if not live_errors_enabled() then return end
+  if not json_mode() then
+    if marked then clear_marks() end
+    return
+  end
+  cancel_check()
+  check_token = app.defer(LIVE_DELAY, function()
+    check_token = nil
+    live_check()
+  end)
+end
+
+local function schedule_path()
+  if not live_path_enabled() then return end
+  cancel_path()
+  path_token = app.defer(LIVE_DELAY, function()
+    path_token = nil
+    live_path()
+  end)
+end
+
+local function refresh_now()
+  cancel_check()
+  cancel_path()
+  live_check()
+  live_path()
 end
 
 menu.separator("/Tools/JSON")
 
 menu.checkbox("/Tools/JSON/&Highlight JSON Errors as You Type", "highlight_as_you_type", true,
   function(checked)
+    cancel_check()
     if checked then live_check() elseif marked then clear_marks() end
   end)
 
 menu.checkbox("/Tools/JSON/Show JSON Path in Status &Bar", "path_in_status_bar", false,
   function(checked)
+    cancel_path()
     if checked then live_path() end
   end)
 
-events.on("text_changed", live_check)
-events.on("open", live_check)
-events.on("tab_changed", live_check)
-events.on("selection_changed", live_path)
+events.on("text_changed", schedule_check)
+events.on("open", refresh_now)
+events.on("tab_changed", refresh_now)
+events.on("selection_changed", schedule_path)

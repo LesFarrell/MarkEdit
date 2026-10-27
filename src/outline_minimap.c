@@ -96,17 +96,12 @@ int outline_scan_line(OutlineScan *scan, const char *line, int length, int *text
 
 /* Adds one heading's row: its title, indented two spaces per level. */
 static void add_outline_heading(const char *title, int titleLength, int level, Sci_Position lineNumber) {
-    char *heading = (char *)malloc((size_t)titleLength + 1);
-    if (!heading) return;
-    memcpy(heading, title, (size_t)titleLength);
-    heading[titleLength] = 0;
-    WCHAR *wide = to_wide(heading);
-    free(heading);
+    WCHAR *wide = to_wide_n(title, (size_t)titleLength, NULL);
     if (!wide) return;
-    size_t capacity = wcslen(wide) + (size_t)level * 2 + 1;
+    int indent = (level - 1) * 2;
+    size_t capacity = wcslen(wide) + (size_t)indent + 1;
     WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (label) {
-        int indent = (level - 1) * 2;
         for (int i = 0; i < indent; i++) label[i] = L' ';
         wcscpy(label + indent, wide);
         SendMessageW(*g_host->outline, LB_ADDSTRING, 0, (LPARAM)label);
@@ -133,15 +128,24 @@ void update_outline(void) {
     /* Suspend repainting so re-adding every heading doesn't flicker. */
     SendMessageW(*g_host->outline, WM_SETREDRAW, FALSE, 0);
     OutlineScan scan = {0};
-    Sci_Position lines = (Sci_Position)SendMessageA(edit, SCI_GETLINECOUNT, 0, 0);
-    for (Sci_Position lineNumber = 0; lineNumber < lines && *g_host->outlineCount < OUTLINE_MAX_HEADINGS; lineNumber++) {
-        Sci_Position start = (Sci_Position)SendMessageA(edit, SCI_POSITIONFROMLINE, (WPARAM)lineNumber, 0);
-        Sci_Position end = (Sci_Position)SendMessageA(edit, SCI_GETLINEENDPOSITION, (WPARAM)lineNumber, 0);
-        if (end - start > 65535) end = start + 65535;
+    /* Walk the stable character buffer directly. Asking Scintilla for both
+       endpoints of every line made a large outline pay two window-message
+       round trips per source line even though the text is already here. */
+    Sci_Position length = (Sci_Position)SendMessageA(edit, SCI_GETLENGTH, 0, 0);
+    Sci_Position position = 0;
+    Sci_Position lineNumber = 0;
+    while (position < length && *g_host->outlineCount < OUTLINE_MAX_HEADINGS) {
+        Sci_Position start = position;
+        while (position < length && text[position] != '\r' && text[position] != '\n') position++;
+        Sci_Position lineLength = position - start;
+        if (lineLength > 65535) lineLength = 65535;
         int titleStart = 0, titleLength = 0;
-        int level = outline_scan_line(&scan, text + start, (int)(end - start), &titleStart, &titleLength);
+        int level = outline_scan_line(&scan, text + start, (int)lineLength, &titleStart, &titleLength);
         if (level && titleLength > 0)
             add_outline_heading(text + start + titleStart, titleLength, level, lineNumber);
+        if (position < length && text[position] == '\r') position++;
+        if (position < length && text[position] == '\n') position++;
+        lineNumber++;
     }
     SendMessageW(*g_host->outline, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(*g_host->outline, NULL, TRUE);

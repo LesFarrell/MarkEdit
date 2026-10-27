@@ -731,6 +731,103 @@ static void move_document_tab(int from, int to) {
     update_title();
 }
 
+static void do_save_tab_at(int index) {
+    if (index < 0 || index >= g_documentStore.count) return;
+    int original = g_documentStore.active;
+    if (index != original) switch_document(index);
+    do_save();
+    if (index != original && original < g_documentStore.count) switch_document(original);
+}
+
+static void do_saveas_tab_at(int index) {
+    if (index < 0 || index >= g_documentStore.count) return;
+    int original = g_documentStore.active;
+    if (index != original) switch_document(index);
+    do_saveas();
+    if (index != original && original < g_documentStore.count) switch_document(original);
+}
+
+/* do_close_document_at() shifts every document after the one it removes down
+   by one index, so these close multiple tabs from the highest index down -
+   that way an index not yet visited never moves before its turn. */
+static void do_close_other_tabs(int keep) {
+    if (keep < 0 || keep >= g_documentStore.count) return;
+    for (int i = g_documentStore.count - 1; i >= 0; i--) {
+        if (i == keep) continue;
+        do_close_document_at(i);
+    }
+}
+
+static void do_close_tabs_to_right(int index) {
+    for (int i = g_documentStore.count - 1; i > index; i--) do_close_document_at(i);
+}
+
+static void do_close_all_tabs(void) {
+    for (int i = g_documentStore.count - 1; i >= 0; i--) do_close_document_at(i);
+}
+
+static void copy_text_to_clipboard(const WCHAR *text) {
+    size_t bytes = (wcslen(text) + 1) * sizeof(WCHAR);
+    HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!global) return;
+    void *locked = GlobalLock(global);
+    if (!locked) { GlobalFree(global); return; }
+    memcpy(locked, text, bytes);
+    GlobalUnlock(global);
+    if (!OpenClipboard(g_hMainWnd)) { GlobalFree(global); return; }
+    EmptyClipboard();
+    SetClipboardData(CF_UNICODETEXT, global);
+    CloseClipboard();
+}
+
+static void show_tab_context_menu(int index, POINT screenPoint) {
+    enum {
+        TAB_CONTEXT_SAVE = 1, TAB_CONTEXT_SAVEAS, TAB_CONTEXT_CLOSE,
+        TAB_CONTEXT_CLOSE_OTHERS, TAB_CONTEXT_CLOSE_RIGHT, TAB_CONTEXT_CLOSE_ALL,
+        TAB_CONTEXT_COPY_PATH, TAB_CONTEXT_REVEAL
+    };
+    if (index < 0 || index >= g_documentStore.count) return;
+    const WCHAR *path = g_documentStore.documents[index].path;
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, TAB_CONTEXT_SAVE, L"Save");
+    AppendMenuW(menu, MF_STRING, TAB_CONTEXT_SAVEAS, L"Save As...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, TAB_CONTEXT_CLOSE, L"Close");
+    AppendMenuW(menu, MF_STRING | (g_documentStore.count > 1 ? 0 : MF_GRAYED),
+                TAB_CONTEXT_CLOSE_OTHERS, L"Close Others");
+    AppendMenuW(menu, MF_STRING | (index < g_documentStore.count - 1 ? 0 : MF_GRAYED),
+                TAB_CONTEXT_CLOSE_RIGHT, L"Close Tabs to the Right");
+    AppendMenuW(menu, MF_STRING, TAB_CONTEXT_CLOSE_ALL, L"Close All");
+    if (path) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, TAB_CONTEXT_COPY_PATH, L"Copy Path");
+        AppendMenuW(menu, MF_STRING, TAB_CONTEXT_REVEAL, L"Reveal in Explorer");
+    }
+
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                  screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL);
+    DestroyMenu(menu);
+
+    switch (command) {
+        case TAB_CONTEXT_SAVE: do_save_tab_at(index); break;
+        case TAB_CONTEXT_SAVEAS: do_saveas_tab_at(index); break;
+        case TAB_CONTEXT_CLOSE: do_close_document_at(index); break;
+        case TAB_CONTEXT_CLOSE_OTHERS: do_close_other_tabs(index); break;
+        case TAB_CONTEXT_CLOSE_RIGHT: do_close_tabs_to_right(index); break;
+        case TAB_CONTEXT_CLOSE_ALL: do_close_all_tabs(); break;
+        case TAB_CONTEXT_COPY_PATH:
+            if (index < g_documentStore.count && g_documentStore.documents[index].path)
+                copy_text_to_clipboard(g_documentStore.documents[index].path);
+            break;
+        case TAB_CONTEXT_REVEAL:
+            if (index < g_documentStore.count && g_documentStore.documents[index].path)
+                reveal_path_in_explorer(g_documentStore.documents[index].path);
+            break;
+    }
+}
+
 static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                         UINT_PTR subclassId, DWORD_PTR refData) {
     (void)subclassId; (void)refData;
@@ -811,6 +908,28 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 return 0;
             }
         }
+    } else if (msg == WM_CONTEXTMENU) {
+        POINT screenPoint = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        int index;
+        if (screenPoint.x == -1 && screenPoint.y == -1) {
+            /* Keyboard-invoked (Shift+F10 / context menu key): no cursor
+               position, so anchor the menu under the selected tab instead. */
+            index = TabCtrl_GetCurSel(hwnd);
+            RECT itemRect;
+            if (index >= 0 && TabCtrl_GetItemRect(hwnd, index, &itemRect)) {
+                screenPoint.x = itemRect.left;
+                screenPoint.y = itemRect.bottom;
+                ClientToScreen(hwnd, &screenPoint);
+            }
+        } else {
+            POINT clientPoint = screenPoint;
+            ScreenToClient(hwnd, &clientPoint);
+            TCHITTESTINFO hit = {0};
+            hit.pt = clientPoint;
+            index = TabCtrl_HitTest(hwnd, &hit);
+        }
+        if (index >= 0) show_tab_context_menu(index, screenPoint);
+        return 0;
     } else if (msg == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, TabSubclassProc, 1);
     }

@@ -154,6 +154,12 @@ static void test_files(void) {
     CHECK(path_join(L"C:\\folder", NULL) == NULL);
     CHECK(absolute_path(NULL) == NULL);
     CHECK(!skipped_workspace_directory(NULL));
+    CHECK(!path_has_skipped_component(NULL));
+    CHECK(path_has_skipped_component(L"src\\.git\\objects\\ab"));
+    CHECK(path_has_skipped_component(L"src/node_modules/package/index.js"));
+    CHECK(path_has_skipped_component(L"C:\\work\\BUILD\\object.o"));
+    CHECK(!path_has_skipped_component(L"src\\build-tools\\file.c"));
+    CHECK(!path_has_skipped_component(L"src\\output.txt"));
 
     WCHAR directory[MAX_PATH], path[MAX_PATH];
     DWORD length = GetTempPathW(MAX_PATH, directory);

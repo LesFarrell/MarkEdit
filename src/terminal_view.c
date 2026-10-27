@@ -335,6 +335,26 @@ static void send_bytes(TerminalView *view, const char *bytes, size_t length) {
     if (view->running) terminal_process_write(view->process, bytes, length);
 }
 
+/* Windows may fold held keys into one message with a repeat count. Queue
+   those repetitions in compact batches rather than taking the input lock
+   once per character or escape sequence. */
+static void send_repeated_bytes(TerminalView *view, const char *bytes, size_t length,
+                                WORD repeatCount) {
+    size_t remaining = repeatCount ? repeatCount : 1;
+    char batch[256];
+    size_t perBatch = length ? sizeof(batch) / length : 0;
+    if (!perBatch) {
+        while (remaining--) send_bytes(view, bytes, length);
+        return;
+    }
+    for (size_t i = 0; i < perBatch; i++) memcpy(batch + i * length, bytes, length);
+    while (remaining) {
+        size_t count = remaining < perBatch ? remaining : perBatch;
+        send_bytes(view, batch, count * length);
+        remaining -= count;
+    }
+}
+
 static unsigned int key_modifiers(void) {
     unsigned int modifiers = 0;
     if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= TERMINAL_MOD_SHIFT;
@@ -345,8 +365,14 @@ static unsigned int key_modifiers(void) {
 
 /* Virtual keys that need VT sequences instead of their WM_CHAR translation.
    Printable keys and control characters still use TranslateMessage(), which
-   preserves the active keyboard layout and dead-key composition. */
-static int handle_special_key(TerminalView *view, WPARAM key) {
+   preserves the active keyboard layout and dead-key composition.
+
+   repeatCount is WM_KEYDOWN's lParam bits 0-15: normally 1, but Windows folds
+   a key's un-retrieved auto-repeats into one message with a higher count
+   whenever this thread falls behind the keyboard (a busy shell's own output
+   is the usual cause here) - sending the sequence only once would silently
+   drop the rest of a held arrow key or Backspace. */
+static int handle_special_key(TerminalView *view, WPARAM key, WORD repeatCount) {
     unsigned int modifiers = key_modifiers();
     if (key == VK_INSERT && (modifiers & TERMINAL_MOD_SHIFT)) {
         paste_clipboard(view);
@@ -357,17 +383,17 @@ static int handle_special_key(TerminalView *view, WPARAM key) {
                                             terminal_grid_app_cursor_keys(view->grid),
                                             sequence, sizeof(sequence));
     if (!length) return 0;
-    send_bytes(view, sequence, length);
+    send_repeated_bytes(view, sequence, length, repeatCount);
     return 1;
 }
 
-static void send_character(TerminalView *view, WCHAR ch, int prefixEscape) {
+static void send_character(TerminalView *view, WCHAR ch, int prefixEscape, WORD repeatCount) {
     char utf8[8];
     int offset = prefixEscape ? 1 : 0;
     if (prefixEscape) utf8[0] = '\x1b';
     int length = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, utf8 + offset,
                                      (int)sizeof(utf8) - offset, NULL, NULL);
-    if (length > 0) send_bytes(view, utf8, (size_t)(length + offset));
+    if (length > 0) send_repeated_bytes(view, utf8, (size_t)(length + offset), repeatCount);
 }
 
 /* ---- the process's output ---- */
@@ -513,7 +539,7 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             }
             if (view->scrollOffset != 0 && wParam != VK_SHIFT && wParam != VK_CONTROL && wParam != VK_MENU)
                 view->scrollOffset = 0; /* typing returns the view to the live tail */
-            if (handle_special_key(view, wParam)) {
+            if (handle_special_key(view, wParam, LOWORD(lParam))) {
                 view->suppressTranslatedChar = 1;
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
@@ -527,7 +553,9 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
                Alt plus Control is AltGr, so it remains a layout character. */
             int altGr = (GetKeyState(VK_RMENU) & 0x8000) &&
                         (GetKeyState(VK_CONTROL) & 0x8000);
-            send_character(view, (WCHAR)wParam, msg == WM_SYSCHAR && !altGr);
+            /* lParam's repeat count (see handle_special_key's comment) covers
+               held printable keys the same way. */
+            send_character(view, (WCHAR)wParam, msg == WM_SYSCHAR && !altGr, LOWORD(lParam));
             return 0;
         }
         case WM_DEADCHAR:
@@ -589,6 +617,14 @@ HWND terminal_view_window(const TerminalView *view) { return view ? view->hwnd :
 void terminal_view_free(TerminalView *view) {
     if (!view) return;
     terminal_process_free(view->process);
+    /* terminal_process_free() joins the reader/watcher threads, but a
+       WM_TERMINAL_CHUNK they posted just before the join can still be
+       sitting in this thread's queue (it wasn't being pumped while blocked
+       on the join). Drain and free any such chunk now, since once the
+       window below is destroyed DispatchMessage will just drop it. */
+    MSG msg;
+    while (PeekMessageW(&msg, view->hwnd, WM_TERMINAL_CHUNK, WM_TERMINAL_CHUNK, PM_REMOVE))
+        free((TerminalChunk *)msg.lParam);
     terminal_grid_free(view->grid);
     release_back_buffer(view);
     if (view->hwnd) DestroyWindow(view->hwnd);

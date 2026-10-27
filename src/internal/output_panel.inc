@@ -69,6 +69,16 @@ static int output_pane_running(const OutputPane *pane) {
     return pane->process != NULL;
 }
 
+/* Whether the output panel (including the Terminal tab's own shell) owns
+   keyboard focus, so that document-switching code (documents.inc's
+   switch_document()) doesn't wrest it away from a pane the user is actively
+   using - e.g. a plugin activating a tab in the background while the user
+   is mid-command in the terminal. */
+static int focus_outside_editor_area(void) {
+    HWND focused = GetFocus();
+    return g_hOutputPanel && focused && IsChild(g_hOutputPanel, focused);
+}
+
 /* Whether the given tab has something running - the Run tab's OutputProcess,
    or the Terminal tab's own shell. */
 static int tab_running(int tab) {
@@ -473,13 +483,29 @@ static LRESULT CALLBACK OutputInputSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
-/* Typing into an output view types into the input line instead. */
+/* This view is read-only scrollback, not where typed input goes - clicking
+   it (e.g. to select or copy output text) would otherwise leave Scintilla's
+   own click handling with keyboard focus on a control that can't take input,
+   so the Run tab's Enter/Up/Down/typing would silently do nothing until the
+   user explicitly clicked the input line. Run the click normally (selection,
+   double-click-to-open still work via DefSubclassProc), then hand focus back
+   to the input line, the same redirect typing into this view already uses. */
 static LRESULT CALLBACK OutputViewSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                                UINT_PTR id, DWORD_PTR data) {
     (void)data;
+    if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+        LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+        SetFocus(g_hOutputInput);
+        return result;
+    }
     if (msg == WM_CHAR && wParam >= ' ' && !(GetKeyState(VK_CONTROL) & 0x8000)) {
         SetFocus(g_hOutputInput);
         SendMessageW(g_hOutputInput, WM_CHAR, wParam, lParam);
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && (wParam == VK_RETURN || wParam == VK_UP || wParam == VK_DOWN)) {
+        SetFocus(g_hOutputInput);
+        SendMessageW(g_hOutputInput, WM_KEYDOWN, wParam, lParam);
         return 0;
     }
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, OutputViewSubclassProc, id);

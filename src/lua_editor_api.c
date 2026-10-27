@@ -258,13 +258,12 @@ static int editor_replace_selections(lua_State *L) {
        before this selection. Rebuild in document order; Scintilla may merge
        coincident carets, which is the same behaviour as interactive editing. */
     int finalMainSelection = 0;
+    Sci_Position shift = 0;
     for (int i = count - 1; i >= 0; i--) {
-        Sci_Position shift = 0;
-        for (int j = count - 1; j > i; j--)
-            shift += (Sci_Position)items[j].length - (items[j].finish - items[j].start);
         items[i].finalCaret = items[i].start + shift + (Sci_Position)items[i].length;
         carets[count - 1 - i] = items[i].finalCaret;
         if (items[i].originalIndex == mainSelection) finalMainSelection = count - 1 - i;
+        shift += (Sci_Position)items[i].length - (items[i].finish - items[i].start);
     }
     SendMessageA(hEdit, SCI_SETSEL, (WPARAM)carets[0], (LPARAM)carets[0]);
     for (int i = 1; i < count; i++)

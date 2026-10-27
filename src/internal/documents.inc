@@ -153,7 +153,11 @@ static void switch_document(int index) {
     update_status_bar();
     update_outline();
     prompt_reload_active_external_change();
-    SetFocus(g_hEdit);
+    /* Switching documents can be triggered from outside the editor area
+       itself - a plugin activating a tab, or do_save_all()/do_exit()'s
+       switch-to-each-tab loops - and shouldn't steal focus from a pane like
+       the terminal the user is actively using when that happens. */
+    if (!focus_outside_editor_area()) SetFocus(g_hEdit);
 }
 
 static int create_document_tab(void) {

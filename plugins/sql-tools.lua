@@ -156,18 +156,22 @@ local function starts_join(tokens, index)
 end
 
 local function format_tokens(tokens)
-  local pieces, line, depth, line_depth = {}, "", 0, 0
+  local pieces, line, line_tail, depth, line_depth = {}, {}, "", 0, 0
   local function flush()
-    if line ~= "" then pieces[#pieces + 1] = string.rep("  ", line_depth) .. line; line = "" end
+    if #line > 0 then
+      pieces[#pieces + 1] = string.rep("  ", line_depth) .. table.concat(line)
+      line, line_tail = {}, ""
+    end
   end
   local function append(value)
     local no_space_before = value == "," or value == ";" or value == ")" or value == "("
       or value == "." or value == "::"
-    local tail = line:sub(-1)
-    local no_space_after = tail == "(" or tail == "." or line:sub(-2) == "::"
-    if line ~= "" and not no_space_before and not no_space_after then line = line .. " " end
-    if line == "" then line_depth = depth end
-    line = line .. value
+    local no_space_after = line_tail:sub(-1) == "(" or line_tail:sub(-1) == "."
+      or line_tail == "::"
+    if #line > 0 and not no_space_before and not no_space_after then line[#line + 1] = " " end
+    if #line == 0 then line_depth = depth end
+    line[#line + 1] = value
+    line_tail = value:sub(-2)
   end
   local index = 1
   while index <= tokens.n do

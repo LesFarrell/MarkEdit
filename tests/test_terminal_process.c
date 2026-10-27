@@ -73,7 +73,11 @@ static void test_process(void) {
     process = terminal_process_start(interactive, NULL, 80, 24, window, WM_TEST_OUTPUT, 3);
     expect(process != NULL, "an interactive shell starts");
     if (process) {
-        expect(terminal_process_write(process, "echo roundtrip\r\n", 16), "keystrokes reach it");
+        static const char input[] = "echo roundtrip\r\n";
+        int queued = 1;
+        for (size_t i = 0; i < sizeof(input) - 1; i++)
+            queued = queued && terminal_process_write(process, input + i, 1);
+        expect(queued, "individual keystrokes are queued without blocking the caller");
         char output[4096];
         DWORD started = GetTickCount();
         output[0] = 0;

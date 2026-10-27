@@ -52,6 +52,16 @@ static void expect_not_contains(const char *name, const char *markdown, const ch
     free(html);
 }
 
+static void test_length_aware_render(void) {
+    static const char markdown[] = "# Kept\n# Ignored\n";
+    char *html = markdown_to_html_n(markdown, sizeof("# Kept\n") - 1);
+    if (!html || !strstr(html, "Kept") || strstr(html, "Ignored")) {
+        fprintf(stderr, "FAIL length-aware render\nactual: %s\n", html ? html : "(null)");
+        failures++;
+    }
+    free(html);
+}
+
 int main(void) {
     expect_contains("heading", "# Hello *world*\n", "<h1>Hello <em>world</em></h1>");
     expect_contains_raw("heading sourcepos", "# Hello *world*\n", "<h1 data-sourcepos=\"1:1-1:15\">");
@@ -85,6 +95,7 @@ int main(void) {
                         "data-sourcepos=\"4:1-4:6\"");
     expect_contains_raw("CR front matter source positions", "---\rtitle: Example\r---\r# Body\r",
                         "data-sourcepos=\"4:1-4:6\"");
+    test_length_aware_render();
     if (failures) return 1;
     puts("All parser tests passed.");
     return 0;

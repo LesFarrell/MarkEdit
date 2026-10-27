@@ -988,6 +988,7 @@ static void test_bundled_plugins(HWND editor) {
     int editUtf16Be = find_command("/Edit/Convert/En&coding/UTF-16 B&E");
     int editAnsi = find_command("/Edit/Convert/En&coding/&ANSI (system code page)");
     int naturalSort = find_command("/Edit/Convert/Natural Sort Lines Ascending");
+    int anagramWords = find_command("Anagrams (British English)/Words From Letters...");
     int numberHex = find_command("/Tools/Number Converter/To Hexadecimal");
     int numberDecimal = find_command("/Tools/Number Converter/To Decimal");
     int numberRoman = find_command("/Tools/Number Converter/To Roman Numerals");
@@ -1044,7 +1045,8 @@ static void test_bundled_plugins(HWND editor) {
            editSortDescending >= 0 && editDedupe >= 0 && editTabs >= 0 && editSpaces >= 0 &&
            editCrlf >= 0 && editLf >= 0 && editCr >= 0 && editUtf8 >= 0 &&
            editUtf8Bom >= 0 && editUtf16Le >= 0 && editUtf16Be >= 0 && editAnsi >= 0 &&
-           naturalSort >= 0 && numberHex >= 0 && numberDecimal >= 0 && numberRoman >= 0 &&
+           naturalSort >= 0 && anagramWords >= 0 &&
+           numberHex >= 0 && numberDecimal >= 0 && numberRoman >= 0 &&
            sqlFormat >= 0 && sqlMinify >= 0 && sqlUpper >= 0 && sqlLower >= 0 &&
            removeContaining >= 0 && jsonLinesToArray >= 0 &&
            jsonArrayToLines >= 0 && queryToJson >= 0 && clefFormat >= 0 &&
@@ -1128,6 +1130,11 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(naturalSort, editor) && document_is(editor, "file1\nfile01\nfile2\nfile10"),
            "natural sort compares embedded digit runs numerically");
 
+    set_document(editor, "tone");
+    SendMessageA(editor, SCI_SETSEL, 0, 4);
+    expect(run_ok(anagramWords, editor) && document_is(editor, "tone"),
+           "anagram word indexing handles the bundled dictionary");
+
     set_document(editor, "255");
     SendMessageA(editor, SCI_SETSEL, 0, 3);
     expect(run_ok(numberHex, editor) && document_is(editor, "0xFF"),
@@ -1169,6 +1176,16 @@ static void test_bundled_plugins(HWND editor) {
     SendMessageA(editor, SCI_SETSEL, 0, 0);
     expect(run_ok(sqlLower, editor) && document_is(editor, "select a,\n  b\nfrom t -- note\nwhere x=1"),
            "SQL plugin lowercases keywords in place");
+
+    char *longSql = repeated_text("select ", "column_name", ",", " from records", 256u << 10);
+    expect(longSql != NULL, "allocate a long SQL statement");
+    if (longSql) {
+        set_document(editor, longSql);
+        SendMessageA(editor, SCI_SETSEL, 0, 0);
+        expect(run_ok(sqlFormat, editor) && document_contains(editor, "\nFROM records"),
+               "SQL formatting handles a long expression in linear space");
+        free(longSql);
+    }
 
     set_document(editor, "{\"a\":1}\n{\"a\":2}");
     SendMessageA(editor, SCI_SETSEL, 0, 0);

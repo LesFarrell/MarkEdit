@@ -109,6 +109,10 @@ static int utf8_sequence_length(unsigned char lead) {
     return 0;
 }
 
+static int plain_output_byte(unsigned char byte) {
+    return byte == '\n' || byte == '\t' || (byte >= 0x20 && byte < 0x7f);
+}
+
 /* A byte that isn't part of a UTF-8 character, read in the OEM code page. */
 static void emit_oem_byte(OutputRun *run, int style, unsigned char byte) {
     WCHAR wide;
@@ -166,8 +170,15 @@ void output_decoder_feed(OutputDecoder *decoder, const char *bytes, size_t lengt
         } else if (byte == 0x1b) {
             decoder->escapeState = ESCAPE_START;
             decoder->escapeLength = 0;
-        } else if (byte == '\n' || byte == '\t' || (byte >= 0x20 && byte < 0x7f)) {
-            emit(&run, current_style(decoder), (const char *)&byte, 1);
+        } else if (plain_output_byte(byte)) {
+            /* Console output is overwhelmingly plain ASCII. Copy a bounded
+               run at once instead of calling emit() for every byte. */
+            size_t count = 1;
+            while (count < sizeof(run.text) && i + count < length &&
+                   plain_output_byte((unsigned char)bytes[i + count]))
+                count++;
+            emit(&run, current_style(decoder), bytes + i, count);
+            i += count - 1;
         } else if (byte >= 0x80) {
             if (utf8_sequence_length(byte)) {
                 decoder->pending[0] = byte;

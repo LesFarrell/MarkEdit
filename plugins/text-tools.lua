@@ -153,7 +153,7 @@ end
 -- they're on. With wholeWord, a match next to a word character on a side
 -- where needle starts or ends with one doesn't count.
 local function count_occurrences(text, needle, eol, wholeWord)
-  local count, lines, lastLine, line, scanned = 0, 0, 0, 1, 1
+  local count, lines, lastLine, line, lineScan = 0, 0, 0, 1, 1
   local checkBefore = wholeWord and needle:find("^" .. WORD_BYTE)
   local checkAfter = wholeWord and needle:find(WORD_BYTE .. "$")
   local masked = wholeWord and mask_punctuation(text) or text
@@ -164,11 +164,13 @@ local function count_occurrences(text, needle, eol, wholeWord)
     local before, after = masked:sub(first - 1, first - 1), masked:sub(last + 1, last + 1)
     if not (checkBefore and before:find(WORD_BYTE)) and not (checkAfter and after:find(WORD_BYTE)) then
       count = count + 1
-      -- Line endings since the last match give this match's line.
-      local between = text:sub(scanned, first - 1)
-      -- (No line ending has pattern magic characters, so eol is its own pattern.)
-      local _, endings = between:gsub(eol, "")
-      line, scanned = line + endings, first
+      -- Advance over each line ending once, without allocating the text
+      -- between every pair of matches.
+      while true do
+        local ending = text:find(eol, lineScan, true)
+        if not ending or ending >= first then break end
+        line, lineScan = line + 1, ending + #eol
+      end
       if line ~= lastLine then lines, lastLine = lines + 1, line end
       position = last + 1
     else

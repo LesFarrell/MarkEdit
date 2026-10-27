@@ -144,19 +144,46 @@ end
 -- use and kept while the plugin is loaded.
 local word_list
 
+-- The bundled list is ASCII a-z. Counting its letters is linear and avoids
+-- allocating and sorting a table of characters for every one of 79,000 words.
+local function word_signature(word)
+  local counts = {}
+  for index = 1, #word do
+    local letter = word:byte(index) - 96
+    counts[letter] = (counts[letter] or 0) + 1
+  end
+  local parts = {}
+  for letter = 1, 26 do
+    if counts[letter] then
+      parts[#parts + 1] = string.char(letter + 96):rep(counts[letter])
+    end
+  end
+  return table.concat(parts)
+end
+
+local function signature_fits(key, counts)
+  local position = 1
+  while position <= #key do
+    local letter = key:sub(position, position)
+    local finish = position + 1
+    while finish <= #key and key:byte(finish) == key:byte(position) do finish = finish + 1 end
+    if finish - position > (counts[letter] or 0) then return false end
+    position = finish
+  end
+  return true
+end
+
 local function english_words()
   if not word_list then
-    local words, by_signature = {}, {}
+    local words, signatures, by_signature = {}, {}, {}
     for word in require("words_en_gb"):gmatch("%l+") do
-      words[#words + 1] = word
-      local letters = {}
-      for letter in word:gmatch(".") do letters[#letters + 1] = letter end
-      table.sort(letters)
-      local key = table.concat(letters)
+      local index = #words + 1
+      local key = word_signature(word)
+      words[index], signatures[index] = word, key
       by_signature[key] = by_signature[key] or {}
-      table.insert(by_signature[key], word)
+      by_signature[key][#by_signature[key] + 1] = word
     end
-    word_list = { words = words, by_signature = by_signature }
+    word_list = { words = words, signatures = signatures, by_signature = by_signature }
   end
   return word_list
 end
@@ -175,8 +202,10 @@ end
 -- Listed words of shortest..longest letters that pool can spell.
 local function listed_words_from(pool, shortest, longest)
   local found = {}
-  for _, word in ipairs(english_words().words) do
-    if #word >= shortest and #word <= longest and spells(word, pool.counts) then
+  local list = english_words()
+  for index, word in ipairs(list.words) do
+    if #word >= shortest and #word <= longest and
+        signature_fits(list.signatures[index], pool.counts) then
       found[#found + 1] = word
     end
   end

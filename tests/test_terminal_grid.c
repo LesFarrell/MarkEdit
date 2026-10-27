@@ -56,6 +56,21 @@ static void test_scroll_and_scrollback(void) {
     terminal_grid_free(grid);
 }
 
+static void test_scrollback_limit_keeps_order(void) {
+    TerminalGrid *grid = terminal_grid_create(16, 2);
+    char line[32];
+    for (int i = 0; i < 2005; i++) {
+        snprintf(line, sizeof(line), "L%04d\r\n", i);
+        feed(grid, line);
+    }
+    expect(terminal_grid_scrollback_count(grid) == 2000,
+           "scrollback stays at its configured limit");
+    expect_line(grid, 0, "L0004", "the ring drops only the oldest scrollback line");
+    expect_line(grid, 1999, "L2003", "the newest scrollback line remains last");
+    expect_line(grid, 2000, "L2004", "screen rows follow scrollback in logical order");
+    terminal_grid_free(grid);
+}
+
 static void test_sgr_colours(void) {
     TerminalGrid *grid = terminal_grid_create(10, 2);
     feed(grid, "\x1b[31mred\x1b[0m plain");
@@ -112,6 +127,7 @@ int main(void) {
     test_plain_text_and_wrapping();
     test_cursor_addressing();
     test_scroll_and_scrollback();
+    test_scrollback_limit_keeps_order();
     test_sgr_colours();
     test_alternate_screen();
     test_device_attributes_reply();

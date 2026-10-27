@@ -26,6 +26,13 @@ static const char *const EVENT_NAMES[] = {
     "reload"
 };
 
+static const char *known_event(const char *name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < sizeof(EVENT_NAMES) / sizeof(EVENT_NAMES[0]); i++)
+        if (strcmp(name, EVENT_NAMES[i]) == 0) return EVENT_NAMES[i];
+    return NULL;
+}
+
 PluginCommand s_commands[PLUGIN_MAX_COMMANDS];
 int s_commandCount = 0;
 PluginHandler s_handlers[PLUGIN_MAX_HANDLERS];
@@ -459,9 +466,7 @@ static int commands_register(lua_State *L) {
 static int events_on(lua_State *L) {
     const char *name = checked_cstring(L, 1, "event name");
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    const char *event = NULL;
-    for (size_t i = 0; i < sizeof(EVENT_NAMES) / sizeof(EVENT_NAMES[0]); i++)
-        if (strcmp(name, EVENT_NAMES[i]) == 0) event = EVENT_NAMES[i];
+    const char *event = known_event(name);
     if (!event) return luaL_error(L, "unknown event '%s'", name);
     if (s_handlerCount >= PLUGIN_MAX_HANDLERS)
         return luaL_error(L, "too many event handlers (the limit is %d)", PLUGIN_MAX_HANDLERS);
@@ -1398,13 +1403,15 @@ char *plugin_host_run_context_menu_item(int id, HWND hEdit) {
 
 char *plugin_host_fire(const char *event, const char *argument, HWND hEdit) {
     if (s_busy || !s_lua) return NULL;
+    const char *registeredEvent = known_event(event);
+    if (!registeredEvent) return NULL;
     char *report = NULL;
     /* Snapshot stable IDs. Handlers may remove themselves or each other,
        which compacts s_handlers; newly registered handlers wait until the
        next event. */
     int ids[PLUGIN_MAX_HANDLERS], count = 0;
     for (int i = 0; i < s_handlerCount; i++)
-        if (strcmp(s_handlers[i].event, event) == 0) ids[count++] = s_handlers[i].id;
+        if (s_handlers[i].event == registeredEvent) ids[count++] = s_handlers[i].id;
     for (int n = 0; n < count; n++) {
         int index = -1;
         for (int i = 0; i < s_handlerCount; i++)

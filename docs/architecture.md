@@ -114,7 +114,7 @@ they are included into the `markedit.c` translation unit.
 - `dialogs.inc`: modal choices, text input, find/replace and help windows, and the shared popup-dialog theming and buttons.
 - `ui_shell.inc`: menus, toolbar, status bar, layout, view toggles and editor presentation.
 - `debugger.inc`: source launching, compiler discovery, GDB/Python debugger control and breakpoint persistence.
-- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, and the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`). The Output tab's programs run through `output_process.c`, decoded by `output_text.c`; the Terminal tab is `terminal_view.c`, built around `terminal_process.c` (ConPTY), `terminal_grid.c` (the VT100 screen), and `terminal_input.c` (Win32-key to VT-sequence translation).
+- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, and the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`). The Output tab's programs run through `output_process.c`, whose reader batches available pipe output before posting it for `output_text.c` to decode; the Terminal tab is `terminal_view.c`, built around `terminal_process.c` (ConPTY and its worker threads), `terminal_grid.c` (the VT100 screen and bounded scrollback ring), and `terminal_input.c` (Win32-key to VT-sequence translation).
 - `editor_input.inc`: smart Tab/Enter, paired characters, spelling context actions and editor navigation gestures.
 - `outline_host.inc`, `workspace.inc` and `settings_dialog.inc`: their named UI subsystems.
 - `command_dispatch.inc`: native command-family handlers.
@@ -169,12 +169,12 @@ depend on a UI module.
 | `plugin_discovery.c` | (internal) | Extension discovery and the folder-local `require` loader | `plugin_host_internal.h`, `file_io.h`, `path_utils.h` |
 | `lua_editor_api.c` | `lua_editor_api.h` | Scintilla-facing `editor.*` API | Scintilla |
 | `menu_commands.c` | `menu_commands.h` | Command registry | `command_ids.h` |
-| `output_process.c` | `output_process.h` | A program on pipes in a kill-on-close job, its output posted to a window by a reader thread | windows.h |
+| `output_process.c` | `output_process.h` | A program on pipes in a kill-on-close job, with immediately available output batched before its reader thread posts it to the UI | windows.h |
 | `output_text.c` | `output_text.h` | Output decoding (ANSI colours, carriage returns, OEM fallback), file locations in messages | windows.h |
-| `terminal_process.c` | `terminal_process.h` | A shell on a Windows pseudoconsole (ConPTY) in a kill-on-close job, its output posted to a window by a reader thread | windows.h |
-| `terminal_grid.c` | `terminal_grid.h` | VT100/ECMA-48 screen buffer: cursor-addressed cells, SGR colours, scroll regions, the alternate screen, scrollback | none (pure logic) |
+| `terminal_process.c` | `terminal_process.h` | A shell on a Windows pseudoconsole (ConPTY) in a kill-on-close job; a batched reader posts output, an ordered writer drains queued input, and a watcher reports shell exit | windows.h |
+| `terminal_grid.c` | `terminal_grid.h` | VT100/ECMA-48 screen buffer: cursor-addressed cells, SGR colours, scroll regions, the alternate screen, and bounded ring-buffer scrollback | none (pure logic) |
 | `terminal_input.c` | `terminal_input.h` | Pure translation of Win32 virtual keys and modifier flags into xterm-compatible VT input sequences | windows.h for virtual-key constants |
-| `terminal_view.c` | `terminal_view.h` | The Terminal tab's rendering and input control, owning one `TerminalProcess` and one `TerminalGrid`; focused keyboard messages are handled before application accelerators | `terminal_process.h`, `terminal_grid.h`, `terminal_input.h` |
+| `terminal_view.c` | `terminal_view.h` | The Terminal tab's rendering and input control, owning one `TerminalProcess` and one `TerminalGrid`; repeated keys are batched and focused keyboard messages are handled before queued output and application accelerators | `terminal_process.h`, `terminal_grid.h`, `terminal_input.h` |
 | `markedit.c` + `src/internal/*.inc` | `markedit.h` | Application shell and subsystems | everything above |
 
 Two dependency rules fall out of the table:
@@ -186,14 +186,41 @@ Two dependency rules fall out of the table:
   reads persisted values includes `settings_values.h`; only `markedit.c` pulls in
   the umbrella `settings.h`.
 
+## Responsiveness and background work
+
+The UI thread owns Win32 controls, terminal-grid mutation and painting. Work that
+can block is kept outside it:
+
+- `terminal_process.c` uses three workers. The reader drains currently available
+  ConPTY output into chunks of up to 64 KB, the writer drains a lock-protected
+  input queue in order, and the watcher waits for shell exit. Key handlers only
+  encode and enqueue bytes; they never wait in `WriteFile`.
+- The main message loop explicitly takes pending messages for the focused
+  terminal from `WM_KEYFIRST` through `WM_KEYLAST` before ordinary posted output
+  messages. This prevents sustained output from starving keys. Auto-repeat bytes
+  are assembled in small batches before they enter the writer queue.
+- `terminal_grid.c` stores at most 2,000 scrollback rows in a ring. Once full, a
+  new line replaces the oldest slot in O(1); do not reintroduce an array-wide
+  `memmove` on rollover.
+- `output_process.c` similarly drains immediately available pipe data into a
+  64 KB batch before posting it, reducing UI messages and decoder/repaint passes.
+
+Other hot paths stay linear: outline rebuilding walks Scintilla's stable
+character buffer instead of sending messages for every line, bulk multi-caret
+replacement carries one cumulative offset, folder replacement advances through
+its sorted matches once, and preview rendering passes its known byte length to
+`markdown_to_html_n()` rather than rescanning the document.
+
 Compiled sources are listed in the repo-root `*.rsp` response files.
 `build.bat` passes `markedit-sources.rsp`, `cmark-gfm-sources.rsp`,
 `lua-sources.rsp` and `lexilla-sources.rsp` to the compiler (cmark-gfm and
 Lexilla compiled file by file, with their own flags). `plugin-sources.rsp`
 lists the plugin host subset for `test.bat` and the Premake test projects;
 those files are also in `markedit-sources.rsp`. `release-flags.rsp` holds the
-release code-generation flags (`-Os`, the unwind tables Lua's `longjmp` needs,
-section flags), which `build.bat`, `test.bat` and `premake5.lua` all use.
+release code-generation flags (`-Os`, `-flto`, the unwind tables Lua's `longjmp`
+needs, and section flags), which `build.bat`, `test.bat` and `premake5.lua` all
+use. Full LTO makes a clean build slower but lets the final link optimize across
+the separately compiled modules and vendored static objects.
 `premake5.lua` reads the source lists via `sources_from_rsp()`, so adding a new
 `.c` file is a one-line change to its `.rsp` rather than an edit in two build
 systems.

@@ -35,10 +35,12 @@ static int prepare(const char *needle, int options, char **pattern, int *flags) 
    match as the target. Returns its start, -1, or SCINTILLA_BAD_REGEX.
    Scintilla reports a regular expression it can't compile as not found,
    with a warning status, which is cleared again afterwards. */
-static Sci_Position search_range(HWND hEdit, const char *pattern, Sci_Position from, Sci_Position to) {
+static Sci_Position search_range(HWND hEdit, const char *pattern, size_t patternLength,
+                                 Sci_Position from, Sci_Position to) {
     SendMessageA(hEdit, SCI_SETTARGETRANGE, (WPARAM)from, (LPARAM)to);
     SendMessageA(hEdit, SCI_SETSTATUS, SC_STATUS_OK, 0);
-    Sci_Position found = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, strlen(pattern), (LPARAM)pattern);
+    Sci_Position found = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET,
+                                                    patternLength, (LPARAM)pattern);
     if (found < 0 && SendMessageA(hEdit, SCI_GETSTATUS, 0, 0) == SC_STATUS_WARN_REGEX) {
         SendMessageA(hEdit, SCI_SETSTATUS, SC_STATUS_OK, 0);
         return SCINTILLA_BAD_REGEX;
@@ -72,26 +74,27 @@ int search_find(HWND hEdit, const char *needle, int options, int forward) {
     int flags;
     if (!needle || !needle[0]) return SEARCH_NOT_FOUND;
     if (!prepare(needle, options, &pattern, &flags)) return SEARCH_NOT_FOUND;
+    size_t patternLength = strlen(pattern);
     SendMessageA(hEdit, SCI_SETSEARCHFLAGS, (WPARAM)flags, 0);
     Sci_Position length = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
     Sci_Position selStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
     Sci_Position selEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
     int result = SEARCH_FOUND;
-    Sci_Position found = forward ? search_range(hEdit, pattern, selEnd, length)
-                                 : search_range(hEdit, pattern, selStart, 0);
+    Sci_Position found = forward ? search_range(hEdit, pattern, patternLength, selEnd, length)
+                                 : search_range(hEdit, pattern, patternLength, selStart, 0);
     /* An empty match where the caret already is (a regex such as "^") would
        be found again forever, so step past it. */
     if (found >= 0 && found == target_end(hEdit) && found == selStart && selStart == selEnd) {
         Sci_Position next = (Sci_Position)SendMessageA(hEdit,
             forward ? SCI_POSITIONAFTER : SCI_POSITIONBEFORE, (WPARAM)found, 0);
         found = next == found ? -1
-              : forward ? search_range(hEdit, pattern, next, length)
-                        : search_range(hEdit, pattern, next, 0);
+              : forward ? search_range(hEdit, pattern, patternLength, next, length)
+                        : search_range(hEdit, pattern, patternLength, next, 0);
     }
     if (found == -1) {
         result = SEARCH_WRAPPED;
-        found = forward ? search_range(hEdit, pattern, 0, selStart)
-                        : search_range(hEdit, pattern, length, selEnd);
+        found = forward ? search_range(hEdit, pattern, patternLength, 0, selStart)
+                        : search_range(hEdit, pattern, patternLength, length, selEnd);
     }
     free(pattern);
     if (found == SCINTILLA_BAD_REGEX) return SEARCH_BAD_PATTERN;
@@ -105,11 +108,12 @@ long search_count(HWND hEdit, const char *needle, int options, Sci_Position star
     int flags;
     if (!needle || !needle[0]) return 0;
     if (!prepare(needle, options, &pattern, &flags)) return 0;
+    size_t patternLength = strlen(pattern);
     SendMessageA(hEdit, SCI_SETSEARCHFLAGS, (WPARAM)flags, 0);
     long count = 0;
     Sci_Position position = start;
     while (position <= end) {
-        Sci_Position found = search_range(hEdit, pattern, position, end);
+        Sci_Position found = search_range(hEdit, pattern, patternLength, position, end);
         if (found == SCINTILLA_BAD_REGEX) { count = SEARCH_BAD_PATTERN; break; }
         if (found < 0) break;
         count++;
@@ -132,10 +136,11 @@ int search_replace_selection(HWND hEdit, const char *needle, const char *replace
     int flags;
     if (!needle || !needle[0]) return 0;
     if (!prepare(needle, options, &pattern, &flags)) return 0;
+    size_t patternLength = strlen(pattern);
     SendMessageA(hEdit, SCI_SETSEARCHFLAGS, (WPARAM)flags, 0);
     Sci_Position selStart = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONSTART, 0, 0);
     Sci_Position selEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETSELECTIONEND, 0, 0);
-    Sci_Position found = search_range(hEdit, pattern, selStart, selEnd);
+    Sci_Position found = search_range(hEdit, pattern, patternLength, selStart, selEnd);
     free(pattern);
     if (found == SCINTILLA_BAD_REGEX) return SEARCH_BAD_PATTERN;
     if (found != selStart || target_end(hEdit) != selEnd) return 0;
@@ -150,12 +155,13 @@ long search_replace_all(HWND hEdit, const char *needle, const char *replacement,
     int flags;
     if (!needle || !needle[0]) return 0;
     if (!prepare(needle, options, &pattern, &flags)) return 0;
+    size_t patternLength = strlen(pattern);
     SendMessageA(hEdit, SCI_SETSEARCHFLAGS, (WPARAM)flags, 0);
     long count = 0;
     Sci_Position position = start;
     SendMessageA(hEdit, SCI_BEGINUNDOACTION, 0, 0);
     while (position <= *end) {
-        Sci_Position found = search_range(hEdit, pattern, position, *end);
+        Sci_Position found = search_range(hEdit, pattern, patternLength, position, *end);
         if (found == SCINTILLA_BAD_REGEX) { count = SEARCH_BAD_PATTERN; break; }
         if (found < 0) break;
         Sci_Position matched = target_end(hEdit) - found;

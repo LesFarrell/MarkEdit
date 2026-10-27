@@ -14,8 +14,13 @@ static int attach_extension(cmark_parser *parser, cmark_llist **render_extension
     return 1;
 }
 
-static const char *next_line(const char *line_end) {
-    if (*line_end == '\r' && line_end[1] == '\n') return line_end + 2;
+static const char *find_line_end(const char *start, const char *end) {
+    while (start < end && *start != '\r' && *start != '\n') start++;
+    return start < end ? start : NULL;
+}
+
+static const char *next_line(const char *line_end, const char *end) {
+    if (*line_end == '\r' && line_end + 1 < end && line_end[1] == '\n') return line_end + 2;
     if (*line_end == '\r' || *line_end == '\n') return line_end + 1;
     return line_end;
 }
@@ -26,6 +31,7 @@ static const char *next_line(const char *line_end) {
 static const char *skip_yaml_front_matter(const char *text, size_t text_length,
                                           size_t *body_length) {
     const char *start = text;
+    const char *end = text + text_length;
     const char *line_end;
 
     if (text_length >= 3 &&
@@ -35,28 +41,28 @@ static const char *skip_yaml_front_matter(const char *text, size_t text_length,
         start += 3;
     }
 
-    line_end = strpbrk(start, "\r\n");
+    line_end = find_line_end(start, end);
     if (!line_end || line_end - start != 3 || memcmp(start, "---", 3) != 0) {
         *body_length = text_length;
         return text;
     }
 
-    start = next_line(line_end);
-    while (*start) {
+    start = next_line(line_end, end);
+    while (start < end) {
         size_t length;
-        line_end = strpbrk(start, "\r\n");
-        length = line_end ? (size_t)(line_end - start) : text_length - (size_t)(start - text);
+        line_end = find_line_end(start, end);
+        length = line_end ? (size_t)(line_end - start) : (size_t)(end - start);
         size_t trimmed = length;
         while (trimmed > 0 && (start[trimmed - 1] == ' ' || start[trimmed - 1] == '\t'))
             trimmed--;
         if (trimmed == 3 &&
             (memcmp(start, "---", 3) == 0 || memcmp(start, "...", 3) == 0)) {
-            const char *body = line_end ? next_line(line_end) : start + length;
+            const char *body = line_end ? next_line(line_end, end) : start + length;
             *body_length = text_length - (size_t)(body - text);
             return body;
         }
         if (!line_end) break;
-        start = next_line(line_end);
+        start = next_line(line_end, end);
     }
 
     /* An unterminated opening marker is ordinary Markdown, not metadata. */
@@ -64,7 +70,7 @@ static const char *skip_yaml_front_matter(const char *text, size_t text_length,
     return text;
 }
 
-char *markdown_to_html(const char *text) {
+char *markdown_to_html_n(const char *text, size_t text_length) {
     static const char *const extension_names[] = {
         "table",
         "strikethrough",
@@ -81,7 +87,7 @@ char *markdown_to_html(const char *text) {
     cmark_llist *render_extensions = NULL;
     char *html;
 
-    if (!text) text = "";
+    if (!text) { text = ""; text_length = 0; }
 
     cmark_gfm_core_extensions_ensure_registered();
     parser = cmark_parser_new(options);
@@ -96,7 +102,7 @@ char *markdown_to_html(const char *text) {
     }
 
     size_t body_length = 0;
-    const char *body = skip_yaml_front_matter(text, strlen(text), &body_length);
+    const char *body = skip_yaml_front_matter(text, text_length, &body_length);
     /* Keep source positions aligned with the editor after hiding metadata. */
     for (const char *cursor = text; cursor < body; cursor++) {
         if (*cursor == '\r') {
@@ -120,4 +126,8 @@ char *markdown_to_html(const char *text) {
     cmark_llist_free(mem, render_extensions);
     cmark_parser_free(parser);
     return html;
+}
+
+char *markdown_to_html(const char *text) {
+    return markdown_to_html_n(text, text ? strlen(text) : 0);
 }

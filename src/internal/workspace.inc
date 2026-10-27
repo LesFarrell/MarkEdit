@@ -199,6 +199,7 @@ static void do_quick_open(void) {
    deliberately not part of this, since only that one caller needs it). */
 static void adopt_workspace_folder(HWND hwnd, const WCHAR *root) {
     replace_wstring(&g_currentWorkspaceFolder, root);
+    SetCurrentDirectoryW(root);
     recent_list_add(&g_recentFolderList, root);
     save_workspace_settings();
     refresh_menu(hwnd);
@@ -206,14 +207,12 @@ static void adopt_workspace_folder(HWND hwnd, const WCHAR *root) {
     fire_plugin_event("workspace_changed", g_currentWorkspaceFolder);
 }
 
-/* Opens a workspace folder and immediately lets the user fuzzy-pick a file
-   from it, same as Quick Open - the folder is remembered so Recent
-   Workspaces can return to it without browsing for it again. */
+/* Opens a workspace folder - the folder is remembered so Recent Workspaces
+   can return to it without browsing for it again. */
 static void do_open_workspace(void) {
     WCHAR *root = choose_workspace_folder();
     if (!root) return;
     adopt_workspace_folder(g_hMainWnd, root);
-    do_quick_open_in(root);
     free(root);
 }
 
@@ -231,7 +230,6 @@ static void do_open_recent_workspace(int index) {
         return;
     }
     adopt_workspace_folder(g_hMainWnd, root);
-    do_quick_open_in(root);
     free(root);
 }
 
@@ -267,8 +265,8 @@ enum { WORKSPACE_SNIPPET_BYTES = 180 };
    WORKSPACE_SNIPPET_BYTES on a UTF-8 character boundary. */
 static WCHAR *workspace_match_label(const WCHAR *fileLabel, int lineNumber, const char *line) {
     char snippet[WORKSPACE_SNIPPET_BYTES + 1];
-    size_t snippetLength = strlen(line);
-    if (snippetLength > WORKSPACE_SNIPPET_BYTES) snippetLength = WORKSPACE_SNIPPET_BYTES;
+    size_t snippetLength = 0;
+    while (snippetLength < WORKSPACE_SNIPPET_BYTES && line[snippetLength]) snippetLength++;
     while (snippetLength && ((unsigned char)line[snippetLength] & 0xC0) == 0x80)
         snippetLength--;
     memcpy(snippet, line, snippetLength);
@@ -457,18 +455,18 @@ static void reload_document_buffer(int index, const char *content) {
    occur (or is empty - callers must not pass one, since StrStrIA would
    "find" it at every position and loop forever). */
 static char *replace_all_in_line(const char *line, const char *find, const char *replace) {
-    if (!find[0] || !utf8_case_find(line, find)) return NULL;
+    size_t matchLen = 0;
+    const char *hit = find[0] ? utf8_case_find_length(line, find, &matchLen) : NULL;
+    if (!hit || !matchLen) return NULL;
     size_t replaceLen = strlen(replace);
     size_t cap = strlen(line) + replaceLen + 64;
     char *out = (char *)malloc(cap);
     if (!out) return NULL;
     size_t outLen = 0;
     const char *cursor = line;
-    const char *hit;
-    size_t matchLen = 0;
     /* Advance by the bytes actually matched: a linguistic match can be
        longer or shorter than `find` itself. */
-    while ((hit = utf8_case_find_length(cursor, find, &matchLen)) != NULL && matchLen) {
+    do {
         size_t prefixLen = (size_t)(hit - cursor);
         size_t needed = outLen + prefixLen + replaceLen + 1;
         if (needed > cap) {
@@ -480,7 +478,8 @@ static char *replace_all_in_line(const char *line, const char *find, const char 
         memcpy(out + outLen, cursor, prefixLen); outLen += prefixLen;
         memcpy(out + outLen, replace, replaceLen); outLen += replaceLen;
         cursor = hit + matchLen;
-    }
+        hit = utf8_case_find_length(cursor, find, &matchLen);
+    } while (hit && matchLen);
     size_t restLen = strlen(cursor);
     size_t needed = outLen + restLen + 1;
     if (needed > cap) {
@@ -515,6 +514,7 @@ static char *replace_accepted_lines(char *text, size_t length, const ReplaceMatc
     *changed = 0;
     char *cursor = text;
     int lineNumber = 1;
+    int nextMatch = first;
     while (*cursor) {
         size_t terminatorLength = 0;
         char *end = text_line_break(cursor, &terminatorLength);
@@ -522,8 +522,11 @@ static char *replace_accepted_lines(char *text, size_t length, const ReplaceMatc
         if (terminatorLength) memcpy(terminator, end, terminatorLength);
         *end = 0;
         int accept = 0;
-        for (int j = first; j < last; j++)
-            if (matches[j].line == lineNumber && matches[j].accepted) { accept = 1; break; }
+        while (nextMatch < last && matches[nextMatch].line < lineNumber) nextMatch++;
+        while (nextMatch < last && matches[nextMatch].line == lineNumber) {
+            if (matches[nextMatch].accepted) accept = 1;
+            nextMatch++;
+        }
         char *lineOut = accept ? replace_all_in_line(cursor, find, replace) : NULL;
         const char *piece = lineOut ? lineOut : cursor;
         size_t pieceLen = strlen(piece);
