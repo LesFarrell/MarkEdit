@@ -158,7 +158,7 @@ Runs `fn(path)` each time the event happens, where `path` is the document's file
 | `"tab_changed"` | After a different document becomes the active one: switching tabs, opening a new tab, or closing one. Brief switches MarkEdit makes itself, such as Save All visiting each tab, don't count. | The newly active document. |
 | `"before_save"` / `"after_save"` | Immediately before or after a successful write. `"save"` remains the compatibility alias for `"before_save"`. | The save destination. |
 | `"close"` | Before a tab asks to save/discard and closes. | The document being closed. |
-| `"text_changed"` / `"selection_changed"` | After a short debounce following an edit or selection move. | The active document. |
+| `"text_changed"` / `"selection_changed"` | After a short host-side debounce following an edit or selection move. Expensive live analysis can run here directly; do not add another debounce unless it also combines other event sources. | The active document. |
 | `"workspace_changed"` / `"theme_changed"` | After the workspace or editor theme changes. | The active document (workspace handlers can call `app.workspace_path()`). |
 | `"shutdown"` | As the main window shuts down. | The final active document. |
 

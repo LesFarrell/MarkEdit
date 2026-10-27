@@ -164,9 +164,10 @@ end
 local function signature_fits(key, counts)
   local position = 1
   while position <= #key do
-    local letter = key:sub(position, position)
+    local code = key:byte(position)
+    local letter = string.char(code)
     local finish = position + 1
-    while finish <= #key and key:byte(finish) == key:byte(position) do finish = finish + 1 end
+    while finish <= #key and key:byte(finish) == code do finish = finish + 1 end
     if finish - position > (counts[letter] or 0) then return false end
     position = finish
   end
@@ -186,17 +187,6 @@ local function english_words()
     word_list = { words = words, signatures = signatures, by_signature = by_signature }
   end
   return word_list
-end
-
--- Whether counts has enough of each letter to spell word.
-local function spells(word, counts)
-  local used = {}
-  for letter in word:gmatch(".") do
-    local count = (used[letter] or 0) + 1
-    if count > (counts[letter] or 0) then return false end
-    used[letter] = count
-  end
-  return true
 end
 
 -- Listed words of shortest..longest letters that pool can spell.

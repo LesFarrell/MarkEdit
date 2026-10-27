@@ -195,27 +195,6 @@ local function refresh_if_live()
   if config.get("live_highlighting", false) then live_highlight() end
 end
 
-local LIVE_DELAY = 100
-local live_token
-
-local function cancel_live_refresh()
-  if live_token then app.cancel(live_token); live_token = nil end
-end
-
-local function schedule_live_refresh()
-  if not config.get("live_highlighting", false) then return end
-  cancel_live_refresh()
-  live_token = app.defer(LIVE_DELAY, function()
-    live_token = nil
-    live_highlight()
-  end)
-end
-
-local function refresh_live_now()
-  cancel_live_refresh()
-  refresh_if_live()
-end
-
 local function plural(count, singular, plural_form)
   return count == 1 and singular or (plural_form or singular .. "s")
 end
@@ -349,11 +328,10 @@ end)
 menu.separator("Constraint Writer")
 
 menu.checkbox("Constraint Writer/Live Highlighting", "live_highlighting", false, function(checked)
-  cancel_live_refresh()
   if checked then live_highlight() else clear_highlights() end
 end)
 
-events.on("text_changed", schedule_live_refresh)
-events.on("open", refresh_live_now)
-events.on("tab_changed", refresh_live_now)
+events.on("text_changed", refresh_if_live)
+events.on("open", refresh_if_live)
+events.on("tab_changed", refresh_if_live)
 

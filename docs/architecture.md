@@ -204,12 +204,21 @@ can block is kept outside it:
   `memmove` on rollover.
 - `output_process.c` similarly drains immediately available pipe data into a
   64 KB batch before posting it, reducing UI messages and decoder/repaint passes.
+  `output_text.c` then copies bounded runs of ordinary ASCII instead of feeding
+  the decoder one byte at a time.
+- Edit and selection notifications are coalesced by the main-window timers
+  before `text_changed` and `selection_changed` reach Lua. Live analyzers should
+  use those events directly; adding a second debounce only delays their result.
+- File-explorer change filtering scans path components in place. It must remain
+  allocation-free because a busy workspace watcher can call it for every change.
 
 Other hot paths stay linear: outline rebuilding walks Scintilla's stable
 character buffer instead of sending messages for every line, bulk multi-caret
 replacement carries one cumulative offset, folder replacement advances through
-its sorted matches once, and preview rendering passes its known byte length to
-`markdown_to_html_n()` rather than rescanning the document.
+its sorted matches once, preview rendering passes its known byte length to
+`markdown_to_html_n()` rather than rescanning the document, SQL formatting
+collects line pieces before joining them, occurrence counting advances one line
+cursor, and the anagram index counts letters instead of sorting every word.
 
 Compiled sources are listed in the repo-root `*.rsp` response files.
 `build.bat` passes `markedit-sources.rsp`, `cmark-gfm-sources.rsp`,

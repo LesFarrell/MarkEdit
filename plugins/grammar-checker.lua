@@ -482,27 +482,6 @@ local function refresh_if_live()
   if config.get("live", false) then live_highlight() end
 end
 
-local LIVE_DELAY = 100
-local live_token
-
-local function cancel_live_refresh()
-  if live_token then app.cancel(live_token); live_token = nil end
-end
-
-local function schedule_live_refresh()
-  if not config.get("live", false) then return end
-  cancel_live_refresh()
-  live_token = app.defer(LIVE_DELAY, function()
-    live_token = nil
-    live_highlight()
-  end)
-end
-
-local function refresh_live_now()
-  cancel_live_refresh()
-  refresh_if_live()
-end
-
 local function check()
   local text, first = source_range()
   local issues = inspect(text, first - 1)
@@ -556,7 +535,6 @@ menu.add("/Tools/Grammar Checker/Fix Safe Issues", fix_safe)
 menu.add("/Tools/Grammar Checker/Clear Highlights", clear)
 menu.separator("/Tools/Grammar Checker")
 menu.checkbox("/Tools/Grammar Checker/Live Highlighting", "live", false, function(checked)
-  cancel_live_refresh()
   if checked then live_highlight() else clear() end
 end)
 menu.separator("/Tools/Grammar Checker")
@@ -570,6 +548,6 @@ for _, rule in ipairs(RULES) do
     "rule." .. rule.key, rule.default, refresh_if_live)
 end
 
-events.on("text_changed", schedule_live_refresh)
-events.on("open", refresh_live_now)
-events.on("tab_changed", refresh_live_now)
+events.on("text_changed", refresh_if_live)
+events.on("open", refresh_if_live)
+events.on("tab_changed", refresh_if_live)
