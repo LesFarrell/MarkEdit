@@ -1087,8 +1087,9 @@ typedef struct {
     WCHAR mark;  /* '*' for the current local branch; a file's porcelain mark */
 } GitTreeNode;
 
-/* Remote branches start collapsed - a long remote list would otherwise push
-   the usually-more-relevant Staged/Changes sections below the fold. */
+/* Both branch sections start collapsed - they sit below Staged/Changes now,
+   so a long list would otherwise push those below the fold on first open. */
+static int g_gitLocalBranchesCollapsed = 1;
 static int g_gitRemoteBranchesCollapsed = 1;
 /* Set while render_git_panel() is giving a file item its initial checkbox
    state, so handle_git_tree_item_changed() can tell that apart from the user
@@ -1153,6 +1154,22 @@ static void set_git_tree_item_checked(HWND tree, HTREEITEM item, int checked) {
     SendMessageW(tree, TVM_SETITEMW, 0, (LPARAM)&state);
 }
 
+/* The status word shown after a file's name, from git's own porcelain code
+   (or '!' for a merge conflict, flagged internally - see the Conflicts
+   section in render_git_panel()). */
+static const WCHAR *git_status_word(WCHAR mark) {
+    switch (mark) {
+        case L'M': return L"Modified";
+        case L'A': return L"Added";
+        case L'D': return L"Deleted";
+        case L'R': return L"Renamed";
+        case L'C': return L"Copied";
+        case L'?': return L"Untracked";
+        case L'!': return L"Conflict";
+        default: return L"Changed";
+    }
+}
+
 /* Reads only g_gitStatusFiles/g_gitBranchName and the branch cache above -
    never a subprocess - so it's always safe to call directly, including from
    a checkbox click (see handle_git_tree_item_changed()). */
@@ -1169,32 +1186,6 @@ static void render_git_panel(void) {
         InvalidateRect(tree, NULL, TRUE);
         g_buildingGitTree = 0;
         return;
-    }
-
-    if (g_gitLocalBranchCount > 0) {
-        WCHAR label[48];
-        swprintf(label, 48, L"Branches (%d)", g_gitLocalBranchCount);
-        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
-            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
-        for (int i = 0; i < g_gitLocalBranchCount; i++) {
-            int current = g_gitBranchName[0] && _wcsicmp(g_gitLocalBranches[i], g_gitBranchName) == 0;
-            WCHAR text[160];
-            swprintf(text, 160, current ? L"%ls (current)" : L"%ls", g_gitLocalBranches[i]);
-            insert_git_tree_item(tree, header, text,
-                new_git_tree_node(GIT_TREE_LOCAL_BRANCH, g_gitLocalBranches[i], current ? L'*' : L' '), 0);
-        }
-        TreeView_Expand(tree, header, TVE_EXPAND);
-    }
-
-    if (g_gitRemoteBranchCount > 0) {
-        WCHAR label[48];
-        swprintf(label, 48, L"Remote Branches (%d)", g_gitRemoteBranchCount);
-        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
-            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
-        for (int i = 0; i < g_gitRemoteBranchCount; i++)
-            insert_git_tree_item(tree, header, g_gitRemoteBranchNames[i],
-                new_git_tree_node(GIT_TREE_REMOTE_BRANCH, g_gitRemoteBranchNames[i], 0), 0);
-        if (!g_gitRemoteBranchesCollapsed) TreeView_Expand(tree, header, TVE_EXPAND);
     }
 
     int stagedCount = 0, unstagedCount = 0, untrackedCount = 0, conflictCount = 0;
@@ -1219,7 +1210,9 @@ static void render_git_panel(void) {
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
             if (file->index != L' ' && file->index != L'?') {
-                HTREEITEM item = insert_git_tree_item(tree, header, file->path,
+                WCHAR text[MAX_PATH + 24];
+                swprintf(text, MAX_PATH + 24, L"%ls (%ls)", file->path, git_status_word(file->index));
+                HTREEITEM item = insert_git_tree_item(tree, header, text,
                     new_git_tree_node(GIT_TREE_STAGED_FILE, file->path, file->index), 1);
                 set_git_tree_item_checked(tree, item, 1);
             }
@@ -1234,7 +1227,9 @@ static void render_git_panel(void) {
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
             if (file->worktree != L' ') {
-                HTREEITEM item = insert_git_tree_item(tree, header, file->path,
+                WCHAR text[MAX_PATH + 24];
+                swprintf(text, MAX_PATH + 24, L"%ls (%ls)", file->path, git_status_word(file->worktree));
+                HTREEITEM item = insert_git_tree_item(tree, header, text,
                     new_git_tree_node(GIT_TREE_UNSTAGED_FILE, file->path, file->worktree), 1);
                 set_git_tree_item_checked(tree, item, 0);
             }
@@ -1252,7 +1247,9 @@ static void render_git_panel(void) {
                           (file->index == L'A' && file->worktree == L'A') ||
                           (file->index == L'D' && file->worktree == L'D');
             if (conflict) {
-                HTREEITEM item = insert_git_tree_item(tree, header, file->path,
+                WCHAR text[MAX_PATH + 24];
+                swprintf(text, MAX_PATH + 24, L"%ls (%ls)", file->path, git_status_word(L'!'));
+                HTREEITEM item = insert_git_tree_item(tree, header, text,
                     new_git_tree_node(GIT_TREE_CONFLICT_FILE, file->path, L'!'), 1);
                 set_git_tree_item_checked(tree, item, 0);
             }
@@ -1262,6 +1259,30 @@ static void render_git_panel(void) {
     if (!stagedCount && !unstagedCount && !untrackedCount && !conflictCount)
         insert_git_tree_item(tree, TVI_ROOT, L"No changes.",
             new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+
+    if (g_gitLocalBranchCount > 0) {
+        WCHAR label[160];
+        swprintf(label, 160, L"Local Branches (%ls)", g_gitBranchName[0] ? g_gitBranchName : L"none");
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        for (int i = 0; i < g_gitLocalBranchCount; i++) {
+            int current = g_gitBranchName[0] && _wcsicmp(g_gitLocalBranches[i], g_gitBranchName) == 0;
+            WCHAR text[160];
+            swprintf(text, 160, current ? L"%ls (current)" : L"%ls", g_gitLocalBranches[i]);
+            insert_git_tree_item(tree, header, text,
+                new_git_tree_node(GIT_TREE_LOCAL_BRANCH, g_gitLocalBranches[i], current ? L'*' : L' '), 0);
+        }
+        if (!g_gitLocalBranchesCollapsed) TreeView_Expand(tree, header, TVE_EXPAND);
+    }
+
+    if (g_gitRemoteBranchCount > 0) {
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, L"Remote Branches",
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        for (int i = 0; i < g_gitRemoteBranchCount; i++)
+            insert_git_tree_item(tree, header, g_gitRemoteBranchNames[i],
+                new_git_tree_node(GIT_TREE_REMOTE_BRANCH, g_gitRemoteBranchNames[i], 0), 0);
+        if (!g_gitRemoteBranchesCollapsed) TreeView_Expand(tree, header, TVE_EXPAND);
+    }
 
     SendMessageW(tree, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(tree, NULL, TRUE);

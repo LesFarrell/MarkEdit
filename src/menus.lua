@@ -151,6 +151,8 @@ return {
   } },
 
   { "&Tools", {
+    { "Settin&gs...", "tools.settings" },
+    "-",
     { "&Git", {
       { "&Git Panel", "git.panel" },
       { "&Status", "git.status" },
@@ -172,8 +174,6 @@ return {
       { "&Merge Into Current...", "git.merge" },
       { "&Rebase Onto...", "git.rebase" },
     } },
-    "-",
-    { "Settin&gs...", "tools.settings" },
   } },
 
   { "&Plugins", {
