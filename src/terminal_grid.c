@@ -81,33 +81,38 @@ COLORREF terminal_grid_resolve_colour(int colour, int background, const Terminal
 /* ---- scrollback ---- */
 
 static void push_scrollback(TerminalGrid *g, const TerminalCell *row, int width) {
+    if (g->scrollbackCount == g->scrollbackCapacity &&
+        g->scrollbackCapacity >= TERMINAL_SCROLLBACK_MAX_ROWS) {
+        /* At the limit, overwrite the oldest row in place. Terminal width is
+           normally stable, so sustained output performs no allocation here. */
+        TerminalScrollRow *oldest = &g->scrollback[g->scrollbackStart];
+        if (oldest->width != width) {
+            TerminalCell *resized = (TerminalCell *)realloc(
+                oldest->cells, (size_t)width * sizeof(TerminalCell));
+            if (!resized) return;
+            oldest->cells = resized;
+            oldest->width = width;
+        }
+        memcpy(oldest->cells, row, (size_t)width * sizeof(TerminalCell));
+        g->scrollbackStart = (g->scrollbackStart + 1) % g->scrollbackCapacity;
+        return;
+    }
+
     TerminalCell *copy = (TerminalCell *)malloc((size_t)width * sizeof(TerminalCell));
     if (!copy) return;
     memcpy(copy, row, (size_t)width * sizeof(TerminalCell));
     if (g->scrollbackCount == g->scrollbackCapacity) {
-        if (g->scrollbackCapacity >= TERMINAL_SCROLLBACK_MAX_ROWS) {
-            /* Reuse the oldest ring slot. This used to shift every pointer
-               in the full history on every new line, making sustained output
-               O(scrollback size) per line once the limit was reached. */
-            int slot = g->scrollbackStart;
-            free(g->scrollback[slot].cells);
-            g->scrollback[slot].cells = copy;
-            g->scrollback[slot].width = width;
-            g->scrollbackStart = (g->scrollbackStart + 1) % g->scrollbackCapacity;
-            return;
-        } else {
-            int capacity = g->scrollbackCapacity ? g->scrollbackCapacity * 2 : 256;
-            if (capacity > TERMINAL_SCROLLBACK_MAX_ROWS) capacity = TERMINAL_SCROLLBACK_MAX_ROWS;
-            TerminalScrollRow *grown = (TerminalScrollRow *)malloc(
-                (size_t)capacity * sizeof(TerminalScrollRow));
-            if (!grown) { free(copy); return; }
-            for (int i = 0; i < g->scrollbackCount; i++)
-                grown[i] = g->scrollback[(g->scrollbackStart + i) % g->scrollbackCapacity];
-            free(g->scrollback);
-            g->scrollback = grown;
-            g->scrollbackStart = 0;
-            g->scrollbackCapacity = capacity;
-        }
+        int capacity = g->scrollbackCapacity ? g->scrollbackCapacity * 2 : 256;
+        if (capacity > TERMINAL_SCROLLBACK_MAX_ROWS) capacity = TERMINAL_SCROLLBACK_MAX_ROWS;
+        TerminalScrollRow *grown = (TerminalScrollRow *)malloc(
+            (size_t)capacity * sizeof(TerminalScrollRow));
+        if (!grown) { free(copy); return; }
+        for (int i = 0; i < g->scrollbackCount; i++)
+            grown[i] = g->scrollback[(g->scrollbackStart + i) % g->scrollbackCapacity];
+        free(g->scrollback);
+        g->scrollback = grown;
+        g->scrollbackStart = 0;
+        g->scrollbackCapacity = capacity;
     }
     int slot = (g->scrollbackStart + g->scrollbackCount) % g->scrollbackCapacity;
     g->scrollback[slot].cells = copy;

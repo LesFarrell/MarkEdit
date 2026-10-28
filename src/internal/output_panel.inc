@@ -394,16 +394,25 @@ static char *collect_output_locations(OutputPane *pane) {
     if (!all) return NULL;
     SendMessageA(pane->view, SCI_GETTEXT, (WPARAM)length + 1, (LPARAM)all);
     char *report = NULL;
-    size_t used = 0;
+    size_t used = 0, capacity = 0;
     for (char *line = all; *line;) {
         char *end = strchr(line, '\n');
         size_t lineLength = end ? (size_t)(end - line) : strlen(line);
         OutputLocation location;
         if (output_find_location(line, lineLength, &location)) {
+            if (lineLength > SIZE_MAX - used - 2) break;
             size_t needed = used + lineLength + 2;
-            char *grown = (char *)realloc(report, needed);
-            if (!grown) break;
-            report = grown;
+            if (needed > capacity) {
+                size_t next = capacity ? capacity : 1024;
+                while (next < needed) {
+                    if (next > SIZE_MAX / 2) { next = needed; break; }
+                    next *= 2;
+                }
+                char *grown = (char *)realloc(report, next);
+                if (!grown) break;
+                report = grown;
+                capacity = next;
+            }
             memcpy(report + used, line, lineLength);
             used += lineLength;
             report[used++] = '\n';

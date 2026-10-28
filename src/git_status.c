@@ -1,6 +1,7 @@
 #include "git_status.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,12 +32,18 @@ static const char *after_spaces(const char *record, size_t length, int count) {
     return at;
 }
 
-static int append_entry(GitStatusResult *result, const char *path, size_t pathLength,
+static int append_entry(GitStatusResult *result, size_t *capacity,
+                        const char *path, size_t pathLength,
                         char indexStatus, char worktreeStatus) {
-    GitStatusEntry *grown = (GitStatusEntry *)realloc(
-        result->entries, (result->entryCount + 1) * sizeof(GitStatusEntry));
-    if (!grown) return 0;
-    result->entries = grown;
+    if (result->entryCount == *capacity) {
+        size_t next = *capacity ? *capacity * 2 : 32;
+        if (next < *capacity || next > SIZE_MAX / sizeof(GitStatusEntry)) return 0;
+        GitStatusEntry *grown = (GitStatusEntry *)realloc(
+            result->entries, next * sizeof(GitStatusEntry));
+        if (!grown) return 0;
+        result->entries = grown;
+        *capacity = next;
+    }
     char *copy = copy_text(path, pathLength);
     if (!copy) return 0;
     if (indexStatus == '.' || indexStatus == '-') indexStatus = ' ';
@@ -65,6 +72,7 @@ int git_status_parse_v2_z(const char *data, size_t length, GitStatusResult *resu
     if (!result || (!data && length)) return 0;
     memset(result, 0, sizeof(*result));
     size_t position = 0;
+    size_t entryCapacity = 0;
     while (position < length) {
         const char *record = data + position;
         const char *nul = (const char *)memchr(record, 0, length - position);
@@ -135,7 +143,8 @@ int git_status_parse_v2_z(const char *data, size_t length, GitStatusResult *resu
             indexStatus = '?';
             worktreeStatus = '?';
         }
-        if (path && !append_entry(result, path, (size_t)((record + recordLength) - path),
+        if (path && !append_entry(result, &entryCapacity, path,
+                                  (size_t)((record + recordLength) - path),
                                   indexStatus, worktreeStatus)) goto invalid;
     }
     return 1;
