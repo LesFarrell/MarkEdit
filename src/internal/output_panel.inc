@@ -1278,10 +1278,10 @@ static void git_rebase_abort(void) {
         run_git_mutating_output(L"rebase --abort", L"Git Abort Rebase");
 }
 
-static void show_git_panel(HWND hwnd) {
+static void show_git_panel(void) {
     refresh_git_status();
     render_git_panel();
-    show_output_panel(hwnd, OUTPUT_TAB_GIT, 0);
+    show_output_panel(g_hMainWnd, OUTPUT_TAB_GIT, 0);
     SetFocus(g_outputPanes[OUTPUT_TAB_GIT].view);
 }
 
@@ -1309,7 +1309,7 @@ static void show_git_branch_menu(HWND hwnd, POINT screenPoint) {
                                   screenPoint.x, screenPoint.y, 0, hwnd, NULL);
     DestroyMenu(menu);
     switch (command) {
-        case GIT_MENU_PANEL: show_git_panel(hwnd); break;
+        case GIT_MENU_PANEL: show_git_panel(); break;
         case GIT_MENU_SWITCH: git_switch_branch_prompt(); break;
         case GIT_MENU_NEW: git_new_branch_prompt(); break;
         case GIT_MENU_DELETE: git_delete_branch_prompt(); break;

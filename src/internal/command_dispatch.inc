@@ -328,7 +328,7 @@ static int handle_git_command(WORD cmd) {
         case IDM_GIT_DIFF_FILE_STAGED: show_git_staged_file_diff(); break;
         case IDM_GIT_DIFF_WORKSPACE: show_git_workspace_diff(); break;
         case IDM_GIT_DIFF_STAGED: show_git_staged_diff(); break;
-        case IDM_VIEW_GIT: show_git_panel(g_hMainWnd); break;
+        case IDM_VIEW_GIT: show_git_panel(); break;
         case IDM_GIT_STAGE_ALL: git_stage_all(); break;
         case IDM_GIT_UNSTAGE_ALL: git_unstage_all(); break;
         case IDM_GIT_DISCARD_ALL: git_discard_all(); break;
