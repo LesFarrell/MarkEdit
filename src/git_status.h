@@ -24,5 +24,6 @@ typedef struct GitStatusResult {
    the exact UTF-8 bytes Git emitted, without C-style quoting. */
 int git_status_parse_v2_z(const char *data, size_t length, GitStatusResult *result);
 void git_status_result_free(GitStatusResult *result);
+int git_status_is_conflict(char indexStatus, char worktreeStatus);
 
 #endif

@@ -66,6 +66,10 @@ static DWORD g_gitStatusExitCode;
 static int g_gitStatusAvailable;
 static int g_gitStatusUnborn;
 static WCHAR g_gitUpstreamName[192];
+/* The repository these status globals describe. A workspace switch clears
+   them before starting the next asynchronous query, so commands cannot use a
+   branch name carried over from the previous repository. */
+static WCHAR *g_gitStatusWorkspace;
 
 /* Implemented in git_panel.inc, which is included immediately after this
    file. Git status collection stays beside the shared OutputProcess runner;
@@ -428,7 +432,8 @@ static void clear_git_status_files(void) {
 static void apply_git_status_output(void) {
     clear_git_status_files();
     g_gitStatusText[0] = 0;
-    g_gitBranchName[0] = 0;
+    free(g_gitBranchName);
+    g_gitBranchName = NULL;
     g_gitUpstreamName[0] = 0;
     g_gitStatusUnborn = 0;
     GitStatusResult status;
@@ -452,8 +457,7 @@ static void apply_git_status_output(void) {
     for (size_t i = 0; i < status.entryCount; i++) {
         GitStatusEntry *entry = &status.entries[i];
         char x = entry->indexStatus, y = entry->worktreeStatus;
-        int conflict = x == 'U' || y == 'U' || (x == 'A' && y == 'A') ||
-                       (x == 'D' && y == 'D');
+        int conflict = git_status_is_conflict(x, y);
         if (conflict) conflicts++;
         else if (x == '?' && y == '?') untracked++;
         else {
@@ -475,8 +479,7 @@ static void apply_git_status_output(void) {
         WCHAR *wideBranch = status.detached ? NULL : to_wide(status.head);
         int total = staged + changed + untracked;
         if (wideBranch) {
-            wcsncpy(g_gitBranchName, wideBranch, 95);
-            g_gitBranchName[95] = 0;
+            g_gitBranchName = wideBranch;
         }
         const WCHAR *label = status.detached ? L"Detached HEAD" :
                              wideBranch ? wideBranch : L"Git";
@@ -488,7 +491,6 @@ static void apply_git_status_output(void) {
                  status.unborn ? L" (unborn)" : tracking,
                  total || conflicts ? L" *" : L"",
                  conflicts ? L" (conflicts)" : L"");
-        free(wideBranch);
     }
     git_status_result_free(&status);
 finished:
@@ -526,10 +528,29 @@ static void refresh_git_status(void) {
         g_gitStatusUnborn = 0;
         clear_git_status_files();
         g_gitStatusText[0] = 0;
-        g_gitBranchName[0] = 0;
+        free(g_gitBranchName);
+        g_gitBranchName = NULL;
         g_gitUpstreamName[0] = 0;
-        render_git_panel();
+        free(g_gitStatusWorkspace);
+        g_gitStatusWorkspace = NULL;
+        refresh_git_branches();
         return;
+    }
+    int workspaceChanged = !g_gitStatusWorkspace ||
+                           _wcsicmp(g_gitStatusWorkspace, g_currentWorkspaceFolder) != 0;
+    if (workspaceChanged) {
+        WCHAR *workspace = _wcsdup(g_currentWorkspaceFolder);
+        free(g_gitStatusWorkspace);
+        g_gitStatusWorkspace = workspace;
+        g_gitStatusAvailable = 0;
+        g_gitStatusUnborn = 0;
+        clear_git_status_files();
+        g_gitStatusText[0] = 0;
+        free(g_gitBranchName);
+        g_gitBranchName = NULL;
+        g_gitUpstreamName[0] = 0;
+        update_status_position();
+        render_git_panel();
     }
     if (g_gitStatusProcess) output_process_free(g_gitStatusProcess);
     g_gitStatusProcess = NULL;
@@ -547,6 +568,8 @@ static void refresh_git_status(void) {
         g_gitStatusUnborn = 0;
         clear_git_status_files();
         g_gitStatusText[0] = 0;
+        free(g_gitBranchName);
+        g_gitBranchName = NULL;
         g_gitUpstreamName[0] = 0;
         update_status_position();
     }
@@ -623,7 +646,7 @@ static void git_diff_panel_file(const WCHAR *relativePath, GitDiffKind kind) {
     free(parameters);
 }
 
-/* ---- quick, local git commands (stage/unstage/commit/branches...) ----
+/* ---- quick, local git commands (stage/unstage/branches...) ----
    push/pull/fetch/merge/rebase run through run_git_output() instead - the
    visible, asynchronous Run tab - since those can be slow, need the user's
    attention (conflicts, credentials) or produce long reports; everything
@@ -632,6 +655,7 @@ static void git_diff_panel_file(const WCHAR *relativePath, GitDiffKind kind) {
 
 static char *g_gitSyncOutput;
 static size_t g_gitSyncOutputLength;
+static int g_gitSyncOutputTruncated;
 static int g_gitSyncSession;
 static int g_gitSyncDone;
 static DWORD g_gitSyncExitCode;
@@ -639,13 +663,21 @@ static int g_gitRunPending; /* the Run tab's current command mutates the repo; r
 
 static void handle_git_sync_chunk(OutputChunk *chunk) {
     if (chunk->session == g_gitSyncSession && !g_gitSyncDone) {
-        if (chunk->length) {
-            char *grown = (char *)realloc(g_gitSyncOutput, g_gitSyncOutputLength + chunk->length + 1);
-            if (grown) {
-                g_gitSyncOutput = grown;
-                memcpy(g_gitSyncOutput + g_gitSyncOutputLength, chunk->data, chunk->length);
-                g_gitSyncOutputLength += chunk->length;
-                g_gitSyncOutput[g_gitSyncOutputLength] = 0;
+        if (chunk->length && !g_gitSyncOutputTruncated) {
+            const size_t limit = 1024 * 1024;
+            if (chunk->length > limit - g_gitSyncOutputLength) {
+                g_gitSyncOutputTruncated = 1;
+            } else {
+                char *grown = (char *)realloc(
+                    g_gitSyncOutput, g_gitSyncOutputLength + chunk->length + 1);
+                if (grown) {
+                    g_gitSyncOutput = grown;
+                    memcpy(g_gitSyncOutput + g_gitSyncOutputLength, chunk->data, chunk->length);
+                    g_gitSyncOutputLength += chunk->length;
+                    g_gitSyncOutput[g_gitSyncOutputLength] = 0;
+                } else {
+                    g_gitSyncOutputTruncated = 1;
+                }
             }
         }
         if (chunk->finished) {
@@ -670,6 +702,7 @@ static char *run_git_sync(const WCHAR *parameters, const WCHAR *directory, DWORD
     free(g_gitSyncOutput);
     g_gitSyncOutput = NULL;
     g_gitSyncOutputLength = 0;
+    g_gitSyncOutputTruncated = 0;
     g_gitSyncDone = 0;
     g_gitSyncExitCode = 0;
     g_gitSyncSession = session;
@@ -678,19 +711,44 @@ static char *run_git_sync(const WCHAR *parameters, const WCHAR *directory, DWORD
     free(command);
     if (!process) return NULL;
     EnableWindow(g_hMainWnd, FALSE);
+    UINT_PTR timeoutTimer = SetTimer(NULL, 0, 120000, NULL);
     MSG message;
     int loopResult = -1;
+    int timedOut = 0;
+    DWORD loopError = 0;
     while (!g_gitSyncDone && (loopResult = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        if (timeoutTimer && message.message == WM_TIMER && !message.hwnd &&
+            message.wParam == timeoutTimer) {
+            timedOut = 1;
+            break;
+        }
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    if (timeoutTimer) KillTimer(NULL, timeoutTimer);
+    if (loopResult < 0) {
+        loopError = GetLastError();
+        if (!loopError) loopError = ERROR_GEN_FAILURE;
+    }
     EnableWindow(g_hMainWnd, TRUE);
-    if (loopResult == 0) PostQuitMessage((int)message.wParam);
+    SetForegroundWindow(g_hMainWnd);
+    if (loopResult == 0) {
+        loopError = ERROR_CANCELLED;
+        PostQuitMessage((int)message.wParam);
+    }
     output_process_free(process);
-    if (exitCode) *exitCode = g_gitSyncExitCode;
     char *result = g_gitSyncOutput;
     g_gitSyncOutput = NULL;
     g_gitSyncOutputLength = 0;
+    DWORD finalExitCode = timedOut ? WAIT_TIMEOUT : loopError ? loopError : g_gitSyncExitCode;
+    if (g_gitSyncOutputTruncated) finalExitCode = ERROR_INSUFFICIENT_BUFFER;
+    if (timedOut || loopError || g_gitSyncOutputTruncated) {
+        free(result);
+        result = _strdup(timedOut ? "Git command timed out after 120 seconds." :
+                         g_gitSyncOutputTruncated ? "Git produced more than 1 MiB of output." :
+                         "The Windows message loop failed while waiting for Git.");
+    }
+    if (exitCode) *exitCode = finalExitCode;
     return result ? result : _strdup("");
 }
 
@@ -700,7 +758,7 @@ static void report_git_sync_result(const WCHAR *verb, DWORD exitCode, const char
     if (exitCode == 0) return;
     WCHAR *wide = output && output[0] ? to_wide(output) : NULL;
     WCHAR message[1024];
-    swprintf(message, 1024, L"git %ls failed:\n\n%ls", verb, wide ? wide : L"(no output)");
+    swprintf(message, 1024, L"git %ls failed:\n\n%.800ls", verb, wide ? wide : L"(no output)");
     MessageBoxW(g_hMainWnd, message, L"Git", MB_OK | MB_ICONWARNING);
     free(wide);
 }
@@ -1652,6 +1710,10 @@ static void shutdown_output_panel(void) {
     g_gitStatusOutput = NULL;
     free(g_gitSyncOutput);
     g_gitSyncOutput = NULL;
+    free(g_gitStatusWorkspace);
+    g_gitStatusWorkspace = NULL;
+    free(g_gitBranchName);
+    g_gitBranchName = NULL;
     shutdown_git_panel();
     clear_git_status_files();
     clear_problem_reports();

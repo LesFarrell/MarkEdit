@@ -79,11 +79,22 @@ static void test_rejects_truncated_records(void) {
     CHECK(result.entryCount == 0);
 }
 
+static void test_conflict_classification(void) {
+    CHECK(git_status_is_conflict('U', 'U'));
+    CHECK(git_status_is_conflict('A', 'A'));
+    CHECK(git_status_is_conflict('D', 'D'));
+    CHECK(git_status_is_conflict(' ', 'U'));
+    CHECK(!git_status_is_conflict('A', ' '));
+    CHECK(!git_status_is_conflict(' ', 'M'));
+    CHECK(!git_status_is_conflict('?', '?'));
+}
+
 int main(void) {
     test_normal_status();
     test_conflict_and_detached_head();
     test_unborn_branch();
     test_rejects_truncated_records();
+    test_conflict_classification();
     if (failures) return 1;
     puts("All Git status tests passed.");
     return 0;

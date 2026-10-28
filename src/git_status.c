@@ -55,6 +55,12 @@ void git_status_result_free(GitStatusResult *result) {
     memset(result, 0, sizeof(*result));
 }
 
+int git_status_is_conflict(char indexStatus, char worktreeStatus) {
+    return indexStatus == 'U' || worktreeStatus == 'U' ||
+           (indexStatus == 'A' && worktreeStatus == 'A') ||
+           (indexStatus == 'D' && worktreeStatus == 'D');
+}
+
 int git_status_parse_v2_z(const char *data, size_t length, GitStatusResult *result) {
     if (!result || (!data && length)) return 0;
     memset(result, 0, sizeof(*result));

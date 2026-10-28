@@ -357,7 +357,9 @@ static WCHAR *g_currentWorkspaceFolder = NULL;
    paint this without waiting for git, and document tabs use the path table
    below for their one-character working-tree decorations. */
 static WCHAR g_gitStatusText[128] = L"";
-static WCHAR g_gitBranchName[96] = L"";
+/* Kept at its full ref length because branch actions must never operate on a
+   display-truncated name. The status bar truncates naturally when painted. */
+static WCHAR *g_gitBranchName;
 #define GIT_STATUS_FILE_MAX 4096
 /* status is the one-character working-tree decoration tabs use (worktree
    over index); index/worktree keep the raw porcelain X/Y codes (' ' when

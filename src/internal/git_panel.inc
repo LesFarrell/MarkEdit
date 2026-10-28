@@ -19,6 +19,7 @@ static int g_gitLocalBranchCapacity;
 static WCHAR **g_gitRemoteBranchNames;
 static int g_gitRemoteBranchCount;
 static int g_gitRemoteBranchCapacity;
+static WCHAR *g_gitBranchesWorkspace;
 
 static void clear_git_branch_cache(void) {
     free_branch_list(g_gitLocalBranches, g_gitLocalBranchCount);
@@ -37,6 +38,8 @@ static void shutdown_git_panel(void) {
     free(g_gitBranchesOutput);
     g_gitBranchesOutput = NULL;
     g_gitBranchesOutputLength = 0;
+    free(g_gitBranchesWorkspace);
+    g_gitBranchesWorkspace = NULL;
     clear_git_branch_cache();
 }
 
@@ -106,9 +109,25 @@ static void handle_git_branches_chunk(OutputChunk *chunk) {
 
 static void refresh_git_branches(void) {
     if (!g_hMainWnd || !g_currentWorkspaceFolder) {
+        if (g_gitBranchesProcess) output_process_free(g_gitBranchesProcess);
+        g_gitBranchesProcess = NULL;
+        free(g_gitBranchesOutput);
+        g_gitBranchesOutput = NULL;
+        g_gitBranchesOutputLength = 0;
+        free(g_gitBranchesWorkspace);
+        g_gitBranchesWorkspace = NULL;
         clear_git_branch_cache();
         render_git_panel();
         return;
+    }
+    int workspaceChanged = !g_gitBranchesWorkspace ||
+                           _wcsicmp(g_gitBranchesWorkspace, g_currentWorkspaceFolder) != 0;
+    if (workspaceChanged) {
+        WCHAR *workspace = _wcsdup(g_currentWorkspaceFolder);
+        free(g_gitBranchesWorkspace);
+        g_gitBranchesWorkspace = workspace;
+        clear_git_branch_cache();
+        render_git_panel();
     }
     if (g_gitBranchesProcess) output_process_free(g_gitBranchesProcess);
     g_gitBranchesProcess = NULL;
@@ -144,7 +163,7 @@ static WCHAR *pick_git_branch(const WCHAR *title, const WCHAR *prompt, const WCH
     int n = 0;
     if (labels)
         for (int i = 0; i < count; i++)
-            if (!excludeCurrent || !g_gitBranchName[0] || _wcsicmp(branches[i], g_gitBranchName) != 0)
+            if (!excludeCurrent || !g_gitBranchName || _wcsicmp(branches[i], g_gitBranchName) != 0)
                 labels[n++] = branches[i];
     WCHAR *result = NULL;
     if (n > 0) {
@@ -171,6 +190,8 @@ static void git_stage_file(const WCHAR *relativePath) {
     free(output);
     refresh_git_status();
 }
+
+static void run_git_mutating_output(const WCHAR *parameters, const WCHAR *title);
 
 static void git_unstage_file(const WCHAR *relativePath) {
     if (!g_currentWorkspaceFolder) return;
@@ -269,12 +290,11 @@ static void git_commit_prompt(void) {
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) return;
     swprintf(parameters, capacity, L"commit -m \"%ls\"", message);
-    DWORD exitCode = 0;
-    char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
+    /* Commit hooks and signing can take time or require user attention, so a
+       commit belongs on the cancellable Run tab rather than in the modal
+       quick-command runner. */
+    run_git_mutating_output(parameters, L"Git Commit");
     free(parameters);
-    report_git_sync_result(L"commit", exitCode, output);
-    free(output);
-    refresh_git_status();
 }
 
 /* push/pull/fetch/merge/rebase/switch/branch run visibly on the Run tab,
@@ -301,7 +321,7 @@ static WCHAR *pick_git_remote(void) {
 }
 
 static void git_publish_branch(void) {
-    if (!g_currentWorkspaceFolder || !g_gitBranchName[0]) {
+    if (!g_currentWorkspaceFolder || !g_gitBranchName || !g_gitBranchName[0]) {
         MessageBoxW(g_hMainWnd, L"Check out a local branch before publishing it.",
                     L"Git", MB_OK | MB_ICONINFORMATION);
         return;
@@ -689,6 +709,10 @@ static const WCHAR *git_status_word(WCHAR mark) {
     }
 }
 
+static int git_status_file_is_conflict(const GitStatusFile *file) {
+    return git_status_is_conflict((char)file->index, (char)file->worktree);
+}
+
 /* A Git path can exceed MAX_PATH. Build the display label to its actual
    length instead of truncating it through a fixed stack buffer. Caller frees. */
 static WCHAR *git_file_label(const WCHAR *path, WCHAR mark) {
@@ -725,13 +749,19 @@ static void render_git_panel(void) {
         g_buildingGitTree = 0;
         return;
     }
+    if (g_gitStatusAvailable == 0) {
+        insert_git_tree_item(tree, TVI_ROOT, L"Refreshing Git status...",
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        SendMessageW(tree, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(tree, NULL, TRUE);
+        g_buildingGitTree = 0;
+        return;
+    }
 
     int stagedCount = 0, unstagedCount = 0, untrackedCount = 0, conflictCount = 0;
     for (int i = 0; i < g_gitStatusFileCount; i++) {
         GitStatusFile *file = &g_gitStatusFiles[i];
-        int conflict = file->index == L'U' || file->worktree == L'U' ||
-                      (file->index == L'A' && file->worktree == L'A') ||
-                      (file->index == L'D' && file->worktree == L'D');
+        int conflict = git_status_file_is_conflict(file);
         if (conflict) conflictCount++;
         else if (file->index == L'?') untrackedCount++;
         else {
@@ -747,7 +777,8 @@ static void render_git_panel(void) {
             new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
-            if (file->index != L' ' && file->index != L'?') {
+            if (!git_status_file_is_conflict(file) &&
+                file->index != L' ' && file->index != L'?') {
                 WCHAR *text = git_file_label(file->path, file->index);
                 HTREEITEM item = insert_git_tree_item(tree, header, text ? text : file->path,
                     new_git_tree_node(GIT_TREE_STAGED_FILE, file->path, file->index), 1);
@@ -764,7 +795,7 @@ static void render_git_panel(void) {
             new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
-            if (file->worktree != L' ') {
+            if (!git_status_file_is_conflict(file) && file->worktree != L' ') {
                 WCHAR *text = git_file_label(file->path, file->worktree);
                 HTREEITEM item = insert_git_tree_item(tree, header, text ? text : file->path,
                     new_git_tree_node(GIT_TREE_UNSTAGED_FILE, file->path, file->worktree), 1);
@@ -781,9 +812,7 @@ static void render_git_panel(void) {
             new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
-            int conflict = file->index == L'U' || file->worktree == L'U' ||
-                          (file->index == L'A' && file->worktree == L'A') ||
-                          (file->index == L'D' && file->worktree == L'D');
+            int conflict = git_status_file_is_conflict(file);
             if (conflict) {
                 WCHAR *text = git_file_label(file->path, L'!');
                 HTREEITEM item = insert_git_tree_item(tree, header, text ? text : file->path,
@@ -799,16 +828,23 @@ static void render_git_panel(void) {
             new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
 
     if (g_gitLocalBranchCount > 0) {
-        WCHAR label[160];
-        swprintf(label, 160, L"Local Branches (%ls)", g_gitBranchName[0] ? g_gitBranchName : L"none");
-        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
+        const WCHAR *currentName = g_gitBranchName && g_gitBranchName[0] ? g_gitBranchName : L"none";
+        size_t labelCapacity = wcslen(currentName) + 24;
+        WCHAR *label = (WCHAR *)malloc(labelCapacity * sizeof(WCHAR));
+        if (label) swprintf(label, labelCapacity, L"Local Branches (%ls)", currentName);
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT,
+            label ? label : L"Local Branches",
             new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        free(label);
         for (int i = 0; i < g_gitLocalBranchCount; i++) {
-            int current = g_gitBranchName[0] && _wcsicmp(g_gitLocalBranches[i], g_gitBranchName) == 0;
-            WCHAR text[160];
-            swprintf(text, 160, current ? L"%ls (current)" : L"%ls", g_gitLocalBranches[i]);
-            insert_git_tree_item(tree, header, text,
+            int current = g_gitBranchName && _wcsicmp(g_gitLocalBranches[i], g_gitBranchName) == 0;
+            size_t textCapacity = wcslen(g_gitLocalBranches[i]) + 12;
+            WCHAR *text = (WCHAR *)malloc(textCapacity * sizeof(WCHAR));
+            if (text) swprintf(text, textCapacity, current ? L"%ls (current)" : L"%ls",
+                               g_gitLocalBranches[i]);
+            insert_git_tree_item(tree, header, text ? text : g_gitLocalBranches[i],
                 new_git_tree_node(GIT_TREE_LOCAL_BRANCH, g_gitLocalBranches[i], current ? L'*' : L' '), 0);
+            free(text);
         }
         if (!g_gitLocalBranchesCollapsed) TreeView_Expand(tree, header, TVE_EXPAND);
     }
@@ -926,22 +962,29 @@ static void show_git_tree_context_menu(HWND tree, HTREEITEM item, POINT screenPo
     TreeView_SelectItem(tree, item);
     GitTreeNode *node = git_tree_item_data(tree, item);
     if (!node) return;
+    /* TrackPopupMenu pumps messages. A status result can therefore rebuild
+       the tree and free node while the menu is open, so retain only an owned
+       snapshot across that modal loop. */
+    GitTreeNodeKind kind = node->kind;
+    WCHAR mark = node->mark;
+    WCHAR *path = node->path ? _wcsdup(node->path) : NULL;
+    if (node->path && !path) return;
     HMENU menu = CreatePopupMenu();
-    if (!menu) return;
-    if (node->kind == GIT_TREE_REMOTE_BRANCH) {
+    if (!menu) { free(path); return; }
+    if (kind == GIT_TREE_REMOTE_BRANCH) {
         AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
-    } else if (node->kind == GIT_TREE_LOCAL_BRANCH) {
-        if (node->mark != L'*') {
+    } else if (kind == GIT_TREE_LOCAL_BRANCH) {
+        if (mark != L'*') {
             AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
             AppendMenuW(menu, MF_STRING, GIT_CTX_DELETE_BRANCH, L"Delete Branch...");
         }
-    } else if (node->kind == GIT_TREE_STAGED_FILE) {
+    } else if (kind == GIT_TREE_STAGED_FILE) {
         AppendMenuW(menu, MF_STRING, GIT_CTX_UNSTAGE, L"Unstage");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
-    } else if (node->kind == GIT_TREE_UNSTAGED_FILE || node->kind == GIT_TREE_CONFLICT_FILE) {
+    } else if (kind == GIT_TREE_UNSTAGED_FILE || kind == GIT_TREE_CONFLICT_FILE) {
         AppendMenuW(menu, MF_STRING, GIT_CTX_STAGE,
-                   node->kind == GIT_TREE_CONFLICT_FILE ? L"Mark Resolved" : L"Stage");
+                   kind == GIT_TREE_CONFLICT_FILE ? L"Mark Resolved" : L"Stage");
         AppendMenuW(menu, MF_STRING, GIT_CTX_DISCARD, L"Discard Changes...");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
@@ -952,18 +995,19 @@ static void show_git_tree_context_menu(HWND tree, HTREEITEM item, POINT screenPo
         : 0;
     DestroyMenu(menu);
     switch (command) {
-        case GIT_CTX_STAGE: queue_git_panel_action(1, node->path, 0); break;
-        case GIT_CTX_UNSTAGE: queue_git_panel_action(2, node->path, 0); break;
-        case GIT_CTX_DISCARD: queue_git_panel_action(5, node->path, node->mark); break;
+        case GIT_CTX_STAGE: queue_git_panel_action(1, path, 0); break;
+        case GIT_CTX_UNSTAGE: queue_git_panel_action(2, path, 0); break;
+        case GIT_CTX_DISCARD: queue_git_panel_action(5, path, mark); break;
         case GIT_CTX_DIFF:
-            queue_git_panel_action(node->kind == GIT_TREE_STAGED_FILE ? 7 :
-                                   node->mark == L'?' ? 9 : 3, node->path, 0);
+            queue_git_panel_action(kind == GIT_TREE_STAGED_FILE ? 7 :
+                                   mark == L'?' ? 9 : 3, path, 0);
             break;
         case GIT_CTX_SWITCH:
-            queue_git_panel_action(node->kind == GIT_TREE_REMOTE_BRANCH ? 8 : 4, node->path, 0);
+            queue_git_panel_action(kind == GIT_TREE_REMOTE_BRANCH ? 8 : 4, path, 0);
             break;
-        case GIT_CTX_DELETE_BRANCH: queue_git_panel_action(6, node->path, 0); break;
+        case GIT_CTX_DELETE_BRANCH: queue_git_panel_action(6, path, 0); break;
     }
+    free(path);
 }
 
 static void handle_git_tree_mouse_context_menu(HWND tree) {
