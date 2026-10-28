@@ -1,8 +1,9 @@
 ; ZX Spectrum "Hello, World!" for the bundled Z80 assembler.
 ;
 ; Open this file in MarkEdit, then choose
-;   Tools -> Z80 Assembler -> Compile
-; and save the .tap file. Load it in a Spectrum emulator (or real hardware)
+;   Tools -> Assemblers -> Z80 Assembler -> Compile
+; and save the .tap file, or use Compile and Run to open it in the application
+; associated with .tap files. Load it in a Spectrum emulator (or real hardware)
 ; with
 ;   LOAD ""
 ; The TAP's BASIC loader CLEARs memory below the code, loads it and starts

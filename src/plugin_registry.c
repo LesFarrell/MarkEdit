@@ -198,14 +198,21 @@ static int ui_save_binary(lua_State *L) {
     size_t length = 0;
     const char *data = luaL_checklstring(L, 2, &length);
     const char *title = optional_cstring(L, 3, current_title(), "dialog title");
+    int openAfterSave = 0;
+    if (!lua_isnoneornil(L, 4)) {
+        luaL_checktype(L, 4, LUA_TBOOLEAN);
+        openAfterSave = lua_toboolean(L, 4);
+    }
     if (!defaultName[0]) return luaL_argerror(L, 1, "default file name must not be empty");
     if (length > PLUGIN_MAX_BINARY_BYTES)
         return luaL_error(L, "binary output exceeds the %d MiB limit",
                           PLUGIN_MAX_BINARY_BYTES / (1024 * 1024));
     if (!s_callbacks.save_binary)
         return luaL_error(L, "ui.save_binary is not available here");
-    int result = s_callbacks.save_binary(title, defaultName, data, length);
+    int result = s_callbacks.save_binary(title, defaultName, data, length, openAfterSave);
     restart_time_limit();
+    if (result == -2)
+        return luaL_error(L, "the binary file was saved but could not be opened with its associated application");
     if (result < 0) return luaL_error(L, "the binary file could not be written");
     lua_pushboolean(L, result > 0);
     return 1;
@@ -815,7 +822,7 @@ static int app_capabilities(lua_State *L) {
         "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
         "documents", "command_execution", "path_picker", "status", "logging", "defer",
         "eol_conversion", "save_encoding", "tab_width", "spelling", "output_panel",
-        "context_menu"
+        "context_menu", "problems", "save_and_open"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {

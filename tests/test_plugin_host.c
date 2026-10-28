@@ -250,6 +250,7 @@ static char s_lastTitle[64], s_lastMessage[1024];
 static char s_configPlugin[64], s_configKey[64], s_configValue[4096];
 static char s_binaryName[64], s_binaryData[256];
 static size_t s_binaryLength;
+static int s_binaryOpenAfterSave;
 static int s_deferredToken;
 static char s_documentEncoding[16] = "utf-8";
 static const char *s_alignDelimiter = "=";
@@ -310,12 +311,14 @@ static int fake_choose(const char *title, const char *label, const char *const *
 }
 
 static int fake_save_binary(const char *title, const char *defaultName,
-                            const char *data, size_t length) {
+                            const char *data, size_t length, int openAfterSave) {
     snprintf(s_lastTitle, sizeof(s_lastTitle), "%s", title);
     if (strcmp(defaultName, "cancel.tap") == 0) return 0;
     snprintf(s_binaryName, sizeof(s_binaryName), "%s", defaultName);
     s_binaryLength = length < sizeof(s_binaryData) ? length : sizeof(s_binaryData);
     memcpy(s_binaryData, data, s_binaryLength);
+    s_binaryOpenAfterSave = openAfterSave;
+    if (strcmp(defaultName, "open-fail.tap") == 0) return -2;
     return 1;
 }
 
@@ -531,6 +534,12 @@ static void test_ui(HWND editor) {
         "menu.add('Binary', function()\n"
         "  assert(ui.save_binary('output.tap', string.char(0, 1, 255)))\n"
         "  assert(ui.save_binary('cancel.tap', 'x') == false)\n"
+        "end)\n"
+        "menu.add('Binary and open', function()\n"
+        "  assert(ui.save_binary('run.tap', 'run', nil, true))\n"
+        "end)\n"
+        "menu.add('Binary open failure', function()\n"
+        "  ui.save_binary('open-fail.tap', 'x', nil, true)\n"
         "end)\n");
     expect(run_ok(first, editor), "ui.prompt and ui.choose");
     expect(strcmp(s_lastTitle, "Ask") == 0, "dialogs are titled with the command label");
@@ -538,6 +547,11 @@ static void test_ui(HWND editor) {
            s_binaryLength == 3 && (unsigned char)s_binaryData[0] == 0 &&
            (unsigned char)s_binaryData[1] == 1 && (unsigned char)s_binaryData[2] == 255,
            "ui.save_binary preserves every byte and reports cancellation");
+    s_binaryOpenAfterSave = 0;
+    expect(run_ok(first + 3, editor) && strcmp(s_binaryName, "run.tap") == 0 &&
+           s_binaryOpenAfterSave, "ui.save_binary can open the saved file by association");
+    expect(run_fails(first + 4, editor, "was saved but could not be opened"),
+           "ui.save_binary distinguishes an association launch failure");
 
     plugin_host_set_callbacks(NULL);
     expect(run_fails(first + 1, editor, "not available"), "missing callbacks raise errors");
@@ -685,7 +699,7 @@ static void test_environment(void) {
     load_ok("metadata.lua",
         "assert(app.api_version() >= 3 and app.platform() == 'windows')\n"
         "assert(type(app.version()) == 'string' and app.memory_used() > 0)\n"
-        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require)\n"
+        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require and c.save_and_open)\n"
         "assert(c.eol_conversion and c.save_encoding and c.tab_width)\n");
 }
 
@@ -1041,6 +1055,7 @@ static void test_bundled_plugins(HWND editor) {
     int sortLength = find_command("Line Tools/Order/Sort by Length");
     int shuffle = find_command("Line Tools/Order/Shuffle");
     int buildTap = find_command("/Tools/Assemblers/Z80 Assembler/Compile");
+    int buildAndRunTap = find_command("/Tools/Assemblers/Z80 Assembler/Compile and Run");
     expect(encode64 >= 0 && decode64 >= 0 && encodeUrl >= 0 && decodeUrl >= 0 &&
            encodeHex >= 0 && decodeHex >= 0 && encodeHtml >= 0 && decodeHtml >= 0 &&
            csvInspect >= 0 && csvFormat >= 0 && csvToComma >= 0 && csvToTab >= 0 && csvToJson >= 0 &&
@@ -1066,7 +1081,8 @@ static void test_bundled_plugins(HWND editor) {
            personality >= 0 && clearPersonality >= 0 &&
            checkConstraints >= 0 && highlightConstraints >= 0 && clearConstraints >= 0 &&
            toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
-           sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0,
+           sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0 &&
+           buildAndRunTap >= 0,
            "bundled plugin commands are registered");
 
     set_document(editor, "one two three");
@@ -1373,7 +1389,7 @@ static void test_bundled_plugins(HWND editor) {
 
     set_document(editor, "ORG $8000\nstart: LD A,42\nLD ($9000),A\nJR start\n");
     s_binaryLength = 0;
-    expect(buildTap >= 0 && run_ok(buildTap, editor) &&
+    expect(buildTap >= 0 && run_ok(buildTap, editor) && !s_binaryOpenAfterSave &&
            strcmp(s_binaryName, "C:\\docs\\note.tap") == 0 && s_binaryLength == 93 &&
            (unsigned char)s_binaryData[0] == 19 && (unsigned char)s_binaryData[3] == 0 &&
            (unsigned char)s_binaryData[14] == 36 && (unsigned char)s_binaryData[16] == 10 &&
@@ -1391,6 +1407,13 @@ static void test_bundled_plugins(HWND editor) {
            (unsigned char)s_binaryData[88] == 0 && (unsigned char)s_binaryData[89] == 0x90 &&
            (unsigned char)s_binaryData[90] == 0x18 && (unsigned char)s_binaryData[91] == 0xf9,
            "bundled Z80 assembler creates an auto-running Spectrum TAP");
+
+    s_binaryOpenAfterSave = 0;
+    strcpy(s_lastMessage, "unchanged");
+    expect(buildAndRunTap >= 0 && run_ok(buildAndRunTap, editor) &&
+           strcmp(s_binaryName, "C:\\docs\\note.tap") == 0 && s_binaryLength == 93 &&
+           s_binaryOpenAfterSave && strcmp(s_lastMessage, "unchanged") == 0,
+           "Z80 Compile and Run saves and launches without a completion message");
 
     set_document(editor,
         "ORG $8000\nCOUNT EQU 5\nLD BC,$1234\nLD IX,$9000\nLD (IX-2),A\n"

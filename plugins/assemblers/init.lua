@@ -56,15 +56,16 @@ local function assemble_source(cpu)
   return {bytes=bytes, origin=origin, symbols=symbols, info=info, path=path}
 end
 
-local function save(cpu, result, image, extension, what)
-  if ui.save_binary(output_name(result.path, extension), image, "Save " .. what) then
+local function save(cpu, result, image, extension, what, open_after_save)
+  if ui.save_binary(output_name(result.path, extension), image, "Save " .. what,
+      open_after_save or false) and not open_after_save then
     ui.message(("Created %d-byte %s: %d code bytes, origin $%04X, entry $%04X, end $%04X, %d symbols.")
       :format(#image, what, #result.bytes, result.origin, result.info.entry,
         result.info.end_address, result.info.symbol_count), cpu.name .. " assembler")
   end
 end
 
-menu.add("/Tools/Assemblers/Z80 Assembler/Compile", function()
+local function build_z80(open_after_save)
   local result = assemble_source(z80)
   if not result then return end
   local tap_ok, image = pcall(tap.code, base_name(result.path), result.bytes,
@@ -73,7 +74,15 @@ menu.add("/Tools/Assemblers/Z80 Assembler/Compile", function()
     ui.message(tostring(image), "Z80 TAP creation failed", "error")
     return
   end
-  save(z80, result, image, ".tap", "ZX Spectrum TAP")
+  save(z80, result, image, ".tap", "ZX Spectrum TAP", open_after_save)
+end
+
+menu.add("/Tools/Assemblers/Z80 Assembler/Compile", function()
+  build_z80(false)
+end)
+
+menu.add("/Tools/Assemblers/Z80 Assembler/Compile and Run", function()
+  build_z80(true)
 end)
 
 menu.add("/Tools/Assemblers/CHIP-8 Assembler/Compile", function()

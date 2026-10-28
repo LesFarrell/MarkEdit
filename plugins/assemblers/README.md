@@ -6,6 +6,7 @@ an emulator. Each is on the **Tools** menu:
 | Menu | CPU | Saves | Default `ORG` |
 |---|---|---|---|
 | **Z80 Assembler → Compile** | Z80 | ZX Spectrum `.tap` with an auto-running BASIC loader | `$8000` |
+| **Z80 Assembler → Compile and Run** | Z80 | Saves the `.tap`, then opens it with its Windows-associated application | `$8000` |
 | **CHIP-8 Assembler → Compile** | CHIP-8 and SUPER-CHIP 1.1 | `.ch8` program | `$200` |
 | **6502 Assembler → Compile C64 PRG** | MOS 6502 | Commodore 64 `.prg` | `$C000` |
 | **6502 Assembler → Compile Raw Binary** | MOS 6502 | `.bin` with no header, for other 6502 machines | `$C000` |
@@ -70,7 +71,8 @@ destination.
 **Compile** saves a TAP: a tokenized BASIC loader followed by the code. For
 code above Spectrum BASIC memory the loader lowers RAMTOP with `CLEAR`, then
 loads the code and calls the entry point (`ENTRY`/`END`, otherwise the first
-byte).
+byte). **Compile and Run** saves the same TAP and asks Windows to open it with
+the application associated with `.tap` files, such as a Spectrum emulator.
 
 ## CHIP-8 and SUPER-CHIP
 

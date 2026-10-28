@@ -46,7 +46,7 @@ static void plugin_message(const char *title, const char *text, const char *kind
 }
 
 static int plugin_save_binary(const char *title, const char *defaultName,
-                              const char *data, size_t length) {
+                              const char *data, size_t length, int openAfterSave) {
     const DWORD capacity = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(capacity, sizeof(WCHAR));
     WCHAR *wideDefault = to_wide(defaultName);
@@ -68,7 +68,16 @@ static int plugin_save_binary(const char *title, const char *defaultName,
     dialog.lpstrDefExt = defaultExtension;
     dialog.lpstrTitle = wideTitle;
     int result = 0;
-    if (GetSaveFileNameW(&dialog)) result = write_bytes_file(path, data, length) ? 1 : -1;
+    if (GetSaveFileNameW(&dialog)) {
+        if (!write_bytes_file(path, data, length)) {
+            result = -1;
+        } else if (openAfterSave &&
+                   (INT_PTR)ShellExecuteW(g_hMainWnd, L"open", path, NULL, NULL, SW_SHOWNORMAL) <= 32) {
+            result = -2;
+        } else {
+            result = 1;
+        }
+    }
     free(wideTitle);
     free(wideDefault);
     free(path);
