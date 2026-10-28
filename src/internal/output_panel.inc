@@ -820,16 +820,31 @@ static void git_fetch(void) {
     run_git_mutating_output(L"fetch --all", L"Git Fetch");
 }
 
+static void git_switch_to_branch(const WCHAR *branch) {
+    size_t capacity = wcslen(branch) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"switch \"%ls\"", branch);
+    run_git_mutating_output(parameters, L"Git Switch Branch");
+    free(parameters);
+}
+
+static void git_delete_branch(const WCHAR *branch) {
+    WCHAR prompt[192];
+    swprintf(prompt, 192, L"Delete branch \"%ls\"? This cannot be undone if it isn't merged elsewhere.", branch);
+    if (MessageBoxW(g_hMainWnd, prompt, L"Git", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+    size_t capacity = wcslen(branch) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"branch -D \"%ls\"", branch);
+    run_git_mutating_output(parameters, L"Git Delete Branch");
+    free(parameters);
+}
+
 static void git_switch_branch_prompt(void) {
     WCHAR *branch = pick_git_branch(L"Switch Branch", L"Switch to branch:", L"Switch", 1);
     if (!branch) return;
-    size_t capacity = wcslen(branch) + 32;
-    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (parameters) {
-        swprintf(parameters, capacity, L"switch \"%ls\"", branch);
-        run_git_mutating_output(parameters, L"Git Switch Branch");
-        free(parameters);
-    }
+    git_switch_to_branch(branch);
     free(branch);
 }
 
@@ -853,17 +868,7 @@ static void git_new_branch_prompt(void) {
 static void git_delete_branch_prompt(void) {
     WCHAR *branch = pick_git_branch(L"Delete Branch", L"Delete branch:", L"Delete", 1);
     if (!branch) return;
-    WCHAR prompt[192];
-    swprintf(prompt, 192, L"Delete branch \"%ls\"? This cannot be undone if it isn't merged elsewhere.", branch);
-    if (MessageBoxW(g_hMainWnd, prompt, L"Git", MB_YESNO | MB_ICONWARNING) == IDYES) {
-        size_t capacity = wcslen(branch) + 32;
-        WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-        if (parameters) {
-            swprintf(parameters, capacity, L"branch -D \"%ls\"", branch);
-            run_git_mutating_output(parameters, L"Git Delete Branch");
-            free(parameters);
-        }
-    }
+    git_delete_branch(branch);
     free(branch);
 }
 
@@ -954,6 +959,20 @@ static void append_git_file_line(OutputPane *pane, const WCHAR *path, WCHAR mark
     free(utf8Path);
 }
 
+/* Reuses the file line's "  X  name" shape (see git_panel_parse_file_line())
+   so double-click/right-click handling doesn't need a second line format. */
+static void append_git_branch_line(OutputPane *pane, const WCHAR *name, int current) {
+    char *utf8Name = to_utf8(name);
+    if (!utf8Name) return;
+    int style = current ? OUTPUT_STYLE_NOTE : OUTPUT_STYLE_DEFAULT;
+    char prefix[8];
+    snprintf(prefix, sizeof(prefix), "  %c  ", current ? '*' : ' ');
+    append_output(pane, style, prefix, strlen(prefix));
+    append_output(pane, style, utf8Name, strlen(utf8Name));
+    append_output(pane, style, "\n", 1);
+    free(utf8Name);
+}
+
 static void render_git_panel(void) {
     OutputPane *pane = &g_outputPanes[OUTPUT_TAB_GIT];
     if (!pane->view) return;
@@ -966,6 +985,19 @@ static void render_git_panel(void) {
     swprintf(header, 160, L"Branch: %ls", g_gitBranchName[0] ? g_gitBranchName : L"(none)");
     append_output_note(pane, OUTPUT_STYLE_NOTE, header);
     append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+
+    int branchCount = 0;
+    WCHAR **branches = git_list_branches(&branchCount);
+    if (branches && branchCount > 0) {
+        WCHAR label[48];
+        swprintf(label, 48, L"Branches (%d)", branchCount);
+        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        for (int i = 0; i < branchCount; i++)
+            append_git_branch_line(pane, branches[i],
+                g_gitBranchName[0] && _wcsicmp(branches[i], g_gitBranchName) == 0);
+        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+    }
+    free_branch_list(branches, branchCount);
 
     int stagedCount = 0, unstagedCount = 0, untrackedCount = 0, conflictCount = 0;
     for (int i = 0; i < g_gitStatusFileCount; i++) {
@@ -1033,7 +1065,8 @@ static int git_panel_section_at(HWND view, Sci_Position lineNumber) {
         text[length] = 0;
         int section = strncmp(text, "Staged Changes", 14) == 0 ? 0
                     : strncmp(text, "Changes", 7) == 0 ? 1
-                    : strncmp(text, "Conflicts", 9) == 0 ? 2 : -1;
+                    : strncmp(text, "Conflicts", 9) == 0 ? 2
+                    : strncmp(text, "Branches", 8) == 0 ? 3 : -1;
         free(text);
         if (section >= 0) return section;
     }
@@ -1093,13 +1126,21 @@ static void handle_git_panel_double_click(Sci_Position position) {
     WCHAR mark = 0, *path = NULL;
     if (!git_panel_parse_file_line(pane->view, line, &mark, &path)) return;
     int section = git_panel_section_at(pane->view, line);
+    if (section == 3) {
+        /* git_switch_to_branch() only starts an async process - unlike
+           run_git_sync(), it never pumps a nested message loop, so it's
+           safe to call straight out of SCN_DOUBLECLICK. */
+        if (mark != L'*') git_switch_to_branch(path);
+        free(path);
+        return;
+    }
     free(g_gitPendingActionPath);
     g_gitPendingActionPath = path;
     g_gitPendingAction = section == 0 ? 2 : 1;
     PostMessageW(g_hMainWnd, WM_APP_GIT_PANEL_ACTION, 0, 0);
 }
 
-enum { GIT_CTX_STAGE = 1, GIT_CTX_UNSTAGE, GIT_CTX_DISCARD, GIT_CTX_DIFF };
+enum { GIT_CTX_STAGE = 1, GIT_CTX_UNSTAGE, GIT_CTX_DISCARD, GIT_CTX_DIFF, GIT_CTX_SWITCH, GIT_CTX_DELETE_BRANCH };
 
 static void show_git_panel_context_menu(HWND view, POINT screenPoint) {
     POINT clientPoint;
@@ -1124,22 +1165,33 @@ static void show_git_panel_context_menu(HWND view, POINT screenPoint) {
     int section = git_panel_section_at(view, lineNumber);
     HMENU menu = CreatePopupMenu();
     if (menu) {
-        if (section == 0) {
+        if (section == 3) {
+            if (mark != L'*') {
+                AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
+                AppendMenuW(menu, MF_STRING, GIT_CTX_DELETE_BRANCH, L"Delete Branch...");
+            }
+        } else if (section == 0) {
             AppendMenuW(menu, MF_STRING, GIT_CTX_UNSTAGE, L"Unstage");
         } else {
             AppendMenuW(menu, MF_STRING, GIT_CTX_STAGE, section == 2 ? L"Mark Resolved" : L"Stage");
             AppendMenuW(menu, MF_STRING, GIT_CTX_DISCARD, L"Discard Changes...");
         }
-        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
-        UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                                      screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL);
+        if (section != 3) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
+        }
+        UINT command = GetMenuItemCount(menu) > 0
+            ? TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                             screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL)
+            : 0;
         DestroyMenu(menu);
         switch (command) {
             case GIT_CTX_STAGE: git_stage_file(path); break;
             case GIT_CTX_UNSTAGE: git_unstage_file(path); break;
             case GIT_CTX_DISCARD: git_discard_file(path, mark); break;
             case GIT_CTX_DIFF: git_diff_panel_file(path); break;
+            case GIT_CTX_SWITCH: git_switch_to_branch(path); break;
+            case GIT_CTX_DELETE_BRANCH: git_delete_branch(path); break;
         }
     }
     free(path);
