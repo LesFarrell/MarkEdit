@@ -325,6 +325,7 @@ static int handle_git_command(WORD cmd) {
     switch (cmd) {
         case IDM_GIT_REFRESH: show_git_status(); break;
         case IDM_GIT_DIFF_FILE: show_git_file_diff(); break;
+        case IDM_GIT_DIFF_FILE_STAGED: show_git_staged_file_diff(); break;
         case IDM_GIT_DIFF_WORKSPACE: show_git_workspace_diff(); break;
         case IDM_GIT_DIFF_STAGED: show_git_staged_diff(); break;
         case IDM_VIEW_GIT: show_git_panel(g_hMainWnd); break;

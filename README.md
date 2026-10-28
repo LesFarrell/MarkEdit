@@ -242,7 +242,7 @@ premake5.lua             alternative build for MinGW GCC, Zig (make) or MSVC (Vi
 markedit.iss             Inno Setup installer script
 dist/                    clean unpacked release staging folder (generated, not tracked)
 test.bat / tests/        test programs: parser, editor commands, language, outline, theme, core,
-                         output, terminal grid/input/process, recovery, plugin host, menus,
+                          output, Git status/workflows, terminal grid/input/process, recovery, plugin host, menus,
                          formatting, Lua formatting, assemblers, preview bridge
 third_party/webview2/    WebView2 headers + import libs
 third_party/scintilla/   Scintilla headers, licence, and built Scintilla.dll

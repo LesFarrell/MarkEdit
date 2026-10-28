@@ -147,6 +147,7 @@ static const MenuCommand COMMANDS[] = {
     {"tools.settings", IDM_SETTINGS, NULL},
     {"git.status", IDM_GIT_REFRESH, NULL},
     {"git.diff_file", IDM_GIT_DIFF_FILE, NULL},
+    {"git.diff_file_staged", IDM_GIT_DIFF_FILE_STAGED, NULL},
     {"git.diff_workspace", IDM_GIT_DIFF_WORKSPACE, NULL},
     {"git.diff_staged", IDM_GIT_DIFF_STAGED, NULL},
     {"git.panel", IDM_VIEW_GIT, "Ctrl+Shift+G"},

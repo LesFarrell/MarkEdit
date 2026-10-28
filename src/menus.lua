@@ -157,7 +157,8 @@ return {
   { "&Git", {
     { "&Git Panel", "git.panel" },
     { "&Status", "git.status" },
-    { "Diff Current &File", "git.diff_file" },
+    { "Diff Current &File (Unstaged)", "git.diff_file" },
+    { "Diff Current File (S&taged)", "git.diff_file_staged" },
     { "Diff &Unstaged Changes", "git.diff_workspace" },
     { "Diff Staged C&hanges", "git.diff_staged" },
     "-",
