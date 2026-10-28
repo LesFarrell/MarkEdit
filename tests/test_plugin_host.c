@@ -249,6 +249,7 @@ static void test_context_menu(HWND editor) {
 static char s_lastTitle[64], s_lastMessage[1024];
 static char s_configPlugin[64], s_configKey[64], s_configValue[4096];
 static char s_binaryName[64], s_binaryData[256];
+static char s_binaryApplication[256], s_binaryArguments[256];
 static size_t s_binaryLength;
 static int s_binaryOpenAfterSave;
 static int s_deferredToken;
@@ -256,8 +257,20 @@ static char s_documentEncoding[16] = "utf-8";
 static const char *s_alignDelimiter = "=";
 static const char *s_calculatorExpression =
     "0x10 + 0b11 + (5 << 1) + min(4, 9)";
+static const char *s_z80EmulatorPath;
+static const char *s_z80EmulatorArguments;
 
 static char *fake_config_get(const char *plugin, const char *key) {
+    const char *special = NULL;
+    if (strcmp(plugin, "assemblers") == 0) {
+        if (strcmp(key, "z80_emulator_path") == 0) special = s_z80EmulatorPath;
+        else if (strcmp(key, "z80_emulator_arguments") == 0) special = s_z80EmulatorArguments;
+    }
+    if (special) {
+        char *copy = (char *)malloc(strlen(special) + 1);
+        if (copy) strcpy(copy, special);
+        return copy;
+    }
     if (strcmp(plugin, s_configPlugin) != 0 || strcmp(key, s_configKey) != 0 || !s_configValue[0])
         return NULL;
     size_t length = strlen(s_configValue) + 1;
@@ -311,13 +324,16 @@ static int fake_choose(const char *title, const char *label, const char *const *
 }
 
 static int fake_save_binary(const char *title, const char *defaultName,
-                            const char *data, size_t length, int openAfterSave) {
+                            const char *data, size_t length, int openAfterSave,
+                            const char *application, const char *arguments) {
     snprintf(s_lastTitle, sizeof(s_lastTitle), "%s", title);
     if (strcmp(defaultName, "cancel.tap") == 0) return 0;
     snprintf(s_binaryName, sizeof(s_binaryName), "%s", defaultName);
     s_binaryLength = length < sizeof(s_binaryData) ? length : sizeof(s_binaryData);
     memcpy(s_binaryData, data, s_binaryLength);
     s_binaryOpenAfterSave = openAfterSave;
+    snprintf(s_binaryApplication, sizeof(s_binaryApplication), "%s", application ? application : "");
+    snprintf(s_binaryArguments, sizeof(s_binaryArguments), "%s", arguments ? arguments : "");
     if (strcmp(defaultName, "open-fail.tap") == 0) return -2;
     return 1;
 }
@@ -538,6 +554,9 @@ static void test_ui(HWND editor) {
         "menu.add('Binary and open', function()\n"
         "  assert(ui.save_binary('run.tap', 'run', nil, true))\n"
         "end)\n"
+        "menu.add('Binary and configured runner', function()\n"
+        "  assert(ui.save_binary('run.tap', 'run', nil, true, 'C:/Emu/emu.exe', '--fast'))\n"
+        "end)\n"
         "menu.add('Binary open failure', function()\n"
         "  ui.save_binary('open-fail.tap', 'x', nil, true)\n"
         "end)\n");
@@ -550,7 +569,10 @@ static void test_ui(HWND editor) {
     s_binaryOpenAfterSave = 0;
     expect(run_ok(first + 3, editor) && strcmp(s_binaryName, "run.tap") == 0 &&
            s_binaryOpenAfterSave, "ui.save_binary can open the saved file by association");
-    expect(run_fails(first + 4, editor, "was saved but could not be opened"),
+    expect(run_ok(first + 4, editor) && strcmp(s_binaryApplication, "C:/Emu/emu.exe") == 0 &&
+           strcmp(s_binaryArguments, "--fast") == 0,
+           "ui.save_binary can run a configured application after saving");
+    expect(run_fails(first + 5, editor, "was saved but could not be opened"),
            "ui.save_binary distinguishes an association launch failure");
 
     plugin_host_set_callbacks(NULL);
@@ -699,7 +721,7 @@ static void test_environment(void) {
     load_ok("metadata.lua",
         "assert(app.api_version() >= 3 and app.platform() == 'windows')\n"
         "assert(type(app.version()) == 'string' and app.memory_used() > 0)\n"
-        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require and c.save_and_open)\n"
+        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require and c.save_and_open and c.configured_runner)\n"
         "assert(c.eol_conversion and c.save_encoding and c.tab_width)\n");
 }
 
@@ -1056,6 +1078,7 @@ static void test_bundled_plugins(HWND editor) {
     int shuffle = find_command("Line Tools/Order/Shuffle");
     int buildTap = find_command("/Tools/Assemblers/Z80 Assembler/Compile");
     int buildAndRunTap = find_command("/Tools/Assemblers/Z80 Assembler/Compile and Run");
+    int configureZ80Emulator = find_command("/Tools/Assemblers/Z80 Assembler/Configure Emulator...");
     expect(encode64 >= 0 && decode64 >= 0 && encodeUrl >= 0 && decodeUrl >= 0 &&
            encodeHex >= 0 && decodeHex >= 0 && encodeHtml >= 0 && decodeHtml >= 0 &&
            csvInspect >= 0 && csvFormat >= 0 && csvToComma >= 0 && csvToTab >= 0 && csvToJson >= 0 &&
@@ -1082,7 +1105,7 @@ static void test_bundled_plugins(HWND editor) {
            checkConstraints >= 0 && highlightConstraints >= 0 && clearConstraints >= 0 &&
            toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
            sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0 &&
-           buildAndRunTap >= 0,
+           buildAndRunTap >= 0 && configureZ80Emulator >= 0,
            "bundled plugin commands are registered");
 
     set_document(editor, "one two three");
@@ -1409,11 +1432,16 @@ static void test_bundled_plugins(HWND editor) {
            "bundled Z80 assembler creates an auto-running Spectrum TAP");
 
     s_binaryOpenAfterSave = 0;
+    s_z80EmulatorPath = "C:\\Emulators\\zx.exe";
+    s_z80EmulatorArguments = "--fast";
     strcpy(s_lastMessage, "unchanged");
     expect(buildAndRunTap >= 0 && run_ok(buildAndRunTap, editor) &&
            strcmp(s_binaryName, "C:\\docs\\note.tap") == 0 && s_binaryLength == 93 &&
-           s_binaryOpenAfterSave && strcmp(s_lastMessage, "unchanged") == 0,
-           "Z80 Compile and Run saves and launches without a completion message");
+           s_binaryOpenAfterSave && strcmp(s_binaryApplication, s_z80EmulatorPath) == 0 &&
+           strcmp(s_binaryArguments, s_z80EmulatorArguments) == 0 &&
+           strcmp(s_lastMessage, "unchanged") == 0,
+           "Z80 Compile and Run saves and launches its configured emulator silently");
+    s_z80EmulatorPath = s_z80EmulatorArguments = NULL;
 
     set_document(editor,
         "ORG $8000\nCOUNT EQU 5\nLD BC,$1234\nLD IX,$9000\nLD (IX-2),A\n"

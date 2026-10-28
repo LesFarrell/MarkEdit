@@ -453,6 +453,7 @@ static void show_error(const WCHAR *message) {
 #include "internal/ui_shell.inc"
 #include "internal/debugger.inc"
 #include "internal/output_panel.inc"
+#include "internal/git_panel.inc"
 
 #include "internal/outline_host.inc"
 

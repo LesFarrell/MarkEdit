@@ -203,13 +203,22 @@ static int ui_save_binary(lua_State *L) {
         luaL_checktype(L, 4, LUA_TBOOLEAN);
         openAfterSave = lua_toboolean(L, 4);
     }
+    const char *application = optional_cstring(L, 5, NULL, "application path");
+    const char *arguments = optional_cstring(L, 6, NULL, "application arguments");
+    if (application && !application[0]) application = NULL;
+    if (arguments && !arguments[0]) arguments = NULL;
+    if ((application || arguments) && !openAfterSave)
+        return luaL_argerror(L, 4, "must be true when an application is supplied");
+    if (arguments && !application)
+        return luaL_argerror(L, 6, "application arguments require an application path");
     if (!defaultName[0]) return luaL_argerror(L, 1, "default file name must not be empty");
     if (length > PLUGIN_MAX_BINARY_BYTES)
         return luaL_error(L, "binary output exceeds the %d MiB limit",
                           PLUGIN_MAX_BINARY_BYTES / (1024 * 1024));
     if (!s_callbacks.save_binary)
         return luaL_error(L, "ui.save_binary is not available here");
-    int result = s_callbacks.save_binary(title, defaultName, data, length, openAfterSave);
+    int result = s_callbacks.save_binary(title, defaultName, data, length, openAfterSave,
+                                         application, arguments);
     restart_time_limit();
     if (result == -2)
         return luaL_error(L, "the binary file was saved but could not be opened with its associated application");
@@ -822,7 +831,7 @@ static int app_capabilities(lua_State *L) {
         "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
         "documents", "command_execution", "path_picker", "status", "logging", "defer",
         "eol_conversion", "save_encoding", "tab_width", "spelling", "output_panel",
-        "context_menu", "problems", "save_and_open"
+        "context_menu", "problems", "save_and_open", "configured_runner"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {

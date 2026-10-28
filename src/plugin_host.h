@@ -21,7 +21,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 6
+#define MARKEDIT_PLUGIN_API_VERSION 7
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -48,10 +48,13 @@ typedef struct {
     int (*plugin_enabled)(const char *scope, const char *name);
     /* Shows a Save As dialog initialized with defaultName, then writes data
        byte-for-byte. When openAfterSave is nonzero, asks Windows to open the
-       saved file with its associated application. Returns 1 on success, 0
-       when cancelled, -1 on a write error, or -2 when opening fails. */
+       saved file with its associated application, or with application when
+       that UTF-8 path is non-NULL. arguments are placed before the quoted
+       saved path. Returns 1 on success, 0 when cancelled, -1 on a write
+       error, or -2 when opening fails. */
     int (*save_binary)(const char *title, const char *defaultName,
-                       const char *data, size_t length, int openAfterSave);
+                       const char *data, size_t length, int openAfterSave,
+                       const char *application, const char *arguments);
     /* Optional richer host services. Strings returned by a callback are heap
        allocated and are freed by the plugin host. */
     int (*confirm)(const char *title, const char *text);

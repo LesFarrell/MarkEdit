@@ -56,9 +56,9 @@ local function assemble_source(cpu)
   return {bytes=bytes, origin=origin, symbols=symbols, info=info, path=path}
 end
 
-local function save(cpu, result, image, extension, what, open_after_save)
+local function save(cpu, result, image, extension, what, open_after_save, application, arguments)
   if ui.save_binary(output_name(result.path, extension), image, "Save " .. what,
-      open_after_save or false) and not open_after_save then
+      open_after_save or false, application, arguments) and not open_after_save then
     ui.message(("Created %d-byte %s: %d code bytes, origin $%04X, entry $%04X, end $%04X, %d symbols.")
       :format(#image, what, #result.bytes, result.origin, result.info.entry,
         result.info.end_address, result.info.symbol_count), cpu.name .. " assembler")
@@ -74,7 +74,10 @@ local function build_z80(open_after_save)
     ui.message(tostring(image), "Z80 TAP creation failed", "error")
     return
   end
-  save(z80, result, image, ".tap", "ZX Spectrum TAP", open_after_save)
+  local application = open_after_save and config.get("z80_emulator_path") or nil
+  local arguments = application and config.get("z80_emulator_arguments") or nil
+  save(z80, result, image, ".tap", "ZX Spectrum TAP", open_after_save,
+    application, arguments)
 end
 
 menu.add("/Tools/Assemblers/Z80 Assembler/Compile", function()
@@ -83,6 +86,31 @@ end)
 
 menu.add("/Tools/Assemblers/Z80 Assembler/Compile and Run", function()
   build_z80(true)
+end)
+
+menu.add("/Tools/Assemblers/Z80 Assembler/Configure Emulator...", function()
+  local current = config.get("z80_emulator_path")
+  local choice = ui.choose({
+    "Use the Windows .tap file association",
+    "Choose an emulator executable...",
+  }, "How should Compile and Run open TAP files?", "Configure Z80 Emulator")
+  if not choice then return end
+  if choice == 1 then
+    config.set("z80_emulator_path", nil)
+    config.set("z80_emulator_arguments", nil)
+    ui.status("Z80 Compile and Run will use the Windows .tap association.")
+    return
+  end
+  local application = ui.pick_file("Select ZX Spectrum emulator")
+  if not application then return end
+  local arguments = ui.prompt(
+    "Arguments placed before the TAP file (optional):",
+    current == application and config.get("z80_emulator_arguments", "") or "",
+    "Configure Z80 Emulator")
+  if arguments == nil then return end
+  config.set("z80_emulator_path", application)
+  config.set("z80_emulator_arguments", arguments ~= "" and arguments or nil)
+  ui.status("Z80 emulator configured for Compile and Run.")
 end)
 
 menu.add("/Tools/Assemblers/CHIP-8 Assembler/Compile", function()

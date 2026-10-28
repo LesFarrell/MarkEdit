@@ -28,6 +28,7 @@ flowchart TB
         controls["control_theme.inc<br/>window · menu · tab and list theming"]
         spelling["spell_check.inc<br/>Windows spell checking"]
         outputpanel["output_panel.inc<br/>Run output · terminal · debugger"]
+        gitpanel["git_panel.inc<br/>Git tree · context actions"]
         recoveryhost["recovery_host.inc<br/>autosave recovery snapshots"]
     end
 
@@ -43,6 +44,7 @@ flowchart TB
     wndproc --> dispatch
     wndproc --> outputpanel
     debugger --> outputpanel
+    outputpanel --> gitpanel
     state -.->|private state used throughout| ui
 
     subgraph compiled["Focused compiled modules"]
@@ -114,7 +116,8 @@ they are included into the `markedit.c` translation unit.
 - `dialogs.inc`: modal choices, text input, find/replace and help windows, and the shared popup-dialog theming and buttons.
 - `ui_shell.inc`: menus, toolbar, status bar, layout, view toggles and editor presentation.
 - `debugger.inc`: source launching, compiler discovery, GDB/Python debugger control and breakpoint persistence.
-- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`), and the Git status/branch tree and commands. The Output tab's programs and asynchronous Git queries run through `output_process.c`, whose reader batches available pipe output before posting it for `output_text.c` or `git_status.c` to decode; the Terminal tab is `terminal_view.c`, built around `terminal_process.c` (ConPTY and its worker threads), `terminal_grid.c` (the VT100 screen and bounded scrollback ring), and `terminal_input.c` (Win32-key to VT-sequence translation).
+- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`), and asynchronous Git status/process integration. The Output tab's programs and Git queries run through `output_process.c`, whose reader batches available pipe output before posting it for `output_text.c` or `git_status.c` to decode; the Terminal tab is `terminal_view.c`, built around `terminal_process.c` (ConPTY and its worker threads), `terminal_grid.c` (the VT100 screen and bounded scrollback ring), and `terminal_input.c` (Win32-key to VT-sequence translation).
+- `git_panel.inc`: Git branch caches and commands plus the Git tab's TreeView rendering, checkbox/context-menu interaction and deferred file/branch actions.
 - `editor_input.inc`: smart Tab/Enter, paired characters, spelling context actions and editor navigation gestures.
 - `outline_host.inc`, `workspace.inc` and `settings_dialog.inc`: their named UI subsystems.
 - `command_dispatch.inc`: native command-family handlers.
@@ -166,7 +169,7 @@ depend on a UI module.
 | `progress_dialog.c` | `progress_dialog.h` | Marquee progress dialog wrapper (IProgressDialog) | windows.h, shlobj, ole32 |
 | `plugin_host.c` | `plugin_host.h` | Plugin host entry points, menu definition, help page rendering, and running a `themes.lua` in a Lua state of its own | `plugin_host_internal.h`, `lua_editor_api.h` |
 | `plugin_lua_runtime.c` | (internal) | Sandboxed `lua_State`, memory/time limits, protected calls | `plugin_host_internal.h` |
-| `plugin_registry.c` | (internal) | `ui`/`menu`/`events`/`commands`/`config`/`app`/`documents`/`spell`/`output` API and registries | `plugin_host_internal.h` |
+| `plugin_registry.c` | (internal) | `ui`/`menu`/`contextmenu`/`events`/`commands`/`config`/`app`/`documents`/`spell`/`output`/`problems` API and registries | `plugin_host_internal.h` |
 | `plugin_discovery.c` | (internal) | Extension discovery and the folder-local `require` loader | `plugin_host_internal.h`, `file_io.h`, `path_utils.h` |
 | `lua_editor_api.c` | `lua_editor_api.h` | Scintilla-facing `editor.*` API | Scintilla |
 | `menu_commands.c` | `menu_commands.h` | Command registry | `command_ids.h` |
@@ -236,6 +239,12 @@ the separately compiled modules and vendored static objects.
 `.c` file is a one-line change to its `.rsp` rather than an edit in two build
 systems.
 
+`tests/test_ui_smoke.ps1` runs after the packaged build. It launches MarkEdit
+with isolated AppData folders and drives stable Win32 command/control IDs to
+verify output-panel tab switching, close/reopen, Git reopening and resize
+layout. `.github/workflows/windows.yml` runs the warning-free unit suite, the
+release build and this smoke harness on Windows.
+
 ## Commands
 
 `menu_commands.c` is the authoritative inventory of built-in command names, IDs and shortcuts. Menus refer to these stable names, and Lua overrides resolve through the same registry.
@@ -244,7 +253,7 @@ Native dispatch remains grouped by responsibility in `handle_file_command`, `han
 
 ## Lua
 
-The plugin host is split across four files. `plugin_lua_runtime.c` owns the sandboxed Lua state, memory/time limits and protected calls; `plugin_registry.c` owns the API plugins see (`ui`, `menu`, `events`, `commands`, `config`, `app`, `documents`, `spell`, `output`), the command and event registries and running a registered command; `plugin_discovery.c` owns extension discovery and the folder-local module loader; and `plugin_host.c` keeps the entry points, the menu definition and help page rendering. Bundled extensions load first and personal extensions from `%APPDATA%\markedit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
+The plugin host is split across four files. `plugin_lua_runtime.c` owns the sandboxed Lua state, memory/time limits and protected calls; `plugin_registry.c` owns the API plugins see (`ui`, `menu`, `contextmenu`, `events`, `commands`, `config`, `app`, `documents`, `spell`, `output`, `problems`), the command and event registries and running a registered command; `plugin_discovery.c` owns extension discovery and the folder-local module loader; and `plugin_host.c` keeps the entry points, the menu definition and help page rendering. Bundled extensions load first and personal extensions from `%APPDATA%\markedit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
 
 The built-in formatter is stored as three focused files:
 

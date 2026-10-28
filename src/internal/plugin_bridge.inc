@@ -46,13 +46,18 @@ static void plugin_message(const char *title, const char *text, const char *kind
 }
 
 static int plugin_save_binary(const char *title, const char *defaultName,
-                              const char *data, size_t length, int openAfterSave) {
+                              const char *data, size_t length, int openAfterSave,
+                              const char *application, const char *arguments) {
     const DWORD capacity = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(capacity, sizeof(WCHAR));
     WCHAR *wideDefault = to_wide(defaultName);
     WCHAR *wideTitle = to_wide(title);
-    if (!path || !wideDefault || !wideTitle) {
+    WCHAR *wideApplication = application ? to_wide(application) : NULL;
+    WCHAR *wideArguments = arguments ? to_wide(arguments) : NULL;
+    if (!path || !wideDefault || !wideTitle ||
+        (application && !wideApplication) || (arguments && !wideArguments)) {
         free(path); free(wideDefault); free(wideTitle);
+        free(wideApplication); free(wideArguments);
         return -1;
     }
     wcsncpy(path, wideDefault, capacity - 1);
@@ -71,15 +76,33 @@ static int plugin_save_binary(const char *title, const char *defaultName,
     if (GetSaveFileNameW(&dialog)) {
         if (!write_bytes_file(path, data, length)) {
             result = -1;
-        } else if (openAfterSave &&
-                   (INT_PTR)ShellExecuteW(g_hMainWnd, L"open", path, NULL, NULL, SW_SHOWNORMAL) <= 32) {
-            result = -2;
+        } else if (openAfterSave) {
+            WCHAR *parameters = NULL;
+            if (wideApplication) {
+                size_t argumentLength = wideArguments ? wcslen(wideArguments) : 0;
+                size_t parameterCapacity = argumentLength + wcslen(path) + 5;
+                parameters = (WCHAR *)malloc(parameterCapacity * sizeof(WCHAR));
+                if (parameters) {
+                    if (argumentLength)
+                        swprintf(parameters, parameterCapacity, L"%ls \"%ls\"", wideArguments, path);
+                    else
+                        swprintf(parameters, parameterCapacity, L"\"%ls\"", path);
+                }
+            }
+            HINSTANCE opened = parameters || !wideApplication
+                ? ShellExecuteW(g_hMainWnd, L"open", wideApplication ? wideApplication : path,
+                                parameters, NULL, SW_SHOWNORMAL)
+                : (HINSTANCE)SE_ERR_OOM;
+            free(parameters);
+            result = (INT_PTR)opened > 32 ? 1 : -2;
         } else {
             result = 1;
         }
     }
     free(wideTitle);
     free(wideDefault);
+    free(wideApplication);
+    free(wideArguments);
     free(path);
     return result;
 }

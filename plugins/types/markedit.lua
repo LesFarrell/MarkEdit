@@ -119,8 +119,10 @@ function ui.choose(items, label, title) end
 ---@param data string Binary data; embedded NUL bytes are preserved.
 ---@param title? string
 ---@param open_after_save? boolean Open the saved file with its Windows-associated application.
+---@param application? string Application to run instead of the file association.
+---@param arguments? string Arguments placed before the quoted saved-file path.
 ---@return boolean saved False when the user cancels the Save As dialog.
-function ui.save_binary(default_name, data, title, open_after_save) end
+function ui.save_binary(default_name, data, title, open_after_save, application, arguments) end
 ---@param text string
 ---@param title? string
 ---@return boolean

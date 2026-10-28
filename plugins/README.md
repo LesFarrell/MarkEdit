@@ -175,7 +175,7 @@ Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.
 
 ### app
 
-`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), API 4 adds `context_menu`, API 5 adds the [`problems`](#problems) diagnostics table, and API 6 adds `save_and_open`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
+`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), API 4 adds `context_menu`, API 5 adds the [`problems`](#problems) diagnostics table, API 6 adds `save_and_open`, and API 7 adds `configured_runner`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
 
 ### documents
 
@@ -316,14 +316,16 @@ local index, choice = ui.choose({ "Note", "Tip", "Warning" }, "Alert type:")
 if not index then return end
 ```
 
-#### `ui.save_binary(default_name, data [, title [, open_after_save]])`
+#### `ui.save_binary(default_name, data [, title [, open_after_save [, application [, arguments]]]])`
 
 Shows a Save As dialog initialized with `default_name` and writes the Lua string
 `data` byte-for-byte. It returns `true` after saving and `false` if the user
 cancels. When `open_after_save` is `true`, Windows opens the newly saved file
-with its associated application. Embedded NUL bytes and all other byte values
-are preserved. Output is limited to 64 MiB; the plugin still cannot choose a
-destination or launch an arbitrary path without the user-controlled dialog.
+with its associated application. Supplying `application` runs that executable
+instead, with `arguments` followed by the quoted saved-file path. Embedded NUL
+bytes and all other byte values are preserved. Output is limited to 64 MiB;
+the plugin still cannot choose a destination or launch anything until the
+user accepts the Save As dialog.
 
 `ui.confirm(text [, title])` asks Yes/No. `ui.pick_file([title])` and `ui.pick_folder([title])` return a user-selected path or `nil`. `ui.status(text)` shows a temporary status message, and `ui.log(text)` writes a plugin-tagged line to the debugger output and to the output panel's Output tab.
 

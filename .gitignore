@@ -47,4 +47,5 @@ third_party/webview2/x64/WebView2LoaderStatic.lib
 *.markedit-*.tmp
 /tests/*
 !/tests/*.c
+!/tests/*.ps1
 /test.bat

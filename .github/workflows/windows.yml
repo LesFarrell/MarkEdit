@@ -1,0 +1,38 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run tests
+        shell: cmd
+        run: test.bat
+
+      - name: Build release distribution
+        shell: cmd
+        run: build.bat
+
+      - name: Run UI smoke tests
+        shell: pwsh
+        run: ./tests/test_ui_smoke.ps1 -Executable ./dist/markedit.exe
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: markedit-windows
+          path: dist
+          if-no-files-found: error
