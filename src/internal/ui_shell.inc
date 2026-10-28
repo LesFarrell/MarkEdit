@@ -35,7 +35,7 @@ static void update_status_position(void) {
     swprintf(g_statusPartText[2], 128, L"%ls%ls   %ls", encodingName, g_hasBom ? L" BOM" : L"", eolName);
     const WCHAR *saveState = !g_dirty ? L"Saved"
              : g_largeFile ? L"Modified" : L"Modified · recovery enabled";
-    if (g_gitStatusText[0]) swprintf(g_statusPartText[3], 128, L"%ls   %ls", g_gitStatusText, saveState);
+    if (g_gitStatusText[0]) swprintf(g_statusPartText[3], 128, L"%ls                              %ls", saveState, g_gitStatusText);
     else swprintf(g_statusPartText[3], 128, L"%ls", saveState);
     InvalidateRect(g_hStatus, NULL, FALSE);
 }
@@ -107,8 +107,13 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
             if (!SendMessageW(hwnd, SB_GETRECT, (WPARAM)i, (LPARAM)&partRect)) continue;
             partRect.left += 4;
             partRect.right -= 4;
+            /* Part 3 is the only one with room to spare (it fills whatever
+               the other three don't use - see layout()'s SB_SETPARTS), so
+               the Git branch text reads from the status bar's right edge
+               rather than floating right after the encoding part. */
+            UINT align = i == 3 ? DT_RIGHT : DT_LEFT;
             DrawTextW(dc, g_statusPartText[i], -1, &partRect,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                      align | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         EndPaint(hwnd, &ps);
         return 0;

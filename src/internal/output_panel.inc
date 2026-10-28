@@ -448,8 +448,8 @@ static void apply_git_status_output(void) {
         if (wideBranch) {
             wcsncpy(g_gitBranchName, wideBranch, 95);
             g_gitBranchName[95] = 0;
-            if (total) swprintf(g_gitStatusText, 128, L"Branch: %ls · %d change%ls%ls",
-                wideBranch, total, total == 1 ? L"" : L"s", conflicts ? L" · conflicts" : L"");
+            if (total) swprintf(g_gitStatusText, 128, L"Branch: %ls *%ls",
+                wideBranch, conflicts ? L" (conflicts)" : L"");
             else swprintf(g_gitStatusText, 128, L"Branch: %ls", wideBranch);
             free(wideBranch);
         }
