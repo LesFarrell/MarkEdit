@@ -855,6 +855,11 @@ static void fake_output_show(void) { s_outputShown = 1; }
 static void fake_output_hide(void) { s_outputShown = 0; }
 static int fake_output_visible(void) { return s_outputShown; }
 
+static void fake_problems_report(const char *source, const char *text) {
+    (void)source;
+    (void)text;
+}
+
 static int s_autoReload;
 
 static int fake_document_auto_reload(int index, int value) {
@@ -936,6 +941,7 @@ static void test_bundled_plugins(HWND editor) {
         .document_set_encoding = fake_document_set_encoding,
         .schedule_deferred = fake_schedule_deferred,
         .output_write = fake_output_write, .output_show = fake_output_show,
+        .problems_report = fake_problems_report,
         .document_auto_reload = fake_document_auto_reload
     };
     plugin_host_set_callbacks(&fakes);
@@ -2124,7 +2130,8 @@ static void load_spelling_plugin(const WCHAR *path, const char *name) {
         .prompt = fake_cancel_prompt, .choose = fake_spell_choose, .message = fake_message,
         .status = fake_status, .file_path = fake_untitled_path,
         .spell_language = fake_spell_language, .spell_check = fake_spell_check,
-        .output_write = fake_output_write, .output_show = fake_output_show
+        .output_write = fake_output_write, .output_show = fake_output_show,
+        .problems_report = fake_problems_report
     };
     plugin_host_set_callbacks(&fakes);
     plugin_host_shutdown();

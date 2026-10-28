@@ -355,8 +355,12 @@ static WCHAR *g_currentWorkspaceFolder = NULL;
    paint this without waiting for git, and document tabs use the path table
    below for their one-character working-tree decorations. */
 static WCHAR g_gitStatusText[128] = L"";
+static WCHAR g_gitBranchName[96] = L"";
 #define GIT_STATUS_FILE_MAX 4096
-typedef struct { WCHAR *path; WCHAR status; } GitStatusFile;
+/* status is the one-character working-tree decoration tabs use (worktree
+   over index); index/worktree keep the raw porcelain X/Y codes (' ' when
+   absent) so the Git panel can show staged and unstaged changes apart. */
+typedef struct { WCHAR *path; WCHAR status; WCHAR index; WCHAR worktree; } GitStatusFile;
 static GitStatusFile g_gitStatusFiles[GIT_STATUS_FILE_MAX];
 static int g_gitStatusFileCount = 0;
 
@@ -1015,6 +1019,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         case WM_APP_GIT_STATUS:
             handle_git_status_chunk((OutputChunk *)lParam);
+            return 0;
+        case WM_APP_GIT_SYNC:
+            handle_git_sync_chunk((OutputChunk *)lParam);
+            return 0;
+        case WM_APP_GIT_PANEL_ACTION:
+            run_pending_git_panel_action();
             return 0;
         case WM_CREATE:
             initialize_main_window(hwnd);

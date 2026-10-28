@@ -8,7 +8,8 @@
 /* The output panel's tabs (see output_panel.inc). Declared here, rather than
    there, so debugger.inc - included before output_panel.inc in markedit.c's
    unity build - can name OUTPUT_TAB_DEBUG when starting a debug session. */
-enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBUG, OUTPUT_TAB_COUNT };
+enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBUG, OUTPUT_TAB_GIT,
+      OUTPUT_TAB_COUNT };
 
 /* ---- child control IDs ---- */
 #define ID_EDIT    101
@@ -31,6 +32,10 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 #define ID_OUTPUT_CLOSE 120
 #define ID_OUTPUT_TAB_DEBUG 121
 #define ID_OUTPUT_TAB_PROBLEMS 122
+#define ID_OUTPUT_TAB_GIT 123
+#define ID_GIT_COMMIT 124
+#define ID_GIT_STAGE_ALL 125
+#define ID_GIT_REFRESH 126
 
 /* ---- timer IDs ---- */
 #define IDT_PREVIEW_UPDATE 1
@@ -77,6 +82,8 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 #define WM_APP_PLUGIN_DOCUMENT_ACTION (WM_APP + 6)
 #define WM_APP_OUTPUT (WM_APP + 7) /* an OutputChunk from output_process.c */
 #define WM_APP_GIT_STATUS (WM_APP + 8) /* hidden asynchronous git status */
+#define WM_APP_GIT_SYNC (WM_APP + 9) /* a quick git command run_git_sync() is waiting on */
+#define WM_APP_GIT_PANEL_ACTION (WM_APP + 10) /* a Git panel stage/unstage, deferred past SCN_DOUBLECLICK */
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
 #define TAB_ITEM_WIDTH 120 /* each document tab, in 96-DPI pixels like the sizes below */

@@ -72,6 +72,19 @@
 #define IDM_GIT_DIFF_WORKSPACE     411
 #define IDM_PLUGIN_PERFORMANCE     412
 #define IDM_PLUGIN_CLEAR_PERFORMANCE 413
+#define IDM_VIEW_GIT               414
+#define IDM_GIT_STAGE_ALL          415
+#define IDM_GIT_UNSTAGE_ALL        416
+#define IDM_GIT_COMMIT             417
+#define IDM_GIT_PUSH               418
+#define IDM_GIT_PULL               419
+#define IDM_GIT_FETCH              420
+#define IDM_GIT_SWITCH_BRANCH      421
+#define IDM_GIT_NEW_BRANCH         422
+#define IDM_GIT_DELETE_BRANCH      423
+#define IDM_GIT_MERGE              424
+#define IDM_GIT_REBASE             425
+#define IDM_GIT_DISCARD_ALL        426
 #define IDM_PLUGIN_COMMAND_0      2000 /* IDM_PLUGIN_COMMAND_0 .. IDM_PLUGIN_COMMAND_0+PLUGIN_MAX_COMMANDS-1 */
 
 /* ---- menu command IDs: Markdown formatting toolbar/menu ---- */

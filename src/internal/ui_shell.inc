@@ -78,6 +78,10 @@ static void show_plugin_reload_status(const WCHAR *text) {
     SetTimer(g_hMainWnd, IDT_PLUGIN_STATUS, PLUGIN_STATUS_DURATION_MS, NULL);
 }
 
+/* Defined in output_panel.inc, included after this file - the status bar's
+   Git segment opens the same branch menu the Git panel and Tools > Git use. */
+static void show_git_branch_menu(HWND hwnd, POINT screenPoint);
+
 /* Paints the whole status bar strip itself in the app's own GitHub palette:
    comctl32's default rendering has no opt-in for a custom light/dark palette
    the way the editor/menu/toolbar do, and (unlike those) drawing only the
@@ -108,6 +112,20 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         }
         EndPaint(hwnd, &ps);
         return 0;
+    } else if (msg == WM_LBUTTONUP) {
+        /* Part 3 holds the Git text (see update_status_position()); clicking
+           it opens the same branch menu as the status bar's "git <branch>"
+           display suggests, rather than needing the Tools > Git submenu. */
+        RECT partRect;
+        if (g_gitStatusText[0] && SendMessageW(hwnd, SB_GETRECT, (WPARAM)3, (LPARAM)&partRect)) {
+            POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (PtInRect(&partRect, point)) {
+                POINT screenPoint = point;
+                ClientToScreen(hwnd, &screenPoint);
+                show_git_branch_menu(hwnd, screenPoint);
+                return 0;
+            }
+        }
     } else if (msg == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, StatusSubclassProc, 1);
     }

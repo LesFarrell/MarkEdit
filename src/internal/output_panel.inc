@@ -43,6 +43,7 @@ static TerminalView *g_terminalView; /* the Terminal tab; g_outputPanes[OUTPUT_T
 static int g_outputTab = OUTPUT_TAB_RUN;
 static int g_outputNextSession = 1;
 static HWND g_hOutputClear, g_hOutputStop, g_hOutputClose;
+static HWND g_hGitRefresh, g_hGitCommit, g_hGitStageAll;
 static char *g_outputHistory[OUTPUT_HISTORY_SIZE];
 static int g_outputHistoryCount = 0;
 static int g_outputHistoryIndex = 0; /* g_outputHistoryCount while not browsing it */
@@ -106,6 +107,7 @@ static int tab_running(int tab) {
 static HWND active_output_focus_target(void) {
     if (g_outputTab == OUTPUT_TAB_TERMINAL) return terminal_view_window(g_terminalView);
     if (g_outputTab == OUTPUT_TAB_PROBLEMS) return g_outputPanes[OUTPUT_TAB_PROBLEMS].view;
+    if (g_outputTab == OUTPUT_TAB_GIT) return g_outputPanes[OUTPUT_TAB_GIT].view;
     if (g_outputTab == OUTPUT_TAB_DEBUG) return g_hDebugVariables;
     return g_hOutputInput;
 }
@@ -171,6 +173,7 @@ static void apply_output_panel_theme(void) {
     if (!g_hOutputPanel) return;
     apply_output_view_theme(g_outputPanes[OUTPUT_TAB_RUN].view);
     apply_output_view_theme(g_outputPanes[OUTPUT_TAB_PROBLEMS].view);
+    apply_output_view_theme(g_outputPanes[OUTPUT_TAB_GIT].view);
     apply_output_view_theme(g_hOutputInput);
     const ThemePalette *p = theme_palette();
     const COLORREF *ansi = g_editorDarkMode ? OUTPUT_ANSI_DARK : OUTPUT_ANSI_LIGHT;
@@ -377,6 +380,7 @@ static char *collect_output_locations(OutputPane *pane) {
 static WCHAR *terminal_directory(void);
 static int run_in_output_panel(const WCHAR *file, const WCHAR *parameters,
                                const WCHAR *directory, const WCHAR *title);
+static void render_git_panel(void);
 
 static void clear_git_status_files(void) {
     for (int i = 0; i < g_gitStatusFileCount; i++) free(g_gitStatusFiles[i].path);
@@ -427,7 +431,8 @@ static void apply_git_status_output(void) {
                         for (WCHAR *c = wide; *c; c++) if (*c == L'/') *c = L'\\';
                         WCHAR mark = conflict ? L'!' : x == '?' ? L'?' :
                                      (y != ' ' ? (WCHAR)y : (WCHAR)x);
-                        g_gitStatusFiles[g_gitStatusFileCount++] = (GitStatusFile){ wide, mark };
+                        g_gitStatusFiles[g_gitStatusFileCount++] =
+                            (GitStatusFile){ wide, mark, (WCHAR)x, (WCHAR)y };
                     }
                 }
             }
@@ -435,10 +440,13 @@ static void apply_git_status_output(void) {
         if (!end) break;
         cursor = end + 1;
     }
+    g_gitBranchName[0] = 0;
     if (branch[0]) {
         WCHAR *wideBranch = to_wide(branch);
         int total = staged + changed + untracked;
         if (wideBranch) {
+            wcsncpy(g_gitBranchName, wideBranch, 95);
+            g_gitBranchName[95] = 0;
             if (total) swprintf(g_gitStatusText, 128, L"git %ls · %d change%ls%ls",
                 wideBranch, total, total == 1 ? L"" : L"s", conflicts ? L" · conflicts" : L"");
             else swprintf(g_gitStatusText, 128, L"git %ls", wideBranch);
@@ -448,6 +456,7 @@ static void apply_git_status_output(void) {
 finished:
     for (int i = 0; i < g_documentStore.count; i++) update_tab_label(i);
     update_status_position();
+    render_git_panel();
 }
 
 static void handle_git_status_chunk(OutputChunk *chunk) {
@@ -525,6 +534,617 @@ static void show_git_file_diff(void) {
     free(parameters);
 }
 
+static void git_diff_panel_file(const WCHAR *relativePath) {
+    size_t capacity = wcslen(relativePath) + 40;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"diff --no-ext-diff -- \"%ls\"", relativePath);
+    run_git_output(parameters, L"Git File Diff");
+    free(parameters);
+}
+
+/* ---- quick, local git commands (stage/unstage/commit/branches...) ----
+   push/pull/fetch/merge/rebase run through run_git_output() instead - the
+   visible, asynchronous Run tab - since those can be slow, need the user's
+   attention (conflicts, credentials) or produce long reports; everything
+   here is fast, local plumbing that blocks the UI briefly rather than
+   needing its own progress UI. */
+
+static char *g_gitSyncOutput;
+static size_t g_gitSyncOutputLength;
+static int g_gitSyncSession;
+static int g_gitSyncDone;
+static DWORD g_gitSyncExitCode;
+static int g_gitRunPending; /* the Run tab's current command mutates the repo; refresh status when it finishes */
+
+static void handle_git_sync_chunk(OutputChunk *chunk) {
+    if (chunk->session == g_gitSyncSession && !g_gitSyncDone) {
+        if (chunk->length) {
+            char *grown = (char *)realloc(g_gitSyncOutput, g_gitSyncOutputLength + chunk->length + 1);
+            if (grown) {
+                g_gitSyncOutput = grown;
+                memcpy(g_gitSyncOutput + g_gitSyncOutputLength, chunk->data, chunk->length);
+                g_gitSyncOutputLength += chunk->length;
+                g_gitSyncOutput[g_gitSyncOutputLength] = 0;
+            }
+        }
+        if (chunk->finished) {
+            g_gitSyncDone = 1;
+            g_gitSyncExitCode = chunk->exitCode;
+        }
+    }
+    free(chunk);
+}
+
+/* Runs a quick git command to completion, pumping the message queue (with
+   the main window disabled, as run_modal_popup() does) so the UI stays
+   responsive without letting the user start something else meanwhile.
+   Returns its merged stdout+stderr (caller frees), or NULL only if the
+   process itself couldn't start. */
+static char *run_git_sync(const WCHAR *parameters, const WCHAR *directory, DWORD *exitCode) {
+    size_t capacity = wcslen(parameters) + 16;
+    WCHAR *command = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!command) return NULL;
+    swprintf(command, capacity, L"git.exe %ls", parameters);
+    int session = g_outputNextSession++;
+    free(g_gitSyncOutput);
+    g_gitSyncOutput = NULL;
+    g_gitSyncOutputLength = 0;
+    g_gitSyncDone = 0;
+    g_gitSyncExitCode = 0;
+    g_gitSyncSession = session;
+    OutputProcess *process = output_process_start(command, directory, NULL,
+                                                   g_hMainWnd, WM_APP_GIT_SYNC, session);
+    free(command);
+    if (!process) return NULL;
+    EnableWindow(g_hMainWnd, FALSE);
+    MSG message;
+    int loopResult = -1;
+    while (!g_gitSyncDone && (loopResult = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    EnableWindow(g_hMainWnd, TRUE);
+    if (loopResult == 0) PostQuitMessage((int)message.wParam);
+    output_process_free(process);
+    if (exitCode) *exitCode = g_gitSyncExitCode;
+    char *result = g_gitSyncOutput;
+    g_gitSyncOutput = NULL;
+    g_gitSyncOutputLength = 0;
+    return result ? result : _strdup("");
+}
+
+/* Shows a failure's output; a successful command stays silent, as the rest
+   of the Git status/decoration UI already does. */
+static void report_git_sync_result(const WCHAR *verb, DWORD exitCode, const char *output) {
+    if (exitCode == 0) return;
+    WCHAR *wide = output && output[0] ? to_wide(output) : NULL;
+    WCHAR message[1024];
+    swprintf(message, 1024, L"git %ls failed:\n\n%ls", verb, wide ? wide : L"(no output)");
+    MessageBoxW(g_hMainWnd, message, L"Git", MB_OK | MB_ICONWARNING);
+    free(wide);
+}
+
+static WCHAR **git_list_branches(int *count) {
+    *count = 0;
+    if (!g_currentWorkspaceFolder) return NULL;
+    DWORD exitCode = 0;
+    char *output = run_git_sync(L"branch --format=%(refname:short)", g_currentWorkspaceFolder, &exitCode);
+    if (!output) return NULL;
+    WCHAR **names = NULL;
+    int n = 0;
+    for (char *line = output; *line;) {
+        char *end = strchr(line, '\n');
+        size_t length = end ? (size_t)(end - line) : strlen(line);
+        if (length && line[length - 1] == '\r') length--;
+        if (length) {
+            char *copy = (char *)malloc(length + 1);
+            if (copy) {
+                memcpy(copy, line, length);
+                copy[length] = 0;
+                WCHAR *wide = to_wide(copy);
+                free(copy);
+                if (wide) {
+                    WCHAR **grown = (WCHAR **)realloc(names, (size_t)(n + 1) * sizeof(WCHAR *));
+                    if (grown) { names = grown; names[n++] = wide; }
+                    else free(wide);
+                }
+            }
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    free(output);
+    *count = n;
+    return names;
+}
+
+static void free_branch_list(WCHAR **names, int count) {
+    for (int i = 0; i < count; i++) free(names[i]);
+    free(names);
+}
+
+/* Picks a branch with show_choice_dialog(); returns the chosen name (caller
+   frees), or NULL if there were none to choose or the user cancelled.
+   excludeCurrent leaves out the branch already checked out, for switch,
+   merge and rebase targets. */
+static WCHAR *pick_git_branch(const WCHAR *title, const WCHAR *prompt, const WCHAR *okLabel,
+                              int excludeCurrent) {
+    int count = 0;
+    WCHAR **branches = git_list_branches(&count);
+    if (!branches || count == 0) {
+        MessageBoxW(g_hMainWnd, L"No local branches were found. Check that git.exe is on PATH.",
+                    L"Git", MB_OK | MB_ICONWARNING);
+        free_branch_list(branches, count);
+        return NULL;
+    }
+    WCHAR **labels = (WCHAR **)malloc((size_t)count * sizeof(WCHAR *));
+    int n = 0;
+    if (labels)
+        for (int i = 0; i < count; i++)
+            if (!excludeCurrent || !g_gitBranchName[0] || _wcsicmp(branches[i], g_gitBranchName) != 0)
+                labels[n++] = branches[i];
+    WCHAR *result = NULL;
+    if (n > 0) {
+        int chosen = show_choice_dialog(title, prompt, labels, n, okLabel);
+        if (chosen >= 0) result = _wcsdup(labels[chosen]);
+    } else {
+        MessageBoxW(g_hMainWnd, L"There's no other branch to choose.", L"Git", MB_OK | MB_ICONINFORMATION);
+    }
+    free(labels);
+    free_branch_list(branches, count);
+    return result;
+}
+
+static void git_stage_file(const WCHAR *relativePath) {
+    if (!g_currentWorkspaceFolder) return;
+    size_t capacity = wcslen(relativePath) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"add -- \"%ls\"", relativePath);
+    DWORD exitCode = 0;
+    char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
+    free(parameters);
+    report_git_sync_result(L"add", exitCode, output);
+    free(output);
+    refresh_git_status();
+}
+
+static void git_unstage_file(const WCHAR *relativePath) {
+    if (!g_currentWorkspaceFolder) return;
+    size_t capacity = wcslen(relativePath) + 48;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"reset -q HEAD -- \"%ls\"", relativePath);
+    DWORD exitCode = 0;
+    char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
+    free(parameters);
+    report_git_sync_result(L"reset", exitCode, output);
+    free(output);
+    refresh_git_status();
+}
+
+static void git_discard_file(const WCHAR *relativePath, WCHAR mark) {
+    if (!g_currentWorkspaceFolder) return;
+    WCHAR prompt[MAX_PATH + 64];
+    swprintf(prompt, MAX_PATH + 64, L"Discard changes to \"%ls\"? This cannot be undone.", relativePath);
+    if (MessageBoxW(g_hMainWnd, prompt, L"Git", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+    size_t capacity = wcslen(relativePath) + 48;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    /* An untracked file is removed with clean, not checkout - there's
+       nothing in the index or HEAD for checkout to restore it from. */
+    if (mark == L'?') swprintf(parameters, capacity, L"clean -fq -- \"%ls\"", relativePath);
+    else swprintf(parameters, capacity, L"checkout -q -- \"%ls\"", relativePath);
+    DWORD exitCode = 0;
+    char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
+    free(parameters);
+    report_git_sync_result(L"checkout", exitCode, output);
+    free(output);
+    refresh_git_status();
+}
+
+static void git_stage_all(void) {
+    if (!g_currentWorkspaceFolder) return;
+    DWORD exitCode = 0;
+    char *output = run_git_sync(L"add -A", g_currentWorkspaceFolder, &exitCode);
+    report_git_sync_result(L"add", exitCode, output);
+    free(output);
+    refresh_git_status();
+}
+
+static void git_unstage_all(void) {
+    if (!g_currentWorkspaceFolder) return;
+    DWORD exitCode = 0;
+    char *output = run_git_sync(L"reset -q HEAD", g_currentWorkspaceFolder, &exitCode);
+    report_git_sync_result(L"reset", exitCode, output);
+    free(output);
+    refresh_git_status();
+}
+
+static void git_discard_all(void) {
+    if (!g_currentWorkspaceFolder) return;
+    if (MessageBoxW(g_hMainWnd,
+            L"Discard all changes in the working tree and remove untracked files? This cannot be undone.",
+            L"Git", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+    DWORD exitCode = 0;
+    char *output = run_git_sync(L"checkout -q -- .", g_currentWorkspaceFolder, &exitCode);
+    report_git_sync_result(L"checkout", exitCode, output);
+    free(output);
+    output = run_git_sync(L"clean -fdq", g_currentWorkspaceFolder, &exitCode);
+    report_git_sync_result(L"clean", exitCode, output);
+    free(output);
+    refresh_git_status();
+}
+
+static void git_commit_prompt(void) {
+    if (!g_currentWorkspaceFolder) {
+        MessageBoxW(g_hMainWnd, L"Open a workspace folder to commit.", L"Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    WCHAR message[512] = L"";
+    if (!show_text_input(L"Commit", L"Commit message:", L"", message, 512) || !message[0]) return;
+    if (wcschr(message, L'"')) {
+        MessageBoxW(g_hMainWnd, L"Commit messages can't contain a quotation mark.",
+                    L"Git", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    size_t capacity = wcslen(message) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"commit -m \"%ls\"", message);
+    DWORD exitCode = 0;
+    char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
+    free(parameters);
+    report_git_sync_result(L"commit", exitCode, output);
+    free(output);
+    refresh_git_status();
+}
+
+/* push/pull/fetch/merge/rebase/switch/branch run visibly on the Run tab,
+   since they can be slow or need the user's attention; this flags the run so
+   handle_output_chunk() refreshes Git status once it finishes. */
+static void run_git_mutating_output(const WCHAR *parameters, const WCHAR *title) {
+    g_gitRunPending = run_git_output(parameters, title) ? 1 : 0;
+}
+
+static void git_push(void) {
+    run_git_mutating_output(L"push", L"Git Push");
+}
+
+static void git_pull(void) {
+    run_git_mutating_output(L"pull", L"Git Pull");
+}
+
+static void git_fetch(void) {
+    run_git_mutating_output(L"fetch --all", L"Git Fetch");
+}
+
+static void git_switch_branch_prompt(void) {
+    WCHAR *branch = pick_git_branch(L"Switch Branch", L"Switch to branch:", L"Switch", 1);
+    if (!branch) return;
+    size_t capacity = wcslen(branch) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (parameters) {
+        swprintf(parameters, capacity, L"switch \"%ls\"", branch);
+        run_git_mutating_output(parameters, L"Git Switch Branch");
+        free(parameters);
+    }
+    free(branch);
+}
+
+static void git_new_branch_prompt(void) {
+    if (!g_currentWorkspaceFolder) {
+        MessageBoxW(g_hMainWnd, L"Open a workspace folder to create a branch.",
+                    L"Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    WCHAR name[128] = L"";
+    if (!show_text_input(L"New Branch", L"New branch name:", L"", name, 128) || !name[0]) return;
+    size_t capacity = wcslen(name) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (parameters) {
+        swprintf(parameters, capacity, L"switch -c \"%ls\"", name);
+        run_git_mutating_output(parameters, L"Git New Branch");
+        free(parameters);
+    }
+}
+
+static void git_delete_branch_prompt(void) {
+    WCHAR *branch = pick_git_branch(L"Delete Branch", L"Delete branch:", L"Delete", 1);
+    if (!branch) return;
+    WCHAR prompt[192];
+    swprintf(prompt, 192, L"Delete branch \"%ls\"? This cannot be undone if it isn't merged elsewhere.", branch);
+    if (MessageBoxW(g_hMainWnd, prompt, L"Git", MB_YESNO | MB_ICONWARNING) == IDYES) {
+        size_t capacity = wcslen(branch) + 32;
+        WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+        if (parameters) {
+            swprintf(parameters, capacity, L"branch -D \"%ls\"", branch);
+            run_git_mutating_output(parameters, L"Git Delete Branch");
+            free(parameters);
+        }
+    }
+    free(branch);
+}
+
+static void git_merge_prompt(void) {
+    WCHAR *branch = pick_git_branch(L"Merge Into Current Branch", L"Merge branch:", L"Merge", 1);
+    if (!branch) return;
+    size_t capacity = wcslen(branch) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (parameters) {
+        swprintf(parameters, capacity, L"merge \"%ls\"", branch);
+        run_git_mutating_output(parameters, L"Git Merge");
+        free(parameters);
+    }
+    free(branch);
+}
+
+static void git_rebase_prompt(void) {
+    WCHAR *branch = pick_git_branch(L"Rebase Onto Branch", L"Rebase onto:", L"Rebase", 1);
+    if (!branch) return;
+    size_t capacity = wcslen(branch) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (parameters) {
+        swprintf(parameters, capacity, L"rebase \"%ls\"", branch);
+        run_git_mutating_output(parameters, L"Git Rebase");
+        free(parameters);
+    }
+    free(branch);
+}
+
+static void show_git_panel(HWND hwnd) {
+    refresh_git_status();
+    render_git_panel();
+    show_output_panel(hwnd, OUTPUT_TAB_GIT, 0);
+    SetFocus(g_outputPanes[OUTPUT_TAB_GIT].view);
+}
+
+/* The status bar's Git segment (see StatusSubclassProc) and Tools > Git both
+   reach every branch command through this one menu. */
+enum { GIT_MENU_PANEL = 1, GIT_MENU_SWITCH, GIT_MENU_NEW, GIT_MENU_DELETE,
+      GIT_MENU_MERGE, GIT_MENU_REBASE, GIT_MENU_PUSH, GIT_MENU_PULL, GIT_MENU_FETCH };
+
+static void show_git_branch_menu(HWND hwnd, POINT screenPoint) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, GIT_MENU_PANEL, L"Open Git Panel");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, GIT_MENU_SWITCH, L"Switch Branch...");
+    AppendMenuW(menu, MF_STRING, GIT_MENU_NEW, L"New Branch...");
+    AppendMenuW(menu, MF_STRING, GIT_MENU_DELETE, L"Delete Branch...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, GIT_MENU_MERGE, L"Merge Into Current...");
+    AppendMenuW(menu, MF_STRING, GIT_MENU_REBASE, L"Rebase Onto...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, GIT_MENU_PUSH, L"Push");
+    AppendMenuW(menu, MF_STRING, GIT_MENU_PULL, L"Pull");
+    AppendMenuW(menu, MF_STRING, GIT_MENU_FETCH, L"Fetch");
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                  screenPoint.x, screenPoint.y, 0, hwnd, NULL);
+    DestroyMenu(menu);
+    switch (command) {
+        case GIT_MENU_PANEL: show_git_panel(hwnd); break;
+        case GIT_MENU_SWITCH: git_switch_branch_prompt(); break;
+        case GIT_MENU_NEW: git_new_branch_prompt(); break;
+        case GIT_MENU_DELETE: git_delete_branch_prompt(); break;
+        case GIT_MENU_MERGE: git_merge_prompt(); break;
+        case GIT_MENU_REBASE: git_rebase_prompt(); break;
+        case GIT_MENU_PUSH: git_push(); break;
+        case GIT_MENU_PULL: git_pull(); break;
+        case GIT_MENU_FETCH: git_fetch(); break;
+    }
+}
+
+/* ---- the Git panel's own tab: a read-only list, built straight from
+   g_gitStatusFiles, with double-click and a right-click menu to stage,
+   unstage, discard or diff a file. Each file line is "  X  path" (see
+   append_git_file_line()); git_panel_section_at() tells which section a
+   line belongs to by scanning back to its nearest header instead of keeping
+   a separate line table, so the two can't drift apart. ---- */
+
+static void append_git_file_line(OutputPane *pane, const WCHAR *path, WCHAR mark) {
+    char *utf8Path = to_utf8(path);
+    if (!utf8Path) return;
+    char prefix[8];
+    snprintf(prefix, sizeof(prefix), "  %c  ", (char)mark);
+    append_output(pane, OUTPUT_STYLE_DEFAULT, prefix, strlen(prefix));
+    append_output(pane, OUTPUT_STYLE_DEFAULT, utf8Path, strlen(utf8Path));
+    append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+    free(utf8Path);
+}
+
+static void render_git_panel(void) {
+    OutputPane *pane = &g_outputPanes[OUTPUT_TAB_GIT];
+    if (!pane->view) return;
+    clear_output_pane(pane);
+    if (!g_currentWorkspaceFolder) {
+        append_output_note(pane, OUTPUT_STYLE_NOTE, L"Open a workspace folder to use Git.");
+        return;
+    }
+    WCHAR header[160];
+    swprintf(header, 160, L"Branch: %ls", g_gitBranchName[0] ? g_gitBranchName : L"(none)");
+    append_output_note(pane, OUTPUT_STYLE_NOTE, header);
+    append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+
+    int stagedCount = 0, unstagedCount = 0, untrackedCount = 0, conflictCount = 0;
+    for (int i = 0; i < g_gitStatusFileCount; i++) {
+        GitStatusFile *file = &g_gitStatusFiles[i];
+        int conflict = file->index == L'U' || file->worktree == L'U' ||
+                      (file->index == L'A' && file->worktree == L'A') ||
+                      (file->index == L'D' && file->worktree == L'D');
+        if (conflict) conflictCount++;
+        else if (file->index == L'?') untrackedCount++;
+        else {
+            if (file->index != L' ') stagedCount++;
+            if (file->worktree != L' ') unstagedCount++;
+        }
+    }
+
+    if (stagedCount) {
+        WCHAR label[48];
+        swprintf(label, 48, L"Staged Changes (%d)", stagedCount);
+        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        for (int i = 0; i < g_gitStatusFileCount; i++) {
+            GitStatusFile *file = &g_gitStatusFiles[i];
+            if (file->index != L' ' && file->index != L'?')
+                append_git_file_line(pane, file->path, file->index);
+        }
+        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+    }
+    if (unstagedCount || untrackedCount) {
+        WCHAR label[48];
+        swprintf(label, 48, L"Changes (%d)", unstagedCount + untrackedCount);
+        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        for (int i = 0; i < g_gitStatusFileCount; i++) {
+            GitStatusFile *file = &g_gitStatusFiles[i];
+            if (file->worktree != L' ')
+                append_git_file_line(pane, file->path, file->worktree);
+        }
+        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+    }
+    if (conflictCount) {
+        WCHAR label[48];
+        swprintf(label, 48, L"Conflicts (%d)", conflictCount);
+        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        for (int i = 0; i < g_gitStatusFileCount; i++) {
+            GitStatusFile *file = &g_gitStatusFiles[i];
+            int conflict = file->index == L'U' || file->worktree == L'U' ||
+                          (file->index == L'A' && file->worktree == L'A') ||
+                          (file->index == L'D' && file->worktree == L'D');
+            if (conflict) append_git_file_line(pane, file->path, L'!');
+        }
+    }
+    if (!stagedCount && !unstagedCount && !untrackedCount && !conflictCount)
+        append_output_note(pane, OUTPUT_STYLE_NOTE, L"No changes.");
+    /* A static snapshot, not a tailing log - append_output() otherwise
+       leaves the view scrolled to the last line it just followed to. */
+    SendMessageA(pane->view, SCI_GOTOPOS, 0, 0);
+}
+
+/* -1 when lineNumber is itself a header or blank line. */
+static int git_panel_section_at(HWND view, Sci_Position lineNumber) {
+    for (Sci_Position line = lineNumber; line >= 0; line--) {
+        Sci_Position length = (Sci_Position)SendMessageA(view, SCI_LINELENGTH, (WPARAM)line, 0);
+        if (length <= 0) continue;
+        char *text = (char *)malloc((size_t)length + 1);
+        if (!text) continue;
+        SendMessageA(view, SCI_GETLINE, (WPARAM)line, (LPARAM)text);
+        text[length] = 0;
+        int section = strncmp(text, "Staged Changes", 14) == 0 ? 0
+                    : strncmp(text, "Changes", 7) == 0 ? 1
+                    : strncmp(text, "Conflicts", 9) == 0 ? 2 : -1;
+        free(text);
+        if (section >= 0) return section;
+    }
+    return -1;
+}
+
+/* Parses a "  X  path" file line (see append_git_file_line()); *path is
+   malloc'd (caller frees) on success. */
+static int git_panel_parse_file_line(HWND view, Sci_Position lineNumber, WCHAR *mark, WCHAR **path) {
+    Sci_Position length = (Sci_Position)SendMessageA(view, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
+    if (length < 6) return 0;
+    char *text = (char *)malloc((size_t)length + 1);
+    if (!text) return 0;
+    SendMessageA(view, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)text);
+    text[length] = 0;
+    int ok = text[0] == ' ' && text[1] == ' ' && text[3] == ' ' && text[4] == ' ' &&
+             text[5] && text[5] != '\n' && text[5] != '\r';
+    if (ok) {
+        *mark = (WCHAR)(unsigned char)text[2];
+        size_t pathLength = strlen(text + 5);
+        while (pathLength && (text[5 + pathLength - 1] == '\n' || text[5 + pathLength - 1] == '\r'))
+            pathLength--;
+        char *pathUtf8 = (char *)malloc(pathLength + 1);
+        if (pathUtf8) {
+            memcpy(pathUtf8, text + 5, pathLength);
+            pathUtf8[pathLength] = 0;
+            *path = to_wide(pathUtf8);
+            free(pathUtf8);
+            ok = *path != NULL;
+        } else ok = 0;
+    }
+    free(text);
+    return ok;
+}
+
+/* run_git_sync() pumps its own nested message loop; calling it straight out
+   of SCN_DOUBLECLICK would do that while Scintilla's own DefSubclassProc
+   call for the click is still on the stack, reentering it mid-click. So the
+   actual stage/unstage happens once that unwinds, via a posted message. */
+static WCHAR *g_gitPendingActionPath;
+static int g_gitPendingAction; /* 0 none, 1 stage, 2 unstage */
+
+static void run_pending_git_panel_action(void) {
+    WCHAR *path = g_gitPendingActionPath;
+    int action = g_gitPendingAction;
+    g_gitPendingActionPath = NULL;
+    g_gitPendingAction = 0;
+    if (!path) return;
+    if (action == 2) git_unstage_file(path);
+    else git_stage_file(path); /* also how a conflict's resolution is marked */
+    free(path);
+}
+
+static void handle_git_panel_double_click(Sci_Position position) {
+    OutputPane *pane = &g_outputPanes[OUTPUT_TAB_GIT];
+    Sci_Position line = (Sci_Position)SendMessageA(pane->view, SCI_LINEFROMPOSITION, (WPARAM)position, 0);
+    WCHAR mark = 0, *path = NULL;
+    if (!git_panel_parse_file_line(pane->view, line, &mark, &path)) return;
+    int section = git_panel_section_at(pane->view, line);
+    free(g_gitPendingActionPath);
+    g_gitPendingActionPath = path;
+    g_gitPendingAction = section == 0 ? 2 : 1;
+    PostMessageW(g_hMainWnd, WM_APP_GIT_PANEL_ACTION, 0, 0);
+}
+
+enum { GIT_CTX_STAGE = 1, GIT_CTX_UNSTAGE, GIT_CTX_DISCARD, GIT_CTX_DIFF };
+
+static void show_git_panel_context_menu(HWND view, POINT screenPoint) {
+    POINT clientPoint;
+    if (screenPoint.x == -1 && screenPoint.y == -1) {
+        Sci_Position pos = (Sci_Position)SendMessageA(view, SCI_GETCURRENTPOS, 0, 0);
+        Sci_Position lineStart = (Sci_Position)SendMessageA(view, SCI_POSITIONFROMLINE,
+            (WPARAM)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)pos, 0), 0);
+        clientPoint.x = (int)SendMessageA(view, SCI_POINTXFROMPOSITION, 0, (LPARAM)lineStart);
+        clientPoint.y = (int)SendMessageA(view, SCI_POINTYFROMPOSITION, 0, (LPARAM)lineStart);
+        screenPoint = clientPoint;
+        ClientToScreen(view, &screenPoint);
+    } else {
+        clientPoint = screenPoint;
+        ScreenToClient(view, &clientPoint);
+    }
+    Sci_Position position = (Sci_Position)SendMessageA(view, SCI_POSITIONFROMPOINTCLOSE,
+                                                        (WPARAM)clientPoint.x, (LPARAM)clientPoint.y);
+    if (position < 0) return;
+    Sci_Position lineNumber = (Sci_Position)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)position, 0);
+    WCHAR mark = 0, *path = NULL;
+    if (!git_panel_parse_file_line(view, lineNumber, &mark, &path)) return;
+    int section = git_panel_section_at(view, lineNumber);
+    HMENU menu = CreatePopupMenu();
+    if (menu) {
+        if (section == 0) {
+            AppendMenuW(menu, MF_STRING, GIT_CTX_UNSTAGE, L"Unstage");
+        } else {
+            AppendMenuW(menu, MF_STRING, GIT_CTX_STAGE, section == 2 ? L"Mark Resolved" : L"Stage");
+            AppendMenuW(menu, MF_STRING, GIT_CTX_DISCARD, L"Discard Changes...");
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
+        UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                      screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL);
+        DestroyMenu(menu);
+        switch (command) {
+            case GIT_CTX_STAGE: git_stage_file(path); break;
+            case GIT_CTX_UNSTAGE: git_unstage_file(path); break;
+            case GIT_CTX_DISCARD: git_discard_file(path, mark); break;
+            case GIT_CTX_DIFF: git_diff_panel_file(path); break;
+        }
+    }
+    free(path);
+}
+
 /* ---- programs ---- */
 
 /* Ends the pane's program, if any, without waiting for its last output. */
@@ -565,6 +1185,10 @@ static void handle_output_chunk(OutputChunk *chunk) {
                 show_output_panel(g_hMainWnd, OUTPUT_TAB_PROBLEMS, 0);
             end_output_program(pane);
             update_output_controls();
+            if (g_gitRunPending) {
+                g_gitRunPending = 0;
+                refresh_git_status();
+            }
         }
     }
     free(chunk);
@@ -769,6 +1393,11 @@ static LRESULT CALLBACK OutputInputSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
 static LRESULT CALLBACK OutputViewSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                                UINT_PTR id, DWORD_PTR data) {
     (void)data;
+    if (id == (UINT_PTR)(OUTPUT_TAB_GIT + 1) && msg == WM_CONTEXTMENU) {
+        POINT screenPoint = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        show_git_panel_context_menu(hwnd, screenPoint);
+        return 0;
+    }
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
         LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
         SetFocus(g_hOutputInput);
@@ -977,7 +1606,8 @@ static OutputPanelLayout output_panel_layout(HWND panel) {
    below it; the Run tab keeps the two separate. */
 static RECT output_content_rect(const OutputPanelLayout *layout) {
     RECT rect = layout->view;
-    if (g_outputTab == OUTPUT_TAB_TERMINAL || g_outputTab == OUTPUT_TAB_PROBLEMS)
+    if (g_outputTab == OUTPUT_TAB_TERMINAL || g_outputTab == OUTPUT_TAB_PROBLEMS ||
+        g_outputTab == OUTPUT_TAB_GIT)
         rect.bottom = layout->inputBox.bottom;
     return rect;
 }
@@ -1003,6 +1633,11 @@ static int active_output_buttons(OutputHeaderButton *buttons, int dpi) {
     } else if (g_outputTab == OUTPUT_TAB_PROBLEMS) {
         int buttonWidth = MulDiv(OUTPUT_BUTTON_WIDTH, dpi, 96);
         buttons[n++] = (OutputHeaderButton){ g_hOutputClear, buttonWidth };
+    } else if (g_outputTab == OUTPUT_TAB_GIT) {
+        int buttonWidth = MulDiv(OUTPUT_BUTTON_WIDTH, dpi, 96);
+        buttons[n++] = (OutputHeaderButton){ g_hGitCommit, buttonWidth };
+        buttons[n++] = (OutputHeaderButton){ g_hGitStageAll, buttonWidth };
+        buttons[n++] = (OutputHeaderButton){ g_hGitRefresh, buttonWidth };
     } else {
         int buttonWidth = MulDiv(OUTPUT_BUTTON_WIDTH, dpi, 96);
         buttons[n++] = (OutputHeaderButton){ g_hOutputStop, buttonWidth };
@@ -1035,7 +1670,8 @@ static void size_output_panel(HWND panel) {
        isn't active are hidden outright, rather than left stacked underneath
        the active tab's. */
     HWND inactiveButtons[] = { g_hOutputClear, g_hOutputStop, g_hDebugContinue,
-                               g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut };
+                               g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut,
+                               g_hGitRefresh, g_hGitStageAll, g_hGitCommit };
     for (size_t i = 0; i < sizeof(inactiveButtons) / sizeof(inactiveButtons[0]); i++)
         ShowWindow(inactiveButtons[i], SW_HIDE);
     int tabsRight = layout.pad + OUTPUT_TAB_COUNT * tabWidth;
@@ -1057,7 +1693,7 @@ static void size_output_panel(HWND panel) {
        view gets its own content rect: the Terminal tab's spans the input
        box's space too, since it has no separate input line. */
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++) {
-        RECT content = (i == OUTPUT_TAB_TERMINAL || i == OUTPUT_TAB_PROBLEMS)
+        RECT content = (i == OUTPUT_TAB_TERMINAL || i == OUTPUT_TAB_PROBLEMS || i == OUTPUT_TAB_GIT)
                      ? output_content_rect(&layout) : layout.view;
         MoveWindow(g_outputPanes[i].view, content.left + 1, content.top + 1,
                    content.right - content.left - 2, content.bottom - content.top - 2, TRUE);
@@ -1089,7 +1725,8 @@ static void paint_output_panel(HWND panel, HDC hdc) {
     OutputPanelLayout layout = output_panel_layout(panel);
     RECT content = output_content_rect(&layout);
     frame_rect(hdc, &content, theme_border_color());
-    if (g_outputTab != OUTPUT_TAB_TERMINAL && g_outputTab != OUTPUT_TAB_PROBLEMS)
+    if (g_outputTab != OUTPUT_TAB_TERMINAL && g_outputTab != OUTPUT_TAB_PROBLEMS &&
+        g_outputTab != OUTPUT_TAB_GIT)
         frame_rect(hdc, &layout.inputBox, theme_border_color());
 }
 
@@ -1138,6 +1775,19 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
                     select_output_tab(OUTPUT_TAB_DEBUG);
                     SetFocus(g_hDebugVariables);
                     return 0;
+                case ID_OUTPUT_TAB_GIT:
+                    select_output_tab(OUTPUT_TAB_GIT);
+                    SetFocus(g_outputPanes[OUTPUT_TAB_GIT].view);
+                    return 0;
+                case ID_GIT_REFRESH:
+                    refresh_git_status();
+                    return 0;
+                case ID_GIT_STAGE_ALL:
+                    git_stage_all();
+                    return 0;
+                case ID_GIT_COMMIT:
+                    git_commit_prompt();
+                    return 0;
                 case IDM_DEBUG_CONTINUE: case IDM_DEBUG_STEP_OVER:
                 case IDM_DEBUG_STEP_INTO: case IDM_DEBUG_STEP_OUT:
                     /* debugger.inc's run_debugger_command() is reached through
@@ -1174,10 +1824,13 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
         case WM_NOTIFY: {
             NMHDR *notification = (NMHDR *)lParam;
             if (notification->code == SCN_DOUBLECLICK) {
-                for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
-                    if (notification->hwndFrom == g_outputPanes[i].view)
-                        open_output_location(&g_outputPanes[i],
-                                             ((struct SCNotification *)lParam)->position);
+                if (notification->hwndFrom == g_outputPanes[OUTPUT_TAB_GIT].view)
+                    handle_git_panel_double_click(((struct SCNotification *)lParam)->position);
+                else
+                    for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
+                        if (notification->hwndFrom == g_outputPanes[i].view)
+                            open_output_location(&g_outputPanes[i],
+                                                 ((struct SCNotification *)lParam)->position);
             } else if (notification->code == TVN_EXITED) {
                 update_output_controls();
             } else if (notification->code == TVN_RESTART_REQUESTED) {
@@ -1236,9 +1889,11 @@ static void create_output_panel(HWND hwnd) {
     g_hOutputPanel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_CLIPCHILDREN,
                                      0, 0, 0, 0, hwnd, (HMENU)ID_OUTPUT_PANEL, GetModuleHandleW(NULL), NULL);
     SetWindowSubclass(g_hOutputPanel, OutputPanelSubclassProc, 1, 0);
-    static const WCHAR *const labels[OUTPUT_TAB_COUNT] = { L"Output", L"Terminal", L"Problems", L"Debug" };
+    static const WCHAR *const labels[OUTPUT_TAB_COUNT] =
+        { L"Output", L"Terminal", L"Problems", L"Debug", L"Git" };
     static const int tabIds[OUTPUT_TAB_COUNT] = { ID_OUTPUT_TAB_RUN, ID_OUTPUT_TAB_TERMINAL,
-                                                  ID_OUTPUT_TAB_PROBLEMS, ID_OUTPUT_TAB_DEBUG };
+                                                  ID_OUTPUT_TAB_PROBLEMS, ID_OUTPUT_TAB_DEBUG,
+                                                  ID_OUTPUT_TAB_GIT };
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
         g_outputPanes[i].tab = create_output_button(g_hOutputPanel, labels[i], tabIds[i]);
 
@@ -1266,6 +1921,17 @@ static void create_output_panel(HWND hwnd) {
     themed_scrollbar_attach(problemsPane->view, THEMED_SCROLL_SCINTILLA);
     SetWindowSubclass(problemsPane->view, OutputViewSubclassProc,
                       (UINT_PTR)(OUTPUT_TAB_PROBLEMS + 1), 0);
+
+    OutputPane *gitPane = &g_outputPanes[OUTPUT_TAB_GIT];
+    gitPane->view = create_output_scintilla(g_hOutputPanel, ID_OUTPUT_VIEW + 2,
+                                            g_outputTab == OUTPUT_TAB_GIT);
+    SendMessageA(gitPane->view, SCI_SETREADONLY, TRUE, 0);
+    SendMessageA(gitPane->view, SCI_SETUNDOCOLLECTION, FALSE, 0);
+    SendMessageA(gitPane->view, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
+    SendMessageA(gitPane->view, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
+    SendMessageA(gitPane->view, SCI_SETSCROLLWIDTH, 1, 0);
+    themed_scrollbar_attach(gitPane->view, THEMED_SCROLL_SCINTILLA);
+    SetWindowSubclass(gitPane->view, OutputViewSubclassProc, (UINT_PTR)(OUTPUT_TAB_GIT + 1), 0);
 
     g_terminalView = terminal_view_create(g_hOutputPanel, ID_TERMINAL_VIEW);
     g_outputPanes[OUTPUT_TAB_TERMINAL].view = terminal_view_window(g_terminalView);
@@ -1306,6 +1972,12 @@ static void create_output_panel(HWND hwnd) {
     g_hOutputClear = create_output_button(g_hOutputPanel, L"Clear", ID_OUTPUT_CLEAR);
     g_hOutputStop = create_output_button(g_hOutputPanel, L"Stop", ID_OUTPUT_STOP);
     g_hOutputClose = create_output_button(g_hOutputPanel, L"X", ID_OUTPUT_CLOSE);
+    g_hGitRefresh = create_output_button(g_hOutputPanel, L"Refresh", ID_GIT_REFRESH);
+    g_hGitStageAll = create_output_button(g_hOutputPanel, L"Stage All", ID_GIT_STAGE_ALL);
+    g_hGitCommit = create_output_button(g_hOutputPanel, L"Commit...", ID_GIT_COMMIT);
+    ShowWindow(g_hGitRefresh, g_outputTab == OUTPUT_TAB_GIT ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hGitStageAll, g_outputTab == OUTPUT_TAB_GIT ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hGitCommit, g_outputTab == OUTPUT_TAB_GIT ? SW_SHOW : SW_HIDE);
     g_hOutputInput = create_output_scintilla(g_hOutputPanel, ID_OUTPUT_INPUT, 1);
     SendMessageA(g_hOutputInput, SCI_SETVSCROLLBAR, FALSE, 0);
     SendMessageA(g_hOutputInput, SCI_SETHSCROLLBAR, FALSE, 0);
@@ -1324,6 +1996,8 @@ static void shutdown_output_panel(void) {
     g_gitStatusProcess = NULL;
     free(g_gitStatusOutput);
     g_gitStatusOutput = NULL;
+    free(g_gitSyncOutput);
+    g_gitSyncOutput = NULL;
     clear_git_status_files();
     clear_problem_reports();
     free(g_outputPanes[OUTPUT_TAB_PROBLEMS].directory);
