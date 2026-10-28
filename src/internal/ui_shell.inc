@@ -114,7 +114,7 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         return 0;
     } else if (msg == WM_LBUTTONUP) {
         /* Part 3 holds the Git text (see update_status_position()); clicking
-           it opens the same branch menu as the status bar's "git <branch>"
+           it opens the same branch menu as the status bar's "Branch: <name>"
            display suggests, rather than needing the Tools > Git submenu. */
         RECT partRect;
         if (g_gitStatusText[0] && SendMessageW(hwnd, SB_GETRECT, (WPARAM)3, (LPARAM)&partRect)) {

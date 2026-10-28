@@ -84,6 +84,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 #define WM_APP_GIT_STATUS (WM_APP + 8) /* hidden asynchronous git status */
 #define WM_APP_GIT_SYNC (WM_APP + 9) /* a quick git command run_git_sync() is waiting on */
 #define WM_APP_GIT_PANEL_ACTION (WM_APP + 10) /* a Git panel stage/unstage, deferred past SCN_DOUBLECLICK */
+#define WM_APP_GIT_BRANCHES (WM_APP + 11) /* hidden asynchronous branch listing, for the Git panel */
 #define TOOLBAR_HEIGHT 32
 #define TAB_HEIGHT 28
 #define TAB_ITEM_WIDTH 120 /* each document tab, in 96-DPI pixels like the sizes below */

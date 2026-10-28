@@ -381,6 +381,7 @@ static WCHAR *terminal_directory(void);
 static int run_in_output_panel(const WCHAR *file, const WCHAR *parameters,
                                const WCHAR *directory, const WCHAR *title);
 static void render_git_panel(void);
+static void refresh_git_branches(void);
 
 static void clear_git_status_files(void) {
     for (int i = 0; i < g_gitStatusFileCount; i++) free(g_gitStatusFiles[i].path);
@@ -447,9 +448,9 @@ static void apply_git_status_output(void) {
         if (wideBranch) {
             wcsncpy(g_gitBranchName, wideBranch, 95);
             g_gitBranchName[95] = 0;
-            if (total) swprintf(g_gitStatusText, 128, L"git %ls · %d change%ls%ls",
+            if (total) swprintf(g_gitStatusText, 128, L"Branch: %ls · %d change%ls%ls",
                 wideBranch, total, total == 1 ? L"" : L"s", conflicts ? L" · conflicts" : L"");
-            else swprintf(g_gitStatusText, 128, L"git %ls", wideBranch);
+            else swprintf(g_gitStatusText, 128, L"Branch: %ls", wideBranch);
             free(wideBranch);
         }
     }
@@ -498,6 +499,7 @@ static void refresh_git_status(void) {
         g_gitStatusText[0] = 0;
         update_status_position();
     }
+    refresh_git_branches();
 }
 
 static int run_git_output(const WCHAR *parameters, const WCHAR *title) {
@@ -625,11 +627,17 @@ static void report_git_sync_result(const WCHAR *verb, DWORD exitCode, const char
     free(wide);
 }
 
-static WCHAR **git_list_branches(int *count) {
+/* refPattern is a for-each-ref pattern ("refs/heads" or "refs/remotes"). */
+static WCHAR **git_list_refs(const WCHAR *refPattern, int *count) {
     *count = 0;
     if (!g_currentWorkspaceFolder) return NULL;
+    size_t capacity = wcslen(refPattern) + 40;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return NULL;
+    swprintf(parameters, capacity, L"for-each-ref --format=%%(refname:short) %ls", refPattern);
     DWORD exitCode = 0;
-    char *output = run_git_sync(L"branch --format=%(refname:short)", g_currentWorkspaceFolder, &exitCode);
+    char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
+    free(parameters);
     if (!output) return NULL;
     WCHAR **names = NULL;
     int n = 0;
@@ -659,9 +667,123 @@ static WCHAR **git_list_branches(int *count) {
     return names;
 }
 
+static WCHAR **git_list_branches(int *count) {
+    return git_list_refs(L"refs/heads", count);
+}
+
 static void free_branch_list(WCHAR **names, int count) {
     for (int i = 0; i < count; i++) free(names[i]);
     free(names);
+}
+
+/* ---- the Git panel's branch lists, refreshed asynchronously alongside
+   status (see refresh_git_status()) ----
+   render_git_panel() only ever reads these cached arrays: listing branches
+   with run_git_sync(), as pick_git_branch() below does for its dialogs, is
+   only safe from a plain menu/button WM_COMMAND, not from the panel's own
+   paint/click handling, which can run nested inside another control's
+   message processing (see g_gitPendingActionPath's comment, further down). */
+static OutputProcess *g_gitBranchesProcess;
+static int g_gitBranchesSession;
+static char *g_gitBranchesOutput;
+static size_t g_gitBranchesOutputLength;
+static WCHAR **g_gitLocalBranches;
+static int g_gitLocalBranchCount;
+static WCHAR **g_gitRemoteBranchNames;
+static int g_gitRemoteBranchCount;
+
+static void clear_git_branch_cache(void) {
+    free_branch_list(g_gitLocalBranches, g_gitLocalBranchCount);
+    g_gitLocalBranches = NULL;
+    g_gitLocalBranchCount = 0;
+    free_branch_list(g_gitRemoteBranchNames, g_gitRemoteBranchCount);
+    g_gitRemoteBranchNames = NULL;
+    g_gitRemoteBranchCount = 0;
+}
+
+/* Appends one for-each-ref line's short name (cursor + prefixLength, length
+   bytes) to the names array, skipping it silently on allocation failure. */
+static void add_branch_name(WCHAR ***names, int *count, const char *cursor, size_t prefixLength, size_t length) {
+    size_t nameLength = length - prefixLength;
+    char *name = (char *)malloc(nameLength + 1);
+    if (!name) return;
+    memcpy(name, cursor + prefixLength, nameLength);
+    name[nameLength] = 0;
+    WCHAR *wide = to_wide(name);
+    free(name);
+    if (!wide) return;
+    WCHAR **grown = (WCHAR **)realloc(*names, (size_t)(*count + 1) * sizeof(WCHAR *));
+    if (!grown) { free(wide); return; }
+    *names = grown;
+    (*names)[(*count)++] = wide;
+}
+
+static void apply_git_branches_output(void) {
+    clear_git_branch_cache();
+    if (g_gitBranchesOutput) {
+        static const char HEADS[] = "refs/heads/", REMOTES[] = "refs/remotes/";
+        char *cursor = g_gitBranchesOutput;
+        while (*cursor) {
+            char *end = strchr(cursor, '\n');
+            size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+            if (length && cursor[length - 1] == '\r') length--;
+            if (length > sizeof(HEADS) - 1 && strncmp(cursor, HEADS, sizeof(HEADS) - 1) == 0) {
+                add_branch_name(&g_gitLocalBranches, &g_gitLocalBranchCount, cursor, sizeof(HEADS) - 1, length);
+            } else if (length > sizeof(REMOTES) - 1 && strncmp(cursor, REMOTES, sizeof(REMOTES) - 1) == 0) {
+                /* The remote's own symbolic HEAD pointer ("origin/HEAD")
+                   isn't a real branch. */
+                if (strncmp(cursor + length - 5, "/HEAD", 5) != 0)
+                    add_branch_name(&g_gitRemoteBranchNames, &g_gitRemoteBranchCount, cursor, sizeof(REMOTES) - 1, length);
+            }
+            if (!end) break;
+            cursor = end + 1;
+        }
+    }
+    render_git_panel();
+}
+
+static void handle_git_branches_chunk(OutputChunk *chunk) {
+    if (g_gitBranchesProcess && chunk->session == g_gitBranchesSession) {
+        if (chunk->length && g_gitBranchesOutputLength + chunk->length <= 1024 * 1024) {
+            char *grown = (char *)realloc(g_gitBranchesOutput,
+                g_gitBranchesOutputLength + chunk->length + 1);
+            if (grown) {
+                g_gitBranchesOutput = grown;
+                memcpy(g_gitBranchesOutput + g_gitBranchesOutputLength, chunk->data, chunk->length);
+                g_gitBranchesOutputLength += chunk->length;
+                g_gitBranchesOutput[g_gitBranchesOutputLength] = 0;
+            }
+        }
+        if (chunk->finished) {
+            output_process_free(g_gitBranchesProcess);
+            g_gitBranchesProcess = NULL;
+            g_gitBranchesSession = 0;
+            apply_git_branches_output();
+        }
+    }
+    free(chunk);
+}
+
+static void refresh_git_branches(void) {
+    if (!g_hMainWnd || !g_currentWorkspaceFolder) {
+        clear_git_branch_cache();
+        render_git_panel();
+        return;
+    }
+    if (g_gitBranchesProcess) output_process_free(g_gitBranchesProcess);
+    g_gitBranchesProcess = NULL;
+    free(g_gitBranchesOutput);
+    g_gitBranchesOutput = NULL;
+    g_gitBranchesOutputLength = 0;
+    int session = g_outputNextSession++;
+    g_gitBranchesProcess = output_process_start(
+        L"git.exe for-each-ref --format=%(refname) refs/heads refs/remotes",
+        g_currentWorkspaceFolder, NULL, g_hMainWnd, WM_APP_GIT_BRANCHES, session);
+    if (g_gitBranchesProcess) g_gitBranchesSession = session;
+    else {
+        clear_git_branch_cache();
+        render_git_panel();
+    }
 }
 
 /* Picks a branch with show_choice_dialog(); returns the chosen name (caller
@@ -973,6 +1095,13 @@ static void append_git_branch_line(OutputPane *pane, const WCHAR *name, int curr
     free(utf8Name);
 }
 
+/* Remote branches start collapsed - a long remote list would otherwise push
+   the usually-more-relevant Staged/Changes sections below the fold. */
+static int g_gitRemoteBranchesCollapsed = 1;
+
+/* Reads only g_gitStatusFiles/g_gitBranchName and the branch cache above -
+   never a subprocess - so it's always safe to call directly, including from
+   SCN_DOUBLECLICK (see handle_git_panel_double_click()). */
 static void render_git_panel(void) {
     OutputPane *pane = &g_outputPanes[OUTPUT_TAB_GIT];
     if (!pane->view) return;
@@ -986,18 +1115,26 @@ static void render_git_panel(void) {
     append_output_note(pane, OUTPUT_STYLE_NOTE, header);
     append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
 
-    int branchCount = 0;
-    WCHAR **branches = git_list_branches(&branchCount);
-    if (branches && branchCount > 0) {
+    if (g_gitLocalBranchCount > 0) {
         WCHAR label[48];
-        swprintf(label, 48, L"Branches (%d)", branchCount);
+        swprintf(label, 48, L"Branches (%d)", g_gitLocalBranchCount);
         append_output_note(pane, OUTPUT_STYLE_NOTE, label);
-        for (int i = 0; i < branchCount; i++)
-            append_git_branch_line(pane, branches[i],
-                g_gitBranchName[0] && _wcsicmp(branches[i], g_gitBranchName) == 0);
+        for (int i = 0; i < g_gitLocalBranchCount; i++)
+            append_git_branch_line(pane, g_gitLocalBranches[i],
+                g_gitBranchName[0] && _wcsicmp(g_gitLocalBranches[i], g_gitBranchName) == 0);
         append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
     }
-    free_branch_list(branches, branchCount);
+
+    if (g_gitRemoteBranchCount > 0) {
+        WCHAR label[64];
+        swprintf(label, 64, L"Remote Branches (%d) [%lc]",
+                g_gitRemoteBranchCount, g_gitRemoteBranchesCollapsed ? L'+' : L'-');
+        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        if (!g_gitRemoteBranchesCollapsed)
+            for (int i = 0; i < g_gitRemoteBranchCount; i++)
+                append_git_branch_line(pane, g_gitRemoteBranchNames[i], 0);
+        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+    }
 
     int stagedCount = 0, unstagedCount = 0, untrackedCount = 0, conflictCount = 0;
     for (int i = 0; i < g_gitStatusFileCount; i++) {
@@ -1055,20 +1192,35 @@ static void render_git_panel(void) {
 }
 
 /* -1 when lineNumber is itself a header or blank line. */
+/* -1 if text isn't one of the panel's own section headers (see
+   render_git_panel()); the indicator render_git_panel() appends to the
+   Remote Branches header comes after the matched prefix, so it doesn't
+   interfere here. */
+static int git_panel_header_kind(const char *text) {
+    if (strncmp(text, "Staged Changes", 14) == 0) return 0;
+    if (strncmp(text, "Changes", 7) == 0) return 1;
+    if (strncmp(text, "Conflicts", 9) == 0) return 2;
+    if (strncmp(text, "Remote Branches", 15) == 0) return 4;
+    if (strncmp(text, "Branches", 8) == 0) return 3;
+    return -1;
+}
+
+static int git_panel_line_header_kind(HWND view, Sci_Position line) {
+    Sci_Position length = (Sci_Position)SendMessageA(view, SCI_LINELENGTH, (WPARAM)line, 0);
+    if (length <= 0) return -1;
+    char *text = (char *)malloc((size_t)length + 1);
+    if (!text) return -1;
+    SendMessageA(view, SCI_GETLINE, (WPARAM)line, (LPARAM)text);
+    text[length] = 0;
+    int kind = git_panel_header_kind(text);
+    free(text);
+    return kind;
+}
+
 static int git_panel_section_at(HWND view, Sci_Position lineNumber) {
     for (Sci_Position line = lineNumber; line >= 0; line--) {
-        Sci_Position length = (Sci_Position)SendMessageA(view, SCI_LINELENGTH, (WPARAM)line, 0);
-        if (length <= 0) continue;
-        char *text = (char *)malloc((size_t)length + 1);
-        if (!text) continue;
-        SendMessageA(view, SCI_GETLINE, (WPARAM)line, (LPARAM)text);
-        text[length] = 0;
-        int section = strncmp(text, "Staged Changes", 14) == 0 ? 0
-                    : strncmp(text, "Changes", 7) == 0 ? 1
-                    : strncmp(text, "Conflicts", 9) == 0 ? 2
-                    : strncmp(text, "Branches", 8) == 0 ? 3 : -1;
-        free(text);
-        if (section >= 0) return section;
+        int kind = git_panel_line_header_kind(view, line);
+        if (kind >= 0) return kind;
     }
     return -1;
 }
@@ -1123,14 +1275,20 @@ static void run_pending_git_panel_action(void) {
 static void handle_git_panel_double_click(Sci_Position position) {
     OutputPane *pane = &g_outputPanes[OUTPUT_TAB_GIT];
     Sci_Position line = (Sci_Position)SendMessageA(pane->view, SCI_LINEFROMPOSITION, (WPARAM)position, 0);
+    if (git_panel_line_header_kind(pane->view, line) == 4) {
+        g_gitRemoteBranchesCollapsed = !g_gitRemoteBranchesCollapsed;
+        render_git_panel();
+        return;
+    }
     WCHAR mark = 0, *path = NULL;
     if (!git_panel_parse_file_line(pane->view, line, &mark, &path)) return;
     int section = git_panel_section_at(pane->view, line);
-    if (section == 3) {
+    if (section == 3 || section == 4) {
         /* git_switch_to_branch() only starts an async process - unlike
            run_git_sync(), it never pumps a nested message loop, so it's
-           safe to call straight out of SCN_DOUBLECLICK. */
-        if (mark != L'*') git_switch_to_branch(path);
+           safe to call straight out of SCN_DOUBLECLICK. A remote branch
+           (section 4) is never the current one, so only section 3 skips it. */
+        if (section == 4 || mark != L'*') git_switch_to_branch(path);
         free(path);
         return;
     }
@@ -1165,7 +1323,9 @@ static void show_git_panel_context_menu(HWND view, POINT screenPoint) {
     int section = git_panel_section_at(view, lineNumber);
     HMENU menu = CreatePopupMenu();
     if (menu) {
-        if (section == 3) {
+        if (section == 4) {
+            AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
+        } else if (section == 3) {
             if (mark != L'*') {
                 AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
                 AppendMenuW(menu, MF_STRING, GIT_CTX_DELETE_BRANCH, L"Delete Branch...");
@@ -1176,7 +1336,7 @@ static void show_git_panel_context_menu(HWND view, POINT screenPoint) {
             AppendMenuW(menu, MF_STRING, GIT_CTX_STAGE, section == 2 ? L"Mark Resolved" : L"Stage");
             AppendMenuW(menu, MF_STRING, GIT_CTX_DISCARD, L"Discard Changes...");
         }
-        if (section != 3) {
+        if (section != 3 && section != 4) {
             AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
             AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
         }
@@ -2050,6 +2210,11 @@ static void shutdown_output_panel(void) {
     g_gitStatusOutput = NULL;
     free(g_gitSyncOutput);
     g_gitSyncOutput = NULL;
+    if (g_gitBranchesProcess) output_process_free(g_gitBranchesProcess);
+    g_gitBranchesProcess = NULL;
+    free(g_gitBranchesOutput);
+    g_gitBranchesOutput = NULL;
+    clear_git_branch_cache();
     clear_git_status_files();
     clear_problem_reports();
     free(g_outputPanes[OUTPUT_TAB_PROBLEMS].directory);

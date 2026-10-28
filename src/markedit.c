@@ -1026,6 +1026,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_GIT_PANEL_ACTION:
             run_pending_git_panel_action();
             return 0;
+        case WM_APP_GIT_BRANCHES:
+            handle_git_branches_chunk((OutputChunk *)lParam);
+            return 0;
         case WM_CREATE:
             initialize_main_window(hwnd);
             return 0;
