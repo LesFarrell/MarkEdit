@@ -1301,6 +1301,51 @@ static HTREEITEM git_tree_item_at_message_pos(HWND tree, POINT *screenOut, UINT 
     return item;
 }
 
+/* Every git action the tree can trigger (checkbox click, double-click, or
+   its right-click menu) is deferred through here rather than called
+   directly. All three arrive nested inside the TreeView's own click
+   processing - a checkbox toggle and a double-click as NM_* notifications
+   fired from within its WM_LBUTTONDOWN/UP handling, and a context-menu
+   choice still on that same stack after TrackPopupMenu() returns (that call
+   runs its own modal loop, but doesn't unwind the frame that opened it).
+   Calling run_git_sync() (its own nested message loop) or run_git_output()/
+   git_switch_to_branch() (which switch tabs and hide/show panes) while
+   still nested like that corrupts the UI - the git panel's own double-click
+   diff doing nothing but switch to an empty Output tab was exactly this.
+   So nothing here runs until the posted message below is handled back at
+   the top of the message loop. */
+static WCHAR *g_gitPendingActionPath;
+static WCHAR g_gitPendingActionMark;
+static int g_gitPendingAction; /* 0 none, 1 stage, 2 unstage, 3 diff, 4 switch branch, 5 discard, 6 delete branch */
+
+static void queue_git_panel_action(int action, const WCHAR *path, WCHAR mark) {
+    WCHAR *copy = _wcsdup(path);
+    if (!copy) return;
+    free(g_gitPendingActionPath);
+    g_gitPendingActionPath = copy;
+    g_gitPendingActionMark = mark;
+    g_gitPendingAction = action;
+    PostMessageW(g_hMainWnd, WM_APP_GIT_PANEL_ACTION, 0, 0);
+}
+
+static void run_pending_git_panel_action(void) {
+    WCHAR *path = g_gitPendingActionPath;
+    WCHAR mark = g_gitPendingActionMark;
+    int action = g_gitPendingAction;
+    g_gitPendingActionPath = NULL;
+    g_gitPendingAction = 0;
+    if (!path) return;
+    switch (action) {
+        case 2: git_unstage_file(path); break;
+        case 3: git_diff_panel_file(path); break;
+        case 4: git_switch_to_branch(path); break;
+        case 5: git_discard_file(path, mark); break;
+        case 6: git_delete_branch(path); break;
+        default: git_stage_file(path); break; /* also how a conflict's resolution is marked */
+    }
+    free(path);
+}
+
 static void handle_git_tree_double_click(HWND tree) {
     UINT flags = 0;
     HTREEITEM item = git_tree_item_at_message_pos(tree, NULL, &flags);
@@ -1310,35 +1355,14 @@ static void handle_git_tree_double_click(HWND tree) {
     if (!item || (flags & (TVHT_ONITEMSTATEICON | TVHT_ONITEMBUTTON))) return;
     GitTreeNode *node = git_tree_item_data(tree, item);
     if (!node) return;
-    /* git_switch_to_branch()/git_diff_panel_file() only start an async
-       process - unlike run_git_sync(), neither pumps a nested message loop,
-       so both are safe to call straight out of NM_DBLCLK. */
     if (node->kind == GIT_TREE_LOCAL_BRANCH) {
-        if (node->mark != L'*') git_switch_to_branch(node->path);
+        if (node->mark != L'*') queue_git_panel_action(4, node->path, 0);
     } else if (node->kind == GIT_TREE_REMOTE_BRANCH) {
-        git_switch_to_branch(node->path);
+        queue_git_panel_action(4, node->path, 0);
     } else if (node->kind == GIT_TREE_STAGED_FILE || node->kind == GIT_TREE_UNSTAGED_FILE ||
               node->kind == GIT_TREE_CONFLICT_FILE) {
-        git_diff_panel_file(node->path);
+        queue_git_panel_action(3, node->path, 0);
     }
-}
-
-/* run_git_sync() pumps its own nested message loop; calling it straight out
-   of a checkbox click would do that while the TreeView's own DefSubclassProc
-   call for the click is still on the stack, reentering it mid-click. So the
-   actual stage/unstage happens once that unwinds, via a posted message. */
-static WCHAR *g_gitPendingActionPath;
-static int g_gitPendingAction; /* 0 none, 1 stage, 2 unstage */
-
-static void run_pending_git_panel_action(void) {
-    WCHAR *path = g_gitPendingActionPath;
-    int action = g_gitPendingAction;
-    g_gitPendingActionPath = NULL;
-    g_gitPendingAction = 0;
-    if (!path) return;
-    if (action == 2) git_unstage_file(path);
-    else git_stage_file(path); /* also how a conflict's resolution is marked */
-    free(path);
 }
 
 static void handle_git_tree_item_changed(NMTVITEMCHANGE *change) {
@@ -1348,15 +1372,9 @@ static void handle_git_tree_item_changed(NMTVITEMCHANGE *change) {
     if (newChecked == oldChecked) return;
     GitTreeNode *node = git_tree_item_data(g_outputPanes[OUTPUT_TAB_GIT].view, change->hItem);
     if (!node) return;
-    int action;
-    if (node->kind == GIT_TREE_STAGED_FILE && !newChecked) action = 2;
+    if (node->kind == GIT_TREE_STAGED_FILE && !newChecked) queue_git_panel_action(2, node->path, 0);
     else if ((node->kind == GIT_TREE_UNSTAGED_FILE || node->kind == GIT_TREE_CONFLICT_FILE) && newChecked)
-        action = 1;
-    else return;
-    free(g_gitPendingActionPath);
-    g_gitPendingActionPath = _wcsdup(node->path);
-    g_gitPendingAction = action;
-    PostMessageW(g_hMainWnd, WM_APP_GIT_PANEL_ACTION, 0, 0);
+        queue_git_panel_action(1, node->path, 0);
 }
 
 enum { GIT_CTX_STAGE = 1, GIT_CTX_UNSTAGE, GIT_CTX_DISCARD, GIT_CTX_DIFF, GIT_CTX_SWITCH, GIT_CTX_DELETE_BRANCH };
@@ -1392,12 +1410,12 @@ static void show_git_tree_context_menu(HWND tree, HTREEITEM item, POINT screenPo
         : 0;
     DestroyMenu(menu);
     switch (command) {
-        case GIT_CTX_STAGE: git_stage_file(node->path); break;
-        case GIT_CTX_UNSTAGE: git_unstage_file(node->path); break;
-        case GIT_CTX_DISCARD: git_discard_file(node->path, node->mark); break;
-        case GIT_CTX_DIFF: git_diff_panel_file(node->path); break;
-        case GIT_CTX_SWITCH: git_switch_to_branch(node->path); break;
-        case GIT_CTX_DELETE_BRANCH: git_delete_branch(node->path); break;
+        case GIT_CTX_STAGE: queue_git_panel_action(1, node->path, 0); break;
+        case GIT_CTX_UNSTAGE: queue_git_panel_action(2, node->path, 0); break;
+        case GIT_CTX_DISCARD: queue_git_panel_action(5, node->path, node->mark); break;
+        case GIT_CTX_DIFF: queue_git_panel_action(3, node->path, 0); break;
+        case GIT_CTX_SWITCH: queue_git_panel_action(4, node->path, 0); break;
+        case GIT_CTX_DELETE_BRANCH: queue_git_panel_action(6, node->path, 0); break;
     }
 }
 

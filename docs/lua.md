@@ -178,3 +178,4 @@ The script lists each menu's commands that have shortcuts under that menu's name
   - [tests/test_formatting.c](../tests/test_formatting.c): joins the three built-in formatting sources from disk and runs commands against a real Scintilla window.
 
   Because these tests read the scripts from `src/`, they test your current edits without a rebuild of `markedit.exe`.
+// diff test comment

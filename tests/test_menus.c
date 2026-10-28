@@ -53,8 +53,10 @@ static void test_default_definition(void) {
 
     int count;
     const PluginMenuItem *menus = plugin_host_menu(&count);
-    expect(count == 8 && strcmp(menus[0].label, "&File") == 0 && strcmp(menus[7].label, "&Help") == 0,
-           "eight top-level menus, File first and Help last");
+    expect(count == 9 && strcmp(menus[0].label, "&File") == 0 &&
+           strcmp(menus[3].label, "&Tools") == 0 && strcmp(menus[4].label, "&Git") == 0 &&
+           strcmp(menus[8].label, "&Help") == 0,
+           "nine top-level menus, with Git after Tools and Help last");
     char *problems = menu_definition_problems(menus, count);
     if (problems) fprintf(stderr, "%s\n", problems);
     expect(problems == NULL, "every command and list name is known");
