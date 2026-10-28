@@ -1,4 +1,5 @@
 src/markedit.c
+src/app_accelerators.c
 src/editor_commands.c
 src/text_search.c
 src/editor_language.c

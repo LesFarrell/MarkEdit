@@ -39,6 +39,7 @@
 #define DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 19
 #endif
 #include "editor_commands.h"
+#include "app_accelerators.h"
 #include "text_search.h"
 #include "editor_language.h"
 #include "preview_fallback.h"
@@ -1201,61 +1202,6 @@ static HWND create_main_window(HINSTANCE instance, HICON largeIcon, HICON smallI
     return window;
 }
 
-static const ACCEL BUILTIN_ACCELERATORS[] = {
-        { FVIRTKEY | FCONTROL, 'N', IDM_FILE_NEW },
-        { FVIRTKEY | FCONTROL, 'O', IDM_FILE_OPEN },
-        { FVIRTKEY | FCONTROL, 'K', IDM_FILE_QUICK_OPEN },
-        { FVIRTKEY | FCONTROL, 'S', IDM_FILE_SAVE },
-        { FVIRTKEY | FCONTROL, 'P', IDM_FILE_PRINT },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'S', IDM_FILE_SAVEAS },
-        { FVIRTKEY | FCONTROL | FALT, 'S', IDM_FILE_SAVE_ALL },
-        { FVIRTKEY | FCONTROL, 'A', IDM_EDIT_SELECTALL },
-        { FVIRTKEY | FCONTROL, 'V', IDM_EDIT_PASTE },
-        { FVIRTKEY | FCONTROL, 'Y', IDM_EDIT_REDO },
-        { FVIRTKEY | FCONTROL, 'F', IDM_EDIT_FIND },
-        { FVIRTKEY | FCONTROL, 'H', IDM_EDIT_REPLACE },
-        { FVIRTKEY | FCONTROL, 'G', IDM_EDIT_GOTOLINE },
-        { FVIRTKEY | FCONTROL, 'W', IDM_FILE_CLOSE },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'T', IDM_FILE_REOPEN_CLOSED },
-        { FVIRTKEY | FALT, VK_LEFT, IDM_FILE_GO_BACK },
-        { FVIRTKEY | FCONTROL, VK_TAB, IDM_VIEW_NEXT_TAB },
-        { FVIRTKEY | FCONTROL | FSHIFT, VK_TAB, IDM_VIEW_PREVIOUS_TAB },
-        { FVIRTKEY, VK_F3, IDM_EDIT_FINDNEXT },
-        { FVIRTKEY | FSHIFT, VK_F3, IDM_EDIT_FINDPREV },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'V', IDM_VIEW_TOGGLEPREVIEW },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'E', IDM_VIEW_TOGGLEEDITOR },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'X', IDM_VIEW_EXPLORER },
-        { FVIRTKEY | FCONTROL | FSHIFT, VK_F11, IDM_VIEW_FOCUS_MODE },
-        { FVIRTKEY | FALT, 'Z', IDM_VIEW_WORD_WRAP },
-        { FVIRTKEY | FCONTROL, 'D', IDM_EDIT_DUPLICATE_LINE },
-        { FVIRTKEY | FALT, VK_UP, IDM_EDIT_MOVE_LINE_UP },
-        { FVIRTKEY | FALT, VK_DOWN, IDM_EDIT_MOVE_LINE_DOWN },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'K', IDM_EDIT_DELETE_LINE },
-        { FVIRTKEY | FCONTROL, 'J', IDM_EDIT_JOIN_LINES },
-        { FVIRTKEY | FCONTROL, VK_OEM_2, IDM_EDIT_TOGGLE_COMMENT },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'D', IDM_EDIT_SELECT_NEXT },
-        { FVIRTKEY | FCONTROL | FSHIFT, 'L', IDM_EDIT_SELECT_ALL_OCCURRENCES },
-        { FVIRTKEY | FCONTROL, VK_OEM_6, IDM_EDIT_MATCH_BRACE },
-        { FVIRTKEY | FCONTROL, VK_F5, IDM_RUN_FILE },
-        { FVIRTKEY, VK_F5, IDM_DEBUG_FILE },
-        { FVIRTKEY, VK_F6, IDM_DEBUG_CONTINUE },
-        { FVIRTKEY | FCONTROL, VK_OEM_5, IDM_VIEW_TOGGLESPLIT },
-        { FVIRTKEY | FCONTROL, VK_F6, IDM_VIEW_CYCLE_PANE },
-        { FVIRTKEY | FCONTROL | FSHIFT, VK_F6, IDM_VIEW_CYCLE_PANE_PREV },
-        { FVIRTKEY, VK_F10, IDM_DEBUG_STEP_OVER },
-        { FVIRTKEY, VK_F11, IDM_DEBUG_STEP_INTO },
-        { FVIRTKEY | FSHIFT, VK_F11, IDM_DEBUG_STEP_OUT },
-        { FVIRTKEY, VK_F9, IDM_DEBUG_BREAKPOINT },
-        { FVIRTKEY | FCONTROL, VK_F2, IDM_EDIT_BOOKMARK_TOGGLE },
-        { FVIRTKEY, VK_F2, IDM_EDIT_BOOKMARK_NEXT },
-        { FVIRTKEY | FSHIFT, VK_F2, IDM_EDIT_BOOKMARK_PREV },
-        { FVIRTKEY | FCONTROL, VK_OEM_PLUS, IDM_VIEW_ZOOM_IN },
-        { FVIRTKEY | FCONTROL, VK_ADD, IDM_VIEW_ZOOM_IN },
-        { FVIRTKEY | FCONTROL, VK_OEM_MINUS, IDM_VIEW_ZOOM_OUT },
-        { FVIRTKEY | FCONTROL, VK_SUBTRACT, IDM_VIEW_ZOOM_OUT },
-        { FVIRTKEY | FCONTROL, '0', IDM_VIEW_ZOOM_RESET },
-};
-
 /* The key that types ` unshifted: VK_OEM_3 on a US keyboard but VK_OEM_8 on
    a UK one, so the output panel's shortcuts are bound to whichever this
    layout uses (VK_OEM_3 when ` needs Shift or AltGr). */
@@ -1265,10 +1211,12 @@ static WORD backtick_key(void) {
 }
 
 static HACCEL create_main_accelerators(void) {
-    ACCEL accelerators[(sizeof(BUILTIN_ACCELERATORS) / sizeof(BUILTIN_ACCELERATORS[0])) + 2 +
-                       PLUGIN_MAX_COMMANDS];
-    int count = (int)(sizeof(BUILTIN_ACCELERATORS) / sizeof(BUILTIN_ACCELERATORS[0]));
-    memcpy(accelerators, BUILTIN_ACCELERATORS, sizeof(BUILTIN_ACCELERATORS));
+    ACCEL accelerators[APP_FIXED_ACCELERATOR_MAX + 2 + PLUGIN_MAX_COMMANDS];
+    size_t fixedCount = 0;
+    const ACCEL *fixed = app_fixed_accelerators(&fixedCount);
+    if (fixedCount > APP_FIXED_ACCELERATOR_MAX) return NULL;
+    int count = (int)fixedCount;
+    memcpy(accelerators, fixed, fixedCount * sizeof(ACCEL));
     WORD backtick = backtick_key();
     accelerators[count++] = (ACCEL){ FVIRTKEY | FCONTROL, backtick, IDM_VIEW_OUTPUT_PANEL };
     accelerators[count++] = (ACCEL){ FVIRTKEY | FCONTROL | FSHIFT, backtick, IDM_VIEW_TERMINAL };

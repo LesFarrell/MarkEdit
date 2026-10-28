@@ -356,7 +356,8 @@ test_project("test_assemblers", {}, {}, "lua")
 test_project("test_lua_format", {}, {}, "lua")
 -- These two read src/menus.lua and src/lua/formatting_*.lua, so run them
 -- from the repository root (test.bat does).
-test_project("test_menus", { "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h", "src/lua_editor_api.h" },
+test_project("test_menus", { "src/menu_commands.c", "src/menu_commands.h", "src/app_accelerators.c",
+                             "src/app_accelerators.h", "src/plugin_host.h", "src/lua_editor_api.h" },
              { "user32" }, "plugins")
 test_project("test_formatting", { "src/menu_commands.c", "src/menu_commands.h", "src/plugin_host.h",
                                   "src/lua_editor_api.h" }, { "user32" }, "plugins")

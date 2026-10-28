@@ -107,6 +107,7 @@ return {
     { "&Next Tab", "view.next_tab" },
     { "&Previous Tab", "view.previous_tab" },
     { "Cycle &Panes", "view.cycle_panes" },
+    { "Cycle Panes &Backwards", "view.cycle_panes_previous" },
     "-",
     { "&Editor Theme", {
       { "&Light", "view.theme_light" },

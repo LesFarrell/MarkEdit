@@ -184,6 +184,7 @@ src/                     application sources, including:
   markedit.c / .h          Win32 application and UI orchestration
   internal/                named private Win32 subsystems included by markedit.c
   command_ids.h            WM_COMMAND IDs of the built-in commands
+  app_accelerators.c / .h  fixed Win32 shortcuts, checked against the command registry by tests
   menus.lua                default menu bar definition, built into markedit.exe
   lua/formatting_*.lua     Markdown, HTML and Markdown-aware Edit commands built into markedit.exe
   menu_commands.c / .h     built-in command names used by menus.lua, with their shortcut text

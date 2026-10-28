@@ -170,6 +170,7 @@ depend on a UI module.
 | `plugin_discovery.c` | (internal) | Extension discovery and the folder-local `require` loader | `plugin_host_internal.h`, `file_io.h`, `path_utils.h` |
 | `lua_editor_api.c` | `lua_editor_api.h` | Scintilla-facing `editor.*` API | Scintilla |
 | `menu_commands.c` | `menu_commands.h` | Command registry | `command_ids.h` |
+| `app_accelerators.c` | `app_accelerators.h` | Fixed Win32 accelerator table, kept in sync with command shortcut labels by menu tests | `command_ids.h`, windows.h |
 | `output_process.c` | `output_process.h` | A program on pipes in a kill-on-close job, with immediately available output batched before its reader thread posts it to the UI | windows.h |
 | `output_text.c` | `output_text.h` | Output decoding (ANSI colours, carriage returns, OEM fallback), file locations in messages | windows.h |
 | `terminal_process.c` | `terminal_process.h` | A shell on a Windows pseudoconsole (ConPTY) in a kill-on-close job; a batched reader posts output, an ordered writer drains queued input, and a watcher reports shell exit | windows.h |

@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../src/menu_commands.h"
+#include "../src/app_accelerators.h"
+#include "../src/command_ids.h"
 #include "../src/plugin_host.h"
 #include "../src/file_io.h"
 
@@ -82,6 +84,37 @@ static void test_default_definition(void) {
     for (size_t i = 0; i < sizeof(pluginOnly) / sizeof(pluginOnly[0]); i++)
         expect(menu_command_find(pluginOnly[i]) == NULL,
                "plugin-owned commands have no built-in registry entry");
+}
+
+/* Shortcut labels and actual accelerators are deliberately separate because
+   native editor commands stay with the focused Scintilla/WebView control and
+   the backtick key is keyboard-layout dependent. Everything else advertised
+   by a built-in command must have a fixed application accelerator. */
+static void test_builtin_accelerators(void) {
+    size_t acceleratorCount = 0;
+    const ACCEL *accelerators = app_fixed_accelerators(&acceleratorCount);
+    expect(acceleratorCount <= APP_FIXED_ACCELERATOR_MAX, "fixed accelerator count fits its capacity");
+    for (size_t i = 0; i < acceleratorCount; i++) {
+        const MenuCommand *command = menu_command_for_id(accelerators[i].cmd);
+        expect(command && command->shortcut, "every fixed accelerator has displayed shortcut text");
+        for (size_t j = i + 1; j < acceleratorCount; j++)
+            expect(accelerators[i].fVirt != accelerators[j].fVirt ||
+                   accelerators[i].key != accelerators[j].key,
+                   "fixed accelerators do not reuse the same key combination");
+    }
+    for (int i = 0; menu_command_at(i); i++) {
+        const MenuCommand *command = menu_command_at(i);
+        if (!command->shortcut) continue;
+        int elsewhere = command->id == IDM_EDIT_UNDO || command->id == IDM_EDIT_CUT ||
+                        command->id == IDM_EDIT_COPY || command->id == IDM_EDIT_DELETE ||
+                        command->id == IDM_VIEW_OUTPUT_PANEL || command->id == IDM_VIEW_TERMINAL;
+        int found = 0;
+        for (size_t j = 0; j < acceleratorCount; j++)
+            if (accelerators[j].cmd == command->id) { found = 1; break; }
+        if (!found && !elsewhere) fprintf(stderr, "No accelerator for shortcut: %s (%s)\n",
+                                          command->name, command->shortcut);
+        expect(found || elsewhere, "every displayed shortcut is handled");
+    }
 }
 
 static void test_definitions(void) {
@@ -228,6 +261,7 @@ static void test_shortcuts_page(void) {
 
 int main(void) {
     test_default_definition();
+    test_builtin_accelerators();
     test_definitions();
     test_shortcuts_page();
     plugin_host_shutdown();

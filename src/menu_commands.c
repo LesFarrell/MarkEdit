@@ -65,6 +65,7 @@ static const MenuCommand COMMANDS[] = {
     {"view.next_tab", IDM_VIEW_NEXT_TAB, "Ctrl+Tab"},
     {"view.previous_tab", IDM_VIEW_PREVIOUS_TAB, "Ctrl+Shift+Tab"},
     {"view.cycle_panes", IDM_VIEW_CYCLE_PANE, "Ctrl+F6"},
+    {"view.cycle_panes_previous", IDM_VIEW_CYCLE_PANE_PREV, "Ctrl+Shift+F6"},
     {"view.theme_light", IDM_VIEW_THEME_GITHUB_LIGHT, NULL},
     {"view.theme_dark", IDM_VIEW_THEME_GITHUB_DARK, NULL},
     {"view.preview_theme_light", IDM_VIEW_PREVIEW_THEME_LIGHT, NULL},

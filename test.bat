@@ -46,7 +46,7 @@ call :run_test test_assemblers @lua-sources.rsp || exit /b 1
 call :run_test test_lua_format @lua-sources.rsp || exit /b 1
 rem test_menus and test_formatting read src\menus.lua and src\lua\*.lua, so
 rem they run from the repository root, as everything here does.
-call :run_test test_menus src\menu_commands.c @plugin-sources.rsp @lua-sources.rsp -luser32 || exit /b 1
+call :run_test test_menus src\menu_commands.c src\app_accelerators.c @plugin-sources.rsp @lua-sources.rsp -luser32 || exit /b 1
 call :run_test test_formatting src\menu_commands.c @plugin-sources.rsp @lua-sources.rsp -luser32 || exit /b 1
 
 where node >nul 2>nul
