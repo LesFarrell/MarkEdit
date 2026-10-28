@@ -41,6 +41,12 @@ typedef struct OutputPane {
 static OutputPane g_outputPanes[OUTPUT_TAB_COUNT];
 static TerminalView *g_terminalView; /* the Terminal tab; g_outputPanes[OUTPUT_TAB_TERMINAL].view is its window */
 static int g_outputTab = OUTPUT_TAB_RUN;
+/* Visual and keyboard traversal order. Keep the enum values stable because
+   the panes themselves are indexed by them; Output remains the default tab
+   but is placed last in the strip. */
+static const int OUTPUT_TAB_ORDER[OUTPUT_TAB_COUNT] = {
+    OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBUG, OUTPUT_TAB_GIT, OUTPUT_TAB_RUN
+};
 static int g_outputNextSession = 1;
 static HWND g_hOutputClear, g_hOutputStop, g_hOutputClose;
 static HWND g_hGitRefresh, g_hGitCommit, g_hGitStageAll;
@@ -2001,8 +2007,11 @@ static void size_output_panel(HWND panel) {
     OutputPanelLayout layout = output_panel_layout(panel);
     int row = layout.header - layout.pad;
     int tabWidth = MulDiv(OUTPUT_TAB_WIDTH, dpi, 96);
-    for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
-        MoveWindow(g_outputPanes[i].tab, layout.pad + i * tabWidth, layout.pad / 2, tabWidth, row, TRUE);
+    for (int position = 0; position < OUTPUT_TAB_COUNT; position++) {
+        int tab = OUTPUT_TAB_ORDER[position];
+        MoveWindow(g_outputPanes[tab].tab, layout.pad + position * tabWidth,
+                   layout.pad / 2, tabWidth, row, TRUE);
+    }
     /* The buttons line up from the right edge. Any that would run into the
        tabs are hidden instead, the leftmost first and Close last, since
        overlapping controls paint over each other. Buttons from a tab that
@@ -2138,6 +2147,7 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
                     SetFocus(g_hDebugVariables);
                     return 0;
                 case ID_OUTPUT_TAB_GIT:
+                    refresh_git_status();
                     select_output_tab(OUTPUT_TAB_GIT);
                     SetFocus(g_outputPanes[OUTPUT_TAB_GIT].view);
                     return 0;
@@ -2264,8 +2274,10 @@ static void create_output_panel(HWND hwnd) {
     static const int tabIds[OUTPUT_TAB_COUNT] = { ID_OUTPUT_TAB_RUN, ID_OUTPUT_TAB_TERMINAL,
                                                   ID_OUTPUT_TAB_PROBLEMS, ID_OUTPUT_TAB_DEBUG,
                                                   ID_OUTPUT_TAB_GIT };
-    for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
-        g_outputPanes[i].tab = create_output_button(g_hOutputPanel, labels[i], tabIds[i]);
+    for (int position = 0; position < OUTPUT_TAB_COUNT; position++) {
+        int tab = OUTPUT_TAB_ORDER[position];
+        g_outputPanes[tab].tab = create_output_button(g_hOutputPanel, labels[tab], tabIds[tab]);
+    }
 
     OutputPane *runPane = &g_outputPanes[OUTPUT_TAB_RUN];
     runPane->view = create_output_scintilla(g_hOutputPanel, ID_OUTPUT_VIEW, g_outputTab == OUTPUT_TAB_RUN);
