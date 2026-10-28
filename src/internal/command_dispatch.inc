@@ -341,6 +341,16 @@ static int handle_git_command(WORD cmd) {
         case IDM_GIT_DELETE_BRANCH: git_delete_branch_prompt(); break;
         case IDM_GIT_MERGE: git_merge_prompt(); break;
         case IDM_GIT_REBASE: git_rebase_prompt(); break;
+        case IDM_GIT_PUBLISH: git_publish_branch(); break;
+        case IDM_GIT_MERGE_CONTINUE: git_merge_continue(); break;
+        case IDM_GIT_MERGE_ABORT: git_merge_abort(); break;
+        case IDM_GIT_REBASE_CONTINUE: git_rebase_continue(); break;
+        case IDM_GIT_REBASE_SKIP: git_rebase_skip(); break;
+        case IDM_GIT_REBASE_ABORT: git_rebase_abort(); break;
+        case IDM_GIT_STASH_PUSH: git_stash_push_prompt(); break;
+        case IDM_GIT_STASH_APPLY: git_stash_apply_prompt(); break;
+        case IDM_GIT_STASH_POP: git_stash_pop(); break;
+        case IDM_GIT_STASH_DROP: git_stash_drop_prompt(); break;
         default: return 0;
     }
     return 1;

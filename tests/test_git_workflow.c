@@ -72,10 +72,13 @@ int main(void) {
         return 0;
     }
 
-    WCHAR tempRoot[MAX_PATH], repository[MAX_PATH];
+    WCHAR tempRoot[MAX_PATH], sandbox[MAX_PATH], repository[MAX_PATH], remote[MAX_PATH];
     CHECK(GetTempPathW(MAX_PATH, tempRoot) > 0);
-    CHECK(GetTempFileNameW(tempRoot, L"mge", 0, repository));
-    CHECK(DeleteFileW(repository));
+    CHECK(GetTempFileNameW(tempRoot, L"mge", 0, sandbox));
+    CHECK(DeleteFileW(sandbox));
+    CHECK(CreateDirectoryW(sandbox, NULL));
+    swprintf(repository, MAX_PATH, L"%ls\\work", sandbox);
+    swprintf(remote, MAX_PATH, L"%ls\\remote.git", sandbox);
     CHECK(CreateDirectoryW(repository, NULL));
     if (failures) return 1;
 
@@ -120,7 +123,64 @@ int main(void) {
     CHECK(run_git(repository, L"branch -d topic") != 0);
     CHECK(run_git(repository, L"branch -D topic") == 0);
 
-    remove_tree(repository);
+    /* Publishing establishes the selected remote as the branch upstream. */
+    WCHAR arguments[MAX_PATH * 2];
+    swprintf(arguments, MAX_PATH * 2, L"init -q --bare \"%ls\"", remote);
+    CHECK(run_git(NULL, arguments) == 0);
+    swprintf(arguments, MAX_PATH * 2, L"remote add origin \"%ls\"", remote);
+    CHECK(run_git(repository, arguments) == 0);
+    CHECK(run_git(repository, L"push -q --set-upstream origin main") == 0);
+    CHECK(run_git(repository, L"rev-parse --verify @{u}") == 0);
+
+    /* Stash includes untracked files and can be applied and dropped by ref. */
+    CHECK(write_file(tracked, "stashed\n"));
+    CHECK(write_file(untracked, "stash-new\n"));
+    CHECK(run_git(repository, L"stash push -q -u -m workflow") == 0);
+    CHECK(read_file_equals(tracked, "base\n"));
+    CHECK(GetFileAttributesW(untracked) == INVALID_FILE_ATTRIBUTES);
+    CHECK(run_git(repository, L"stash apply -q stash@{0}") == 0);
+    CHECK(read_file_equals(tracked, "stashed\n"));
+    CHECK(GetFileAttributesW(untracked) != INVALID_FILE_ATTRIBUTES);
+    CHECK(run_git(repository, L"reset --hard -q HEAD") == 0);
+    CHECK(run_git(repository, L"clean -fdq") == 0);
+    CHECK(run_git(repository, L"stash drop -q stash@{0}") == 0);
+
+    /* A conflicted merge can be aborted back to its pre-merge state. */
+    CHECK(run_git(repository, L"switch -q -c merge-topic") == 0);
+    CHECK(write_file(tracked, "merge-topic\n"));
+    CHECK(run_git(repository, L"add -- tracked.txt") == 0);
+    CHECK(run_git(repository,
+        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c commit.gpgsign=false commit --no-verify -q -m merge-topic") == 0);
+    CHECK(run_git(repository, L"switch -q main") == 0);
+    CHECK(write_file(tracked, "merge-main\n"));
+    CHECK(run_git(repository, L"add -- tracked.txt") == 0);
+    CHECK(run_git(repository,
+        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c commit.gpgsign=false commit --no-verify -q -m merge-main") == 0);
+    CHECK(run_git(repository, L"merge merge-topic") != 0);
+    CHECK(run_git(repository, L"merge --abort") == 0);
+    CHECK(read_file_equals(tracked, "merge-main\n"));
+
+    /* The same conflict lifecycle is available for rebase. */
+    CHECK(run_git(repository, L"switch -q -c rebase-topic") == 0);
+    CHECK(write_file(tracked, "rebase-topic\n"));
+    CHECK(run_git(repository, L"add -- tracked.txt") == 0);
+    CHECK(run_git(repository,
+        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c commit.gpgsign=false commit --no-verify -q -m rebase-topic") == 0);
+    CHECK(run_git(repository, L"switch -q main") == 0);
+    CHECK(write_file(tracked, "rebase-main\n"));
+    CHECK(run_git(repository, L"add -- tracked.txt") == 0);
+    CHECK(run_git(repository,
+        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c commit.gpgsign=false commit --no-verify -q -m rebase-main") == 0);
+    CHECK(run_git(repository, L"switch -q rebase-topic") == 0);
+    CHECK(run_git(repository, L"rebase main") != 0);
+    CHECK(run_git(repository, L"rebase --abort") == 0);
+    CHECK(read_file_equals(tracked, "rebase-topic\n"));
+
+    remove_tree(sandbox);
     if (failures) return 1;
     puts("All Git workflow tests passed.");
     return 0;

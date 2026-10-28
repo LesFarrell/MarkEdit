@@ -65,6 +65,7 @@ static DWORD g_gitStatusExitCode;
    as the much more reassuring "No changes." */
 static int g_gitStatusAvailable;
 static int g_gitStatusUnborn;
+static WCHAR g_gitUpstreamName[192];
 
 typedef struct ProblemReport {
     char *source;
@@ -414,6 +415,7 @@ static void apply_git_status_output(void) {
     clear_git_status_files();
     g_gitStatusText[0] = 0;
     g_gitBranchName[0] = 0;
+    g_gitUpstreamName[0] = 0;
     g_gitStatusUnborn = 0;
     GitStatusResult status;
     if (g_gitStatusExitCode != 0 ||
@@ -423,6 +425,15 @@ static void apply_git_status_output(void) {
     }
     g_gitStatusAvailable = 1;
     g_gitStatusUnborn = status.unborn;
+    if (status.upstream) {
+        WCHAR *upstream = to_wide(status.upstream);
+        if (upstream) {
+            wcsncpy(g_gitUpstreamName, upstream,
+                    sizeof(g_gitUpstreamName) / sizeof(g_gitUpstreamName[0]) - 1);
+            g_gitUpstreamName[sizeof(g_gitUpstreamName) / sizeof(g_gitUpstreamName[0]) - 1] = 0;
+            free(upstream);
+        }
+    }
     int staged = 0, changed = 0, untracked = 0, conflicts = 0;
     for (size_t i = 0; i < status.entryCount; i++) {
         GitStatusEntry *entry = &status.entries[i];
@@ -502,6 +513,7 @@ static void refresh_git_status(void) {
         clear_git_status_files();
         g_gitStatusText[0] = 0;
         g_gitBranchName[0] = 0;
+        g_gitUpstreamName[0] = 0;
         render_git_panel();
         return;
     }
@@ -521,6 +533,7 @@ static void refresh_git_status(void) {
         g_gitStatusUnborn = 0;
         clear_git_status_files();
         g_gitStatusText[0] = 0;
+        g_gitUpstreamName[0] = 0;
         update_status_position();
     }
     refresh_git_branches();
@@ -678,18 +691,15 @@ static void report_git_sync_result(const WCHAR *verb, DWORD exitCode, const char
     free(wide);
 }
 
-/* refPattern is a for-each-ref pattern ("refs/heads" or "refs/remotes"). */
-static WCHAR **git_list_refs(const WCHAR *refPattern, int *count) {
+/* Runs a quick Git command and returns each non-empty output line as UTF-16. */
+static WCHAR **git_list_command_lines(const WCHAR *parameters, int *count, DWORD *resultCode) {
     *count = 0;
     if (!g_currentWorkspaceFolder) return NULL;
-    size_t capacity = wcslen(refPattern) + 40;
-    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
-    if (!parameters) return NULL;
-    swprintf(parameters, capacity, L"for-each-ref --format=%%(refname:short) %ls", refPattern);
     DWORD exitCode = 0;
     char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
-    free(parameters);
+    if (resultCode) *resultCode = exitCode;
     if (!output) return NULL;
+    if (exitCode != 0) { free(output); return NULL; }
     WCHAR **names = NULL;
     int n = 0;
     for (char *line = output; *line;) {
@@ -715,6 +725,17 @@ static WCHAR **git_list_refs(const WCHAR *refPattern, int *count) {
     }
     free(output);
     *count = n;
+    return names;
+}
+
+/* refPattern is a for-each-ref pattern ("refs/heads" or "refs/remotes"). */
+static WCHAR **git_list_refs(const WCHAR *refPattern, int *count) {
+    size_t capacity = wcslen(refPattern) + 40;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) { *count = 0; return NULL; }
+    swprintf(parameters, capacity, L"for-each-ref --format=%%(refname:short) %ls", refPattern);
+    WCHAR **names = git_list_command_lines(parameters, count, NULL);
+    free(parameters);
     return names;
 }
 
@@ -995,8 +1016,44 @@ static void run_git_mutating_output(const WCHAR *parameters, const WCHAR *title)
     g_gitRunPending = run_git_output(parameters, title) ? 1 : 0;
 }
 
+static WCHAR *pick_git_remote(void) {
+    int count = 0;
+    WCHAR **remotes = git_list_command_lines(L"remote", &count, NULL);
+    if (!remotes || count == 0) {
+        MessageBoxW(g_hMainWnd, L"No Git remotes are configured for this repository.",
+                    L"Git", MB_OK | MB_ICONINFORMATION);
+        free_branch_list(remotes, count);
+        return NULL;
+    }
+    int chosen = count == 1 ? 0 :
+        show_choice_dialog(L"Publish Branch", L"Publish to remote:", remotes, count, L"Publish");
+    WCHAR *result = chosen >= 0 ? _wcsdup(remotes[chosen]) : NULL;
+    free_branch_list(remotes, count);
+    return result;
+}
+
+static void git_publish_branch(void) {
+    if (!g_currentWorkspaceFolder || !g_gitBranchName[0]) {
+        MessageBoxW(g_hMainWnd, L"Check out a local branch before publishing it.",
+                    L"Git", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    WCHAR *remote = pick_git_remote();
+    if (!remote) return;
+    size_t capacity = wcslen(remote) + wcslen(g_gitBranchName) + 48;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (parameters) {
+        swprintf(parameters, capacity, L"push --set-upstream \"%ls\" \"%ls\"",
+                 remote, g_gitBranchName);
+        run_git_mutating_output(parameters, L"Git Publish Branch");
+        free(parameters);
+    }
+    free(remote);
+}
+
 static void git_push(void) {
-    run_git_mutating_output(L"push", L"Git Push");
+    if (!g_gitUpstreamName[0]) git_publish_branch();
+    else run_git_mutating_output(L"push", L"Git Push");
 }
 
 static void git_pull(void) {
@@ -1005,6 +1062,82 @@ static void git_pull(void) {
 
 static void git_fetch(void) {
     run_git_mutating_output(L"fetch --all", L"Git Fetch");
+}
+
+static WCHAR *pick_git_stash(const WCHAR *title, const WCHAR *okLabel) {
+    int count = 0;
+    WCHAR **labels = git_list_command_lines(L"stash list --format=%gd%x09%s", &count, NULL);
+    if (!labels || count == 0) {
+        MessageBoxW(g_hMainWnd, L"There are no stashes in this repository.",
+                    L"Git", MB_OK | MB_ICONINFORMATION);
+        free_branch_list(labels, count);
+        return NULL;
+    }
+    int chosen = show_choice_dialog(title, L"Choose a stash:", labels, count, okLabel);
+    WCHAR *result = NULL;
+    if (chosen >= 0) {
+        const WCHAR *tab = wcschr(labels[chosen], L'\t');
+        size_t length = tab ? (size_t)(tab - labels[chosen]) : wcslen(labels[chosen]);
+        result = (WCHAR *)malloc((length + 1) * sizeof(WCHAR));
+        if (result) { memcpy(result, labels[chosen], length * sizeof(WCHAR)); result[length] = 0; }
+    }
+    free_branch_list(labels, count);
+    return result;
+}
+
+static void git_stash_push_prompt(void) {
+    if (!g_currentWorkspaceFolder) return;
+    WCHAR message[512] = L"";
+    if (!show_text_input(L"Stash Changes", L"Stash message (optional):", L"", message, 512)) return;
+    if (wcschr(message, L'"')) {
+        MessageBoxW(g_hMainWnd, L"Stash messages can't contain a quotation mark.",
+                    L"Git", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (!message[0]) {
+        run_git_mutating_output(L"stash push -u", L"Git Stash Changes");
+        return;
+    }
+    size_t capacity = wcslen(message) + 40;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!parameters) return;
+    swprintf(parameters, capacity, L"stash push -u -m \"%ls\"", message);
+    run_git_mutating_output(parameters, L"Git Stash Changes");
+    free(parameters);
+}
+
+static void git_stash_apply_prompt(void) {
+    WCHAR *stash = pick_git_stash(L"Apply Stash", L"Apply");
+    if (!stash) return;
+    size_t capacity = wcslen(stash) + 32;
+    WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (parameters) {
+        swprintf(parameters, capacity, L"stash apply \"%ls\"", stash);
+        run_git_mutating_output(parameters, L"Git Apply Stash");
+        free(parameters);
+    }
+    free(stash);
+}
+
+static void git_stash_pop(void) {
+    run_git_mutating_output(L"stash pop", L"Git Pop Stash");
+}
+
+static void git_stash_drop_prompt(void) {
+    WCHAR *stash = pick_git_stash(L"Drop Stash", L"Drop");
+    if (!stash) return;
+    WCHAR prompt[160];
+    swprintf(prompt, 160, L"Permanently drop %ls?", stash);
+    if (MessageBoxW(g_hMainWnd, prompt, L"Git", MB_YESNO | MB_ICONWARNING) == IDYES) {
+        size_t capacity = wcslen(stash) + 32;
+        WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+        if (parameters) {
+            swprintf(parameters, capacity, L"stash drop \"%ls\"", stash);
+            run_git_mutating_output(parameters, L"Git Drop Stash");
+            free(parameters);
+        }
+    }
+    free(stash);
 }
 
 static void git_switch_to_branch(const WCHAR *branch, int remote) {
@@ -1117,6 +1250,32 @@ static void git_rebase_prompt(void) {
         free(parameters);
     }
     free(branch);
+}
+
+static void git_merge_continue(void) {
+    run_git_mutating_output(L"-c core.editor=true merge --continue", L"Git Continue Merge");
+}
+
+static void git_merge_abort(void) {
+    if (MessageBoxW(g_hMainWnd, L"Abort the current merge and restore its pre-merge state?",
+                    L"Git", MB_YESNO | MB_ICONWARNING) == IDYES)
+        run_git_mutating_output(L"merge --abort", L"Git Abort Merge");
+}
+
+static void git_rebase_continue(void) {
+    run_git_mutating_output(L"-c core.editor=true rebase --continue", L"Git Continue Rebase");
+}
+
+static void git_rebase_skip(void) {
+    if (MessageBoxW(g_hMainWnd, L"Skip the current commit in this rebase?",
+                    L"Git", MB_YESNO | MB_ICONWARNING) == IDYES)
+        run_git_mutating_output(L"rebase --skip", L"Git Skip Rebase Commit");
+}
+
+static void git_rebase_abort(void) {
+    if (MessageBoxW(g_hMainWnd, L"Abort the current rebase and restore its original branch state?",
+                    L"Git", MB_YESNO | MB_ICONWARNING) == IDYES)
+        run_git_mutating_output(L"rebase --abort", L"Git Abort Rebase");
 }
 
 static void show_git_panel(HWND hwnd) {

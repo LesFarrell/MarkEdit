@@ -87,6 +87,16 @@
 #define IDM_GIT_DISCARD_ALL        426
 #define IDM_GIT_DIFF_STAGED        427
 #define IDM_GIT_DIFF_FILE_STAGED   428
+#define IDM_GIT_PUBLISH            429
+#define IDM_GIT_MERGE_CONTINUE     430
+#define IDM_GIT_MERGE_ABORT        431
+#define IDM_GIT_REBASE_CONTINUE    432
+#define IDM_GIT_REBASE_SKIP        433
+#define IDM_GIT_REBASE_ABORT       434
+#define IDM_GIT_STASH_PUSH         435
+#define IDM_GIT_STASH_APPLY        436
+#define IDM_GIT_STASH_POP          437
+#define IDM_GIT_STASH_DROP         438
 #define IDM_PLUGIN_COMMAND_0      2000 /* IDM_PLUGIN_COMMAND_0 .. IDM_PLUGIN_COMMAND_0+PLUGIN_MAX_COMMANDS-1 */
 
 /* ---- menu command IDs: Markdown formatting toolbar/menu ---- */
