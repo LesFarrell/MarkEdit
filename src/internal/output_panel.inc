@@ -1,4 +1,4 @@
-/* ---- The output panel: Run output, a terminal, problems, and debugger --
+/* ---- The output panel: Run, Terminal, Problems, Debug, and Git ----------
    Docked under the editor and preview with a splitter above it (see
    layout_output_panel()). The Output tab is a read-only Scintilla log that
    scrolls sideways rather than wraps, showing whatever Run started plus
@@ -51,6 +51,12 @@ static OutputProcess *g_gitStatusProcess;
 static int g_gitStatusSession;
 static char *g_gitStatusOutput;
 static size_t g_gitStatusOutputLength;
+static DWORD g_gitStatusExitCode;
+/* 1 after a successful status parse, -1 when Git failed, 0 before status is
+   known or when no workspace is open. Prevents a failed command being shown
+   as the much more reassuring "No changes." */
+static int g_gitStatusAvailable;
+static int g_gitStatusUnborn;
 
 typedef struct ProblemReport {
     char *source;
@@ -399,68 +405,59 @@ static void clear_git_status_files(void) {
 static void apply_git_status_output(void) {
     clear_git_status_files();
     g_gitStatusText[0] = 0;
-    if (!g_gitStatusOutput || strstr(g_gitStatusOutput, "fatal:")) goto finished;
-    char *cursor = g_gitStatusOutput;
-    char branch[96] = "";
+    g_gitBranchName[0] = 0;
+    g_gitStatusUnborn = 0;
+    GitStatusResult status;
+    if (g_gitStatusExitCode != 0 ||
+        !git_status_parse_v2_z(g_gitStatusOutput, g_gitStatusOutputLength, &status)) {
+        g_gitStatusAvailable = -1;
+        goto finished;
+    }
+    g_gitStatusAvailable = 1;
+    g_gitStatusUnborn = status.unborn;
     int staged = 0, changed = 0, untracked = 0, conflicts = 0;
-    while (*cursor) {
-        char *end = strchr(cursor, '\n');
-        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
-        if (length && cursor[length - 1] == '\r') length--;
-        if (length > 3 && cursor[0] == '#' && cursor[1] == '#' && cursor[2] == ' ') {
-            size_t n = 0;
-            const char *name = cursor + 3;
-            while (n < length - 3 && n + 1 < sizeof(branch) &&
-                   name[n] != '.' && name[n] != ' ' && name[n] != '\t') {
-                branch[n] = name[n]; n++;
-            }
-            branch[n] = 0;
-        } else if (length >= 4) {
-            char x = cursor[0], y = cursor[1];
-            int conflict = x == 'U' || y == 'U' || (x == 'A' && y == 'A') ||
-                           (x == 'D' && y == 'D');
-            if (x == '?' && y == '?') untracked++;
-            else {
-                if (x != ' ') staged++;
-                if (y != ' ') changed++;
-                if (conflict) conflicts++;
-            }
-            if (g_gitStatusFileCount < GIT_STATUS_FILE_MAX) {
-                const char *path = cursor + 3;
-                const char *arrow = strstr(path, " -> ");
-                if (arrow && arrow < cursor + length) path = arrow + 4;
-                size_t pathLength = (size_t)(cursor + length - path);
-                char *utf8 = (char *)malloc(pathLength + 1);
-                if (utf8) {
-                    memcpy(utf8, path, pathLength); utf8[pathLength] = 0;
-                    WCHAR *wide = to_wide(utf8);
-                    free(utf8);
-                    if (wide) {
-                        for (WCHAR *c = wide; *c; c++) if (*c == L'/') *c = L'\\';
-                        WCHAR mark = conflict ? L'!' : x == '?' ? L'?' :
-                                     (y != ' ' ? (WCHAR)y : (WCHAR)x);
-                        g_gitStatusFiles[g_gitStatusFileCount++] =
-                            (GitStatusFile){ wide, mark, (WCHAR)x, (WCHAR)y };
-                    }
-                }
+    for (size_t i = 0; i < status.entryCount; i++) {
+        GitStatusEntry *entry = &status.entries[i];
+        char x = entry->indexStatus, y = entry->worktreeStatus;
+        int conflict = x == 'U' || y == 'U' || (x == 'A' && y == 'A') ||
+                       (x == 'D' && y == 'D');
+        if (conflict) conflicts++;
+        else if (x == '?' && y == '?') untracked++;
+        else {
+            if (x != ' ') staged++;
+            if (y != ' ') changed++;
+        }
+        if (g_gitStatusFileCount < GIT_STATUS_FILE_MAX) {
+            WCHAR *wide = to_wide(entry->path);
+            if (wide) {
+                for (WCHAR *c = wide; *c; c++) if (*c == L'/') *c = L'\\';
+                WCHAR mark = conflict ? L'!' : x == '?' ? L'?' :
+                             (y != ' ' ? (WCHAR)y : (WCHAR)x);
+                g_gitStatusFiles[g_gitStatusFileCount++] =
+                    (GitStatusFile){ wide, mark, (WCHAR)x, (WCHAR)y };
             }
         }
-        if (!end) break;
-        cursor = end + 1;
     }
-    g_gitBranchName[0] = 0;
-    if (branch[0]) {
-        WCHAR *wideBranch = to_wide(branch);
+    if (status.head) {
+        WCHAR *wideBranch = status.detached ? NULL : to_wide(status.head);
         int total = staged + changed + untracked;
         if (wideBranch) {
             wcsncpy(g_gitBranchName, wideBranch, 95);
             g_gitBranchName[95] = 0;
-            if (total) swprintf(g_gitStatusText, 128, L"Branch: %ls *%ls",
-                wideBranch, conflicts ? L" (conflicts)" : L"");
-            else swprintf(g_gitStatusText, 128, L"Branch: %ls", wideBranch);
-            free(wideBranch);
         }
+        const WCHAR *label = status.detached ? L"Detached HEAD" :
+                             wideBranch ? wideBranch : L"Git";
+        WCHAR tracking[40] = L"";
+        if (status.ahead || status.behind)
+            swprintf(tracking, 40, L" +%d/-%d", status.ahead, status.behind);
+        swprintf(g_gitStatusText, 128, L"%ls%ls%ls%ls%ls",
+                 status.detached ? label : L"Branch: ", status.detached ? L"" : label,
+                 status.unborn ? L" (unborn)" : tracking,
+                 total || conflicts ? L" *" : L"",
+                 conflicts ? L" (conflicts)" : L"");
+        free(wideBranch);
     }
+    git_status_result_free(&status);
 finished:
     for (int i = 0; i < g_documentStore.count; i++) update_tab_label(i);
     update_status_position();
@@ -480,6 +477,7 @@ static void handle_git_status_chunk(OutputChunk *chunk) {
             }
         }
         if (chunk->finished) {
+            g_gitStatusExitCode = chunk->exitCode;
             output_process_free(g_gitStatusProcess);
             g_gitStatusProcess = NULL;
             g_gitStatusSession = 0;
@@ -490,18 +488,29 @@ static void handle_git_status_chunk(OutputChunk *chunk) {
 }
 
 static void refresh_git_status(void) {
-    if (!g_hMainWnd || !g_currentWorkspaceFolder) return;
+    if (!g_hMainWnd || !g_currentWorkspaceFolder) {
+        g_gitStatusAvailable = 0;
+        g_gitStatusUnborn = 0;
+        clear_git_status_files();
+        g_gitStatusText[0] = 0;
+        g_gitBranchName[0] = 0;
+        render_git_panel();
+        return;
+    }
     if (g_gitStatusProcess) output_process_free(g_gitStatusProcess);
     g_gitStatusProcess = NULL;
     free(g_gitStatusOutput);
     g_gitStatusOutput = NULL;
     g_gitStatusOutputLength = 0;
+    g_gitStatusExitCode = 0;
     int session = g_outputNextSession++;
     g_gitStatusProcess = output_process_start(
-        L"git.exe status --porcelain=v1 --branch --untracked-files=normal",
+        L"git.exe status --porcelain=v2 --branch -z --untracked-files=normal",
         g_currentWorkspaceFolder, NULL, g_hMainWnd, WM_APP_GIT_STATUS, session);
     if (g_gitStatusProcess) g_gitStatusSession = session;
     else {
+        g_gitStatusAvailable = -1;
+        g_gitStatusUnborn = 0;
         clear_git_status_files();
         g_gitStatusText[0] = 0;
         update_status_position();
@@ -529,6 +538,10 @@ static void show_git_workspace_diff(void) {
     run_git_output(L"diff --no-ext-diff", L"Git Workspace Diff");
 }
 
+static void show_git_staged_diff(void) {
+    run_git_output(L"diff --cached --no-ext-diff", L"Git Staged Diff");
+}
+
 static void show_git_file_diff(void) {
     if (!g_currentFile) {
         MessageBoxW(g_hMainWnd, L"Save the document before opening its Git diff.",
@@ -543,12 +556,13 @@ static void show_git_file_diff(void) {
     free(parameters);
 }
 
-static void git_diff_panel_file(const WCHAR *relativePath) {
-    size_t capacity = wcslen(relativePath) + 40;
+static void git_diff_panel_file(const WCHAR *relativePath, int staged) {
+    size_t capacity = wcslen(relativePath) + 56;
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) return;
-    swprintf(parameters, capacity, L"diff --no-ext-diff -- \"%ls\"", relativePath);
-    run_git_output(parameters, L"Git File Diff");
+    swprintf(parameters, capacity, staged ? L"diff --cached --no-ext-diff -- \"%ls\""
+                                         : L"diff --no-ext-diff -- \"%ls\"", relativePath);
+    run_git_output(parameters, staged ? L"Git Staged File Diff" : L"Git File Diff");
     free(parameters);
 }
 
@@ -844,11 +858,12 @@ static void git_unstage_file(const WCHAR *relativePath) {
     size_t capacity = wcslen(relativePath) + 48;
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) return;
-    swprintf(parameters, capacity, L"reset -q HEAD -- \"%ls\"", relativePath);
+    swprintf(parameters, capacity, g_gitStatusUnborn ? L"rm -q --cached -- \"%ls\""
+                                                     : L"reset -q HEAD -- \"%ls\"", relativePath);
     DWORD exitCode = 0;
     char *output = run_git_sync(parameters, g_currentWorkspaceFolder, &exitCode);
     free(parameters);
-    report_git_sync_result(L"reset", exitCode, output);
+    report_git_sync_result(g_gitStatusUnborn ? L"rm --cached" : L"reset", exitCode, output);
     free(output);
     refresh_git_status();
 }
@@ -885,8 +900,9 @@ static void git_stage_all(void) {
 static void git_unstage_all(void) {
     if (!g_currentWorkspaceFolder) return;
     DWORD exitCode = 0;
-    char *output = run_git_sync(L"reset -q HEAD", g_currentWorkspaceFolder, &exitCode);
-    report_git_sync_result(L"reset", exitCode, output);
+    char *output = run_git_sync(g_gitStatusUnborn ? L"rm -rq --cached -- ." : L"reset -q HEAD",
+                                g_currentWorkspaceFolder, &exitCode);
+    report_git_sync_result(g_gitStatusUnborn ? L"rm --cached" : L"reset", exitCode, output);
     free(output);
     refresh_git_status();
 }
@@ -949,11 +965,11 @@ static void git_fetch(void) {
     run_git_mutating_output(L"fetch --all", L"Git Fetch");
 }
 
-static void git_switch_to_branch(const WCHAR *branch) {
-    size_t capacity = wcslen(branch) + 32;
+static void git_switch_to_branch(const WCHAR *branch, int remote) {
+    size_t capacity = wcslen(branch) + 40;
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) return;
-    swprintf(parameters, capacity, L"switch \"%ls\"", branch);
+    swprintf(parameters, capacity, remote ? L"switch --track \"%ls\"" : L"switch \"%ls\"", branch);
     run_git_mutating_output(parameters, L"Git Switch Branch");
     free(parameters);
 }
@@ -973,7 +989,7 @@ static void git_delete_branch(const WCHAR *branch) {
 static void git_switch_branch_prompt(void) {
     WCHAR *branch = pick_git_branch(L"Switch Branch", L"Switch to branch:", L"Switch", 1);
     if (!branch) return;
-    git_switch_to_branch(branch);
+    git_switch_to_branch(branch, 0);
     free(branch);
 }
 
@@ -1034,8 +1050,8 @@ static void show_git_panel(HWND hwnd) {
     SetFocus(g_outputPanes[OUTPUT_TAB_GIT].view);
 }
 
-/* The status bar's Git segment (see StatusSubclassProc) and Tools > Git both
-   reach every branch command through this one menu. */
+/* The status bar's Git segment (see StatusSubclassProc) reaches every branch
+   command through this one compact menu. */
 enum { GIT_MENU_PANEL = 1, GIT_MENU_SWITCH, GIT_MENU_NEW, GIT_MENU_DELETE,
       GIT_MENU_MERGE, GIT_MENU_REBASE, GIT_MENU_PUSH, GIT_MENU_PULL, GIT_MENU_FETCH };
 
@@ -1187,6 +1203,15 @@ static void render_git_panel(void) {
         g_buildingGitTree = 0;
         return;
     }
+    if (g_gitStatusAvailable < 0) {
+        insert_git_tree_item(tree, TVI_ROOT,
+            L"Git status unavailable. Check the workspace and git.exe.",
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        SendMessageW(tree, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(tree, NULL, TRUE);
+        g_buildingGitTree = 0;
+        return;
+    }
 
     int stagedCount = 0, unstagedCount = 0, untrackedCount = 0, conflictCount = 0;
     for (int i = 0; i < g_gitStatusFileCount; i++) {
@@ -1316,7 +1341,7 @@ static HTREEITEM git_tree_item_at_message_pos(HWND tree, POINT *screenOut, UINT 
    the top of the message loop. */
 static WCHAR *g_gitPendingActionPath;
 static WCHAR g_gitPendingActionMark;
-static int g_gitPendingAction; /* 0 none, 1 stage, 2 unstage, 3 diff, 4 switch branch, 5 discard, 6 delete branch */
+static int g_gitPendingAction; /* 0 none, 1 stage, 2 unstage, 3 diff, 4 switch local, 5 discard, 6 delete, 7 staged diff, 8 switch remote */
 
 static void queue_git_panel_action(int action, const WCHAR *path, WCHAR mark) {
     WCHAR *copy = _wcsdup(path);
@@ -1337,10 +1362,12 @@ static void run_pending_git_panel_action(void) {
     if (!path) return;
     switch (action) {
         case 2: git_unstage_file(path); break;
-        case 3: git_diff_panel_file(path); break;
-        case 4: git_switch_to_branch(path); break;
+        case 3: git_diff_panel_file(path, 0); break;
+        case 4: git_switch_to_branch(path, 0); break;
         case 5: git_discard_file(path, mark); break;
         case 6: git_delete_branch(path); break;
+        case 7: git_diff_panel_file(path, 1); break;
+        case 8: git_switch_to_branch(path, 1); break;
         default: git_stage_file(path); break; /* also how a conflict's resolution is marked */
     }
     free(path);
@@ -1358,9 +1385,10 @@ static void handle_git_tree_double_click(HWND tree) {
     if (node->kind == GIT_TREE_LOCAL_BRANCH) {
         if (node->mark != L'*') queue_git_panel_action(4, node->path, 0);
     } else if (node->kind == GIT_TREE_REMOTE_BRANCH) {
-        queue_git_panel_action(4, node->path, 0);
-    } else if (node->kind == GIT_TREE_STAGED_FILE || node->kind == GIT_TREE_UNSTAGED_FILE ||
-              node->kind == GIT_TREE_CONFLICT_FILE) {
+        queue_git_panel_action(8, node->path, 0);
+    } else if (node->kind == GIT_TREE_STAGED_FILE) {
+        queue_git_panel_action(7, node->path, 0);
+    } else if (node->kind == GIT_TREE_UNSTAGED_FILE || node->kind == GIT_TREE_CONFLICT_FILE) {
         queue_git_panel_action(3, node->path, 0);
     }
 }
@@ -1413,8 +1441,12 @@ static void show_git_tree_context_menu(HWND tree, HTREEITEM item, POINT screenPo
         case GIT_CTX_STAGE: queue_git_panel_action(1, node->path, 0); break;
         case GIT_CTX_UNSTAGE: queue_git_panel_action(2, node->path, 0); break;
         case GIT_CTX_DISCARD: queue_git_panel_action(5, node->path, node->mark); break;
-        case GIT_CTX_DIFF: queue_git_panel_action(3, node->path, 0); break;
-        case GIT_CTX_SWITCH: queue_git_panel_action(4, node->path, 0); break;
+        case GIT_CTX_DIFF:
+            queue_git_panel_action(node->kind == GIT_TREE_STAGED_FILE ? 7 : 3, node->path, 0);
+            break;
+        case GIT_CTX_SWITCH:
+            queue_git_panel_action(node->kind == GIT_TREE_REMOTE_BRANCH ? 8 : 4, node->path, 0);
+            break;
         case GIT_CTX_DELETE_BRANCH: queue_git_panel_action(6, node->path, 0); break;
     }
 }

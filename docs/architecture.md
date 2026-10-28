@@ -114,7 +114,7 @@ they are included into the `markedit.c` translation unit.
 - `dialogs.inc`: modal choices, text input, find/replace and help windows, and the shared popup-dialog theming and buttons.
 - `ui_shell.inc`: menus, toolbar, status bar, layout, view toggles and editor presentation.
 - `debugger.inc`: source launching, compiler discovery, GDB/Python debugger control and breakpoint persistence.
-- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, and the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`). The Output tab's programs run through `output_process.c`, whose reader batches available pipe output before posting it for `output_text.c` to decode; the Terminal tab is `terminal_view.c`, built around `terminal_process.c` (ConPTY and its worker threads), `terminal_grid.c` (the VT100 screen and bounded scrollback ring), and `terminal_input.c` (Win32-key to VT-sequence translation).
+- `output_panel.inc`: the output panel's Output tab, its input line and opening file locations from the output, plus starting, sizing, theming and stopping the Terminal tab, the Debug tab's status/variables/Continue-Step controls (populated by `debugger.inc`, shown via its `show_debug_panel()`), and the Git status/branch tree and commands. The Output tab's programs and asynchronous Git queries run through `output_process.c`, whose reader batches available pipe output before posting it for `output_text.c` or `git_status.c` to decode; the Terminal tab is `terminal_view.c`, built around `terminal_process.c` (ConPTY and its worker threads), `terminal_grid.c` (the VT100 screen and bounded scrollback ring), and `terminal_input.c` (Win32-key to VT-sequence translation).
 - `editor_input.inc`: smart Tab/Enter, paired characters, spelling context actions and editor navigation gestures.
 - `outline_host.inc`, `workspace.inc` and `settings_dialog.inc`: their named UI subsystems.
 - `command_dispatch.inc`: native command-family handlers.
@@ -147,6 +147,7 @@ depend on a UI module.
 | `settings.h` | — | Umbrella over the three headers above, for the app shell only | `settings_values.h`, `settings_io.h`, `find_state.h` |
 | `path_utils.c` | `path_utils.h` | Path manipulation, `LONG_PATH_CAPACITY`, and the per-user `%LOCALAPPDATA%\MarkEdit` folders | shlwapi |
 | `text_codec.c` | `text_codec.h` | UTF-8/16 and BOM handling | — |
+| `git_status.c` | `git_status.h` | NUL-delimited Git porcelain v2 status parsing, including branch tracking state and exact UTF-8 paths | none (pure logic) |
 | `file_io.c` | `file_io.h` | Atomic file read/write helpers | `path_utils.h` |
 | `workspace_text.c` | `workspace_text.h` | Workspace text helpers | — |
 | `plugin_settings.c` | `plugin_settings.h` | Sectioned JSON settings store shared by application preferences and Lua plugins | `file_io.h` |

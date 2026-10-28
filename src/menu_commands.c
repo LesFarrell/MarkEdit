@@ -148,6 +148,7 @@ static const MenuCommand COMMANDS[] = {
     {"git.status", IDM_GIT_REFRESH, NULL},
     {"git.diff_file", IDM_GIT_DIFF_FILE, NULL},
     {"git.diff_workspace", IDM_GIT_DIFF_WORKSPACE, NULL},
+    {"git.diff_staged", IDM_GIT_DIFF_STAGED, NULL},
     {"git.panel", IDM_VIEW_GIT, "Ctrl+Shift+G"},
     {"git.stage_all", IDM_GIT_STAGE_ALL, NULL},
     {"git.unstage_all", IDM_GIT_UNSTAGE_ALL, NULL},

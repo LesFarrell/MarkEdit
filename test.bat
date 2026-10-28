@@ -35,6 +35,7 @@ call :run_test test_outline src\outline_minimap.c src\theme.c src\text_codec.c -
 call :run_test test_theme src\theme.c @plugin-sources.rsp @lua-sources.rsp -luser32 -lgdi32 -luxtheme || exit /b 1
 call :run_test test_core src\text_codec.c src\workspace_text.c src\file_io.c src\path_utils.c src\plugin_settings.c || exit /b 1
 call :run_test test_output src\output_text.c src\output_process.c || exit /b 1
+call :run_test test_git_status src\git_status.c || exit /b 1
 call :run_test test_terminal_grid src\terminal_grid.c || exit /b 1
 call :run_test test_terminal_input src\terminal_input.c -luser32 || exit /b 1
 call :run_test test_terminal_process src\terminal_process.c -luser32 || exit /b 1

@@ -344,6 +344,7 @@ test_project("test_core", { "src/text_codec.c", "src/workspace_text.c", "src/fil
                             "src/plugin_settings.c", "src/plugin_settings.h" }, {})
 test_project("test_output", { "src/output_text.c", "src/output_text.h", "src/output_process.c",
                               "src/output_process.h" }, {})
+test_project("test_git_status", { "src/git_status.c", "src/git_status.h" }, {})
 test_project("test_terminal_grid", { "src/terminal_grid.c", "src/terminal_grid.h" }, {})
 test_project("test_terminal_input", { "src/terminal_input.c", "src/terminal_input.h" }, {})
 test_project("test_terminal_process", { "src/terminal_process.c", "src/terminal_process.h" }, { "user32" })

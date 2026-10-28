@@ -79,7 +79,7 @@ static void show_plugin_reload_status(const WCHAR *text) {
 }
 
 /* Defined in output_panel.inc, included after this file - the status bar's
-   Git segment opens the same branch menu the Git panel and Tools > Git use. */
+   Git segment opens the same branch menu as the Git panel. */
 static void show_git_branch_menu(HWND hwnd, POINT screenPoint);
 
 /* Paints the whole status bar strip itself in the app's own GitHub palette:
@@ -119,8 +119,8 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         return 0;
     } else if (msg == WM_LBUTTONUP) {
         /* Part 3 holds the Git text (see update_status_position()); clicking
-           it opens the same branch menu as the status bar's "Branch: <name>"
-           display suggests, rather than needing the Tools > Git submenu. */
+           it opens the branch menu directly instead of requiring the Git
+           menu on the menu bar. */
         RECT partRect;
         if (g_gitStatusText[0] && SendMessageW(hwnd, SB_GETRECT, (WPARAM)3, (LPARAM)&partRect)) {
             POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };

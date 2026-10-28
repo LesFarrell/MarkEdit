@@ -7,6 +7,7 @@ src/preview_fallback.c
 src/path_utils.c
 src/file_io.c
 src/text_codec.c
+src/git_status.c
 src/workspace_text.c
 src/markdown.c
 src/settings.c

@@ -85,6 +85,7 @@
 #define IDM_GIT_MERGE              424
 #define IDM_GIT_REBASE             425
 #define IDM_GIT_DISCARD_ALL        426
+#define IDM_GIT_DIFF_STAGED        427
 #define IDM_PLUGIN_COMMAND_0      2000 /* IDM_PLUGIN_COMMAND_0 .. IDM_PLUGIN_COMMAND_0+PLUGIN_MAX_COMMANDS-1 */
 
 /* ---- menu command IDs: Markdown formatting toolbar/menu ---- */

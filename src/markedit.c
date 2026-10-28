@@ -61,6 +61,7 @@
 #include "settings.h"
 #include "recent_list.h"
 #include "text_codec.h"
+#include "git_status.h"
 #include "workspace_text.h"
 #include "theme.h"
 #include "themed_scrollbar.h"
