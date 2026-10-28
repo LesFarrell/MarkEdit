@@ -173,17 +173,24 @@ static void apply_output_panel_theme(void) {
     if (!g_hOutputPanel) return;
     apply_output_view_theme(g_outputPanes[OUTPUT_TAB_RUN].view);
     apply_output_view_theme(g_outputPanes[OUTPUT_TAB_PROBLEMS].view);
-    apply_output_view_theme(g_outputPanes[OUTPUT_TAB_GIT].view);
     apply_output_view_theme(g_hOutputInput);
+    if (g_outputPanes[OUTPUT_TAB_GIT].view) {
+        apply_explorer_theme(g_outputPanes[OUTPUT_TAB_GIT].view);
+        TreeView_SetBkColor(g_outputPanes[OUTPUT_TAB_GIT].view, theme_bg_color());
+        TreeView_SetTextColor(g_outputPanes[OUTPUT_TAB_GIT].view, theme_fg_color());
+        themed_scrollbar_refresh(g_outputPanes[OUTPUT_TAB_GIT].view);
+        InvalidateRect(g_outputPanes[OUTPUT_TAB_GIT].view, NULL, TRUE);
+    }
     const ThemePalette *p = theme_palette();
     const COLORREF *ansi = g_editorDarkMode ? OUTPUT_ANSI_DARK : OUTPUT_ANSI_LIGHT;
     terminal_view_apply_theme(g_terminalView, ansi, p->fg, p->bg);
     apply_debug_tab_theme();
     InvalidateRect(g_hOutputPanel, NULL, TRUE);
     HWND buttons[] = { g_outputPanes[0].tab, g_outputPanes[1].tab,
-                       g_outputPanes[2].tab, g_outputPanes[3].tab,
+                       g_outputPanes[2].tab, g_outputPanes[3].tab, g_outputPanes[4].tab,
                        g_hOutputClear, g_hOutputStop, g_hOutputClose,
-                       g_hDebugContinue, g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut };
+                       g_hDebugContinue, g_hDebugStepOver, g_hDebugStepInto, g_hDebugStepOut,
+                       g_hGitRefresh, g_hGitStageAll, g_hGitCommit };
     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++)
         if (buttons[i]) InvalidateRect(buttons[i], NULL, TRUE);
 }
@@ -1063,77 +1070,131 @@ static void show_git_branch_menu(HWND hwnd, POINT screenPoint) {
     }
 }
 
-/* ---- the Git panel's own tab: a read-only list, built straight from
-   g_gitStatusFiles, with double-click and a right-click menu to stage,
-   unstage, discard or diff a file. Each file line is "  X  path" (see
-   append_git_file_line()); git_panel_section_at() tells which section a
-   line belongs to by scanning back to its nearest header instead of keeping
-   a separate line table, so the two can't drift apart. ---- */
+/* ---- the Git panel's own tab: a TreeView (checkboxes stage/unstage a file)
+   instead of the output tabs' usual read-only Scintilla log. Each item's
+   lParam is a GitTreeNode (see new_git_tree_node()), freed via
+   TVN_DELETEITEMW - which fires for every item TVM_DELETEITEM(TVI_ROOT)
+   removes, so rebuilding the tree on every refresh can't leak them. ---- */
 
-static void append_git_file_line(OutputPane *pane, const WCHAR *path, WCHAR mark) {
-    char *utf8Path = to_utf8(path);
-    if (!utf8Path) return;
-    char prefix[8];
-    snprintf(prefix, sizeof(prefix), "  %c  ", (char)mark);
-    append_output(pane, OUTPUT_STYLE_DEFAULT, prefix, strlen(prefix));
-    append_output(pane, OUTPUT_STYLE_DEFAULT, utf8Path, strlen(utf8Path));
-    append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
-    free(utf8Path);
-}
+typedef enum {
+    GIT_TREE_HEADER, GIT_TREE_LOCAL_BRANCH, GIT_TREE_REMOTE_BRANCH,
+    GIT_TREE_STAGED_FILE, GIT_TREE_UNSTAGED_FILE, GIT_TREE_CONFLICT_FILE
+} GitTreeNodeKind;
 
-/* Reuses the file line's "  X  name" shape (see git_panel_parse_file_line())
-   so double-click/right-click handling doesn't need a second line format. */
-static void append_git_branch_line(OutputPane *pane, const WCHAR *name, int current) {
-    char *utf8Name = to_utf8(name);
-    if (!utf8Name) return;
-    int style = current ? OUTPUT_STYLE_NOTE : OUTPUT_STYLE_DEFAULT;
-    char prefix[8];
-    snprintf(prefix, sizeof(prefix), "  %c  ", current ? '*' : ' ');
-    append_output(pane, style, prefix, strlen(prefix));
-    append_output(pane, style, utf8Name, strlen(utf8Name));
-    append_output(pane, style, "\n", 1);
-    free(utf8Name);
-}
+typedef struct {
+    GitTreeNodeKind kind;
+    WCHAR *path; /* file path or branch name; NULL for header nodes */
+    WCHAR mark;  /* '*' for the current local branch; a file's porcelain mark */
+} GitTreeNode;
 
 /* Remote branches start collapsed - a long remote list would otherwise push
    the usually-more-relevant Staged/Changes sections below the fold. */
 static int g_gitRemoteBranchesCollapsed = 1;
+/* Set while render_git_panel() is giving a file item its initial checkbox
+   state, so handle_git_tree_item_changed() can tell that apart from the user
+   actually clicking one - otherwise every rebuild would re-stage/unstage. */
+static int g_buildingGitTree;
+
+static GitTreeNode *new_git_tree_node(GitTreeNodeKind kind, const WCHAR *path, WCHAR mark) {
+    GitTreeNode *node = (GitTreeNode *)calloc(1, sizeof(GitTreeNode));
+    if (!node) return NULL;
+    node->kind = kind;
+    node->path = path ? _wcsdup(path) : NULL;
+    node->mark = mark;
+    return node;
+}
+
+static void handle_git_tree_delete_item(NMTREEVIEWW *info) {
+    GitTreeNode *node = (GitTreeNode *)info->itemOld.lParam;
+    if (node) { free(node->path); free(node); }
+}
+
+static GitTreeNode *git_tree_item_data(HWND tree, HTREEITEM item) {
+    TVITEMW tv = {0};
+    tv.mask = TVIF_PARAM | TVIF_HANDLE;
+    tv.hItem = item;
+    SendMessageW(tree, TVM_GETITEMW, 0, (LPARAM)&tv);
+    return (GitTreeNode *)tv.lParam;
+}
+
+/* Headers and branches get no checkbox at all (state image index 0); a file
+   gets one, initially unchecked - set_git_tree_item_checked() below gives
+   staged files their checked starting state. */
+static HTREEITEM insert_git_tree_item(HWND tree, HTREEITEM parent, const WCHAR *text,
+                                      GitTreeNode *node, int checkbox) {
+    TVINSERTSTRUCTW insert = {0};
+    insert.hParent = parent;
+    insert.hInsertAfter = TVI_LAST;
+    insert.item.mask = TVIF_TEXT | TVIF_PARAM;
+    insert.item.pszText = (WCHAR *)text;
+    insert.item.lParam = (LPARAM)node;
+    /* TVM_INSERTITEM/TVM_GETITEM have distinct ANSI/Unicode message codes and
+       this project defines neither UNICODE nor _UNICODE (see file_explorer.c's
+       tree_insert_item()), so this goes through the explicit *_W message
+       rather than the ambiguous TreeView_InsertItem macro. */
+    HTREEITEM item = (HTREEITEM)SendMessageW(tree, TVM_INSERTITEMW, 0, (LPARAM)&insert);
+    if (item && !checkbox) {
+        TVITEMW state = {0};
+        state.mask = TVIF_HANDLE | TVIF_STATE;
+        state.hItem = item;
+        state.stateMask = TVIS_STATEIMAGEMASK;
+        state.state = INDEXTOSTATEIMAGEMASK(0);
+        SendMessageW(tree, TVM_SETITEMW, 0, (LPARAM)&state);
+    }
+    return item;
+}
+
+static void set_git_tree_item_checked(HWND tree, HTREEITEM item, int checked) {
+    TVITEMW state = {0};
+    state.mask = TVIF_HANDLE | TVIF_STATE;
+    state.hItem = item;
+    state.stateMask = TVIS_STATEIMAGEMASK;
+    state.state = INDEXTOSTATEIMAGEMASK(checked ? 2 : 1);
+    SendMessageW(tree, TVM_SETITEMW, 0, (LPARAM)&state);
+}
 
 /* Reads only g_gitStatusFiles/g_gitBranchName and the branch cache above -
    never a subprocess - so it's always safe to call directly, including from
-   SCN_DOUBLECLICK (see handle_git_panel_double_click()). */
+   a checkbox click (see handle_git_tree_item_changed()). */
 static void render_git_panel(void) {
-    OutputPane *pane = &g_outputPanes[OUTPUT_TAB_GIT];
-    if (!pane->view) return;
-    clear_output_pane(pane);
+    HWND tree = g_outputPanes[OUTPUT_TAB_GIT].view;
+    if (!tree) return;
+    g_buildingGitTree = 1;
+    SendMessageW(tree, WM_SETREDRAW, FALSE, 0);
+    TreeView_DeleteAllItems(tree); /* frees every GitTreeNode via TVN_DELETEITEMW */
     if (!g_currentWorkspaceFolder) {
-        append_output_note(pane, OUTPUT_STYLE_NOTE, L"Open a workspace folder to use Git.");
+        insert_git_tree_item(tree, TVI_ROOT, L"Open a workspace folder to use Git.",
+                             new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        SendMessageW(tree, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(tree, NULL, TRUE);
+        g_buildingGitTree = 0;
         return;
     }
-    WCHAR header[160];
-    swprintf(header, 160, L"Branch: %ls", g_gitBranchName[0] ? g_gitBranchName : L"(none)");
-    append_output_note(pane, OUTPUT_STYLE_NOTE, header);
-    append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
 
     if (g_gitLocalBranchCount > 0) {
         WCHAR label[48];
         swprintf(label, 48, L"Branches (%d)", g_gitLocalBranchCount);
-        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
-        for (int i = 0; i < g_gitLocalBranchCount; i++)
-            append_git_branch_line(pane, g_gitLocalBranches[i],
-                g_gitBranchName[0] && _wcsicmp(g_gitLocalBranches[i], g_gitBranchName) == 0);
-        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        for (int i = 0; i < g_gitLocalBranchCount; i++) {
+            int current = g_gitBranchName[0] && _wcsicmp(g_gitLocalBranches[i], g_gitBranchName) == 0;
+            WCHAR text[160];
+            swprintf(text, 160, current ? L"%ls (current)" : L"%ls", g_gitLocalBranches[i]);
+            insert_git_tree_item(tree, header, text,
+                new_git_tree_node(GIT_TREE_LOCAL_BRANCH, g_gitLocalBranches[i], current ? L'*' : L' '), 0);
+        }
+        TreeView_Expand(tree, header, TVE_EXPAND);
     }
 
     if (g_gitRemoteBranchCount > 0) {
-        WCHAR label[64];
-        swprintf(label, 64, L"Remote Branches (%d) [%lc]",
-                g_gitRemoteBranchCount, g_gitRemoteBranchesCollapsed ? L'+' : L'-');
-        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
-        if (!g_gitRemoteBranchesCollapsed)
-            for (int i = 0; i < g_gitRemoteBranchCount; i++)
-                append_git_branch_line(pane, g_gitRemoteBranchNames[i], 0);
-        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+        WCHAR label[48];
+        swprintf(label, 48, L"Remote Branches (%d)", g_gitRemoteBranchCount);
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+        for (int i = 0; i < g_gitRemoteBranchCount; i++)
+            insert_git_tree_item(tree, header, g_gitRemoteBranchNames[i],
+                new_git_tree_node(GIT_TREE_REMOTE_BRANCH, g_gitRemoteBranchNames[i], 0), 0);
+        if (!g_gitRemoteBranchesCollapsed) TreeView_Expand(tree, header, TVE_EXPAND);
     }
 
     int stagedCount = 0, unstagedCount = 0, untrackedCount = 0, conflictCount = 0;
@@ -1153,109 +1214,96 @@ static void render_git_panel(void) {
     if (stagedCount) {
         WCHAR label[48];
         swprintf(label, 48, L"Staged Changes (%d)", stagedCount);
-        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
-            if (file->index != L' ' && file->index != L'?')
-                append_git_file_line(pane, file->path, file->index);
+            if (file->index != L' ' && file->index != L'?') {
+                HTREEITEM item = insert_git_tree_item(tree, header, file->path,
+                    new_git_tree_node(GIT_TREE_STAGED_FILE, file->path, file->index), 1);
+                set_git_tree_item_checked(tree, item, 1);
+            }
         }
-        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+        TreeView_Expand(tree, header, TVE_EXPAND);
     }
     if (unstagedCount || untrackedCount) {
         WCHAR label[48];
         swprintf(label, 48, L"Changes (%d)", unstagedCount + untrackedCount);
-        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
-            if (file->worktree != L' ')
-                append_git_file_line(pane, file->path, file->worktree);
+            if (file->worktree != L' ') {
+                HTREEITEM item = insert_git_tree_item(tree, header, file->path,
+                    new_git_tree_node(GIT_TREE_UNSTAGED_FILE, file->path, file->worktree), 1);
+                set_git_tree_item_checked(tree, item, 0);
+            }
         }
-        append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
+        TreeView_Expand(tree, header, TVE_EXPAND);
     }
     if (conflictCount) {
         WCHAR label[48];
         swprintf(label, 48, L"Conflicts (%d)", conflictCount);
-        append_output_note(pane, OUTPUT_STYLE_NOTE, label);
+        HTREEITEM header = insert_git_tree_item(tree, TVI_ROOT, label,
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
         for (int i = 0; i < g_gitStatusFileCount; i++) {
             GitStatusFile *file = &g_gitStatusFiles[i];
             int conflict = file->index == L'U' || file->worktree == L'U' ||
                           (file->index == L'A' && file->worktree == L'A') ||
                           (file->index == L'D' && file->worktree == L'D');
-            if (conflict) append_git_file_line(pane, file->path, L'!');
+            if (conflict) {
+                HTREEITEM item = insert_git_tree_item(tree, header, file->path,
+                    new_git_tree_node(GIT_TREE_CONFLICT_FILE, file->path, L'!'), 1);
+                set_git_tree_item_checked(tree, item, 0);
+            }
         }
+        TreeView_Expand(tree, header, TVE_EXPAND);
     }
     if (!stagedCount && !unstagedCount && !untrackedCount && !conflictCount)
-        append_output_note(pane, OUTPUT_STYLE_NOTE, L"No changes.");
-    /* A static snapshot, not a tailing log - append_output() otherwise
-       leaves the view scrolled to the last line it just followed to. */
-    SendMessageA(pane->view, SCI_GOTOPOS, 0, 0);
+        insert_git_tree_item(tree, TVI_ROOT, L"No changes.",
+            new_git_tree_node(GIT_TREE_HEADER, NULL, 0), 0);
+
+    SendMessageW(tree, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(tree, NULL, TRUE);
+    g_buildingGitTree = 0;
 }
 
-/* -1 when lineNumber is itself a header or blank line. */
-/* -1 if text isn't one of the panel's own section headers (see
-   render_git_panel()); the indicator render_git_panel() appends to the
-   Remote Branches header comes after the matched prefix, so it doesn't
-   interfere here. */
-static int git_panel_header_kind(const char *text) {
-    if (strncmp(text, "Staged Changes", 14) == 0) return 0;
-    if (strncmp(text, "Changes", 7) == 0) return 1;
-    if (strncmp(text, "Conflicts", 9) == 0) return 2;
-    if (strncmp(text, "Remote Branches", 15) == 0) return 4;
-    if (strncmp(text, "Branches", 8) == 0) return 3;
-    return -1;
+static HTREEITEM git_tree_item_at_message_pos(HWND tree, POINT *screenOut, UINT *flagsOut) {
+    DWORD pos = GetMessagePos();
+    POINT screen = { GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
+    if (screenOut) *screenOut = screen;
+    TVHITTESTINFO hit = {0};
+    hit.pt = screen;
+    ScreenToClient(tree, &hit.pt);
+    HTREEITEM item = TreeView_HitTest(tree, &hit);
+    if (flagsOut) *flagsOut = hit.flags;
+    return item;
 }
 
-static int git_panel_line_header_kind(HWND view, Sci_Position line) {
-    Sci_Position length = (Sci_Position)SendMessageA(view, SCI_LINELENGTH, (WPARAM)line, 0);
-    if (length <= 0) return -1;
-    char *text = (char *)malloc((size_t)length + 1);
-    if (!text) return -1;
-    SendMessageA(view, SCI_GETLINE, (WPARAM)line, (LPARAM)text);
-    text[length] = 0;
-    int kind = git_panel_header_kind(text);
-    free(text);
-    return kind;
-}
-
-static int git_panel_section_at(HWND view, Sci_Position lineNumber) {
-    for (Sci_Position line = lineNumber; line >= 0; line--) {
-        int kind = git_panel_line_header_kind(view, line);
-        if (kind >= 0) return kind;
+static void handle_git_tree_double_click(HWND tree) {
+    UINT flags = 0;
+    HTREEITEM item = git_tree_item_at_message_pos(tree, NULL, &flags);
+    /* A click on the checkbox or the expand/collapse glyph already did its
+       own thing through the TreeView's default handling; this is only for
+       a double-click on the row's icon/label. */
+    if (!item || (flags & (TVHT_ONITEMSTATEICON | TVHT_ONITEMBUTTON))) return;
+    GitTreeNode *node = git_tree_item_data(tree, item);
+    if (!node) return;
+    /* git_switch_to_branch()/git_diff_panel_file() only start an async
+       process - unlike run_git_sync(), neither pumps a nested message loop,
+       so both are safe to call straight out of NM_DBLCLK. */
+    if (node->kind == GIT_TREE_LOCAL_BRANCH) {
+        if (node->mark != L'*') git_switch_to_branch(node->path);
+    } else if (node->kind == GIT_TREE_REMOTE_BRANCH) {
+        git_switch_to_branch(node->path);
+    } else if (node->kind == GIT_TREE_STAGED_FILE || node->kind == GIT_TREE_UNSTAGED_FILE ||
+              node->kind == GIT_TREE_CONFLICT_FILE) {
+        git_diff_panel_file(node->path);
     }
-    return -1;
-}
-
-/* Parses a "  X  path" file line (see append_git_file_line()); *path is
-   malloc'd (caller frees) on success. */
-static int git_panel_parse_file_line(HWND view, Sci_Position lineNumber, WCHAR *mark, WCHAR **path) {
-    Sci_Position length = (Sci_Position)SendMessageA(view, SCI_LINELENGTH, (WPARAM)lineNumber, 0);
-    if (length < 6) return 0;
-    char *text = (char *)malloc((size_t)length + 1);
-    if (!text) return 0;
-    SendMessageA(view, SCI_GETLINE, (WPARAM)lineNumber, (LPARAM)text);
-    text[length] = 0;
-    int ok = text[0] == ' ' && text[1] == ' ' && text[3] == ' ' && text[4] == ' ' &&
-             text[5] && text[5] != '\n' && text[5] != '\r';
-    if (ok) {
-        *mark = (WCHAR)(unsigned char)text[2];
-        size_t pathLength = strlen(text + 5);
-        while (pathLength && (text[5 + pathLength - 1] == '\n' || text[5 + pathLength - 1] == '\r'))
-            pathLength--;
-        char *pathUtf8 = (char *)malloc(pathLength + 1);
-        if (pathUtf8) {
-            memcpy(pathUtf8, text + 5, pathLength);
-            pathUtf8[pathLength] = 0;
-            *path = to_wide(pathUtf8);
-            free(pathUtf8);
-            ok = *path != NULL;
-        } else ok = 0;
-    }
-    free(text);
-    return ok;
 }
 
 /* run_git_sync() pumps its own nested message loop; calling it straight out
-   of SCN_DOUBLECLICK would do that while Scintilla's own DefSubclassProc
+   of a checkbox click would do that while the TreeView's own DefSubclassProc
    call for the click is still on the stack, reentering it mid-click. So the
    actual stage/unstage happens once that unwinds, via a posted message. */
 static WCHAR *g_gitPendingActionPath;
@@ -1272,89 +1320,102 @@ static void run_pending_git_panel_action(void) {
     free(path);
 }
 
-static void handle_git_panel_double_click(Sci_Position position) {
-    OutputPane *pane = &g_outputPanes[OUTPUT_TAB_GIT];
-    Sci_Position line = (Sci_Position)SendMessageA(pane->view, SCI_LINEFROMPOSITION, (WPARAM)position, 0);
-    if (git_panel_line_header_kind(pane->view, line) == 4) {
-        g_gitRemoteBranchesCollapsed = !g_gitRemoteBranchesCollapsed;
-        render_git_panel();
-        return;
-    }
-    WCHAR mark = 0, *path = NULL;
-    if (!git_panel_parse_file_line(pane->view, line, &mark, &path)) return;
-    int section = git_panel_section_at(pane->view, line);
-    if (section == 3 || section == 4) {
-        /* git_switch_to_branch() only starts an async process - unlike
-           run_git_sync(), it never pumps a nested message loop, so it's
-           safe to call straight out of SCN_DOUBLECLICK. A remote branch
-           (section 4) is never the current one, so only section 3 skips it. */
-        if (section == 4 || mark != L'*') git_switch_to_branch(path);
-        free(path);
-        return;
-    }
+static void handle_git_tree_item_changed(NMTVITEMCHANGE *change) {
+    if (g_buildingGitTree) return;
+    int newChecked = ((change->uStateNew & TVIS_STATEIMAGEMASK) >> 12) == 2;
+    int oldChecked = ((change->uStateOld & TVIS_STATEIMAGEMASK) >> 12) == 2;
+    if (newChecked == oldChecked) return;
+    GitTreeNode *node = git_tree_item_data(g_outputPanes[OUTPUT_TAB_GIT].view, change->hItem);
+    if (!node) return;
+    int action;
+    if (node->kind == GIT_TREE_STAGED_FILE && !newChecked) action = 2;
+    else if ((node->kind == GIT_TREE_UNSTAGED_FILE || node->kind == GIT_TREE_CONFLICT_FILE) && newChecked)
+        action = 1;
+    else return;
     free(g_gitPendingActionPath);
-    g_gitPendingActionPath = path;
-    g_gitPendingAction = section == 0 ? 2 : 1;
+    g_gitPendingActionPath = _wcsdup(node->path);
+    g_gitPendingAction = action;
     PostMessageW(g_hMainWnd, WM_APP_GIT_PANEL_ACTION, 0, 0);
 }
 
 enum { GIT_CTX_STAGE = 1, GIT_CTX_UNSTAGE, GIT_CTX_DISCARD, GIT_CTX_DIFF, GIT_CTX_SWITCH, GIT_CTX_DELETE_BRANCH };
 
-static void show_git_panel_context_menu(HWND view, POINT screenPoint) {
-    POINT clientPoint;
-    if (screenPoint.x == -1 && screenPoint.y == -1) {
-        Sci_Position pos = (Sci_Position)SendMessageA(view, SCI_GETCURRENTPOS, 0, 0);
-        Sci_Position lineStart = (Sci_Position)SendMessageA(view, SCI_POSITIONFROMLINE,
-            (WPARAM)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)pos, 0), 0);
-        clientPoint.x = (int)SendMessageA(view, SCI_POINTXFROMPOSITION, 0, (LPARAM)lineStart);
-        clientPoint.y = (int)SendMessageA(view, SCI_POINTYFROMPOSITION, 0, (LPARAM)lineStart);
-        screenPoint = clientPoint;
-        ClientToScreen(view, &screenPoint);
-    } else {
-        clientPoint = screenPoint;
-        ScreenToClient(view, &clientPoint);
-    }
-    Sci_Position position = (Sci_Position)SendMessageA(view, SCI_POSITIONFROMPOINTCLOSE,
-                                                        (WPARAM)clientPoint.x, (LPARAM)clientPoint.y);
-    if (position < 0) return;
-    Sci_Position lineNumber = (Sci_Position)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)position, 0);
-    WCHAR mark = 0, *path = NULL;
-    if (!git_panel_parse_file_line(view, lineNumber, &mark, &path)) return;
-    int section = git_panel_section_at(view, lineNumber);
+static void show_git_tree_context_menu(HWND tree, HTREEITEM item, POINT screenPoint) {
+    if (!item) return;
+    TreeView_SelectItem(tree, item);
+    GitTreeNode *node = git_tree_item_data(tree, item);
+    if (!node) return;
     HMENU menu = CreatePopupMenu();
-    if (menu) {
-        if (section == 4) {
+    if (!menu) return;
+    if (node->kind == GIT_TREE_REMOTE_BRANCH) {
+        AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
+    } else if (node->kind == GIT_TREE_LOCAL_BRANCH) {
+        if (node->mark != L'*') {
             AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
-        } else if (section == 3) {
-            if (mark != L'*') {
-                AppendMenuW(menu, MF_STRING, GIT_CTX_SWITCH, L"Switch to This Branch");
-                AppendMenuW(menu, MF_STRING, GIT_CTX_DELETE_BRANCH, L"Delete Branch...");
-            }
-        } else if (section == 0) {
-            AppendMenuW(menu, MF_STRING, GIT_CTX_UNSTAGE, L"Unstage");
-        } else {
-            AppendMenuW(menu, MF_STRING, GIT_CTX_STAGE, section == 2 ? L"Mark Resolved" : L"Stage");
-            AppendMenuW(menu, MF_STRING, GIT_CTX_DISCARD, L"Discard Changes...");
+            AppendMenuW(menu, MF_STRING, GIT_CTX_DELETE_BRANCH, L"Delete Branch...");
         }
-        if (section != 3 && section != 4) {
-            AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-            AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
-        }
-        UINT command = GetMenuItemCount(menu) > 0
-            ? TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                             screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL)
-            : 0;
-        DestroyMenu(menu);
-        switch (command) {
-            case GIT_CTX_STAGE: git_stage_file(path); break;
-            case GIT_CTX_UNSTAGE: git_unstage_file(path); break;
-            case GIT_CTX_DISCARD: git_discard_file(path, mark); break;
-            case GIT_CTX_DIFF: git_diff_panel_file(path); break;
-            case GIT_CTX_SWITCH: git_switch_to_branch(path); break;
-            case GIT_CTX_DELETE_BRANCH: git_delete_branch(path); break;
-        }
+    } else if (node->kind == GIT_TREE_STAGED_FILE) {
+        AppendMenuW(menu, MF_STRING, GIT_CTX_UNSTAGE, L"Unstage");
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
+    } else if (node->kind == GIT_TREE_UNSTAGED_FILE || node->kind == GIT_TREE_CONFLICT_FILE) {
+        AppendMenuW(menu, MF_STRING, GIT_CTX_STAGE,
+                   node->kind == GIT_TREE_CONFLICT_FILE ? L"Mark Resolved" : L"Stage");
+        AppendMenuW(menu, MF_STRING, GIT_CTX_DISCARD, L"Discard Changes...");
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, GIT_CTX_DIFF, L"Open Diff");
     }
-    free(path);
+    UINT command = GetMenuItemCount(menu) > 0
+        ? TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                         screenPoint.x, screenPoint.y, 0, g_hMainWnd, NULL)
+        : 0;
+    DestroyMenu(menu);
+    switch (command) {
+        case GIT_CTX_STAGE: git_stage_file(node->path); break;
+        case GIT_CTX_UNSTAGE: git_unstage_file(node->path); break;
+        case GIT_CTX_DISCARD: git_discard_file(node->path, node->mark); break;
+        case GIT_CTX_DIFF: git_diff_panel_file(node->path); break;
+        case GIT_CTX_SWITCH: git_switch_to_branch(node->path); break;
+        case GIT_CTX_DELETE_BRANCH: git_delete_branch(node->path); break;
+    }
+}
+
+static void handle_git_tree_mouse_context_menu(HWND tree) {
+    POINT screenPt;
+    HTREEITEM item = git_tree_item_at_message_pos(tree, &screenPt, NULL);
+    show_git_tree_context_menu(tree, item, screenPt);
+}
+
+static void handle_git_tree_keyboard_context_menu(HWND tree) {
+    HTREEITEM item = TreeView_GetSelection(tree);
+    RECT itemRect = {0};
+    POINT screenPt = {0};
+    if (item && TreeView_GetItemRect(tree, item, &itemRect, TRUE)) {
+        screenPt.x = itemRect.left;
+        screenPt.y = itemRect.bottom;
+    } else {
+        RECT client;
+        GetClientRect(tree, &client);
+        screenPt.x = client.left + 12;
+        screenPt.y = client.top + 12;
+    }
+    ClientToScreen(tree, &screenPt);
+    show_git_tree_context_menu(tree, item, screenPt);
+}
+
+/* The Git tree's only subclass job: the context-menu key (WM_CONTEXTMENU
+   with lParam -1, i.e. no cursor position) needs its own handling, since
+   NM_RCLICK (handled in OutputPanelSubclassProc's WM_NOTIFY) only covers a
+   mouse right-click. */
+static LRESULT CALLBACK GitTreeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                            UINT_PTR id, DWORD_PTR data) {
+    (void)id; (void)data; (void)wParam;
+    if (msg == WM_CONTEXTMENU && (LONG)lParam == -1) {
+        handle_git_tree_keyboard_context_menu(hwnd);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, GitTreeSubclassProc, 1);
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 /* ---- programs ---- */
@@ -1605,11 +1666,6 @@ static LRESULT CALLBACK OutputInputSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
 static LRESULT CALLBACK OutputViewSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                                UINT_PTR id, DWORD_PTR data) {
     (void)data;
-    if (id == (UINT_PTR)(OUTPUT_TAB_GIT + 1) && msg == WM_CONTEXTMENU) {
-        POINT screenPoint = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        show_git_panel_context_menu(hwnd, screenPoint);
-        return 0;
-    }
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
         LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
         SetFocus(g_hOutputInput);
@@ -1942,6 +1998,29 @@ static void paint_output_panel(HWND panel, HDC hdc) {
         frame_rect(hdc, &layout.inputBox, theme_border_color());
 }
 
+/* Forces every item's text to the app's own theme colour rather than
+   whatever the "DarkMode_Explorer"/"Explorer" visual style would otherwise
+   pick per item (observed: it colours some leaf items differently from
+   others with no code-visible cause - deterministic colouring sidesteps
+   that instead of chasing it). The current local branch and section headers
+   get the accent colour, so they still read as distinct from a plain file
+   or branch name. */
+static LRESULT git_tree_customdraw(NMTVCUSTOMDRAW *draw) {
+    switch (draw->nmcd.dwDrawStage) {
+        case CDDS_PREPAINT:
+            return CDRF_NOTIFYITEMDRAW;
+        case CDDS_ITEMPREPAINT: {
+            GitTreeNode *node = (GitTreeNode *)draw->nmcd.lItemlParam;
+            int accent = node && (node->kind == GIT_TREE_HEADER ||
+                                  (node->kind == GIT_TREE_LOCAL_BRANCH && node->mark == L'*'));
+            draw->clrText = accent ? theme_accent_color() : theme_fg_color();
+            return CDRF_DODEFAULT;
+        }
+        default:
+            return CDRF_DODEFAULT;
+    }
+}
+
 static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
                                                 LPARAM lParam, UINT_PTR id, DWORD_PTR data) {
     (void)id; (void)data;
@@ -2035,14 +2114,22 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
             break;
         case WM_NOTIFY: {
             NMHDR *notification = (NMHDR *)lParam;
+            HWND gitTree = g_outputPanes[OUTPUT_TAB_GIT].view;
+            if (notification->hwndFrom == gitTree && notification->code == NM_CUSTOMDRAW)
+                return git_tree_customdraw((NMTVCUSTOMDRAW *)lParam);
             if (notification->code == SCN_DOUBLECLICK) {
-                if (notification->hwndFrom == g_outputPanes[OUTPUT_TAB_GIT].view)
-                    handle_git_panel_double_click(((struct SCNotification *)lParam)->position);
-                else
-                    for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
-                        if (notification->hwndFrom == g_outputPanes[i].view)
-                            open_output_location(&g_outputPanes[i],
-                                                 ((struct SCNotification *)lParam)->position);
+                for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
+                    if (notification->hwndFrom == g_outputPanes[i].view)
+                        open_output_location(&g_outputPanes[i],
+                                             ((struct SCNotification *)lParam)->position);
+            } else if (notification->hwndFrom == gitTree && notification->code == TVN_DELETEITEMW) {
+                handle_git_tree_delete_item((NMTREEVIEWW *)lParam);
+            } else if (notification->hwndFrom == gitTree && notification->code == TVN_ITEMCHANGEDW) {
+                handle_git_tree_item_changed((NMTVITEMCHANGE *)lParam);
+            } else if (notification->hwndFrom == gitTree && notification->code == NM_DBLCLK) {
+                handle_git_tree_double_click(gitTree);
+            } else if (notification->hwndFrom == gitTree && notification->code == NM_RCLICK) {
+                handle_git_tree_mouse_context_menu(gitTree);
             } else if (notification->code == TVN_EXITED) {
                 update_output_controls();
             } else if (notification->code == TVN_RESTART_REQUESTED) {
@@ -2134,16 +2221,18 @@ static void create_output_panel(HWND hwnd) {
     SetWindowSubclass(problemsPane->view, OutputViewSubclassProc,
                       (UINT_PTR)(OUTPUT_TAB_PROBLEMS + 1), 0);
 
+    /* Unlike the Scintilla-based tabs, the Git tab is a checkbox TreeView -
+       see the "Git panel's own tab" section above for why. */
     OutputPane *gitPane = &g_outputPanes[OUTPUT_TAB_GIT];
-    gitPane->view = create_output_scintilla(g_hOutputPanel, ID_OUTPUT_VIEW + 2,
-                                            g_outputTab == OUTPUT_TAB_GIT);
-    SendMessageA(gitPane->view, SCI_SETREADONLY, TRUE, 0);
-    SendMessageA(gitPane->view, SCI_SETUNDOCOLLECTION, FALSE, 0);
-    SendMessageA(gitPane->view, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
-    SendMessageA(gitPane->view, SCI_SETSCROLLWIDTHTRACKING, TRUE, 0);
-    SendMessageA(gitPane->view, SCI_SETSCROLLWIDTH, 1, 0);
-    themed_scrollbar_attach(gitPane->view, THEMED_SCROLL_SCINTILLA);
-    SetWindowSubclass(gitPane->view, OutputViewSubclassProc, (UINT_PTR)(OUTPUT_TAB_GIT + 1), 0);
+    gitPane->view = CreateWindowExW(0, WC_TREEVIEWW, L"",
+        WS_CHILD | (g_outputTab == OUTPUT_TAB_GIT ? WS_VISIBLE : 0) | WS_VSCROLL | WS_TABSTOP |
+            TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS |
+            TVS_DISABLEDRAGDROP | TVS_CHECKBOXES,
+        0, 0, 0, 0, g_hOutputPanel, (HMENU)(UINT_PTR)(ID_OUTPUT_VIEW + 2), GetModuleHandleW(NULL), NULL);
+    TreeView_SetExtendedStyle(gitPane->view, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
+    TreeView_SetItemHeight(gitPane->view, MulDiv(18, GetDpiForWindow(hwnd), 96));
+    SetWindowSubclass(gitPane->view, GitTreeSubclassProc, 1, 0);
+    themed_scrollbar_attach(gitPane->view, THEMED_SCROLL_TREEVIEW);
 
     g_terminalView = terminal_view_create(g_hOutputPanel, ID_TERMINAL_VIEW);
     g_outputPanes[OUTPUT_TAB_TERMINAL].view = terminal_view_window(g_terminalView);
