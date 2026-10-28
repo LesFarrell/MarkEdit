@@ -269,13 +269,13 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
             toggle_explorer_panel(hwnd);
             break;
         case IDM_VIEW_OUTPUT_PANEL:
-            toggle_output_panel(hwnd);
+            toggle_output_panel();
             break;
         case IDM_VIEW_TERMINAL:
-            show_terminal(hwnd);
+            show_terminal();
             break;
         case IDM_VIEW_PROBLEMS:
-            show_problems(hwnd);
+            show_problems();
             break;
         case IDM_VIEW_TOGGLESPLIT:
             toggle_split_editor(hwnd, 0);

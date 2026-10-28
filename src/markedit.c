@@ -174,7 +174,7 @@ static int g_activeDebuggerKind = 0; /* 1 = pdb, 2 = GDB */
 static char *g_lastDebugState = NULL;
 static void apply_output_panel_font(const char *faceUtf8);
 static HWND active_output_focus_target(void);
-static void show_output_panel(HWND hwnd, int tab, int focusInput);
+static void show_output_panel(int tab, int focusInput);
 static int run_in_output_panel(const WCHAR *file, const WCHAR *parameters,
                                const WCHAR *directory, const WCHAR *title);
 static void restore_persisted_breakpoints(const WCHAR *path);

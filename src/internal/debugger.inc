@@ -466,7 +466,7 @@ static void set_debug_panel_status(const WCHAR *status) {
    variables are (see output_panel.inc) - without moving focus away from the
    editor, same as this did before the debug and output panels were merged. */
 static void show_debug_panel(void) {
-    show_output_panel(g_hMainWnd, OUTPUT_TAB_DEBUG, 0);
+    show_output_panel(OUTPUT_TAB_DEBUG, 0);
 }
 
 static void add_debug_variable(const char *name, const char *value) {

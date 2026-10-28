@@ -1281,7 +1281,7 @@ static void git_rebase_abort(void) {
 static void show_git_panel(void) {
     refresh_git_status();
     render_git_panel();
-    show_output_panel(g_hMainWnd, OUTPUT_TAB_GIT, 0);
+    show_output_panel(OUTPUT_TAB_GIT, 0);
     SetFocus(g_outputPanes[OUTPUT_TAB_GIT].view);
 }
 
@@ -1776,7 +1776,7 @@ static void handle_output_chunk(OutputChunk *chunk) {
             set_problem_report("Build", locations, pane->directory);
             free(locations);
             if (failed && g_problemReportCount)
-                show_output_panel(g_hMainWnd, OUTPUT_TAB_PROBLEMS, 0);
+                show_output_panel(OUTPUT_TAB_PROBLEMS, 0);
             g_outputExitOneIsSuccess = 0;
             end_output_program(pane);
             update_output_controls();
@@ -1836,36 +1836,36 @@ static void select_output_tab(int tab) {
     if (tab == OUTPUT_TAB_TERMINAL) start_terminal();
 }
 
-static void show_output_panel(HWND hwnd, int tab, int focusInput) {
+static void show_output_panel(int tab, int focusInput) {
     if (!g_hOutputPanel) return;
     select_output_tab(tab);
     if (!g_outputPanelVisible) {
         g_outputPanelVisible = 1;
-        relayout_and_save(hwnd);
+        relayout_and_save(g_hMainWnd);
     }
     if (focusInput) SetFocus(active_output_focus_target());
 }
 
-static void hide_output_panel(HWND hwnd) {
+static void hide_output_panel(void) {
     if (!g_outputPanelVisible) return;
     g_outputPanelVisible = 0;
-    relayout_and_save(hwnd);
+    relayout_and_save(g_hMainWnd);
     if (g_editorVisible) SetFocus(g_hEdit);
 }
 
 /* View > Output Panel (Ctrl+`). */
-static void toggle_output_panel(HWND hwnd) {
-    if (g_outputPanelVisible) hide_output_panel(hwnd);
-    else show_output_panel(hwnd, g_outputTab, 1);
+static void toggle_output_panel(void) {
+    if (g_outputPanelVisible) hide_output_panel();
+    else show_output_panel(g_outputTab, 1);
 }
 
 /* View > Terminal (Ctrl+Shift+`). */
-static void show_terminal(HWND hwnd) {
-    show_output_panel(hwnd, OUTPUT_TAB_TERMINAL, 1);
+static void show_terminal(void) {
+    show_output_panel(OUTPUT_TAB_TERMINAL, 1);
 }
 
-static void show_problems(HWND hwnd) {
-    show_output_panel(hwnd, OUTPUT_TAB_PROBLEMS, 1);
+static void show_problems(void) {
+    show_output_panel(OUTPUT_TAB_PROBLEMS, 1);
 }
 
 /* Run's way into the panel: runs `"file" parameters` on the Output tab,
@@ -1892,7 +1892,7 @@ static int run_in_output_panel(const WCHAR *file, const WCHAR *parameters,
     }
     int started = start_output_program(pane, command, directory);
     free(command);
-    show_output_panel(g_hMainWnd, OUTPUT_TAB_RUN, 0);
+    show_output_panel(OUTPUT_TAB_RUN, 0);
     update_output_controls();
     return started;
 }
@@ -2434,7 +2434,7 @@ static LRESULT CALLBACK OutputPanelSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
                     }
                     return 0;
                 case ID_OUTPUT_CLOSE:
-                    hide_output_panel(g_hMainWnd);
+                    hide_output_panel();
                     return 0;
             }
             break;

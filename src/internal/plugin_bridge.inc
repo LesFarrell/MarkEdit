@@ -108,8 +108,8 @@ static void plugin_log(const char *plugin, const char *text) {
 
 static void plugin_output_write(const char *text) { write_plugin_output(text); }
 static void plugin_output_clear(void) { clear_output_pane(&g_outputPanes[OUTPUT_TAB_RUN]); }
-static void plugin_output_show(void) { show_output_panel(g_hMainWnd, OUTPUT_TAB_RUN, 0); }
-static void plugin_output_hide(void) { hide_output_panel(g_hMainWnd); }
+static void plugin_output_show(void) { show_output_panel(OUTPUT_TAB_RUN, 0); }
+static void plugin_output_hide(void) { hide_output_panel(); }
 static int plugin_output_visible(void) { return g_outputPanelVisible; }
 
 static void plugin_problems_report(const char *source, const char *text) {
@@ -130,7 +130,7 @@ static void show_plugin_performance(void) {
     set_problem_report("Plugin Performance",
         report ? report : "No plugin callbacks have run since plugins were loaded.", NULL);
     free(report);
-    show_output_panel(g_hMainWnd, OUTPUT_TAB_PROBLEMS, 1);
+    show_output_panel(OUTPUT_TAB_PROBLEMS, 1);
 }
 
 static void clear_plugin_performance(void) {
