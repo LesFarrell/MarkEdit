@@ -1274,14 +1274,21 @@ static void select_next_occurrence(HWND hEdit) {
     SendMessageA(hEdit, SCI_MULTIPLESELECTADDNEXT, 0, 0);
 }
 
+/* An unmatched brace makes SCI_BRACEMATCH scan to the document's end, on
+   every caret move next to one - g_largeFile alone doesn't bound this, since
+   its threshold (g_largeFileThresholdMB) is user-configurable up into the
+   hundreds of MB for documents that should still get a responsive caret. */
+#define BRACE_HIGHLIGHT_MAX_DOC_LENGTH (8 * 1024 * 1024)
+
 /* Keeps the matching-brace highlight (STYLE_BRACELIGHT/STYLE_BRACEBAD, set up
    in apply_editor_theme) in sync with the caret. Called on every SCN_UPDATEUI. */
 static void update_brace_highlight(HWND hEdit) {
-    /* An unmatched brace makes SCI_BRACEMATCH scan to the document's end,
-       on every caret move. */
     HWND other = hEdit == g_hSplitEdit ? g_hEdit : g_hSplitEdit;
     if (other) SendMessageA(other, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
-    Sci_Position bracePos = g_largeFile ? -1 : brace_position_near_caret(hEdit);
+    Sci_Position bracePos = -1;
+    if (!g_largeFile &&
+        (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0) <= BRACE_HIGHLIGHT_MAX_DOC_LENGTH)
+        bracePos = brace_position_near_caret(hEdit);
     if (bracePos < 0) {
         SendMessageA(hEdit, SCI_BRACEHIGHLIGHT, (WPARAM)-1, (LPARAM)-1);
         return;
@@ -1293,6 +1300,10 @@ static void update_brace_highlight(HWND hEdit) {
 
 #define WORD_COMPLETION_MIN_PREFIX 2
 #define WORD_COMPLETION_MAX_WORDS 100
+/* Caps the scanned span around the caret, each direction, so a trigger near
+   the start of a huge document can't turn into a near-full-document
+   SCI_SEARCHINTARGET scan on every newly typed word. */
+#define WORD_COMPLETION_SCAN_RADIUS (256 * 1024)
 
 static int compare_words_ordinal(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
@@ -1353,14 +1364,16 @@ static void update_word_completions(HWND hEdit) {
     if (!prefix) return;
 
     Sci_Position docLength = (Sci_Position)SendMessageA(hEdit, SCI_GETLENGTH, 0, 0);
+    Sci_Position scanStart = wordStart > WORD_COMPLETION_SCAN_RADIUS ? wordStart - WORD_COMPLETION_SCAN_RADIUS : 0;
+    Sci_Position scanEnd = docLength - pos > WORD_COMPLETION_SCAN_RADIUS ? pos + WORD_COMPLETION_SCAN_RADIUS : docLength;
     SendMessageA(hEdit, SCI_SETSEARCHFLAGS, SCFIND_WORDSTART, 0);
 
     char *words[WORD_COMPLETION_MAX_WORDS];
     int wordCount = 0;
-    Sci_Position searchFrom = 0;
+    Sci_Position searchFrom = scanStart;
     while (wordCount < WORD_COMPLETION_MAX_WORDS) {
         SendMessageA(hEdit, SCI_SETTARGETSTART, (WPARAM)searchFrom, 0);
-        SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)docLength, 0);
+        SendMessageA(hEdit, SCI_SETTARGETEND, (WPARAM)scanEnd, 0);
         Sci_Position matchStart = (Sci_Position)SendMessageA(hEdit, SCI_SEARCHINTARGET, (WPARAM)prefixLen, (LPARAM)prefix);
         if (matchStart < 0) break;
         Sci_Position matchTargetEnd = (Sci_Position)SendMessageA(hEdit, SCI_GETTARGETEND, 0, 0);
