@@ -310,6 +310,10 @@ function editor.scroll_to(position) end
 ---@field word_start boolean|nil
 ---@field regex boolean|nil
 
+---Finds text, or with `options.regex` a pattern, from `start` onward.
+---Raises an error instead of searching if the pattern looks like classic
+---catastrophic backtracking (e.g. `(a+)+`), or if a regex search would span
+---more than 1,000,000 characters.
 ---@param text string
 ---@param start? integer
 ---@param options? MarkEditFindOptions

@@ -297,7 +297,7 @@ editor.replace_selections(replacements)
 | `editor.language()` | How MarkEdit is treating the document: `"markdown"`, `"json"`, `"xml"`, `"html"`, `"yaml"`, `"cpp"` (C, C++, JavaScript, and TypeScript), `"python"`, `"bash"`, `"powershell"`, `"lua"`, `"css"`, `"sql"`, `"ini"` (also `.cfg`, `.conf` and `.properties`), `"toml"`, `"batch"` (`.bat` and `.cmd`), `"makefile"`, or `"text"`. |
 | `editor.modified()` / `editor.read_only([value])` | The modified and read-only states. |
 | `editor.visible_range()` / `editor.scroll_to(position)` | The visible byte range, or move the caret to a position and scroll it into view. Moving the caret replaces the selections, so select after scrolling. |
-| `editor.find(text [, start [, options]])` | Finds text; options support `match_case`, `whole_word`, `word_start`, and `regex`. Returns the matching range or `nil`. |
+| `editor.find(text [, start [, options]])` | Finds text; options support `match_case`, `whole_word`, `word_start`, and `regex`. Returns the matching range or `nil`. A `regex` pattern that looks like classic catastrophic backtracking (e.g. `(a+)+`), or a search spanning more than 1,000,000 characters, raises an error instead of running. |
 | `editor.annotation(...)`, `editor.marker(...)` | Adds/removes line annotations and markers; matching clear functions remove them. |
 | `editor.indicator(...)` / `editor.clear_indicator(...)` | Adds or removes temporary highlighted ranges using plugin indicator numbers 8–19. Markers use the same reserved numeric range so they cannot overwrite MarkEdit's bookmarks, debugger markers, folding markers, or spelling indicator. |
 | `editor.fold(line [, expanded])` / `editor.style_at(position)` | Controls folding and reads the lexer style at a position. |
