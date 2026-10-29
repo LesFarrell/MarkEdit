@@ -1,10 +1,10 @@
 /*
  * outline_minimap.c - the document outline pane and the minimap overview.
  *
- * The outline listbox and the minimap are views over the active Scintilla
- * document: the listbox is rebuilt from the active document's ATX headings,
- * and the minimap is a second Scintilla view that mirrors the main editor's
- * scroll position. Both are created by markedit.c, so this module drives them
+ * The outline listbox is rebuilt from the active Scintilla document's ATX
+ * headings. The minimap uses a throttled snapshot of that document and
+ * mirrors the main editor's scroll position without joining its live edit
+ * notifications. Both are created by markedit.c, so this module drives them
  * through the OutlineMinimapHost table handed in by outline_minimap_init()
  * rather than reaching into markedit.c's translation-unit statics by name.
  */
@@ -30,6 +30,7 @@
 #define MINIMAP_EXTRA_DESCENT (-3)
 
 static const OutlineMinimapHost *g_host = NULL;
+static int g_minimapPaintDeferred = 0;
 
 void outline_minimap_init(const OutlineMinimapHost *host) {
     g_host = host;
@@ -111,9 +112,8 @@ static void add_outline_heading(const char *title, int titleLength, int level, S
     free(wide);
 }
 
-/* Reads the lines straight from Scintilla's buffer rather than asking the
-   lexer which are headings: Scintilla styles text lazily, as it's shown,
-   so lines it hasn't reached yet would be missed. */
+/* Reads the text rather than asking the lexer which lines are headings:
+   Scintilla styles lazily, so lines it has not displayed could be missed. */
 void update_outline(void) {
     if (!(*g_host->outline)) return;
     SendMessageW(*g_host->outline, LB_RESETCONTENT, 0, 0);
@@ -123,15 +123,16 @@ void update_outline(void) {
        rebuilds it when the pane is shown, so a hidden pane skips the scan. */
     if (!g_outlineVisible || *g_host->activeLanguage != LANG_MARKDOWN) return;
     HWND edit = *g_host->edit;
-    const char *text = (const char *)SendMessageA(edit, SCI_GETCHARACTERPOINTER, 0, 0);
+    Sci_Position length = (Sci_Position)SendMessageA(edit, SCI_GETLENGTH, 0, 0);
+    char *text = (char *)malloc((size_t)length + 1);
     if (!text) return;
+    SendMessageA(edit, SCI_GETTEXT, (WPARAM)(length + 1), (LPARAM)text);
     /* Suspend repainting so re-adding every heading doesn't flicker. */
     SendMessageW(*g_host->outline, WM_SETREDRAW, FALSE, 0);
     OutlineScan scan = {0};
-    /* Walk the stable character buffer directly. Asking Scintilla for both
-       endpoints of every line made a large outline pay two window-message
-       round trips per source line even though the text is already here. */
-    Sci_Position length = (Sci_Position)SendMessageA(edit, SCI_GETLENGTH, 0, 0);
+    /* Walk the copy directly. Asking Scintilla for both endpoints of every
+       line would pay two window-message round trips per source line, while
+       GETCHARACTERPOINTER would close the gap buffer and slow the next edit. */
     Sci_Position position = 0;
     Sci_Position lineNumber = 0;
     while (position < length && *g_host->outlineCount < OUTLINE_MAX_HEADINGS) {
@@ -147,6 +148,7 @@ void update_outline(void) {
         if (position < length && text[position] == '\n') position++;
         lineNumber++;
     }
+    free(text);
     SendMessageW(*g_host->outline, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(*g_host->outline, NULL, TRUE);
 }
@@ -213,7 +215,13 @@ void update_minimap_viewport(void) {
         if (minimapFirstDocLine < 0) minimapFirstDocLine = 0;
     }
     Sci_Position minimapFirstVisible = (Sci_Position)SendMessageA(*g_host->minimap, SCI_VISIBLEFROMDOCLINE, (WPARAM)minimapFirstDocLine, 0);
-    SendMessageA(*g_host->minimap, SCI_SETFIRSTVISIBLELINE, (WPARAM)minimapFirstVisible, 0);
+    Sci_Position currentMinimapFirstVisible = (Sci_Position)SendMessageA(
+        *g_host->minimap, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    /* Scintilla repaints after SCI_SETFIRSTVISIBLELINE even if the value did
+       not change. The repaint can produce another shared-document content
+       update, so only send the scroll command when the minimap really moved. */
+    if (minimapFirstVisible != currentMinimapFirstVisible)
+        SendMessageA(*g_host->minimap, SCI_SETFIRSTVISIBLELINE, (WPARAM)minimapFirstVisible, 0);
 
     /* Pixels within the minimap: the clamping above keeps the main view's
        first line within one minimap height of the minimap's own. */
@@ -221,12 +229,76 @@ void update_minimap_viewport(void) {
     int newViewHeight = (int)mainLinesOnScreen * minimapLineHeight;
     if (newViewHeight < 4) newViewHeight = 4;
 
-    /* This runs on every caret move/scroll tick (see SCN_UPDATEUI), so only
-       repaint the visible-region box when it actually moved or resized. */
+    /* Only repaint the visible-region box when it moved or resized. During
+       typing the shell has redraw suspended, so this invalidation is folded
+       into the single deferred minimap refresh. */
     if (newViewTop == *g_host->minimapViewTop && newViewHeight == *g_host->minimapViewHeight) return;
     *g_host->minimapViewTop = newViewTop;
     *g_host->minimapViewHeight = newViewHeight;
     InvalidateRect(*g_host->minimap, NULL, FALSE);
+}
+
+void defer_minimap_paint(void) {
+    g_minimapPaintDeferred = 1;
+}
+
+void refresh_minimap_after_edit(void) {
+    if (!(*g_host->minimap) || !g_minimapVisible ||
+        !IsWindowVisible(*g_host->minimap)) return;
+
+    HWND edit = *g_host->edit;
+    HWND minimap = *g_host->minimap;
+    Sci_Position length = (Sci_Position)SendMessageA(edit, SCI_GETLENGTH, 0, 0);
+    char *text = (char *)malloc((size_t)length + 1);
+    if (!text) return;
+    SendMessageA(edit, SCI_GETTEXT, (WPARAM)(length + 1), (LPARAM)text);
+
+    /* The minimap's independent document is the key edit-path optimisation:
+       replacing this snapshot here means Backspace never synchronously makes
+       the minimap process the live document change. Redraw remains disabled
+       until the complete snapshot and its styling are ready. */
+    SendMessageA(minimap, WM_SETREDRAW, FALSE, 0);
+    SendMessageA(minimap, SCI_SETREADONLY, FALSE, 0);
+    SendMessageA(minimap, SCI_SETTEXT, 0, (LPARAM)text);
+    SendMessageA(minimap, SCI_SETREADONLY, TRUE, 0);
+    if (!g_host->largeFile()) SendMessageA(minimap, SCI_COLOURISE, 0, (LPARAM)-1);
+    SendMessageA(minimap, WM_SETREDRAW, TRUE, 0);
+    free(text);
+
+    g_minimapPaintDeferred = 0;
+    update_minimap_viewport();
+    InvalidateRect(*g_host->minimap, NULL, FALSE);
+}
+
+/* Draws the viewport shade and frame onto the same surface as the minimap
+   text. The caller presents that completed surface in one BitBlt, avoiding
+   the visible text-then-overlay sequence of two direct screen paints. */
+static void paint_minimap_viewport(HDC hdc, const RECT *clientRect) {
+    RECT box = {
+        clientRect->left,
+        *g_host->minimapViewTop,
+        clientRect->right,
+        *g_host->minimapViewTop + *g_host->minimapViewHeight
+    };
+    if (box.top < clientRect->top) box.top = clientRect->top;
+    if (box.bottom > clientRect->bottom) box.bottom = clientRect->bottom;
+    if (box.bottom <= box.top) return;
+
+    HBRUSH brush = CreateSolidBrush(theme_palette()->minimapFrame);
+    HDC shadeDc = CreateCompatibleDC(hdc);
+    HBITMAP shadeBmp = CreateCompatibleBitmap(hdc, 1, 1);
+    if (brush && shadeDc && shadeBmp) {
+        HGDIOBJ oldBmp = SelectObject(shadeDc, shadeBmp);
+        SetPixel(shadeDc, 0, 0, theme_palette()->minimapFrame);
+        BLENDFUNCTION blend = { AC_SRC_OVER, 0, THEME_MINIMAP_SHADE_ALPHA, 0 };
+        AlphaBlend(hdc, box.left, box.top, box.right - box.left, box.bottom - box.top,
+                   shadeDc, 0, 0, 1, 1, blend);
+        SelectObject(shadeDc, oldBmp);
+        FrameRect(hdc, &box, brush);
+    }
+    if (shadeBmp) DeleteObject(shadeBmp);
+    if (shadeDc) DeleteDC(shadeDc);
+    if (brush) DeleteObject(brush);
 }
 
 /* Scrolls the main editor so the document line under minimap-local y is
@@ -274,32 +346,38 @@ LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (*g_host->edit) SendMessageA(g_host->trackedEditView(), WM_MOUSEWHEEL, wParam, lParam);
             return 0;
         case WM_PAINT: {
-            LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+            if (g_minimapPaintDeferred) {
+                /* Scintilla invalidates every view of a shared document on
+                   each edit. Preserve the current minimap pixels until the
+                   throttled refresh instead of painting every character. */
+                ValidateRect(hwnd, NULL);
+                return 0;
+            }
+            PAINTSTRUCT paint;
+            HDC paintDc = BeginPaint(hwnd, &paint);
             RECT rc;
             GetClientRect(hwnd, &rc);
-            RECT box = { rc.left, *g_host->minimapViewTop, rc.right, *g_host->minimapViewTop + *g_host->minimapViewHeight };
-            if (box.top < rc.top) box.top = rc.top;
-            if (box.bottom > rc.bottom) box.bottom = rc.bottom;
-            if (box.bottom > box.top) {
-                HDC hdc = GetDC(hwnd);
-                HBRUSH brush = CreateSolidBrush(theme_palette()->minimapFrame);
-                /* Translucent shade: stretch a 1x1 bitmap of the frame colour
-                   over the box, then outline it solidly. */
-                HDC shadeDc = CreateCompatibleDC(hdc);
-                HBITMAP shadeBmp = CreateCompatibleBitmap(hdc, 1, 1);
-                HGDIOBJ oldBmp = SelectObject(shadeDc, shadeBmp);
-                SetPixel(shadeDc, 0, 0, theme_palette()->minimapFrame);
-                BLENDFUNCTION blend = { AC_SRC_OVER, 0, THEME_MINIMAP_SHADE_ALPHA, 0 };
-                AlphaBlend(hdc, box.left, box.top, box.right - box.left, box.bottom - box.top,
-                           shadeDc, 0, 0, 1, 1, blend);
-                SelectObject(shadeDc, oldBmp);
-                DeleteObject(shadeBmp);
-                DeleteDC(shadeDc);
-                FrameRect(hdc, &box, brush);
-                DeleteObject(brush);
-                ReleaseDC(hwnd, hdc);
+            int width = rc.right - rc.left;
+            int height = rc.bottom - rc.top;
+            HDC bufferDc = width > 0 && height > 0 ? CreateCompatibleDC(paintDc) : NULL;
+            HBITMAP bufferBmp = bufferDc ? CreateCompatibleBitmap(paintDc, width, height) : NULL;
+            HGDIOBJ oldBmp = bufferBmp ? SelectObject(bufferDc, bufferBmp) : NULL;
+            HDC drawDc = bufferBmp ? bufferDc : paintDc;
+
+            /* Scintilla's WM_PRINTCLIENT paints its complete client into the
+               supplied compatible DC without presenting an intermediate
+               frame to the screen. */
+            DefSubclassProc(hwnd, WM_PRINTCLIENT, (WPARAM)drawDc, PRF_CLIENT);
+            paint_minimap_viewport(drawDc, &rc);
+            if (bufferBmp) {
+                BitBlt(paintDc, rc.left, rc.top, width, height,
+                       bufferDc, rc.left, rc.top, SRCCOPY);
+                SelectObject(bufferDc, oldBmp);
+                DeleteObject(bufferBmp);
             }
-            return result;
+            if (bufferDc) DeleteDC(bufferDc);
+            EndPaint(hwnd, &paint);
+            return 0;
         }
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, MinimapSubclassProc, 1);
@@ -311,6 +389,7 @@ LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 void toggle_minimap(HWND hwnd) {
     g_minimapVisible = !g_minimapVisible;
     g_host->relayoutAndSave(hwnd);
+    if (g_minimapVisible) refresh_minimap_after_edit();
 }
 
 void toggle_split_editor(HWND hwnd, int vertical) {
@@ -323,6 +402,7 @@ void toggle_split_editor(HWND hwnd, int vertical) {
         g_splitEditorVertical = vertical;
         g_splitEditorVisible = 1;
     }
+    g_host->syncSplitDocument();
     g_host->relayoutAndSave(hwnd);
 }
 

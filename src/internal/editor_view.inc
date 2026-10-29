@@ -174,6 +174,7 @@ static void apply_editor_theme(HWND hEdit) {
    large-file document is always plain text: its document has no style
    storage to lex into (see read_large_file_document()). */
 static void apply_language_to_view(HWND hEdit, const WCHAR *path) {
+    int isMinimap = hEdit == g_hMinimap;
     const LanguageInfo *language = g_largeFile ? &LANGUAGES[LANG_TEXT] : language_for_path(path);
     g_activeLanguage = language->id;
 
@@ -193,22 +194,25 @@ static void apply_language_to_view(HWND hEdit, const WCHAR *path) {
     SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold.compact", (LPARAM)"0");
     SendMessageA(hEdit, SCI_SETPROPERTY, (WPARAM)"fold.html", (LPARAM)"1");
     SendMessageA(hEdit, SCI_SETMARGINWIDTHN, MARGIN_FOLD,
-                 language->folds ? FOLD_MARGIN_WIDTH : 0);
+                 !isMinimap && language->folds ? FOLD_MARGIN_WIDTH : 0);
 
     apply_editor_theme(hEdit);
-    apply_word_wrap(hEdit);
+    if (isMinimap) {
+        SendMessageA(hEdit, SCI_SETWRAPMODE, SC_WRAP_NONE, 0);
+        strip_minimap_bold();
+    } else {
+        apply_word_wrap(hEdit);
+    }
     if (!g_largeFile) SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
 
-    /* Style bytes live in the shared Scintilla document, but the colours
-       assigned to those style numbers belong to each view. Keep the minimap's
-       palette in step when the main view changes language (tab switches,
-       Open, Save As, and large-file mode all come through here). It does not
-       need its own lexer or a second colourising pass. */
+    /* The minimap owns a throttled snapshot rather than the live document,
+       so it also needs a lexer. Refresh its snapshot after configuring that
+       lexer whenever a tab, path, or large-file mode changes. */
     if (hEdit == g_hEdit && g_hMinimap) {
-        apply_editor_theme(g_hMinimap);
-        strip_minimap_bold();
+        apply_language_to_view(g_hMinimap, path);
+        refresh_minimap_after_edit();
     }
-    schedule_spell_check();
+    if (!isMinimap) schedule_spell_check();
 }
 
 /* Applies the language for `path` to every editable view of the active

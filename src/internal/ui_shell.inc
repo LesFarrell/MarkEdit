@@ -1096,6 +1096,7 @@ static void toggle_preview(HWND hwnd) {
 static void toggle_editor(HWND hwnd) {
     if (g_editorVisible && !g_previewVisible) return; /* would leave nothing visible */
     g_editorVisible = !g_editorVisible;
+    sync_split_editor_document();
     relayout_and_save(hwnd);
 }
 
@@ -1115,6 +1116,7 @@ static void toggle_panel_sides(HWND hwnd) {
 
 static void toggle_focus_mode(HWND hwnd) {
     g_focusMode = !g_focusMode;
+    sync_split_editor_document();
     refresh_menu(hwnd);
     layout(hwnd);
     InvalidateRect(hwnd, NULL, TRUE);

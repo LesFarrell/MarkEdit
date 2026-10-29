@@ -109,6 +109,7 @@ static int g_lastPluginLoadSucceeded = 1;
 /* Set when plugin code changes save metadata without modifying Scintilla's
    text buffer, so dirty-state reconciliation preserves that change. */
 static int g_pluginChangedSaveEncoding = 0;
+static int g_pluginConfigChanged = 0;
 static HACCEL create_main_accelerators(void);
 static void rebuild_main_accelerators(void);
 /* Font face/weight/point-size: see settings.h for MAX_FONT_FACE_NAME's
@@ -283,6 +284,10 @@ int g_splitEditorRatio = 500; /* main pane size as thousandths of the editor reg
 int g_splitEditorVertical = 0; /* nonzero places the second pane to the right instead of below */
 static int g_splitEditorPos = -1; /* pixel position along the split axis, local to the editor region */
 static RECT g_splitEditorSplitterRect = {0};
+/* The hidden split pane rests on its own empty document instead of observing
+   every edit made to the active tab. This explicit reference keeps that
+   document alive while the pane is temporarily attached elsewhere. */
+static sptr_t g_splitScratchDocument = 0;
 
 static HWND tracked_edit_view(void) {
     if (g_lastEditView == g_hSplitEdit && g_hSplitEdit && g_splitEditorVisible)
@@ -539,6 +544,8 @@ static void create_editor_views(HWND hwnd) {
         0, 0, 0, 0, hwnd, (HMENU)ID_SPLIT_EDIT, GetModuleHandleA(NULL), NULL);
     SetWindowSubclass(g_hSplitEdit, EditSubclassProc, 3, 0);
     configure_scintilla(g_hSplitEdit);
+    g_splitScratchDocument = (sptr_t)SendMessageA(g_hSplitEdit, SCI_GETDOCPOINTER, 0, 0);
+    SendMessageA(g_hSplitEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_splitScratchDocument);
     g_lastEditView = g_hEdit;
 
     apply_editor_font();
@@ -550,8 +557,7 @@ static void initialize_first_document(void) {
     memset(&g_documentStore.documents[0], 0, sizeof(g_documentStore.documents[0]));
     g_documentStore.documents[0].sciDocument = (sptr_t)SendMessageA(g_hEdit, SCI_GETDOCPOINTER, 0, 0);
     SendMessageA(g_hEdit, SCI_ADDREFDOCUMENT, 0, (LPARAM)g_documentStore.documents[0].sciDocument);
-    SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[0].sciDocument);
-    SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)g_documentStore.documents[0].sciDocument);
+    sync_split_editor_document();
     /* The sole blank startup tab is the unnumbered canonical document. */
     g_documentStore.documents[0].untitledNumber = 0;
     TCITEMW firstTab = {0};
@@ -638,15 +644,25 @@ static void run_deferred_startup_init(void) {
 }
 
 static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotification *scn) {
-    g_lastEditView = editor;
+    /* A shared document can produce UI notifications from both editor views.
+       Only the pane the user is actually working in should drive caret,
+       brace, preview-scroll, and plugin-selection updates. */
+    if (GetFocus() == editor) g_lastEditView = editor;
+    if (editor != tracked_edit_view()) return;
     if ((scn->updated & SC_UPDATE_V_SCROLL) && g_editorVisible && g_previewVisible) {
             if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
             else SetTimer(hwnd, IDT_SCROLL_SYNC, SCROLL_SYNC_DELAY_MS, NULL);
     }
-    update_brace_highlight(editor);
-    update_status_position();
-    update_minimap_viewport();
-    if (scn->updated & SC_UPDATE_SELECTION) SetTimer(hwnd, IDT_PLUGIN_SELECTION, PLUGIN_SELECTION_DELAY_MS, NULL);
+    if (scn->updated & SC_UPDATE_V_SCROLL) schedule_visible_spell_check();
+    if (scn->updated & SC_UPDATE_SELECTION) {
+        /* Brace matching and column calculation can both scan beyond the
+           changed byte. Coalesce them with the existing selection debounce
+           instead of doing them inside every key notification. */
+        SetTimer(hwnd, IDT_PLUGIN_SELECTION, PLUGIN_SELECTION_DELAY_MS, NULL);
+    }
+    if (g_hMinimap && g_minimapVisible && IsWindowVisible(g_hMinimap) &&
+        (scn->updated & SC_UPDATE_V_SCROLL))
+        update_minimap_viewport();
 }
 
 static void handle_editor_margin_click(const struct SCNotification *scn) {
@@ -692,19 +708,38 @@ static void schedule_updates_after_edit(HWND hwnd, const struct SCNotification *
     if (!g_largeFile && g_previewVisible && g_activeLanguage != LANG_HTML &&
         editLength <= LIVE_PREVIEW_MAX_LENGTH)
         SetTimer(hwnd, IDT_PREVIEW_UPDATE, PREVIEW_UPDATE_DELAY_MS, NULL);
-    if (!g_largeFile) schedule_spell_check();
+    if (!g_largeFile) schedule_visible_spell_check();
 
     /* Full-document status and outline scans are debounced across typing. */
     SetTimer(hwnd, IDT_STATUS_UPDATE, STATUS_UPDATE_DELAY_MS, NULL);
-    if (!g_largeFile) SetTimer(hwnd, IDT_OUTLINE_UPDATE, OUTLINE_UPDATE_DELAY_MS, NULL);
+    if (!g_largeFile && g_outlineVisible && g_activeLanguage == LANG_MARKDOWN)
+        SetTimer(hwnd, IDT_OUTLINE_UPDATE, OUTLINE_UPDATE_DELAY_MS, NULL);
     if (scn->linesAdded != 0) {
         update_linenumber_margin_width(g_hEdit);
         if (g_hSplitEdit) update_linenumber_margin_width(g_hSplitEdit);
     }
 }
 
+/* Character edits are coalesced until the editor has been idle for the timer
+   interval. A newline insertion/deletion shifts every following minimap row,
+   so that structural change is refreshed immediately instead. */
+static void schedule_minimap_after_edit(HWND hwnd, const struct SCNotification *scn) {
+    if (!g_hMinimap || !g_minimapVisible || !IsWindowVisible(g_hMinimap)) return;
+    if (scn->linesAdded != 0) {
+        KillTimer(hwnd, IDT_MINIMAP_UPDATE);
+        refresh_minimap_after_edit();
+    } else {
+        defer_minimap_paint();
+        /* Resetting the existing timer prevents a full minimap repaint in
+           the middle of a typing or Backspace burst. */
+        SetTimer(hwnd, IDT_MINIMAP_UPDATE, MINIMAP_UPDATE_DELAY_MS, NULL);
+    }
+}
+
 static void handle_document_modified(HWND hwnd, const struct SCNotification *scn) {
     if (!(scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT))) return;
+
+    schedule_minimap_after_edit(hwnd, scn);
 
     /* Everything below is document-level bookkeeping, not view-level, so it
        applies regardless of which pane the edit came from - both panes are
@@ -735,7 +770,11 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
             handle_editor_margin_click(scn);
             break;
         case SCN_MODIFIED:
-            handle_document_modified(hwnd, scn);
+            /* Every view of the shared Scintilla document receives the same
+               modification. Use the main view as the canonical notification
+               so split-editor mode does not run document bookkeeping twice. */
+            if (notification->hwndFrom == g_hEdit)
+                handle_document_modified(hwnd, scn);
             break;
     }
 }
@@ -756,9 +795,15 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_EXPLORER_REFRESH);
     KillTimer(hwnd, IDT_PLUGIN_STATUS);
     KillTimer(hwnd, IDT_PLUGIN_SELECTION);
+    KillTimer(hwnd, IDT_MINIMAP_UPDATE);
     explorer_shutdown();
     shutdown_output_panel();
+    plugin_config_cache_clear();
     plugin_host_shutdown();
+    if (g_splitScratchDocument) {
+        SendMessageA(g_hSplitEdit, SCI_RELEASEDOCUMENT, 0, (LPARAM)g_splitScratchDocument);
+        g_splitScratchDocument = 0;
+    }
     stop_debug_location_tracking();
     if (g_webview && g_webMessageRegistered) {
         ICoreWebView2_remove_WebMessageReceived(g_webview, g_webMessageToken);
@@ -895,7 +940,13 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
             break;
         case IDT_PLUGIN_SELECTION:
             KillTimer(hwnd, IDT_PLUGIN_SELECTION);
+            update_brace_highlight(tracked_edit_view());
+            update_status_position();
             fire_plugin_event("selection_changed", g_currentFile);
+            break;
+        case IDT_MINIMAP_UPDATE:
+            KillTimer(hwnd, IDT_MINIMAP_UPDATE);
+            refresh_minimap_after_edit();
             break;
         default: return 0;
     }

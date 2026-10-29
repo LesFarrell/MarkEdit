@@ -124,16 +124,42 @@ static void record_document_file_time(int index) {
     free(ioPath);
 }
 
-/* Swaps the shared document pointer for the main editor, its minimap, and
-   its split pane (if any), keeping all of them in sync with whichever tab is
-   active. Not used for the transient peeks in get_document_text() and
-   clear_debug_execution_markers(), which restore the original pointer
-   before returning and would otherwise flash the minimap/split pane at an
-   unrelated document. */
+/* A hidden Scintilla view still observes and lays out changes to a shared
+   document. Keep the secondary editor on a private empty document until it
+   is genuinely visible, then attach it to the active tab and start it at the
+   main pane's current location. */
+static void sync_split_editor_document(void) {
+    if (!g_hSplitEdit || !g_splitScratchDocument || g_documentStore.count <= 0) return;
+    int visible = g_splitEditorVisible && g_editorVisible && !g_focusMode;
+    sptr_t desired = visible
+        ? g_documentStore.documents[g_documentStore.active].sciDocument
+        : g_splitScratchDocument;
+    sptr_t current = (sptr_t)SendMessageA(g_hSplitEdit, SCI_GETDOCPOINTER, 0, 0);
+    if (current == desired) return;
+
+    if (!visible && GetFocus() == g_hSplitEdit) SetFocus(g_hEdit);
+    SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)desired);
+    if (visible) {
+        Sci_Position anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
+        Sci_Position caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
+        Sci_Position first = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
+        SendMessageA(g_hSplitEdit, SCI_SETSEL, (WPARAM)anchor, (LPARAM)caret);
+        SendMessageA(g_hSplitEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)first, 0);
+        remeasure_linenumber_margin(g_hSplitEdit);
+    } else {
+        g_lastEditView = g_hEdit;
+    }
+}
+
+/* Swaps the shared document pointer for the editable views, keeping them in
+   sync with whichever tab is active. The minimap deliberately owns a
+   separate snapshot document so normal edits do not make its Scintilla view
+   process every byte change before the throttled refresh. Not used for the
+   transient peeks in get_document_text() and clear_debug_execution_markers(),
+   which restore the original pointer before returning. */
 static void set_active_editor_document(sptr_t doc) {
     SendMessageA(g_hEdit, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
-    if (g_hMinimap) SendMessageA(g_hMinimap, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
-    if (g_hSplitEdit) SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)doc);
+    sync_split_editor_document();
 }
 
 static void switch_document(int index) {

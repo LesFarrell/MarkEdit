@@ -100,6 +100,10 @@ void reset_undo_history(HWND hEdit) {
 void configure_scintilla_editing(HWND hEdit) {
     SendMessageA(hEdit, SCI_SETCODEPAGE, SC_CP_UTF8, 0);
     SendMessageA(hEdit, SCI_SETEOLMODE, SC_EOL_CRLF, 0);
+    /* Bound lexer work performed while painting after an edit. Scintilla
+       styles in short foreground chunks and finishes the visible range while
+       idle, keeping long multiline constructs from blocking key handling. */
+    SendMessageA(hEdit, SCI_SETIDLESTYLING, SC_IDLESTYLING_TOVISIBLE, 0);
     apply_indentation(hEdit);
     SendMessageA(hEdit, SCI_SETINDENT, 0, 0); /* 0 = indent width follows tab width */
     SendMessageA(hEdit, SCI_SETMODEVENTMASK, SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT, 0);

@@ -9,9 +9,10 @@
    sizes markedit.c's own g_outlineLines table, which the module writes. */
 #define OUTLINE_MAX_HEADINGS 1024
 
-/* The outline/minimap module is a self-contained view over the shared
-   Scintilla document: the outline listbox and the minimap are windows it
-   creates nothing of (markedit.c creates them) and state it does not own.
+/* The outline/minimap module is a self-contained view over the active
+   Scintilla document: the outline reads it directly, while the minimap keeps
+   a throttled snapshot. Both windows are created by markedit.c and their
+   state is owned by the shell.
    Rather than reaching into markedit.c's translation-unit statics by name,
    the shell hands in this table once at startup. Members that point into
    live shell state are followed on each use, so a later change to the
@@ -40,6 +41,7 @@ typedef struct OutlineMinimapHost {
 
     /* Shell helpers static to markedit.c, passed in rather than duplicated. */
     HWND (*trackedEditView)(void);
+    void (*syncSplitDocument)(void);
     void (*relayoutAndSave)(HWND hwnd);
     void (*layout)(HWND hwnd);
 } OutlineMinimapHost;
@@ -75,6 +77,10 @@ void configure_minimap(HWND hMinimap);
 
 /* Recomputes the minimap's scroll position and its visible-region box. */
 void update_minimap_viewport(void);
+
+/* Coalesces snapshot updates while the active document is being edited. */
+void defer_minimap_paint(void);
+void refresh_minimap_after_edit(void);
 
 /* Flips the minimap pane's visibility and relayouts. */
 void toggle_minimap(HWND hwnd);

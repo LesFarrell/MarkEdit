@@ -23,6 +23,7 @@ static void init_outline_minimap(void) {
     host.splitEditorPos = &g_splitEditorPos;
     host.largeFile = outline_large_file_active;
     host.trackedEditView = tracked_edit_view;
+    host.syncSplitDocument = sync_split_editor_document;
     host.relayoutAndSave = relayout_and_save;
     host.layout = layout;
     outline_minimap_init(&host);

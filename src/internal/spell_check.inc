@@ -125,8 +125,26 @@ static int markdown_style_is_prose(int style) {
            style == SCE_MARKDOWN_BLOCKQUOTE || style == SCE_MARKDOWN_STRIKEOUT;
 }
 
+/* A full scan is still useful after opening a file, changing language, or
+   changing dictionaries. Ordinary edits and scrolling only need the text
+   around the visible viewport; existing indicators elsewhere move with the
+   Scintilla document and remain valid. */
+static int g_fullSpellCheckPending = 1;
+
 static void schedule_spell_check(void) {
     if (!g_hMainWnd) return;
+    if (g_largeFile) {
+        KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
+        return;
+    }
+    g_fullSpellCheckPending = 1;
+    SetTimer(g_hMainWnd, IDT_SPELL_CHECK, SPELL_CHECK_DELAY_MS, NULL);
+}
+
+static void schedule_visible_spell_check(void) {
+    if (!g_hMainWnd) return;
+    if (!g_spellCheckEnabled || !g_spellChecker ||
+        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT)) return;
     if (g_largeFile) {
         KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
         return;
@@ -134,16 +152,9 @@ static void schedule_spell_check(void) {
     SetTimer(g_hMainWnd, IDT_SPELL_CHECK, SPELL_CHECK_DELAY_MS, NULL);
 }
 
-/* ISpellChecker_Check() below is a single synchronous COM call over the
-   *entire* document (there's no incremental/ranged spellcheck API), run
-   right on the UI thread with no chunking or background thread. That's
-   unnoticeable at normal typing volume, since each keystroke rechecks a
-   document that's already close to this size - but pasting a large block
-   makes the document balloon in one step, and the native spellchecker is
-   slow per byte, so the very next check after a big paste can block the UI
-   thread (and the whole app's message pump) for a long, visible stretch.
-   Skipping the check above this size trades spelling squiggles in huge
-   documents for not freezing on every large paste. */
+/* A full ISpellChecker_Check() is a synchronous COM call on the UI thread.
+   Bound one-off full scans to this size; larger ordinary documents are still
+   checked in the small visible ranges scheduled by edits and scrolling. */
 #define SPELLCHECK_MAX_LENGTH (256 * 1024)
 
 static void perform_spell_check(void) {
@@ -153,19 +164,57 @@ static void perform_spell_check(void) {
 
     Sci_Position textLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
-    SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
     if (!g_spellCheckEnabled || !g_spellChecker ||
-        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT) ||
-        textLength <= 0 || textLength > SPELLCHECK_MAX_LENGTH) return;
+        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT)) {
+        SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
+        g_fullSpellCheckPending = 0;
+        return;
+    }
+
+    int fullCheck = g_fullSpellCheckPending;
+    g_fullSpellCheckPending = 0;
+    if (textLength <= 0) return;
+    if (fullCheck && textLength > SPELLCHECK_MAX_LENGTH) {
+        /* Large ordinary documents are checked lazily as their text becomes
+           visible instead of freezing the UI for one oversized COM call. */
+        SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
+        return;
+    }
+
+    Sci_Position rangeStart = 0;
+    Sci_Position rangeEnd = textLength;
+    if (!fullCheck) {
+        HWND view = tracked_edit_view();
+        Sci_Position firstVisible = (Sci_Position)SendMessageA(view, SCI_GETFIRSTVISIBLELINE, 0, 0);
+        Sci_Position visibleCount = (Sci_Position)SendMessageA(view, SCI_LINESONSCREEN, 0, 0);
+        Sci_Position firstLine = (Sci_Position)SendMessageA(
+            view, SCI_DOCLINEFROMVISIBLE, (WPARAM)firstVisible, 0);
+        Sci_Position lastLine = (Sci_Position)SendMessageA(
+            view, SCI_DOCLINEFROMVISIBLE, (WPARAM)(firstVisible + visibleCount), 0);
+        Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
+        if (firstLine > 0) firstLine--;
+        if (lastLine + 1 < lineCount) lastLine++;
+        rangeStart = (Sci_Position)SendMessageA(
+            g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+        rangeEnd = lastLine + 1 < lineCount
+            ? (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(lastLine + 1), 0)
+            : textLength;
+        if (rangeStart < 0) rangeStart = 0;
+        if (rangeEnd > textLength) rangeEnd = textLength;
+    }
+    Sci_Position rangeLength = rangeEnd - rangeStart;
+    if (rangeLength <= 0) return;
+
+    SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE,
+                 (WPARAM)rangeStart, (LPARAM)rangeLength);
 
     /* Ensure the Markdown styles used to exclude code and links are current. */
-    SendMessageA(g_hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
-    Sci_Position ignoredLength = 0;
-    char *utf8 = get_edit_text(g_hEdit, &ignoredLength);
+    SendMessageA(g_hEdit, SCI_COLOURISE, (WPARAM)rangeStart, (LPARAM)rangeEnd);
+    char *utf8 = get_text_range(g_hEdit, rangeStart, rangeEnd);
     if (!utf8) return;
 
     int wideLength = 0;
-    WCHAR *wide = to_wide_n(utf8, (size_t)textLength, &wideLength);
+    WCHAR *wide = to_wide_n(utf8, (size_t)rangeLength, &wideLength);
     if (!wide || wideLength <= 0) {
         free(wide);
         free(utf8);
@@ -188,16 +237,17 @@ static void perform_spell_check(void) {
                     NULL, 0, NULL, NULL);
                 int byteSpan = WideCharToMultiByte(CP_UTF8, 0, wide + wideStart,
                     (int)wideSpan, NULL, 0, NULL, NULL);
+                Sci_Position absoluteStart = rangeStart + byteStart;
                 /* Plain text has no lexer at all (see the LANG_TEXT entry in
                    LANGUAGES) to distinguish code/links from prose the way
                    Markdown's does, so every character in it is spellable. */
                 int spellable = g_activeLanguage == LANG_TEXT || markdown_style_is_prose(
-                    (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)byteStart, 0));
-                if (byteSpan > 0 && byteStart >= 0 && byteStart + byteSpan <= textLength &&
+                    (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)absoluteStart, 0));
+                if (byteSpan > 0 && byteStart >= 0 && byteStart + byteSpan <= rangeLength &&
                     spellable) {
                     SendMessageA(g_hEdit, SCI_SETINDICATORVALUE, 1, 0);
                     SendMessageA(g_hEdit, SCI_INDICATORFILLRANGE,
-                                 (WPARAM)byteStart, (LPARAM)byteSpan);
+                                 (WPARAM)absoluteStart, (LPARAM)byteSpan);
                 }
             }
             ISpellingError_Release(error);

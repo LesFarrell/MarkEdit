@@ -413,6 +413,7 @@ static void sync_dirty_after_plugin(int wasDirty) {
 static void fire_plugin_event(const char *event, const WCHAR *path) {
     int wasDirty = g_dirty;
     g_pluginChangedSaveEncoding = 0;
+    g_pluginConfigChanged = 0;
     char *argument = path ? to_utf8(path) : NULL;
     char *report = plugin_host_fire(event, argument, g_hEdit);
     refresh_plugin_performance_problems();
@@ -420,9 +421,9 @@ static void fire_plugin_event(const char *event, const WCHAR *path) {
     sync_dirty_after_plugin(wasDirty);
     if (report) show_plugin_error(report);
     free(report);
-    /* A handler may change a menu.checkbox setting through config.set(),
-       as run_plugin_command() allows for commands. */
-    update_view_menu(g_hMainWnd);
+    /* Most high-frequency text/selection handlers only read configuration.
+       Rewalk the complete menu bar only when one actually changed it. */
+    if (g_pluginConfigChanged) update_view_menu(g_hMainWnd);
     /* A tab check that arrived while the handlers ran was put off. */
     if (!plugin_host_is_busy()) queue_plugin_tab_check();
 }

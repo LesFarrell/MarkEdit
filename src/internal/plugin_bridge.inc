@@ -352,10 +352,62 @@ static char *plugin_config_section(const char *plugin) {
     return section;
 }
 
+typedef struct PluginConfigCacheEntry {
+    char *plugin;
+    char *key;
+    char *value; /* NULL records a missing setting as a cache hit. */
+    struct PluginConfigCacheEntry *next;
+} PluginConfigCacheEntry;
+
+static PluginConfigCacheEntry *g_pluginConfigCache = NULL;
+
+static void plugin_config_cache_clear(void) {
+    while (g_pluginConfigCache) {
+        PluginConfigCacheEntry *next = g_pluginConfigCache->next;
+        free(g_pluginConfigCache->plugin);
+        free(g_pluginConfigCache->key);
+        free(g_pluginConfigCache->value);
+        free(g_pluginConfigCache);
+        g_pluginConfigCache = next;
+    }
+}
+
+static PluginConfigCacheEntry *plugin_config_cache_find(const char *plugin, const char *key) {
+    for (PluginConfigCacheEntry *entry = g_pluginConfigCache; entry; entry = entry->next)
+        if (strcmp(entry->plugin, plugin) == 0 && strcmp(entry->key, key) == 0)
+            return entry;
+    return NULL;
+}
+
+static void plugin_config_cache_put(const char *plugin, const char *key, const char *value) {
+    PluginConfigCacheEntry *entry = plugin_config_cache_find(plugin, key);
+    char *copy = value ? _strdup(value) : NULL;
+    if (value && !copy) return;
+    if (entry) {
+        free(entry->value);
+        entry->value = copy;
+        return;
+    }
+    entry = (PluginConfigCacheEntry *)calloc(1, sizeof(*entry));
+    if (!entry) { free(copy); return; }
+    entry->plugin = _strdup(plugin);
+    entry->key = _strdup(key);
+    entry->value = copy;
+    if (!entry->plugin || !entry->key) {
+        free(entry->plugin); free(entry->key); free(entry->value); free(entry);
+        return;
+    }
+    entry->next = g_pluginConfigCache;
+    g_pluginConfigCache = entry;
+}
+
 static char *plugin_config_get(const char *plugin, const char *key) {
+    PluginConfigCacheEntry *cached = plugin_config_cache_find(plugin, key);
+    if (cached) return cached->value ? _strdup(cached->value) : NULL;
     char *section = plugin_config_section(plugin);
     WCHAR *path = get_settings_path();
     char *value = path && section ? plugin_settings_get(path, section, key) : NULL;
+    plugin_config_cache_put(plugin, key, value);
     free(section);
     free(path);
     return value;
@@ -365,6 +417,10 @@ static int plugin_config_set(const char *plugin, const char *key, const char *va
     char *section = plugin_config_section(plugin);
     WCHAR *path = get_settings_path();
     int ok = path && section && plugin_settings_set(path, section, key, value);
+    if (ok) {
+        plugin_config_cache_put(plugin, key, value);
+        g_pluginConfigChanged = 1;
+    }
     free(section);
     free(path);
     return ok;
@@ -697,6 +753,9 @@ static void load_menus_and_plugins(void) {
         .output_show = plugin_output_show, .output_hide = plugin_output_hide,
         .output_visible = plugin_output_visible, .problems_report = plugin_problems_report,
     };
+    /* A reload is the explicit boundary at which edits made directly to the
+       settings file become visible to Lua configuration reads. */
+    plugin_config_cache_clear();
     plugin_host_set_callbacks(&callbacks);
     plugin_host_shutdown();
     char *report = load_builtin_formatting(load_menu_definition(load_theme_colours(NULL)));
