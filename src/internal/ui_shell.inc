@@ -155,7 +155,10 @@ static LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
    menus, so "/Tools" is the Tools menu itself, and they're placed in order
    among the commands. */
 
-#define PLUGIN_LABEL_MAX_PARTS 8
+/* Must match PLUGIN_MAX_CONTEXT_DEPTH (plugin_host.h) - editor_input.inc's
+   append_plugin_context_menu_items() sizes its parts[] array from that
+   constant and passes it to split_plugin_label() here. */
+#define PLUGIN_LABEL_MAX_PARTS PLUGIN_MAX_CONTEXT_DEPTH
 #define MENU_BAR_MAX_MENUS 24
 
 typedef struct {

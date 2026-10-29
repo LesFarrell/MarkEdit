@@ -24,6 +24,9 @@ static void flush_run(OutputRun *run) {
 }
 
 static void emit(OutputRun *run, int style, const char *text, size_t length) {
+    /* Every current caller bounds length well under sizeof(run->text), but
+       flush first on a run too big to ever fit rather than overflow it. */
+    if (length > sizeof(run->text)) length = sizeof(run->text);
     if (style != run->style || run->length + length > sizeof(run->text)) {
         flush_run(run);
         run->style = style;

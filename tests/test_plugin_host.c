@@ -570,6 +570,24 @@ static void test_editor_api(HWND editor) {
         "end)");
     set_document(editor, "abcabc");
     expect(run_ok(positions, editor), "find and scroll_to take 1-based positions");
+
+    int regex = load_ok("find-regex.lua",
+        "menu.add('Regex find', function()\n"
+        "  local s, f = editor.find('a+b', 1, {regex = true})\n"
+        "  assert(s == 1 and f == 4, 'a harmless regex still matches')\n"
+        "end)\n"
+        "menu.add('Catastrophic regex', function()\n"
+        "  editor.find('(a+)+b', 1, {regex = true})\n"
+        "end)\n"
+        "menu.add('Catastrophic regex, star', function()\n"
+        "  editor.find('([ab]*)*b', 1, {regex = true})\n"
+        "end)\n");
+    set_document(editor, "aaab");
+    expect(run_ok(regex, editor), "a non-catastrophic regex pattern is still allowed");
+    expect(run_fails(regex + 1, editor, "catastrophic backtracking"),
+           "a classic catastrophic-backtracking pattern is rejected before it reaches Scintilla");
+    expect(run_fails(regex + 2, editor, "catastrophic backtracking"),
+           "a star-quantified nested group is also rejected");
 }
 
 static void test_ui(HWND editor) {

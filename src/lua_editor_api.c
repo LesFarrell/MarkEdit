@@ -485,6 +485,30 @@ static int editor_scroll_to(lua_State *L) {
     return 0;
 }
 
+/* editor.find's SCI_SEARCHINTARGET runs Scintilla's std::regex engine
+   synchronously on the UI thread, outside the Lua instruction-count hook
+   that bounds every other plugin call (see PLUGIN_TIME_LIMIT_MS) - there is
+   no way to interrupt a std::regex match once it starts. Rather than let a
+   pathological pattern hang the whole editor, reject the classic
+   catastrophic-backtracking shape before it ever reaches Scintilla: a
+   quantified group immediately followed by another quantifier, such as
+   (a+)+, (a*)*, ([ab]+)* or (x{2,}){2,}. This is a conservative, textual
+   check (false positives are possible, false negatives on more convoluted
+   patterns are not ruled out), not a full regex static analyzer. */
+static int regex_pattern_is_risky(const char *pattern, size_t length) {
+    /* Looks for a quantifier ('*', '+' or a '{m,n}''s closing '}') landing
+       right against a ')' that is itself immediately re-quantified, e.g.
+       (a+)+, (a*)*, ([ab]+)* or (x{2,}){2,}. */
+    for (size_t i = 0; i + 2 < length; i++) {
+        char inner = pattern[i];
+        if ((inner == '*' || inner == '+' || inner == '}') && pattern[i + 1] == ')') {
+            char outer = pattern[i + 2];
+            if (outer == '*' || outer == '+' || outer == '?' || outer == '{') return 1;
+        }
+    }
+    return 0;
+}
+
 static int editor_find(lua_State *L) {
     HWND hEdit = checked_editor(L);
     size_t length;
@@ -497,6 +521,17 @@ static int editor_find(lua_State *L) {
         lua_getfield(L, 3, "whole_word"); if (lua_toboolean(L, -1)) flags |= SCFIND_WHOLEWORD; lua_pop(L, 1);
         lua_getfield(L, 3, "word_start"); if (lua_toboolean(L, -1)) flags |= SCFIND_WORDSTART; lua_pop(L, 1);
         lua_getfield(L, 3, "regex"); if (lua_toboolean(L, -1)) flags |= SCFIND_REGEXP | SCFIND_CXX11REGEX; lua_pop(L, 1);
+    }
+    if (flags & SCFIND_REGEXP) {
+        if (regex_pattern_is_risky(text, length))
+            return luaL_error(L, "editor.find: this pattern can cause catastrophic backtracking "
+                                 "(a repeated group whose own content also repeats)");
+        /* Bounds the worst case for patterns the check above doesn't catch;
+           callers searching a larger span should narrow it with the start
+           argument and repeated calls instead. */
+        const Sci_Position REGEX_SEARCH_SPAN_MAX = 1000000;
+        if (documentLength - start > REGEX_SEARCH_SPAN_MAX)
+            return luaL_error(L, "editor.find: the regex search range is too large");
     }
     SendMessageA(hEdit, SCI_SETTARGETSTART, start, 0);
     SendMessageA(hEdit, SCI_SETTARGETEND, documentLength, 0);

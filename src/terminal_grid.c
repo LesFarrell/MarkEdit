@@ -413,7 +413,7 @@ static void csi_byte(TerminalGrid *g, unsigned char byte, TerminalGridReply repl
     if (byte >= '0' && byte <= '9') {
         if (g->paramCount == 0) g->paramCount = 1;
         int *p = &g->params[g->paramCount - 1];
-        *p = *p * 10 + (byte - '0');
+        if (*p < 10000000) *p = *p * 10 + (byte - '0');
         return;
     }
     if (byte == ';') {
