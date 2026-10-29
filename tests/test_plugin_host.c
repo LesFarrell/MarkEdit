@@ -110,6 +110,43 @@ static void test_commands(HWND editor) {
     expect(run_fails(-1, editor, "no longer loaded"), "bad index rejected");
 }
 
+static void test_menu_enabled(HWND editor) {
+    int first = load_ok("menu-enabled.lua",
+        "menu.add('Needs selection', function() end, nil, function()\n"
+        "  return editor.get_selection() ~= ''\n"
+        "end)\n"
+        "menu.add('Always', function() end)\n"
+        "menu.add('Broken state', function() end, nil, function() error('state failed') end)\n");
+    expect(plugin_host_command_has_enabled(first) &&
+           !plugin_host_command_has_enabled(first + 1) &&
+           plugin_host_command_has_enabled(first + 2),
+           "menu.add keeps optional enabled predicates");
+    int enabled = -1;
+    set_document(editor, "text");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    char *error = plugin_host_command_enabled(first, editor, &enabled);
+    expect(!error && !enabled, "menu command is disabled without a selection");
+    free(error);
+    SendMessageA(editor, SCI_SETSEL, 0, 2);
+    error = plugin_host_command_enabled(first, editor, &enabled);
+    expect(!error && enabled, "menu command is enabled with a selection");
+    free(error);
+    error = plugin_host_command_enabled(first + 1, editor, &enabled);
+    expect(!error && enabled, "a menu command without a predicate is enabled");
+    free(error);
+    error = plugin_host_command_enabled(first + 2, editor, &enabled);
+    expect(error && strstr(error, "state failed") && !enabled,
+           "a failing menu predicate is reported and disables the command");
+    free(error);
+
+    int before = plugin_host_command_count();
+    error = plugin_host_load_chunk("bad-enabled.lua",
+        "menu.add('Bad', function() end, nil, true)", 42);
+    expect(error && strstr(error, "function") && plugin_host_command_count() == before,
+           "menu.add rejects a non-function enabled predicate atomically");
+    free(error);
+}
+
 /* menu.separator entries keep their place among the commands, carry their
    menu path as the label, and run nothing. */
 static void test_separators(HWND editor) {
@@ -719,9 +756,9 @@ static void test_environment(void) {
         "assert(app.time():match('^%d%d:%d%d:%d%d$'))\n"
         "assert(app.date_time():match('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$'))\n");
     load_ok("metadata.lua",
-        "assert(app.api_version() >= 3 and app.platform() == 'windows')\n"
+        "assert(app.api_version() >= 8 and app.platform() == 'windows')\n"
         "assert(type(app.version()) == 'string' and app.memory_used() > 0)\n"
-        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require and c.save_and_open and c.configured_runner)\n"
+        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require and c.save_and_open and c.configured_runner and c.menu_enabled)\n"
         "assert(c.eol_conversion and c.save_encoding and c.tab_width)\n");
 }
 
@@ -881,6 +918,7 @@ static int find_command(const char *label) {
 
 static char s_outputText[2048];
 static int s_outputShown;
+static char s_problemSource[64], s_problemText[4096];
 
 static void fake_output_write(const char *text) {
     size_t used = strlen(s_outputText);
@@ -892,8 +930,8 @@ static void fake_output_hide(void) { s_outputShown = 0; }
 static int fake_output_visible(void) { return s_outputShown; }
 
 static void fake_problems_report(const char *source, const char *text) {
-    (void)source;
-    (void)text;
+    snprintf(s_problemSource, sizeof(s_problemSource), "%s", source ? source : "");
+    snprintf(s_problemText, sizeof(s_problemText), "%s", text ? text : "");
 }
 
 static int s_autoReload;
@@ -1070,6 +1108,13 @@ static void test_bundled_plugins(HWND editor) {
     int highlightConstraints = find_command("Constraint Writer/Highlight Issues");
     int clearConstraints = find_command("Constraint Writer/Clear Highlights");
     int toc = find_command("/Snippets/Markdown/Table of Contents...");
+    int promoteHeading = find_command("/Tools/Markdown/Structure/Promote Heading");
+    int renumberLists = find_command("/Tools/Markdown/Structure/Renumber Ordered Lists");
+    int toggleTasks = find_command("/Tools/Markdown/Structure/Toggle Task State");
+    int inlineToReferences = find_command("/Tools/Markdown/Links/Convert Inline Links to References");
+    int referencesToInline = find_command("/Tools/Markdown/Links/Convert References to Inline Links");
+    int lintMarkdown = find_command("/Tools/Markdown/Lint/Check Document");
+    int statistics = find_command("/Tools/Statistics/Document or Selection Report");
     int calculator = find_command("Calculate Selection");
     if (calculator < 0) calculator = find_command("/Tools/Calculate Selection");
     int removeBlank = find_command("Line Tools/Clean/Remove Blank Lines");
@@ -1103,7 +1148,9 @@ static void test_bundled_plugins(HWND editor) {
            decodeBinary >= 0 && pigLatin >= 0 &&
            personality >= 0 && clearPersonality >= 0 &&
            checkConstraints >= 0 && highlightConstraints >= 0 && clearConstraints >= 0 &&
-           toc >= 0 && calculator >= 0 && removeBlank >= 0 &&
+           toc >= 0 && promoteHeading >= 0 && renumberLists >= 0 && toggleTasks >= 0 &&
+           inlineToReferences >= 0 && referencesToInline >= 0 && lintMarkdown >= 0 &&
+           statistics >= 0 && calculator >= 0 && removeBlank >= 0 &&
            sortLines >= 0 && sortLength >= 0 && shuffle >= 0 && buildTap >= 0 &&
            buildAndRunTap >= 0 && configureZ80Emulator >= 0,
            "bundled plugin commands are registered");
@@ -1882,6 +1929,55 @@ static void test_bundled_plugins(HWND editor) {
            !document_contains(editor, "[Hidden](#hidden)"),
            "bundled TOC generator ignores fenced headings");
 
+    set_document(editor, "## Two\n### Three");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(promoteHeading, editor) && document_is(editor, "# Two\n## Three"),
+           "Markdown structure tools promote selected headings");
+
+    set_document(editor, "7. outer\n  9. nested\n3. outer again");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(renumberLists, editor) &&
+           document_is(editor, "1. outer\n  1. nested\n2. outer again"),
+           "Markdown structure tools renumber nested ordered lists");
+
+    set_document(editor, "- [ ] one\n- [x] two");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    expect(run_ok(toggleTasks, editor) && document_is(editor, "- [x] one\n- [x] two"),
+           "Markdown structure tools toggle task states as a group");
+
+    set_document(editor, "Read [the guide](https://example.test/guide).");
+    expect(run_ok(inlineToReferences, editor) &&
+           document_contains(editor, "Read [the guide][1].\n\n[1]: https://example.test/guide"),
+           "Markdown link tools convert inline links to references");
+    expect(run_ok(referencesToInline, editor) &&
+           document_is(editor, "Read [the guide](https://example.test/guide).\n"),
+           "Markdown link tools convert references back to inline links");
+
+    set_document(editor, "Existing [old][1] and [new](new).\n\n[1]: old");
+    expect(run_ok(inlineToReferences, editor) &&
+           document_contains(editor, "[new][2]") && document_contains(editor, "[2]: new"),
+           "inline-link conversion does not collide with existing reference ids");
+    set_document(editor, "Use [old][1].\n\n[1]: old\n[unused]: keep");
+    expect(run_ok(referencesToInline, editor) &&
+           document_contains(editor, "Use [old](old).") &&
+           document_contains(editor, "[unused]: keep"),
+           "reference conversion preserves definitions it did not use");
+
+    set_document(editor, "# First  \n\n### Third\n\n[Missing](#nowhere)");
+    s_problemSource[0] = s_problemText[0] = 0;
+    expect(run_ok(lintMarkdown, editor) && strcmp(s_problemSource, "Markdown Linter") == 0 &&
+           strstr(s_problemText, "Trailing whitespace") &&
+           strstr(s_problemText, "Heading level jumps") &&
+           strstr(s_problemText, "does not resolve"),
+           "Markdown linter reports structure, whitespace and link problems");
+
+    set_document(editor, "One two. Three!");
+    SendMessageA(editor, SCI_SETSEL, 0, 0);
+    s_outputText[0] = 0;
+    expect(run_ok(statistics, editor) && strstr(s_outputText, "Words: 3") &&
+           strstr(s_outputText, "Characters: 15") && strstr(s_outputText, "Sentences: 2"),
+           "selection statistics reports document counts and reading time");
+
     set_document(editor, "alpha\n\n  \nbeta\n");
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     expect(removeBlank >= 0 && run_ok(removeBlank, editor) && document_is(editor, "alpha\nbeta\n"),
@@ -2371,6 +2467,7 @@ int main(void) {
     };
     plugin_host_set_callbacks(&fakes);
     test_commands(editor);
+    test_menu_enabled(editor);
     test_separators(editor);
     test_context_menu(editor);
     test_editor_api(editor);

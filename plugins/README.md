@@ -2,7 +2,7 @@
 
 A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
 
-This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, spelling report, readability, anagram, Lua runner, tail (follow a log file), Markdown, text, calculator, assembler, Lua formatting, and developer-oriented extensions.
+This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, spelling report, readability, anagram, Lua runner, tail (follow a log file), Markdown structure/link/lint tools, HTML snippets, selection statistics, text, calculator, assembler, Lua formatting, and developer-oriented extensions.
 
 **Contents:** [Quick start](#quick-start) · [How plugins are loaded](#how-plugins-are-loaded) · [Positions, ranges, and lines](#positions-ranges-and-lines) · [API reference](#api-reference) · [Where commands appear](#where-commands-appear) · [Replacing built-in commands](#replacing-built-in-commands) · [Customizing the menu bar](#customizing-the-menu-bar) · [How commands run](#how-commands-run) · [The Lua environment](#the-lua-environment) · [Limits](#limits) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting)
 
@@ -56,9 +56,17 @@ Names, labels, menu paths, and dialog text must be valid UTF-8 and cannot contai
 
 ### menu
 
-#### `menu.add(label, fn [, shortcut])`
+#### `menu.add(label, fn [, shortcut [, enabled]])`
 
 Adds a command. Choosing it runs `fn()`. `label` decides where it appears; see [Where commands appear](#where-commands-appear). The same label can be added more than once. Each becomes its own item. `shortcut` may combine Ctrl and/or Alt, optional Shift, and a letter, digit, F1–F24, Tab, Space, Insert, or Delete, for example `"Ctrl+Alt+M"`. Built-in shortcuts win if two commands use the same keys.
+
+When `enabled` is supplied, MarkEdit evaluates it while refreshing menu state and greys out the command when it returns `false` or `nil`. The editor API is available. Pass `nil` for `shortcut` when only an enabled predicate is needed:
+
+```lua
+menu.add("Text/Uppercase Selection", uppercase, nil, function()
+  return editor.get_selection() ~= ""
+end)
+```
 
 #### `menu.checkbox(label, key, default, fn [, shortcut])`
 
@@ -175,7 +183,7 @@ Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.
 
 ### app
 
-`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), API 4 adds `context_menu`, API 5 adds the [`problems`](#problems) diagnostics table, API 6 adds `save_and_open`, and API 7 adds `configured_runner`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
+`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), API 4 adds `context_menu`, API 5 adds the [`problems`](#problems) diagnostics table, API 6 adds `save_and_open`, API 7 adds `configured_runner`, and API 8 adds `menu_enabled`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
 
 ### documents
 

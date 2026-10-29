@@ -263,11 +263,11 @@ The built-in formatter is stored as three focused files:
 
 They are separate executable resources but are joined and compiled as one Lua chunk. This preserves private `local` helpers across the parts and makes loading atomic.
 
-HTML snippets live in `plugins/html-tools.lua`, which creates Snippets → HTML without built-in command IDs.
+HTML snippets live in `plugins/html-tools.lua`, which creates Snippets → HTML without built-in command IDs. Markdown structure and link transformations, offline linting, and document/selection statistics similarly live in `plugins/markdown-tools.lua`, `plugins/markdown-linter.lua`, and `plugins/selection-statistics.lua`.
 
 General Edit conversions live in `plugins/edit-convert.lua`, which creates the complete Edit → Convert submenu. Native code exposes only the small EOL-mode, tab-width, and save-encoding capabilities that text transformations cannot reproduce faithfully. JSON tools live entirely in two plugins that share the Tools → JSON submenu: `plugins/json-check.lua` supplies syntax checking (strict JSON, JSONC and JSON Lines), JSON paths and error highlighting as you type; `plugins/json-tools.lua` supplies formatting, minification, recursive key sorting, string escaping and JSON/YAML conversion. The core contains no JSON tool commands. Delimited-text operations live in `plugins/csv-tools.lua`; its shared parser replaces the older CSV-to-Markdown implementation that was formerly duplicated in `markdown-tools.lua`. SQL, CLEF logs, data interchange, natural sorting, number conversion, and heuristic grammar checks are likewise ordinary bundled plugins and require no dedicated native commands.
 
-Lua is preferred for commands whose main input and output are editor text. C remains preferred for filesystem and encoding work, recovery, windows and controls, COM, subprocesses, debugging, large-file streaming and per-keystroke behaviour. Moving one of those areas to Lua is useful only when the Lua API can expose a small capability rather than mirroring a native subsystem wholesale.
+Lua is preferred for commands whose main input and output are editor text. `menu.add` can also supply an enabled predicate, evaluated with the active editor whenever menu state is refreshed, so plugins can keep context-specific commands visibly unavailable without native command-state cases. C remains preferred for filesystem and encoding work, recovery, windows and controls, COM, subprocesses, debugging, large-file streaming and per-keystroke behaviour. Moving one of those areas to Lua is useful only when the Lua API can expose a small capability rather than mirroring a native subsystem wholesale.
 
 ## Selection safety
 

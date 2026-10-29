@@ -13,7 +13,8 @@ menu = {}
 ---@param label string
 ---@param fn fun()
 ---@param shortcut? string Ctrl/Alt plus a letter, digit, F1-F24, Tab, Space, Insert or Delete.
-function menu.add(label, fn, shortcut) end
+---@param enabled? fun():boolean Evaluated whenever menu state is refreshed.
+function menu.add(label, fn, shortcut, enabled) end
 ---@param label string
 ---@param key string
 ---@param default boolean

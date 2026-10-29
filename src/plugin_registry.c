@@ -55,6 +55,8 @@ static int config_value_is_true(const char *value) {
 void discard_commands_from(int first) {
     for (int i = first; i < s_commandCount; i++) {
         if (s_lua) luaL_unref(s_lua, LUA_REGISTRYINDEX, s_commands[i].ref);
+        if (s_lua && s_commands[i].enabledRef != LUA_NOREF)
+            luaL_unref(s_lua, LUA_REGISTRYINDEX, s_commands[i].enabledRef);
         free(s_commands[i].label);
         free(s_commands[i].overrides);
         free(s_commands[i].owner);
@@ -91,6 +93,7 @@ PluginCommand *append_command(lua_State *L, const char *label, int functionIndex
     memset(command, 0, sizeof(*command));
     command->label = copy;
     command->ref = ref;
+    command->enabledRef = LUA_NOREF;
     command->owner = owner;
     command->builtIn = s_loadingBuiltIn;
     command->separator = !functionIndex;
@@ -325,7 +328,12 @@ static PluginCommand *add_labelled_command(lua_State *L, const char *label, int 
 static int menu_add(lua_State *L) {
     const char *label = checked_cstring(L, 1, "menu label");
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    add_labelled_command(L, label, 2, 3);
+    if (!lua_isnoneornil(L, 4)) luaL_checktype(L, 4, LUA_TFUNCTION);
+    PluginCommand *command = add_labelled_command(L, label, 2, 3);
+    if (!lua_isnoneornil(L, 4)) {
+        lua_pushvalue(L, 4);
+        command->enabledRef = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
     return 0;
 }
 
@@ -831,7 +839,7 @@ static int app_capabilities(lua_State *L) {
         "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
         "documents", "command_execution", "path_picker", "status", "logging", "defer",
         "eol_conversion", "save_encoding", "tab_width", "spelling", "output_panel",
-        "context_menu", "problems", "save_and_open", "configured_runner"
+        "context_menu", "problems", "save_and_open", "configured_runner", "menu_enabled"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -1271,6 +1279,11 @@ int plugin_host_context_menu_item_is_checked(int index) {
     return stored_checkbox_state(item->owner, item->configKey, item->checkDefault);
 }
 
+int plugin_host_command_has_enabled(int index) {
+    return index >= 0 && index < s_commandCount &&
+        s_commands[index].enabledRef != LUA_NOREF;
+}
+
 /* Calls a context-menu enabled predicate and writes its truth value through
    the light userdata argument. Keeping the result outside Lua lets the
    existing protected-call path restore the stack and enforce time limits. */
@@ -1306,6 +1319,40 @@ char *plugin_host_context_menu_item_enabled(int index, HWND hEdit, int *enabled)
     s_timeLimited = 1;
     lua_pushcfunction(s_lua, call_enabled_predicate);
     lua_rawgeti(s_lua, LUA_REGISTRYINDEX, item->enabledRef);
+    lua_pushlightuserdata(s_lua, enabled);
+    char *error = protected_call(2);
+    lua_editor_api_set_editor(NULL);
+    s_runningLabel = NULL;
+    s_runningOwner = NULL;
+    s_busy = 0;
+    free(stableLabel);
+    free(stableOwner);
+    return error;
+}
+
+char *plugin_host_command_enabled(int index, HWND hEdit, int *enabled) {
+    if (enabled) *enabled = 0;
+    if (!enabled || s_busy || !s_lua || index < 0 || index >= s_commandCount)
+        return NULL;
+    PluginCommand *command = &s_commands[index];
+    if (command->enabledRef == LUA_NOREF) {
+        *enabled = 1;
+        return NULL;
+    }
+
+    char *stableLabel = dup_string(command->label);
+    char *stableOwner = dup_string(command->owner);
+    if (!stableLabel || !stableOwner) {
+        free(stableLabel); free(stableOwner);
+        return dup_string("out of memory evaluating menu command state");
+    }
+    s_busy = 1;
+    lua_editor_api_set_editor(hEdit);
+    s_runningLabel = stableLabel;
+    s_runningOwner = stableOwner;
+    s_timeLimited = 1;
+    lua_pushcfunction(s_lua, call_enabled_predicate);
+    lua_rawgeti(s_lua, LUA_REGISTRYINDEX, command->enabledRef);
     lua_pushlightuserdata(s_lua, enabled);
     char *error = protected_call(2);
     lua_editor_api_set_editor(NULL);

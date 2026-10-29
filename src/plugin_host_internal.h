@@ -25,6 +25,7 @@ typedef struct {
     char *owner;       /* script name, used to namespace config values */
     char *configKey;   /* menu.checkbox's persisted key, or NULL */
     int checkDefault;
+    int enabledRef;   /* menu.add's optional enabled predicate, or LUA_NOREF */
     char *shortcut;
     BYTE shortcutFlags;
     WORD shortcutKey;

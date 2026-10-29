@@ -141,7 +141,15 @@ static void test_html_commands(HWND editor) {
         "/Snippets/HTML/&Underline", "/Snippets/HTML/&Div", "/Snippets/HTML/&Span",
         "/Snippets/HTML/&Link", "/Snippets/HTML/I&mage", "/Snippets/HTML/&Table",
         "/Snippets/HTML/B&ullet List", "/Snippets/HTML/&Numbered List",
-        "/Snippets/HTML/Line &Break"
+        "/Snippets/HTML/Line &Break", "/Snippets/HTML/HTML5 Document Boilerplate",
+        "/Snippets/HTML/Details and Summary", "/Snippets/HTML/Figure...",
+        "/Snippets/HTML/Description List", "/Snippets/HTML/Wrap with Tag...",
+        "/Snippets/HTML/Convert Selected Markdown Links",
+        "/Snippets/HTML/Semantic/Section", "/Snippets/HTML/Semantic/Article",
+        "/Snippets/HTML/Semantic/Navigation", "/Snippets/HTML/Semantic/Aside",
+        "/Snippets/HTML/Semantic/Header", "/Snippets/HTML/Semantic/Footer",
+        "/Snippets/HTML/Semantic/Main", "/Snippets/HTML/Semantic/Code",
+        "/Snippets/HTML/Semantic/Preformatted"
     };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
         expect(find_plugin_command(labels[i]) >= 0, "every HTML snippet command is registered");
@@ -152,6 +160,13 @@ static void test_html_commands(HWND editor) {
     expect(strcmp(run_plugin(editor, "/Snippets/HTML/B&ullet List", "one\ntwo", 7, SC_EOL_LF),
                   "<ul>\n  <li>one</li>\n  <li>two</li>\n</ul>") == 0,
            "HTML list command wraps selected lines");
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/Semantic/Section", "content", 7, SC_EOL_LF),
+                  "<section>content</section>") == 0,
+           "HTML semantic command wraps selected text");
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/Convert Selected Markdown Links",
+                             "[site](https://example.test)", 28, SC_EOL_LF),
+                  "<a href=\"https://example.test\">site</a>") == 0,
+           "HTML tools convert selected Markdown links");
 }
 
 static void test_table_commands(HWND editor) {

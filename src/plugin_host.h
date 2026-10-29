@@ -21,7 +21,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 7
+#define MARKEDIT_PLUGIN_API_VERSION 8
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -197,6 +197,11 @@ int plugin_host_command_is_separator(int index);
    state. A missing/unavailable setting uses the checkbox's default. */
 int plugin_host_command_is_checkable(int index);
 int plugin_host_command_is_checked(int index);
+/* Whether menu.add supplied an enabled predicate, and its current value.
+   Predicates run with editor APIs bound to hEdit. A failing one is disabled
+   and returns an allocated error for the caller to report and free. */
+int plugin_host_command_has_enabled(int index);
+char *plugin_host_command_enabled(int index, HWND hEdit, int *enabled);
 /* Owner/key metadata for menu.checkbox settings; NULL for other commands. */
 const char *plugin_host_command_checkbox_owner(int index);
 const char *plugin_host_command_checkbox_key(int index);

@@ -14,6 +14,8 @@ This guide is for people working on MarkEdit's source. It covers each Lua file i
 | `src/lua/formatting_*.lua` | Markdown formatting plus Markdown-aware Edit commands. | Built into `markedit.exe` as three resources and compiled together as one Lua chunk. | MarkEdit developers |
 | [plugins/edit-convert.lua](../plugins/edit-convert.lua) | The complete **Edit > Convert** submenu and its transformations. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/html-tools.lua](../plugins/html-tools.lua) | HTML wrapping, links, images, lists and table snippets. | Loaded from the `plugins` folder. | MarkEdit developers |
+| [plugins/markdown-tools.lua](../plugins/markdown-tools.lua) / [markdown-linter.lua](../plugins/markdown-linter.lua) | Markdown structure, links, table of contents and offline diagnostics. | Loaded from the `plugins` folder. | MarkEdit developers |
+| [plugins/selection-statistics.lua](../plugins/selection-statistics.lua) | Document/selection counts and optional live status summaries. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/json-tools.lua](../plugins/json-tools.lua) / [json-check.lua](../plugins/json-check.lua) | JSON formatting, conversion and string tools / JSON syntax checking, including as you type. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/csv-tools.lua](../plugins/csv-tools.lua) | Delimited-text parsing, transformations and export. | Loaded from the `plugins` folder. | MarkEdit developers |
 | `plugins/*-tools.lua` and other bundled plugins | SQL, logs, data conversion, natural sorting, number conversion, grammar, Lua formatting and other optional tools. | Loaded from the `plugins` folder. | MarkEdit developers |
@@ -157,6 +159,7 @@ The script lists each menu's commands that have shortcuts under that menu's name
 - [README.md](../plugins/README.md) is the plugin guide. It's shipped in `dist/plugins/`, and **Help > Plugin Guide** opens it, so it's written for users, not for MarkEdit developers.
 - [edit-convert.lua](../plugins/edit-convert.lua) owns every **Edit > Convert** command and creates that submenu; there are no parallel built-in command IDs or menu entries.
 - [html-tools.lua](../plugins/html-tools.lua) owns the **Snippets > HTML** submenu; its commands likewise have no parallel built-in command IDs or menu entries.
+- [markdown-tools.lua](../plugins/markdown-tools.lua), [markdown-linter.lua](../plugins/markdown-linter.lua), and [selection-statistics.lua](../plugins/selection-statistics.lua) use only the public plugin API for structure/link transformations, Problems diagnostics, and live selection summaries.
 - [example.lua](../plugins/example.lua) is a working plugin that shows each part of the API: `menu.add` with submenus and with `/Menu/...` paths, a persistent `menu.checkbox`, `ui.message`/`prompt`/`choose`, and an `events.on("save")` handler.
 - MarkEdit loads each top-level `*.lua` file and each folder containing `init.lua`, in name order. `types/`, `.luarc.json`, and other files are ignored. Personal extensions use the same rules and load afterward.
 

@@ -156,6 +156,89 @@ local function insert_list(ordered)
   replace_lines(first, last, table.concat(out))
 end
 
+local function insert_document()
+  local eol = editor.eol()
+  insert_block(table.concat({
+    "<!doctype html>", '<html lang="en">', "<head>", '  <meta charset="utf-8">',
+    '  <meta name="viewport" content="width=device-width, initial-scale=1">',
+    "  <title>Document</title>", "</head>", "<body>", "  ", "</body>", "</html>", ""
+  }, eol))
+end
+
+local function insert_details()
+  local start, finish = selection()
+  local body = is_empty(start, finish) and "Details" or editor.get_selection()
+  local eol = editor.eol()
+  local before = "<details>" .. eol .. "  <summary>Summary</summary>" .. eol .. "  "
+  editor.replace_selection(before .. body .. eol .. "</details>")
+  if is_empty(start, finish) then editor.set_selection(start + #before, start + #before + #body - 1) end
+end
+
+local function insert_figure()
+  local source = ui.prompt("Image URL:", "image.png", "Insert Figure")
+  if not source then return end
+  local caption = ui.prompt("Caption:", "Caption", "Insert Figure")
+  if not caption then return end
+  local alt = editor.get_selection()
+  if alt == "" then alt = caption end
+  local eol = editor.eol()
+  insert_block('<figure>' .. eol .. '  <img src="' .. source .. '" alt="' .. alt .. '">' ..
+    eol .. "  <figcaption>" .. caption .. "</figcaption>" .. eol .. "</figure>" .. eol)
+end
+
+local function wrap_chosen_tag()
+  local tag = ui.prompt("HTML tag:", "section", "Wrap with HTML Tag")
+  if not tag then return end
+  tag = tag:match("^%s*(.-)%s*$")
+  if not tag:match("^[A-Za-z][A-Za-z0-9:_-]*$") then
+    ui.message("Use a plain HTML tag name without brackets or attributes.",
+      "Wrap with HTML Tag", "warning")
+    return
+  end
+  wrap_tag(tag:lower())
+end
+
+local function insert_description_list()
+  local start, finish = selection()
+  local lines = {}
+  if is_empty(start, finish) then
+    lines = { "Term", "Description" }
+  else
+    local first, last = selected_lines()
+    for line = first, last do lines[#lines + 1] = editor.get_line(line) end
+  end
+  local eol, out = editor.eol(), { "<dl>" }
+  for index = 1, #lines, 2 do
+    out[#out + 1] = "  <dt>" .. lines[index] .. "</dt>"
+    out[#out + 1] = "  <dd>" .. (lines[index + 1] or "Description") .. "</dd>"
+  end
+  out[#out + 1] = "</dl>"
+  local text = table.concat(out, eol)
+  if is_empty(start, finish) then
+    editor.replace_selection(text)
+    local term = text:find("Term", 1, true)
+    editor.set_selection(start + term - 1, start + term + 2)
+  else
+    local first, last = selected_lines()
+    replace_lines(first, last, text)
+  end
+end
+
+local function markdown_links_to_html()
+  local selected = editor.get_selection()
+  local converted, count = selected:gsub("(!?)%[([^%]]-)%]%(([^%)%s]+)%)",
+    function(image, label, url)
+      if image == "!" then return '<img src="' .. url .. '" alt="' .. label .. '">' end
+      return '<a href="' .. url .. '">' .. label .. '</a>'
+    end)
+  if count == 0 then return ui.status("The selection has no inline Markdown links.") end
+  editor.replace_selection(converted)
+end
+
+local function has_selection()
+  return editor.get_selection() ~= ""
+end
+
 menu.add(ROOT .. "/&HTML", function() wrap_tag("html") end)
 menu.add(ROOT .. "/H&ead", function() wrap_tag("head") end)
 menu.add(ROOT .. "/&Body", function() wrap_tag("body") end)
@@ -174,3 +257,18 @@ menu.add(ROOT .. "/B&ullet List", function() insert_list(false) end)
 menu.add(ROOT .. "/&Numbered List", function() insert_list(true) end)
 menu.separator(ROOT)
 menu.add(ROOT .. "/Line &Break", function() editor.replace_selection("<br>") end)
+menu.separator(ROOT)
+menu.add(ROOT .. "/HTML5 Document Boilerplate", insert_document)
+menu.add(ROOT .. "/Details and Summary", insert_details)
+menu.add(ROOT .. "/Figure...", insert_figure)
+menu.add(ROOT .. "/Description List", insert_description_list)
+menu.add(ROOT .. "/Wrap with Tag...", wrap_chosen_tag)
+menu.add(ROOT .. "/Convert Selected Markdown Links", markdown_links_to_html, nil, has_selection)
+for _, item in ipairs({
+  { "Section", "section" }, { "Article", "article" }, { "Navigation", "nav" },
+  { "Aside", "aside" }, { "Header", "header" }, { "Footer", "footer" },
+  { "Main", "main" }, { "Code", "code" }, { "Preformatted", "pre" },
+}) do
+  local label, tag = item[1], item[2]
+  menu.add(ROOT .. "/Semantic/" .. label, function() wrap_tag(tag) end)
+end

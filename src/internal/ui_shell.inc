@@ -1,3 +1,6 @@
+static HWND active_edit_view(void);
+static void show_plugin_error(const char *report);
+
 /* Backing storage for the status bar's four segments (0: Ln/Col, 1: Words/
    Characters, 2: encoding, 3: save state). The strip is fully repainted by
    StatusSubclassProc below instead of through SB_SETTEXT + owner-draw:
@@ -507,9 +510,21 @@ static int command_state(UINT id, CommandState *state) {
     *state = (CommandState){ 1, 0, 0 };
     if (id >= IDM_PLUGIN_COMMAND_0 && id < IDM_PLUGIN_COMMAND_0 + PLUGIN_MAX_COMMANDS) {
         int index = (int)(id - IDM_PLUGIN_COMMAND_0);
-        if (!plugin_host_command_is_checkable(index)) return 0;
-        state->checked = plugin_host_command_is_checked(index);
-        return 1;
+        int stateKnown = 0;
+        if (plugin_host_command_is_checkable(index)) {
+            state->checked = plugin_host_command_is_checked(index);
+            stateKnown = 1;
+        }
+        if (plugin_host_command_has_enabled(index)) {
+            HWND editor = active_edit_view();
+            if (editor) {
+                char *error = plugin_host_command_enabled(index, editor, &state->enabled);
+                if (error) show_plugin_error(error);
+                free(error);
+            }
+            stateKnown = 1;
+        }
+        return stateKnown;
     }
 #define STATE_CHECK(value) (state->checked = (value) != 0)
 #define STATE_RADIO(value) (state->radio = 1, state->checked = (value) != 0)
