@@ -276,6 +276,68 @@ int output_find_location(const char *line, size_t length, OutputLocation *locati
     return 0;
 }
 
+static size_t line_start_before(const char *text, size_t position) {
+    while (position > 0 && text[position - 1] != '\n') position--;
+    return position;
+}
+
+static size_t next_line_start(const char *text, size_t length, size_t position) {
+    const char *newline = (const char *)memchr(text + position, '\n', length - position);
+    return newline ? (size_t)(newline - text) + 1 : length;
+}
+
+static int diff_hunk_new_line(const char *line, size_t length, int *newLine) {
+    if (length < 7 || line[0] != '@' || line[1] != '@') return 0;
+    const char *plus = (const char *)memchr(line + 2, '+', length - 2);
+    if (!plus || plus + 1 >= line + length || !isdigit((unsigned char)plus[1])) return 0;
+    size_t at = (size_t)(plus + 1 - line);
+    int value = read_number(line, length, &at);
+    if (value < 0) return 0;
+    *newLine = value > 0 ? value : 1;
+    return 1;
+}
+
+int output_find_diff_location(const char *text, size_t length, size_t position,
+                              OutputLocation *location) {
+    if (!text || !location || position > length) return 0;
+    if (position == length && position) position--;
+    size_t clicked = line_start_before(text, position);
+    size_t hunk = clicked;
+    int targetLine = 0;
+    for (;;) {
+        size_t end = next_line_start(text, length, hunk);
+        size_t lineLength = end - hunk;
+        if (lineLength && text[hunk + lineLength - 1] == '\n') lineLength--;
+        if (lineLength && text[hunk + lineLength - 1] == '\r') lineLength--;
+        if (diff_hunk_new_line(text + hunk, lineLength, &targetLine)) break;
+        if (!hunk) return 0;
+        hunk = line_start_before(text, hunk - 1);
+    }
+
+    /* Removed rows do not consume a line in the working-tree file. */
+    for (size_t line = next_line_start(text, length, hunk); line < clicked;) {
+        char prefix = text[line];
+        if (prefix != '-' && prefix != '\\') targetLine++;
+        line = next_line_start(text, length, line);
+    }
+
+    size_t header = hunk;
+    for (;;) {
+        if (header + 4 <= length && memcmp(text + header, "+++ ", 4) == 0) {
+            size_t start = header + 4;
+            size_t end = next_line_start(text, length, start);
+            while (end > start && (text[end - 1] == '\n' || text[end - 1] == '\r')) end--;
+            if (end - start >= 2 && text[start] == 'b' && text[start + 1] == '/') start += 2;
+            if (end == start || (end - start == 9 && memcmp(text + start, "/dev/null", 9) == 0))
+                return 0;
+            *location = (OutputLocation){ start, end - start, targetLine, 0 };
+            return 1;
+        }
+        if (!header) return 0;
+        header = line_start_before(text, header - 1);
+    }
+}
+
 int output_location_next_candidate(const char *line, OutputLocation *location) {
     for (size_t i = 0; i + 1 < location->pathLength; i++) {
         if (line[location->pathStart + i] == ' ') {

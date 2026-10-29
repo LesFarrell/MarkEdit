@@ -601,17 +601,24 @@ static int run_git_output(const WCHAR *parameters, const WCHAR *title) {
     return run_git_output_ex(parameters, title, 0);
 }
 
+/* Git's ANSI colours feed the Output pane's existing terminal-style decoder.
+   Histogram hunks, moved-line colouring, rename detection, submodule patches
+   and a compact statistic make large changes easier to understand. */
+#define GIT_DIFF_COMMAND L"-c core.quotepath=false diff --no-ext-diff --color=always " \
+                         L"--color-moved --histogram --find-renames --submodule=diff " \
+                         L"--compact-summary --patch-with-stat"
+
 static void show_git_status(void) {
     refresh_git_status();
     run_git_output(L"status --short --branch", L"Git Status");
 }
 
 static void show_git_workspace_diff(void) {
-    run_git_output(L"diff --no-ext-diff", L"Git Workspace Diff");
+    run_git_output(GIT_DIFF_COMMAND, L"Git Workspace Diff");
 }
 
 static void show_git_staged_diff(void) {
-    run_git_output(L"diff --cached --no-ext-diff", L"Git Staged Diff");
+    run_git_output(GIT_DIFF_COMMAND L" --cached", L"Git Staged Diff");
 }
 
 static void show_git_file_diff_kind(int staged) {
@@ -620,15 +627,15 @@ static void show_git_file_diff_kind(int staged) {
                     L"Git", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    size_t capacity = wcslen(g_currentFile) + 56;
+    size_t capacity = wcslen(g_currentFile) + wcslen(GIT_DIFF_COMMAND) + 40;
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) return;
     if (!staged && git_status_for_path(g_currentFile) == L'?') {
-        swprintf(parameters, capacity, L"diff --no-index --no-ext-diff -- /dev/null \"%ls\"", g_currentFile);
+        swprintf(parameters, capacity, GIT_DIFF_COMMAND L" --no-index -- /dev/null \"%ls\"", g_currentFile);
         run_git_output_ex(parameters, L"Git Untracked File Diff", 1);
     } else {
-        swprintf(parameters, capacity, staged ? L"diff --cached --no-ext-diff -- \"%ls\""
-                                             : L"diff --no-ext-diff -- \"%ls\"", g_currentFile);
+        swprintf(parameters, capacity, staged ? GIT_DIFF_COMMAND L" --cached -- \"%ls\""
+                                             : GIT_DIFF_COMMAND L" -- \"%ls\"", g_currentFile);
         run_git_output(parameters, staged ? L"Git Staged File Diff" : L"Git File Diff");
     }
     free(parameters);
@@ -640,16 +647,16 @@ static void show_git_staged_file_diff(void) { show_git_file_diff_kind(1); }
 typedef enum { GIT_DIFF_UNSTAGED, GIT_DIFF_STAGED, GIT_DIFF_UNTRACKED } GitDiffKind;
 
 static void git_diff_panel_file(const WCHAR *relativePath, GitDiffKind kind) {
-    size_t capacity = wcslen(relativePath) + 64;
+    size_t capacity = wcslen(relativePath) + wcslen(GIT_DIFF_COMMAND) + 40;
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!parameters) return;
     if (kind == GIT_DIFF_UNTRACKED) {
-        swprintf(parameters, capacity, L"diff --no-index --no-ext-diff -- /dev/null \"%ls\"", relativePath);
+        swprintf(parameters, capacity, GIT_DIFF_COMMAND L" --no-index -- /dev/null \"%ls\"", relativePath);
         run_git_output_ex(parameters, L"Git Untracked File Diff", 1);
     } else {
         swprintf(parameters, capacity, kind == GIT_DIFF_STAGED
-            ? L"diff --cached --no-ext-diff -- \"%ls\""
-            : L"diff --no-ext-diff -- \"%ls\"", relativePath);
+            ? GIT_DIFF_COMMAND L" --cached -- \"%ls\""
+            : GIT_DIFF_COMMAND L" -- \"%ls\"", relativePath);
         run_git_output(parameters, kind == GIT_DIFF_STAGED ? L"Git Staged File Diff" : L"Git File Diff");
     }
     free(parameters);
@@ -1160,6 +1167,16 @@ static int open_output_location(OutputPane *pane, Sci_Position position) {
         } while (!file && output_location_next_candidate(line, &location));
     }
     free(line);
+    if (!file) {
+        Sci_Position viewLength = (Sci_Position)SendMessageA(pane->view, SCI_GETLENGTH, 0, 0);
+        char *all = (char *)malloc((size_t)viewLength + 1);
+        if (all) {
+            SendMessageA(pane->view, SCI_GETTEXT, (WPARAM)viewLength + 1, (LPARAM)all);
+            if (output_find_diff_location(all, (size_t)viewLength, (size_t)position, &location))
+                file = output_location_file(all, &location, pane->directory);
+            free(all);
+        }
+    }
     if (!file) return 0;
     int opened = open_file_in_tab(file);
     free(file);

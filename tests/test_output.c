@@ -132,6 +132,34 @@ static void test_locations(void) {
            location.pathLength == 3 && strncmp(included + location.pathStart, "x.c", 3) == 0 &&
            !output_location_next_candidate(included, &location),
            "leading words can be dropped from a location's path");
+
+    const char *diff =
+        "diff --git a/src/file name.c b/src/file name.c\n"
+        "--- a/src/file name.c\n"
+        "+++ b/src/file name.c\n"
+        "@@ -10,4 +20,5 @@ static void example(void) {\n"
+        " context\n"
+        "-old\n"
+        "+new\n"
+        "+another\n";
+    const char *added = strstr(diff, "+another");
+    expect(output_find_diff_location(diff, strlen(diff), (size_t)(added - diff), &location) &&
+           location.pathLength == strlen("src/file name.c") &&
+           strncmp(diff + location.pathStart, "src/file name.c", location.pathLength) == 0 &&
+           location.line == 22,
+           "a diff row resolves to its working-tree file and new line");
+    const char *removed = strstr(diff, "-old");
+    expect(output_find_diff_location(diff, strlen(diff), (size_t)(removed - diff), &location) &&
+           location.line == 21,
+           "a removed diff row resolves to the following working-tree line");
+    const char *hunk = strstr(diff, "@@ -10");
+    expect(output_find_diff_location(diff, strlen(diff), (size_t)(hunk - diff), &location) &&
+           location.line == 20,
+           "a diff hunk header resolves to its first new line");
+    const char deleted[] = "+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
+    expect(!output_find_diff_location(deleted, sizeof(deleted) - 1,
+                                      sizeof(deleted) - 2, &location),
+           "a deleted file diff is not offered as a working-tree location");
 }
 
 /* ---- a real program on pipes ---- */

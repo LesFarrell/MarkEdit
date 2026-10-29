@@ -51,6 +51,11 @@ typedef struct {
 } OutputLocation;
 
 int output_find_location(const char *line, size_t length, OutputLocation *location);
+/* Finds the working-tree path and new-file line represented by a unified
+   diff line. `position` may point at a context, added, removed or @@ line;
+   the nearest preceding +++ header and @@ hunk are used. */
+int output_find_diff_location(const char *text, size_t length, size_t position,
+                              OutputLocation *location);
 /* Drops the first word of a location's path, for when the whole of it
    isn't a file. Returns 0 when there's no shorter candidate. */
 int output_location_next_candidate(const char *line, OutputLocation *location);
