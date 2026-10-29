@@ -63,11 +63,11 @@ static void test_codecs(void) {
             size_t bytes = first + second;
             for (size_t cut = 0; cut <= bytes; cut++) {
                 TextCodecState decoder = {(TextEncoding)encoding, {0}, 0};
-                char decoded[128]; size_t a = 0, b = 0;
-                CHECK(text_decode(&decoder, encoded, cut, 0, decoded, sizeof(decoded), &a));
+                char decoded_chunk[128]; size_t a = 0, b = 0;
+                CHECK(text_decode(&decoder, encoded, cut, 0, decoded_chunk, sizeof(decoded_chunk), &a));
                 CHECK(text_decode(&decoder, encoded + cut, bytes - cut, 1,
-                                  decoded + a, sizeof(decoded) - a, &b));
-                CHECK(a + b == length && memcmp(decoded, text, length) == 0);
+                                  decoded_chunk + a, sizeof(decoded_chunk) - a, &b));
+                CHECK(a + b == length && memcmp(decoded_chunk, text, length) == 0);
             }
         }
     }

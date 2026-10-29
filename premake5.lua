@@ -2,7 +2,7 @@
 -- Premake supplies project, files, filter and its other functions as
 -- globals, which a Lua language server doesn't know about.
 ---@diagnostic disable: undefined-global, lowercase-global
--- Alternative to the Zig-based build.bat / test.bat scripts, for three
+-- Alternative generator to the direct MSVC build.bat / test.bat scripts, for three
 -- toolchains (builds markedit.exe, statically linking Lexilla, and the
 -- test programs, then stages dist/ the same way build.bat does):
 --
@@ -343,7 +343,7 @@ test_project("test_theme", { "src/theme.c", "src/theme.h", "src/plugin_host.h" }
 test_project("test_core", { "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c",
                             "src/plugin_settings.c", "src/plugin_settings.h" }, {})
 test_project("test_output", { "src/output_text.c", "src/output_text.h", "src/output_process.c",
-                              "src/output_process.h" }, {})
+                              "src/output_process.h" }, { "user32" })
 test_project("test_git_status", { "src/git_status.c", "src/git_status.h" }, {})
 test_project("test_git_workflow", {}, {})
 test_project("test_terminal_grid", { "src/terminal_grid.c", "src/terminal_grid.h" }, {})

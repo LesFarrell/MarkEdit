@@ -209,8 +209,8 @@ static void test_shortcuts_page(void) {
     free(menus);
     if (!page) return;
     expect(strncmp(page, "# MarkEdit Keyboard Shortcuts\n", 30) == 0, "the page has its title");
-    for (int c = 0; menu_command_at(c); c++) {
-        const char *shortcut = menu_command_at(c)->shortcut;
+    for (int command_index = 0; menu_command_at(command_index); command_index++) {
+        const char *shortcut = menu_command_at(command_index)->shortcut;
         if (!shortcut) continue;
         /* Cells escape Markdown punctuation as keyboard-shortcuts.lua's
            cell() does: Ctrl+\ is written Ctrl+\\ and Ctrl+` is Ctrl+\`. */

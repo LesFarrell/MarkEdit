@@ -10,12 +10,14 @@ Tests live in `tests/`; `test_preview.js` covers the preview bridge. Bundled ext
 
 ## Build, Test, and Development Commands
 
-- `build.bat` builds an optimized Windows release with Zig and stages the complete runtime in `dist/`.
+- `build.bat` builds an optimized Windows release with MSVC and stages the complete runtime in `dist/`.
 - `test.bat` compiles and runs all C tests, then runs the Node.js preview tests when Node is installed.
 - `dist\markedit.exe` launches the packaged build.
 - `premake5 --zig gmake` generates an alternative make-based Zig build. `premake5 vs2022` generates a Visual Studio solution.
 
-Zig must be available on `PATH`. Run `test.bat` before `build.bat` when preparing a reviewable change.
+Visual Studio's Desktop development with C++ workload must be installed; the
+scripts locate and initialize its x64 tools automatically. Run `test.bat`
+before `build.bat` when preparing a reviewable change.
 
 ## Coding Style & Naming Conventions
 

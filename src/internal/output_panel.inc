@@ -721,7 +721,7 @@ static char *run_git_sync(const WCHAR *parameters, const WCHAR *directory, DWORD
     if (!process) return NULL;
     EnableWindow(g_hMainWnd, FALSE);
     UINT_PTR timeoutTimer = SetTimer(NULL, 0, 120000, NULL);
-    MSG message;
+    MSG message = {0};
     int loopResult = -1;
     int timedOut = 0;
     DWORD loopError = 0;

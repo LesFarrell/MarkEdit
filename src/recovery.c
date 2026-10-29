@@ -91,7 +91,7 @@ static int cleanup_unlocked(const WCHAR *directory) {
     if (!ok) return 0;
     WCHAR *pattern = path_join(directory, L"document-*");
     if (!pattern) return 0;
-    WIN32_FIND_DATAW data;
+    WIN32_FIND_DATAW data = {0};
     HANDLE find = FindFirstFileW(pattern, &data);
     free(pattern);
     if (find == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
@@ -316,7 +316,7 @@ int recovery_session_claim_orphans(const WCHAR *root, RecoverySession *sessions,
         if (sessions[claimed].directory) claimed++;
     }
     WCHAR *pattern = path_join(root, L"session-*");
-    WIN32_FIND_DATAW data;
+    WIN32_FIND_DATAW data = {0};
     HANDLE find = pattern ? FindFirstFileW(pattern, &data) : INVALID_HANDLE_VALUE;
     free(pattern);
     if (find == INVALID_HANDLE_VALUE) return claimed;

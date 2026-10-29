@@ -1,89 +1,17 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 set "PROJECT_DIR=%~dp0"
 set "DIST_DIR=%~dp0dist"
 set "DIST_BACKUP=%~dp0dist.previous"
 pushd "%PROJECT_DIR%" || (echo Could not enter the project directory. & exit /b 1)
 
-where zig >nul 2>nul || (echo zig was not found on PATH. & exit /b 1)
+call scripts\msvc-env.bat || exit /b 1
+set "PS=pwsh"
+where pwsh >nul 2>nul || set "PS=powershell"
+set "OBJ_DIR=build\msvc"
+%PS% -NoProfile -ExecutionPolicy Bypass -File scripts\build_msvc.ps1 -OutputDirectory "%OBJ_DIR%"
+if errorlevel 1 exit /b 1
 
-rem Lua reports script errors with longjmp. On 64-bit Windows that unwind must
-rem cross valid function tables; stripping them makes any plugin error fail-fast
-rem in ntdll with STATUS_BAD_FUNCTION_TABLE before MarkEdit can show it.
-rem The code-generation flags (including those unwind tables) live in
-rem release-flags.rsp, which test.bat and premake5.lua read too, so the tests
-rem exercise the same code generation as the release build.
-set "COMMON_FLAGS=@release-flags.rsp"
-set "LINK_FLAGS=-Wl,--gc-sections -Wl,--strip-all -Wl,--build-id=none"
-rem Intermediate files go here rather than the project root. build\ is shared
-rem with the premake5-generated build, which uses build\obj.
-set "OBJ_DIR=build\zig"
-if not exist "%OBJ_DIR%\" mkdir "%OBJ_DIR%" || (echo Failed to create %OBJ_DIR%. & exit /b 1)
-
-zig rc markedit.rc %OBJ_DIR%\markedit.res
-if %errorlevel% neq 0 (
-    echo Resource compile failed.
-    exit /b 1
-)
-
-rem Lexilla is linked straight into markedit.exe (static object files)
-rem rather than shipped as its own DLL beside it. WebView2Loader stays a
-rem dynamic DLL: Microsoft's WebView2LoaderStatic.lib is MSVC-ABI-only (MSVC
-rem name mangling, /GS stack-cookie symbols, MSVC CRT thread-init guards) and
-rem can't be linked into a GNU/MinGW-targeted build like this one - the
-rem dynamic loader's DLL boundary is plain C, so it's the only ABI-compatible
-rem option here. Scintilla.dll also stays external, since it self-registers
-rem its window class at runtime via LoadLibrary and isn't linked at build
-rem time at all.
-rem
-rem Each Lexilla source is compiled individually into a same-named .o in
-rem %OBJ_DIR% (zig's cc/c++ driver, unlike plain clang, can't emit
-rem multiple named object files from one -c invocation targeting
-rem COFF/Windows) - the resulting .o list is written to
-rem %OBJ_DIR%\lexilla-objects.rsp for the final link below.
-type nul > %OBJ_DIR%\lexilla-objects.rsp
-for /f "usebackq delims=" %%S in (`findstr /offline /i ".cxx" lexilla-sources.rsp`) do (
-    zig c++ -std=c++17 %COMMON_FLAGS% -DNDEBUG -Ithird_party\lexilla\include -Ithird_party\lexilla\lexlib -Ithird_party\scintilla\include -c "%%S" -o "%OBJ_DIR%\%%~nS.o"
-    if !errorlevel! neq 0 (
-        echo Lexilla build failed compiling %%S.
-        exit /b 1
-    )
-    echo %OBJ_DIR%\%%~nS.o>>%OBJ_DIR%\lexilla-objects.rsp
-)
-
-rem cmark-gfm is compiled the same way, so its -Wno-unused-parameter (the
-rem vendored code leaves many parameters unused) stays off MarkEdit's own sources.
-rem cmark-gfm-objects.rsp starts with the .rsp's -D/-I lines, which
-rem src\markdown.c needs to include the cmark-gfm headers, then lists the
-rem objects.
-findstr /offline /r /b "[-]" cmark-gfm-sources.rsp > %OBJ_DIR%\cmark-gfm-flags.rsp
-copy /y %OBJ_DIR%\cmark-gfm-flags.rsp %OBJ_DIR%\cmark-gfm-objects.rsp >nul
-for /f "usebackq delims=" %%S in (`findstr /offline /r /v /b "[-]" cmark-gfm-sources.rsp`) do (
-    zig cc -std=c11 %COMMON_FLAGS% -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-parameter @%OBJ_DIR%\cmark-gfm-flags.rsp -c "%%S" -o "%OBJ_DIR%\%%~nS.o"
-    if !errorlevel! neq 0 (
-        echo cmark-gfm build failed compiling %%S.
-        exit /b 1
-    )
-    echo %OBJ_DIR%\%%~nS.o>>%OBJ_DIR%\cmark-gfm-objects.rsp
-)
-
-rem zig c++ (not zig cc) so the C++ object code compiled above still gets its
-rem runtime auto-linked; the MarkEdit and Lua sources are .c files and are
-rem still compiled as C - the driver choice only changes runtime auto-linking
-rem defaults, not per-file language detection.
-rem Lexilla.cxx __declspec(dllexport)s its API even inside an exe, so the
-rem linker also writes an import library; --out-implib keeps it in %OBJ_DIR%.
-zig c++ -std=c11 %COMMON_FLAGS% -Wall -Wextra -Wno-unknown-pragmas ^
-    -o %OBJ_DIR%\markedit.exe @markedit-sources.rsp @%OBJ_DIR%\cmark-gfm-objects.rsp @lua-sources.rsp @%OBJ_DIR%\lexilla-objects.rsp %OBJ_DIR%\markedit.res ^
-    -Wl,--out-implib,%OBJ_DIR%\markedit.lib ^
-    third_party\webview2\x64\WebView2Loader.dll.lib ^
-    -isystem third_party\webview2\include -isystem third_party\lexilla\include ^
-    -lgdi32 -lmsimg32 -luser32 -lcomdlg32 -lcomctl32 -lshlwapi -lshell32 -lole32 -lmpr ^
-    -lwindowscodecs -luxtheme -ldwmapi -Wl,--subsystem,windows %LINK_FLAGS%
-if %errorlevel% neq 0 (
-    echo Build failed.
-    exit /b 1
-)
 rem Resolve and verify the destructive target before replacing the release tree.
 for %%I in ("%PROJECT_DIR%.") do set "PROJECT_FULL=%%~fI"
 for %%I in ("%DIST_DIR%") do set "DIST_FULL=%%~fI"

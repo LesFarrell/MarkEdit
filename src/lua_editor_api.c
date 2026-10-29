@@ -448,14 +448,14 @@ static int editor_language(lua_State *L) {
 }
 
 static int editor_modified(lua_State *L) {
-    lua_pushboolean(L, SendMessageA(checked_editor(L), SCI_GETMODIFY, 0, 0));
+    lua_pushboolean(L, SendMessageA(checked_editor(L), SCI_GETMODIFY, 0, 0) != 0);
     return 1;
 }
 
 static int editor_read_only(lua_State *L) {
     HWND hEdit = checked_editor(L);
     if (!lua_isnone(L, 1)) SendMessageA(hEdit, SCI_SETREADONLY, lua_toboolean(L, 1), 0);
-    lua_pushboolean(L, SendMessageA(hEdit, SCI_GETREADONLY, 0, 0));
+    lua_pushboolean(L, SendMessageA(hEdit, SCI_GETREADONLY, 0, 0) != 0);
     return 1;
 }
 
@@ -596,7 +596,7 @@ static int editor_fold(lua_State *L) {
     Sci_Position line = checked_line(L, hEdit, 1);
     if (lua_isnoneornil(L, 2)) SendMessageA(hEdit, SCI_TOGGLEFOLD, line, 0);
     else SendMessageA(hEdit, SCI_SETFOLDEXPANDED, line, lua_toboolean(L, 2));
-    lua_pushboolean(L, SendMessageA(hEdit, SCI_GETFOLDEXPANDED, line, 0));
+    lua_pushboolean(L, SendMessageA(hEdit, SCI_GETFOLDEXPANDED, line, 0) != 0);
     return 1;
 }
 

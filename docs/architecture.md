@@ -226,15 +226,14 @@ collects line pieces before joining them, occurrence counting advances one line
 cursor, and the anagram index counts letters instead of sorting every word.
 
 Compiled sources are listed in the repo-root `*.rsp` response files.
-`build.bat` passes `markedit-sources.rsp`, `cmark-gfm-sources.rsp`,
-`lua-sources.rsp` and `lexilla-sources.rsp` to the compiler (cmark-gfm and
-Lexilla compiled file by file, with their own flags). `plugin-sources.rsp`
-lists the plugin host subset for `test.bat` and the Premake test projects;
-those files are also in `markedit-sources.rsp`. `release-flags.rsp` holds the
-release code-generation flags (`-Os`, `-flto`, the unwind tables Lua's `longjmp`
-needs, and section flags), which `build.bat`, `test.bat` and `premake5.lua` all
-use. Full LTO makes a clean build slower but lets the final link optimize across
-the separately compiled modules and vendored static objects.
+The default MSVC scripts read `markedit-sources.rsp`, `cmark-gfm-sources.rsp`,
+`lua-sources.rsp` and `lexilla-sources.rsp` and compile each dependency with
+its own include and warning policy. `plugin-sources.rsp` lists the plugin-host
+subset for `test.bat` and the Premake test projects; those files are also in
+`markedit-sources.rsp`. MSVC whole-program optimization lets the final link
+optimize across the separately compiled modules and vendored static objects.
+`release-flags.rsp` contains the corresponding GCC/Zig flags for the optional
+Premake builds.
 `premake5.lua` reads the source lists via `sources_from_rsp()`, so adding a new
 `.c` file is a one-line change to its `.rsp` rather than an edit in two build
 systems.

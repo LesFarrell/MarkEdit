@@ -26,13 +26,20 @@ See [docs/features.md](docs/features.md) for the complete feature catalogue.
 
 ## Building
 
-The standard build requires [Zig](https://ziglang.org/) on `PATH`.
+The standard build requires Visual Studio with the **Desktop development with
+C++** workload. `build.bat` finds the newest installed MSVC toolchain through
+Visual Studio Installer, so it works from a normal command prompt as well as a
+Developer Command Prompt.
 
 ```
 build.bat
 ```
 
-This uses Zig's C/C++ toolchain with size and link-time optimization (LTO), dead-section elimination, and symbol stripping. LTO makes a clean release build slower because the final link optimizes across MarkEdit and its statically linked dependencies; Zig's cache makes subsequent unchanged builds much quicker. After compiling, the script safely clears and recreates `dist/`, then stages `markedit.exe`, the required runtime DLLs, offline preview assets, and licence files there.
+This uses MSVC's C/C++ toolchain with size optimization, function/data-level
+linking, whole-program optimization, and a statically linked C/C++ runtime.
+After compiling, the script safely clears and recreates `dist/`, then stages
+`markedit.exe`, the required runtime DLLs, offline preview assets, and licence
+files there.
 
 A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC, Zig, and MSVC builds. Each builds the same targets (`markedit.exe` in `build\bin`, statically linking Lexilla and Lua, and the test programs under `build\tests`) and stages `dist/` the way `build.bat` does:
 
@@ -127,7 +134,7 @@ src/                     application sources, including:
 plugins/                 bundled Lua extensions, plugin guide, examples, and language-server types
 docs/lua.md              developer guide to MarkEdit's Lua files: what each is, load order, how commands reach Lua
 docs/architecture.md     native/Lua boundaries and subsystem ownership
-release-flags.rsp        release optimization/LTO flags shared by build.bat, test.bat and premake
+release-flags.rsp        release flags used by the optional GCC/Zig Premake builds
 cmark-gfm-sources.rsp    vendored renderer source list and its defines/include paths
 markedit-sources.rsp     application source list used by build.bat
 lexilla-sources.rsp      supported lexer source list used by build.bat
@@ -143,7 +150,9 @@ mermaid.min.js           bundled Mermaid renderer
 highlight*.js / .css     bundled Highlight.js renderer and light/dark themes
 katex/                    bundled KaTeX renderer, stylesheet, and fonts
 make_icon.ps1            regenerates markedit.ico
-build.bat                size-optimized Zig build script
+build.bat                size-optimized MSVC build and distribution script
+scripts/*_msvc.ps1       shared MSVC compilation logic for build.bat and test.bat
+scripts/msvc-env.bat     locates Visual Studio and initializes its x64 tools
 premake5.lua             alternative build for MinGW GCC, Zig (make) or MSVC (Visual Studio)
 markedit.iss             Inno Setup installer script
 dist/                    clean unpacked release staging folder (generated, not tracked)
