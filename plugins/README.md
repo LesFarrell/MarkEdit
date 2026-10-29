@@ -297,11 +297,11 @@ editor.replace_selections(replacements)
 
 ### ui
 
-These show MarkEdit's own dialogs and wait for the user. Time spent waiting doesn't count towards the [time limit](#how-commands-run). Unless given a `title`, a dialog is titled with the command's label (or `script.lua: event` for an event handler). `ui.message` can also be used from a plugin's top-level code, while it loads; the others are for commands and event handlers.
+These collect input with MarkEdit's own dialogs, except for `ui.message`, which writes a non-interactive notice to the output panel. Time spent waiting for a dialog doesn't count towards the [time limit](#how-commands-run). Unless given a `title`, a notice or dialog is titled with the command's label (or `script.lua: event` for an event handler). `ui.message` can also be used from a plugin's top-level code, while it loads; the others are for commands and event handlers.
 
 #### `ui.message(text [, title [, kind]])`
 
-Shows `text` in a message box with an OK button. `kind` chooses the icon: `"info"` (the default), `"warning"`, or `"error"`. A report longer than a few lines reads better in the output panel: see [`output.report`](#output).
+Appends `text` under a coloured title in the output panel's Output tab and opens the panel without moving keyboard focus. `kind` chooses the title colour: `"info"` (the default), `"warning"`, or `"error"`. Notices remain in the output history instead of interrupting editing with an OK button. For a longer document-specific report, see [`output.report`](#output).
 
 #### `ui.prompt(label [, default [, title]])`
 

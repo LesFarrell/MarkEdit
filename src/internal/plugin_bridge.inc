@@ -37,10 +37,19 @@ static int plugin_choose(const char *title, const char *label, const char *const
 static void plugin_message(const char *title, const char *text, const char *kind) {
     WCHAR *wideTitle = to_wide(title);
     WCHAR *wideText = to_wide(text);
-    UINT icon = strcmp(kind, "error") == 0 ? MB_ICONERROR
-              : strcmp(kind, "warning") == 0 ? MB_ICONWARNING : MB_ICONINFORMATION;
-    MessageBoxW(g_hMainWnd, wideText ? wideText : L"(This message isn't valid UTF-8 text.)",
-                wideTitle ? wideTitle : L"MarkEdit", MB_OK | icon);
+    const char *heading = wideTitle ? title : "MarkEdit Plugin";
+    const char *message = wideText ? text : "(This message isn't valid UTF-8 text.)";
+    const char *colour = strcmp(kind, "error") == 0 ? "\x1b[1;31m"
+                       : strcmp(kind, "warning") == 0 ? "\x1b[1;33m" : "\x1b[1;36m";
+    const char *ending = message[0] && message[strlen(message) - 1] == '\n' ? "\n" : "\n\n";
+    size_t length = strlen(colour) + strlen(heading) + strlen(message) + strlen(ending) + 6;
+    char *notice = (char *)malloc(length);
+    if (notice) {
+        snprintf(notice, length, "%s%s\x1b[0m\n%s%s", colour, heading, message, ending);
+        write_plugin_output(notice);
+        free(notice);
+    }
+    show_output_panel(OUTPUT_TAB_RUN, 0);
     free(wideText);
     free(wideTitle);
 }

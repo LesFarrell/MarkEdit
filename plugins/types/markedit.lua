@@ -100,6 +100,7 @@ function app.defer(milliseconds, fn) end
 function app.cancel(token) end
 
 ui = {}
+---Appends a titled notice to the output panel's Output tab and opens it.
 ---@param text string
 ---@param title? string
 ---@param kind? 'info'|'warning'|'error'
