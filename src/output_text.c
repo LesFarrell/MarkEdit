@@ -337,7 +337,11 @@ int output_find_diff_location(const char *text, size_t length, size_t position,
         if (header + 4 <= length && memcmp(text + header, "+++ ", 4) == 0) {
             size_t start = header + 4;
             size_t end = next_line_start(text, length, start);
-            while (end > start && (text[end - 1] == '\n' || text[end - 1] == '\r')) end--;
+            /* Git appends a trailing tab after the path when it contains a
+               space, so it can be told apart from a timestamp in plain
+               (non-git) unified diffs. */
+            while (end > start &&
+                   (text[end - 1] == '\n' || text[end - 1] == '\r' || text[end - 1] == '\t')) end--;
             if (end - start >= 2 && text[start] == 'b' && text[start + 1] == '/') start += 2;
             if (end == start || (end - start == 9 && memcmp(text + start, "/dev/null", 9) == 0))
                 return 0;

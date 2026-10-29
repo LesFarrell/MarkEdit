@@ -135,8 +135,9 @@ static void test_locations(void) {
 
     const char *diff =
         "diff --git a/src/file name.c b/src/file name.c\n"
-        "--- a/src/file name.c\n"
-        "+++ b/src/file name.c\n"
+        "--- a/src/file name.c\t\n"
+        /* Git appends a trailing tab after a path containing a space. */
+        "+++ b/src/file name.c\t\n"
         "@@ -10,4 +20,5 @@ static void example(void) {\n"
         " context\n"
         "-old\n"
