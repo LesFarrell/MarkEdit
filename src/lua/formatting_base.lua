@@ -1,4 +1,4 @@
--- MarkEdit's built-in Markdown and HTML formatting commands, written in Lua.
+-- MarkEdit's built-in Markdown formatting commands, written in Lua.
 --
 -- MarkEdit joins this file, formatting_tables.lua and formatting_text.lua
 -- into one chunk before loading it, so many locals here are only used by the
@@ -7,7 +7,7 @@
 ---@diagnostic disable: unused-local, unused-function
 --
 -- What's here (each section below is one of these):
---   Inline wrapping     Bold, Italic, Strikethrough, Inline Code, HTML tags
+--   Inline wrapping     Bold, Italic, Strikethrough, Inline Code
 --   Line prefixes       Headings, Blockquote, Bullet/Numbered/Task lists
 --   Snippets            Link, Image, Table, Code Block, Footnote, Alert, ...
 --   Markdown tables     Table Editor and Snippets > Markdown > Table Row/Column
@@ -76,7 +76,7 @@ local function replace_lines(first, last, text)
   editor.replace_selection(text)
 end
 
--- ---- inline wrapping: bold, italic, HTML tags ----
+-- ---- inline wrapping: bold, italic ----
 
 -- Whether selected is one open ... close pair around its inner text. For a
 -- Markdown marker made of one repeated character, "*" mustn't be half of
@@ -154,10 +154,6 @@ local function wrap_pair(open, close)
   local text, innerStart, innerFinish = wrapped_text(editor.get_selection(), open, close)
   editor.replace_selection(text)
   editor.set_selection(start + innerStart - 1, start + innerFinish - 1)
-end
-
-local function wrap_tag(tag)
-  wrap_pair("<" .. tag .. ">", "</" .. tag .. ">")
 end
 
 -- ---- line prefixes: headings, quotes, lists ----
@@ -369,51 +365,6 @@ local function insert_table()
   for _ = 1, rows do lines[#lines + 1] = row(cells) end
   local eol = editor.eol()
   insert_block(table.concat(lines, eol) .. eol)
-end
-
--- Snippets > HTML > Table.
-local function insert_html_table()
-  local rows, columns = ask_table_size("Insert HTML Table", 1, 3)
-  if not rows then return end
-
-  local lines = { "<table>" }
-  -- One <tr> of tag cells, holding text, or "Column n" when text is nil.
-  local function add_row(tag, text)
-    lines[#lines + 1] = "  <tr>"
-    for column = 1, columns do
-      lines[#lines + 1] = "    <" .. tag .. ">" .. (text or ("Column " .. column)) .. "</" .. tag .. ">"
-    end
-    lines[#lines + 1] = "  </tr>"
-  end
-  add_row("th")
-  for _ = 1, rows do add_row("td", "Cell") end
-  lines[#lines + 1] = "</table>"
-  lines[#lines + 1] = "" -- so the block ends with a line ending
-
-  insert_block(table.concat(lines, editor.eol()))
-end
-
--- Snippets > HTML > Bullet/Numbered List: wraps each selected line in <li>
--- and the lines in <ul> or <ol>. With no selection, inserts a list with one
--- placeholder item, selected.
-local function insert_html_list(ordered)
-  local eol = editor.eol()
-  local tag = ordered and "ol" or "ul"
-  local start, finish = selection()
-
-  if is_empty(start, finish) then
-    local placeholder = "List item"
-    local before = "<" .. tag .. ">" .. eol .. "  <li>"
-    editor.replace_selection(before .. placeholder .. "</li>" .. eol .. "</" .. tag .. ">")
-    editor.set_selection(start + #before, start + #before + #placeholder - 1)
-    return
-  end
-
-  local first, last = selected_lines()
-  local out = { "<" .. tag .. ">" .. eol }
-  for n = first, last do out[#out + 1] = "  <li>" .. editor.get_line(n) .. "</li>" .. eol end
-  out[#out + 1] = "</" .. tag .. ">"
-  replace_lines(first, last, table.concat(out))
 end
 
 -- Fences the selection in ``` lines, leaving it selected. With nothing

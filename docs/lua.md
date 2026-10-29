@@ -11,8 +11,9 @@ This guide is for people working on MarkEdit's source. It covers each Lua file i
 | [src/menus.lua](../src/menus.lua) | The default menu bar. | Built into `markedit.exe` (resource `IDR_DEFAULT_MENUS`). | MarkEdit developers |
 | `%APPDATA%\markedit\menus.lua` | A user's own menu bar, which replaces the default. | On disk. **Plugins > Customize Menus** creates it as a copy of the default. | Users |
 | `%APPDATA%\markedit\themes.lua` | A user's colours for the light and dark themes, overriding the built-in ones in [src/theme.c](../src/theme.c). | On disk. **Plugins > Customize Theme Colours** creates it, listing every colour. Run in a Lua state of its own (`plugin_host_load_theme()`). | Users |
-| `src/lua/formatting_*.lua` | Markdown and HTML formatting plus Markdown-aware Edit commands. | Built into `markedit.exe` as three resources and compiled together as one Lua chunk. | MarkEdit developers |
+| `src/lua/formatting_*.lua` | Markdown formatting plus Markdown-aware Edit commands. | Built into `markedit.exe` as three resources and compiled together as one Lua chunk. | MarkEdit developers |
 | [plugins/edit-convert.lua](../plugins/edit-convert.lua) | The complete **Edit > Convert** submenu and its transformations. | Loaded from the `plugins` folder. | MarkEdit developers |
+| [plugins/html-tools.lua](../plugins/html-tools.lua) | HTML wrapping, links, images, lists and table snippets. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/json-tools.lua](../plugins/json-tools.lua) / [json-check.lua](../plugins/json-check.lua) | JSON formatting, conversion and string tools / JSON syntax checking, including as you type. | Loaded from the `plugins` folder. | MarkEdit developers |
 | [plugins/csv-tools.lua](../plugins/csv-tools.lua) | Delimited-text parsing, transformations and export. | Loaded from the `plugins` folder. | MarkEdit developers |
 | `plugins/*-tools.lua` and other bundled plugins | SQL, logs, data conversion, natural sorting, number conversion, grammar, Lua formatting and other optional tools. | Loaded from the `plugins` folder. | MarkEdit developers |
@@ -80,7 +81,7 @@ Built-in commands have dotted names such as `file.save` or `markdown.bold`. [src
 2. It asks the plugin host whether a Lua function is registered for that name (`plugin_host_find_override`). If one is, it runs the function, and nothing else happens.
 3. Otherwise, it runs the C implementation.
 
-The built-in formatting chunk relies on step 2 for `markdown.*` and `html.*`. These commands have **no C implementation at all**; if the responsible Lua code is unavailable, their menu items do nothing. Convert and JSON tools are ordinary plugin menu commands created entirely by `plugins/edit-convert.lua` and `plugins/json-tools.lua`.
+The built-in formatting chunk relies on step 2 for `markdown.*` and the two Lua `edit.*` commands. These commands have **no C implementation at all**; if the responsible Lua code is unavailable, their menu items do nothing. HTML snippets, Convert and JSON tools are ordinary plugin menu commands created entirely by `plugins/html-tools.lua`, `plugins/edit-convert.lua` and `plugins/json-tools.lua`.
 
 Plugin commands added with `menu.add`, and functions written directly in `menus.lua`, aren't built-in names. They get IDs from `IDM_PLUGIN_COMMAND_0` upwards, one per entry in the host's command list.
 
@@ -117,9 +118,9 @@ These commands use the same API as plugins. Running them as an ordinary script k
 | Section | Commands | Key functions |
 |---|---|---|
 | Shared helpers | none | `selection`, `selected_lines`, `replace_lines`, `needs_leading_eol` |
-| Inline wrapping | Bold, Italic, Strikethrough, Inline Code, the HTML tag commands | `wrap_pair` toggles: it wraps, or unwraps text that's already wrapped |
+| Inline wrapping | Bold, Italic, Strikethrough, Inline Code | `wrap_pair` toggles: it wraps, or unwraps text that's already wrapped |
 | Line prefixes | Heading 1-3, Blockquote, Bullet, Numbered and Task lists | `marker_length` recognises an existing prefix so it can be replaced; `apply_line_prefix` |
-| Snippets | Link, Image, Table, HTML Table/List, Code Block, Rule, Alert, Footnote | `insert_with_url` selects the `url` placeholder; `ask_table_size` |
+| Snippets | Link, Image, Table, Code Block, Rule, Alert, Footnote | `insert_with_url` selects the `url` placeholder; `ask_table_size` |
 | Markdown tables | Table Editor, Row/Column insert, delete, sort and align | `find_table` locates the table at the caret; `row_cells`, `rewrite_table` |
 | Edit menu | Toggle Comment, Trim Trailing Whitespace | `trim_trailing_whitespace`, `toggle_comment` |
 | Registration | none | the `markdown`, `html` and `edit` tables, registered as `group.name` |
@@ -136,7 +137,7 @@ Conventions used throughout (also stated at the top of the file):
 2. Give it an ID in [src/command_ids.h](../src/command_ids.h), and add `{"markdown.underline", IDM_..., NULL}` to `COMMANDS` in [src/menu_commands.c](../src/menu_commands.c). Without this, menus can't refer to it and nothing can invoke it.
 3. Add an item for it to [src/menus.lua](../src/menus.lua), and add a toolbar button only when appropriate.
 4. Add the name to the list of built-in command names in [plugins/README.md](../plugins/README.md#built-in-command-names).
-5. Add a case to [tests/test_formatting.c](../tests/test_formatting.c). `test_registration` already fails if a `markdown.`/`html.` name in `menu_commands.c` has no Lua function. A new `edit.*` Lua command also needs adding to its `textCommands` list.
+5. Add a case to [tests/test_formatting.c](../tests/test_formatting.c). `test_registration` already fails if a `markdown.` name in `menu_commands.c` has no Lua function. A new `edit.*` Lua command also needs adding to its `textCommands` list.
 6. Rebuild.
 
 ## src/help/keyboard-shortcuts.lua
@@ -155,6 +156,7 @@ The script lists each menu's commands that have shortcuts under that menu's name
 
 - [README.md](../plugins/README.md) is the plugin guide. It's shipped in `dist/plugins/`, and **Help > Plugin Guide** opens it, so it's written for users, not for MarkEdit developers.
 - [edit-convert.lua](../plugins/edit-convert.lua) owns every **Edit > Convert** command and creates that submenu; there are no parallel built-in command IDs or menu entries.
+- [html-tools.lua](../plugins/html-tools.lua) owns the **Snippets > HTML** submenu; its commands likewise have no parallel built-in command IDs or menu entries.
 - [example.lua](../plugins/example.lua) is a working plugin that shows each part of the API: `menu.add` with submenus and with `/Menu/...` paths, a persistent `menu.checkbox`, `ui.message`/`prompt`/`choose`, and an `events.on("save")` handler.
 - MarkEdit loads each top-level `*.lua` file and each folder containing `init.lua`, in name order. `types/`, `.luarc.json`, and other files are ignored. Personal extensions use the same rules and load afterward.
 
@@ -175,7 +177,7 @@ The script lists each menu's commands that have shortcuts under that menu's name
 - **Tests** (`test.bat` runs them all; run them from the repository root):
   - [tests/test_plugin_host.c](../tests/test_plugin_host.c): the API, the sandbox, load failures, events and the time limit.
   - [tests/test_menus.c](../tests/test_menus.c): reads `src/menus.lua` from disk, and checks that it loads and that every name in it is known. It also renders `src/help/keyboard-shortcuts.lua` and checks that the page lists every shortcut.
-  - [tests/test_formatting.c](../tests/test_formatting.c): joins the three built-in formatting sources from disk and runs commands against a real Scintilla window.
+  - [tests/test_formatting.c](../tests/test_formatting.c): joins the three built-in formatting sources, loads `plugins/html-tools.lua`, and runs their commands against a real Scintilla window.
 
   Because these tests read the scripts from `src/`, they test your current edits without a rebuild of `markedit.exe`.
 // diff test comment

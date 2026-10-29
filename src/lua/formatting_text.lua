@@ -107,30 +107,12 @@ local markdown = {
   table_align_right = function() set_table_column_alignment("---:") end,
 }
 
-local html = {
-  html = function() wrap_tag("html") end,
-  head = function() wrap_tag("head") end,
-  body = function() wrap_tag("body") end,
-  paragraph = function() wrap_tag("p") end,
-  bold = function() wrap_tag("b") end,
-  italic = function() wrap_tag("i") end,
-  underline = function() wrap_tag("u") end,
-  div = function() wrap_tag("div") end,
-  span = function() wrap_tag("span") end,
-  line_break = function() editor.replace_selection("<br>") end,
-  link = function() insert_with_url('<a href="url">', "link text", "</a>") end,
-  image = function() insert_with_url('<img src="url" alt="', "alt text", '">') end,
-  table = insert_html_table,
-  bullet_list = function() insert_html_list(false) end,
-  numbered_list = function() insert_html_list(true) end,
-}
-
 local edit = {
   trim_whitespace = trim_trailing_whitespace,
   toggle_comment = toggle_comment,
 }
 
-for group, functions in pairs({ markdown = markdown, html = html, edit = edit }) do
+for group, functions in pairs({ markdown = markdown, edit = edit }) do
   for name, fn in pairs(functions) do
     commands.register(group .. "." .. name, fn)
   end

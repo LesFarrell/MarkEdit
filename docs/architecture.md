@@ -257,11 +257,13 @@ The plugin host is split across four files. `plugin_lua_runtime.c` owns the sand
 
 The built-in formatter is stored as three focused files:
 
-- `formatting_base.lua`: shared range helpers, inline formatting, line prefixes and snippets.
+- `formatting_base.lua`: shared range helpers, Markdown inline formatting, line prefixes and snippets.
 - `formatting_tables.lua`: Markdown table parsing and operations.
 - `formatting_text.lua`: Markdown-aware Edit commands and formatting registration.
 
 They are separate executable resources but are joined and compiled as one Lua chunk. This preserves private `local` helpers across the parts and makes loading atomic.
+
+HTML snippets live in `plugins/html-tools.lua`, which creates Snippets → HTML without built-in command IDs.
 
 General Edit conversions live in `plugins/edit-convert.lua`, which creates the complete Edit → Convert submenu. Native code exposes only the small EOL-mode, tab-width, and save-encoding capabilities that text transformations cannot reproduce faithfully. JSON tools live entirely in two plugins that share the Tools → JSON submenu: `plugins/json-check.lua` supplies syntax checking (strict JSON, JSONC and JSON Lines), JSON paths and error highlighting as you type; `plugins/json-tools.lua` supplies formatting, minification, recursive key sorting, string escaping and JSON/YAML conversion. The core contains no JSON tool commands. Delimited-text operations live in `plugins/csv-tools.lua`; its shared parser replaces the older CSV-to-Markdown implementation that was formerly duplicated in `markdown-tools.lua`. SQL, CLEF logs, data interchange, natural sorting, number conversion, and heuristic grammar checks are likewise ordinary bundled plugins and require no dedicated native commands.
 

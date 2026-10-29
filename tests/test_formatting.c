@@ -1,4 +1,4 @@
-/* src/lua/formatting_*.lua: built-in Markdown and HTML-aware commands. */
+/* Built-in Markdown formatting and the bundled HTML snippets plugin. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,16 +97,61 @@ static const char *run_at(HWND editor, const char *name, const char *text,
     return run_with_selection(editor, name, text, strlen(text), caret, caret, eolMode);
 }
 
+static int find_plugin_command(const char *label) {
+    for (int index = 0; index < plugin_host_command_count(); index++) {
+        const char *candidate = plugin_host_command_label(index);
+        if (candidate && strcmp(candidate, label) == 0) return index;
+    }
+    return -1;
+}
+
+static const char *run_plugin(HWND editor, const char *label, const char *text,
+                              size_t length, int eolMode) {
+    static char result[8192];
+    s_lastMessage[0] = 0;
+    SendMessageA(editor, SCI_SETEOLMODE, (WPARAM)eolMode, 0);
+    SendMessageA(editor, SCI_CLEARALL, 0, 0);
+    SendMessageA(editor, SCI_ADDTEXT, (WPARAM)length, (LPARAM)text);
+    SendMessageA(editor, SCI_SETSEL, 0, (LPARAM)length);
+    int index = find_plugin_command(label);
+    char *error = index >= 0 ? plugin_host_run(index, editor) : NULL;
+    if (error) fprintf(stderr, "%s: %s\n", label, error);
+    expect(index >= 0 && !error, label);
+    free(error);
+    SendMessageA(editor, SCI_GETTEXT, sizeof(result), (LPARAM)result);
+    return result;
+}
+
 static void test_registration(void) {
     static const char *const textCommands[] = { "edit.trim_whitespace", "edit.toggle_comment" };
     for (int i = 0; menu_command_at(i); i++) {
         const char *name = menu_command_at(i)->name;
-        int inLua = strncmp(name, "markdown.", 9) == 0 || strncmp(name, "html.", 5) == 0;
+        int inLua = strncmp(name, "markdown.", 9) == 0;
         for (size_t t = 0; t < sizeof(textCommands) / sizeof(textCommands[0]); t++)
             if (strcmp(name, textCommands[t]) == 0) inLua = 1;
         if (inLua && plugin_host_find_override(name) < 0) fprintf(stderr, "Not registered: %s\n", name);
         if (inLua) expect(plugin_host_find_override(name) >= 0, "every formatting and text command is in Lua");
     }
+}
+
+static void test_html_commands(HWND editor) {
+    static const char *const labels[] = {
+        "/Snippets/HTML/&HTML", "/Snippets/HTML/H&ead", "/Snippets/HTML/&Body",
+        "/Snippets/HTML/&Paragraph", "/Snippets/HTML/B&old", "/Snippets/HTML/&Italic",
+        "/Snippets/HTML/&Underline", "/Snippets/HTML/&Div", "/Snippets/HTML/&Span",
+        "/Snippets/HTML/&Link", "/Snippets/HTML/I&mage", "/Snippets/HTML/&Table",
+        "/Snippets/HTML/B&ullet List", "/Snippets/HTML/&Numbered List",
+        "/Snippets/HTML/Line &Break"
+    };
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
+        expect(find_plugin_command(labels[i]) >= 0, "every HTML snippet command is registered");
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/B&old", "word", 4, SC_EOL_LF),
+                  "<b>word</b>") == 0, "HTML tag command wraps text");
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/B&old", "<b>word</b>", 11, SC_EOL_LF),
+                  "word") == 0, "HTML tag command unwraps text");
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/B&ullet List", "one\ntwo", 7, SC_EOL_LF),
+                  "<ul>\n  <li>one</li>\n  <li>two</li>\n</ul>") == 0,
+           "HTML list command wraps selected lines");
 }
 
 static void test_table_commands(HWND editor) {
@@ -160,8 +205,7 @@ static void test_text_commands(HWND editor) {
     check_text_command(editor, "edit.toggle_comment", " <!-- \n\t-->", SC_EOL_CRLF, "");
 }
 
-/* Insert Table and Insert HTML Table ask for a size; the defaults give the
-   tables they always inserted. */
+/* The built-in Markdown and bundled HTML table commands both ask for a size. */
 static void test_insert_tables(HWND editor) {
     answer_with("2", "2");
     expect(strcmp(run(editor, "markdown.table", "", 0, SC_EOL_LF),
@@ -172,18 +216,19 @@ static void test_insert_tables(HWND editor) {
                   "| Column 1 | Column 2 | Column 3 |\r\n| --- | --- | --- |\r\n| Cell | Cell | Cell |\r\n") == 0,
            "the default Markdown table is the one it always was");
     answer_with("1", "1");
-    expect(strcmp(run(editor, "html.table", "", 0, SC_EOL_LF),
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/&Table", "", 0, SC_EOL_LF),
                   "<table>\n  <tr>\n    <th>Column 1</th>\n  </tr>\n  <tr>\n    <td>Cell</td>\n  </tr>\n</table>\n") == 0,
            "HTML table of the size asked for");
     answer_with("1", "3");
-    expect(strcmp(run(editor, "html.table", "", 0, SC_EOL_LF),
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/&Table", "", 0, SC_EOL_LF),
                   "<table>\n  <tr>\n    <th>Column 1</th>\n    <th>Column 2</th>\n    <th>Column 3</th>\n  </tr>\n"
                   "  <tr>\n    <td>Cell</td>\n    <td>Cell</td>\n    <td>Cell</td>\n  </tr>\n</table>\n") == 0,
            "the default HTML table is the one it always was");
     answer_with("2", NULL);
     expect(strcmp(run(editor, "markdown.table", "", 0, SC_EOL_LF), "") == 0, "cancelling inserts nothing");
     answer_with("0", "3");
-    expect(strcmp(run(editor, "html.table", "", 0, SC_EOL_LF), "") == 0 && strstr(s_lastMessage, "1–50"),
+    expect(strcmp(run_plugin(editor, "/Snippets/HTML/&Table", "", 0, SC_EOL_LF), "") == 0 &&
+           strstr(s_lastMessage, "1–50"),
            "an out-of-range size is reported");
 }
 
@@ -212,7 +257,15 @@ int main(void) {
     free(error);
     free(code);
 
+    code = read_utf8_text_file(L"plugins\\html-tools.lua", 1024 * 1024);
+    error = code ? plugin_host_load_chunk("html-tools.lua", code, strlen(code)) : NULL;
+    if (error) fprintf(stderr, "%s\n", error);
+    expect(code && !error, "bundled HTML snippets plugin loads");
+    free(error);
+    free(code);
+
     test_registration();
+    test_html_commands(editor);
     test_insert_tables(editor);
     test_table_commands(editor);
     test_text_commands(editor);

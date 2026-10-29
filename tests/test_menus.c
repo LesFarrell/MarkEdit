@@ -79,7 +79,10 @@ static void test_default_definition(void) {
         "edit.tabs_to_spaces", "edit.spaces_to_tabs", "edit.eol_crlf", "edit.eol_lf",
         "edit.eol_cr", "edit.encoding_utf8", "edit.encoding_utf8_bom",
         "edit.encoding_utf16le", "edit.encoding_utf16be", "edit.encoding_ansi",
-        "json.format", "json.minify"
+        "json.format", "json.minify", "html.html", "html.head", "html.body",
+        "html.paragraph", "html.bold", "html.italic", "html.underline", "html.div",
+        "html.span", "html.link", "html.image", "html.table", "html.bullet_list",
+        "html.numbered_list", "html.line_break"
     };
     for (size_t i = 0; i < sizeof(pluginOnly) / sizeof(pluginOnly[0]); i++)
         expect(menu_command_find(pluginOnly[i]) == NULL,

@@ -1029,7 +1029,7 @@ static void handle_main_command(HWND hwnd, WORD cmd) {
     }
     /* A built-in command registered in Lua (commands.register) runs there,
        from the menu, toolbar or a shortcut alike. Built-in formatting Lua
-       supplies the Markdown and HTML implementations through this route. */
+       supplies the built-in Markdown implementations through this route. */
     const MenuCommand *builtIn = menu_command_for_id(cmd);
     int override = builtIn ? plugin_host_find_override(builtIn->name) : -1;
     if (override >= 0) {
