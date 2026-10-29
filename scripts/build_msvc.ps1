@@ -32,7 +32,7 @@ function Compile-Sources(
     $standard = if ($Language -eq "C++") { "/std:c++17" } else { "/std:c11" }
     $languageOptions = if ($Language -eq "C++") { @("/EHsc") } else { @() }
     $arguments = @(
-        "/nologo", "/c", $standard, "/O1", "/GL", "/Gy", "/Gw", "/MT",
+        "/nologo", "/c", $standard, "/O2", "/GL", "/Gy", "/Gw", "/MT",
         "/DWIN32", "/DNDEBUG", "/D_CRT_SECURE_NO_WARNINGS", "/utf-8", "/W4"
     ) + $languageOptions + $Options + @("/Fo$ObjectDirectory\") + $Sources
     Invoke-Tool "cl.exe" $arguments "MSVC failed compiling $Language sources"
