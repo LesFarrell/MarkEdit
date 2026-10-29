@@ -302,6 +302,16 @@ int output_find_diff_location(const char *text, size_t length, size_t position,
     if (!text || !location || position > length) return 0;
     if (position == length && position) position--;
     size_t clicked = line_start_before(text, position);
+    size_t clickedEnd = next_line_start(text, length, clicked);
+    size_t clickedLength = clickedEnd - clicked;
+    if (clickedLength && text[clicked + clickedLength - 1] == '\n') clickedLength--;
+    int hunkHeader = clickedLength >= 2 && text[clicked] == '@' && text[clicked + 1] == '@';
+    int hunkRow = clickedLength &&
+                  (text[clicked] == ' ' || text[clicked] == '+' || text[clicked] == '-' ||
+                   text[clicked] == '\\');
+    if ((!hunkHeader && !hunkRow) ||
+        (clickedLength >= 4 && (memcmp(text + clicked, "+++ ", 4) == 0 ||
+                                memcmp(text + clicked, "--- ", 4) == 0))) return 0;
     size_t hunk = clicked;
     int targetLine = 0;
     for (;;) {
@@ -310,6 +320,7 @@ int output_find_diff_location(const char *text, size_t length, size_t position,
         if (lineLength && text[hunk + lineLength - 1] == '\n') lineLength--;
         if (lineLength && text[hunk + lineLength - 1] == '\r') lineLength--;
         if (diff_hunk_new_line(text + hunk, lineLength, &targetLine)) break;
+        if (lineLength >= 11 && memcmp(text + hunk, "diff --git ", 11) == 0) return 0;
         if (!hunk) return 0;
         hunk = line_start_before(text, hunk - 1);
     }
@@ -333,6 +344,7 @@ int output_find_diff_location(const char *text, size_t length, size_t position,
             *location = (OutputLocation){ start, end - start, targetLine, 0 };
             return 1;
         }
+        if (header + 11 <= length && memcmp(text + header, "diff --git ", 11) == 0) return 0;
         if (!header) return 0;
         header = line_start_before(text, header - 1);
     }

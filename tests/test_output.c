@@ -160,6 +160,10 @@ static void test_locations(void) {
     expect(!output_find_diff_location(deleted, sizeof(deleted) - 1,
                                       sizeof(deleted) - 2, &location),
            "a deleted file diff is not offered as a working-tree location");
+    expect(!output_find_diff_location(diff, strlen(diff), 0, &location) &&
+           !output_find_diff_location(diff, strlen(diff),
+                                      (size_t)(strstr(diff, "+++ b/") - diff), &location),
+           "diff metadata is not mistaken for a hunk row");
 }
 
 /* ---- a real program on pipes ---- */
