@@ -307,6 +307,12 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_PREVIOUS_TAB:
             if (g_documentStore.count > 1) switch_document((g_documentStore.active + g_documentStore.count - 1) % g_documentStore.count);
             break;
+        case IDM_VIEW_TAB_SWITCHER:
+            show_tab_switcher();
+            break;
+        case IDM_VIEW_PIN_TAB:
+            toggle_document_pinned(g_documentStore.active);
+            break;
         case IDM_VIEW_CYCLE_PANE:
             cycle_pane_focus(0);
             break;

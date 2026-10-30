@@ -753,17 +753,19 @@ static void do_saveas_tab_at(int index) {
 static void do_close_other_tabs(int keep) {
     if (keep < 0 || keep >= g_documentStore.count) return;
     for (int i = g_documentStore.count - 1; i >= 0; i--) {
-        if (i == keep) continue;
+        if (i == keep || g_documentStore.documents[i].pinned) continue;
         do_close_document_at(i);
     }
 }
 
 static void do_close_tabs_to_right(int index) {
-    for (int i = g_documentStore.count - 1; i > index; i--) do_close_document_at(i);
+    for (int i = g_documentStore.count - 1; i > index; i--)
+        if (!g_documentStore.documents[i].pinned) do_close_document_at(i);
 }
 
 static void do_close_all_tabs(void) {
-    for (int i = g_documentStore.count - 1; i >= 0; i--) do_close_document_at(i);
+    for (int i = g_documentStore.count - 1; i >= 0; i--)
+        if (!g_documentStore.documents[i].pinned) do_close_document_at(i);
 }
 
 static void copy_text_to_clipboard(const WCHAR *text) {
@@ -782,7 +784,7 @@ static void copy_text_to_clipboard(const WCHAR *text) {
 
 static void show_tab_context_menu(int index, POINT screenPoint) {
     enum {
-        TAB_CONTEXT_SAVE = 1, TAB_CONTEXT_SAVEAS, TAB_CONTEXT_CLOSE,
+        TAB_CONTEXT_SAVE = 1, TAB_CONTEXT_SAVEAS, TAB_CONTEXT_PIN, TAB_CONTEXT_CLOSE,
         TAB_CONTEXT_CLOSE_OTHERS, TAB_CONTEXT_CLOSE_RIGHT, TAB_CONTEXT_CLOSE_ALL,
         TAB_CONTEXT_COPY_PATH, TAB_CONTEXT_REVEAL
     };
@@ -793,8 +795,11 @@ static void show_tab_context_menu(int index, POINT screenPoint) {
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, TAB_CONTEXT_SAVE, L"Save");
     AppendMenuW(menu, MF_STRING, TAB_CONTEXT_SAVEAS, L"Save As...");
+    AppendMenuW(menu, MF_STRING, TAB_CONTEXT_PIN,
+                g_documentStore.documents[index].pinned ? L"Unpin Tab" : L"Pin Tab");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, TAB_CONTEXT_CLOSE, L"Close");
+    AppendMenuW(menu, MF_STRING | (g_documentStore.documents[index].pinned ? MF_GRAYED : 0),
+                TAB_CONTEXT_CLOSE, L"Close");
     AppendMenuW(menu, MF_STRING | (g_documentStore.count > 1 ? 0 : MF_GRAYED),
                 TAB_CONTEXT_CLOSE_OTHERS, L"Close Others");
     AppendMenuW(menu, MF_STRING | (index < g_documentStore.count - 1 ? 0 : MF_GRAYED),
@@ -813,6 +818,7 @@ static void show_tab_context_menu(int index, POINT screenPoint) {
     switch (command) {
         case TAB_CONTEXT_SAVE: do_save_tab_at(index); break;
         case TAB_CONTEXT_SAVEAS: do_saveas_tab_at(index); break;
+        case TAB_CONTEXT_PIN: toggle_document_pinned(index); break;
         case TAB_CONTEXT_CLOSE: do_close_document_at(index); break;
         case TAB_CONTEXT_CLOSE_OTHERS: do_close_other_tabs(index); break;
         case TAB_CONTEXT_CLOSE_RIGHT: do_close_tabs_to_right(index); break;
@@ -903,7 +909,8 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             TabCtrl_GetItemRect(hwnd, index, &tabRect);
             RECT close = tab_close_rectangle(&tabRect);
             POINT point = hit.pt;
-            if (msg == WM_MBUTTONUP || PtInRect(&close, point)) {
+            if ((msg == WM_MBUTTONUP || PtInRect(&close, point)) &&
+                !g_documentStore.documents[index].pinned) {
                 PostMessageW(g_hMainWnd, WM_APP_CLOSE_TAB, (WPARAM)index, 0);
                 return 0;
             }

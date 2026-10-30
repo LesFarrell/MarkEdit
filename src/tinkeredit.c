@@ -201,6 +201,8 @@ typedef struct Document {
     int xOffset;
     unsigned untitledNumber;
     int closedIndex;
+    int pinned; /* protected from ordinary close commands until explicitly unpinned */
+    unsigned long long lastActivated; /* MRU order for the searchable tab switcher */
     int isReference; /* 0, or a ReferenceKind for a Help page so Help reuses its tab */
     int viewKind; /* DOCUMENT_VIEW_*: text editor or a read-only image preview */
     int largeFile; /* using large-file mode, either from open or after growing past the threshold */
@@ -231,6 +233,7 @@ typedef struct DocumentStore {
     int switching;
 } DocumentStore;
 static DocumentStore g_documentStore = { .nextUntitledNumber = 1 };
+static unsigned long long g_tabActivationSerial = 0;
 
 static int image_file_path(const WCHAR *path) {
     const WCHAR *extension = path ? PathFindExtensionW(path) : NULL;
@@ -597,6 +600,7 @@ static void initialize_first_document(void) {
     sync_split_editor_document();
     /* The sole blank startup tab is the unnumbered canonical document. */
     g_documentStore.documents[0].untitledNumber = 0;
+    g_documentStore.documents[0].lastActivated = ++g_tabActivationSerial;
     TCITEMW firstTab = {0};
     firstTab.mask = TCIF_TEXT;
     firstTab.pszText = L"";

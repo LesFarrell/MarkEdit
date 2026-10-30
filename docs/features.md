@@ -18,7 +18,8 @@ security information, return to the [main README](../README.md).
 - The panel's Git tab (Ctrl+Shift+G) shows staged, unstaged, untracked, and conflicted files alongside local and remote branches. Checkboxes stage or unstage files; double-clicking a file opens a coloured staged or working-tree diff with moved-line highlighting, rename/submodule details and a compact change summary. Double-click any diff hunk or row to open its working-tree file at the corresponding new line. Double-clicking a remote branch creates its local tracking branch. The Git menu also provides repository status, separate staged and unstaged diffs, commit, publish/push/pull/fetch, branch creation/switching/deletion, stash creation/apply/pop/drop, merge and rebase continue/skip/abort controls, and explicitly confirmed discard commands. Pushing a branch without an upstream first offers to publish it to a selected remote. Git operations use the active workspace folder and require `git.exe` on `PATH`.
 - The panel's Debug tab opens automatically when a debug session starts (F5), showing its status, variables, and Continue/Step Over/Step Into/Step Out controls; it stays selectable afterwards like Output and Terminal.
 - F9 (or a click in the marker gutter) toggles per-file Python/C/C++ breakpoints. Breakpoints follow edited lines and are restored for that file in later Tinker Editor sessions; Run → Clear All Breakpoints removes them together.
-- Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
+- Multiple document tabs with independent undo history, selections, dirty state, encoding, and paths. Ctrl+E opens a searchable, most-recently-used tab switcher. Tabs have close buttons, support middle-click closing, can be reopened, and are restored between sessions.
+- Tabs can be pinned from the View menu or their right-click menu. Pinned tabs show a pin instead of a close button, survive Close/Close Others/Close to Right/Close All commands, and retain their pinned state between sessions when they have a saved path.
 - Tabs can be reordered by dragging. Dirty and unsaved tabs are snapshotted every five seconds to a recovery area under Local AppData and can be restored after an interrupted session.
 - A formatting toolbar (Bold, Italic, Strikethrough, Inline code, Code block, Headings, Blockquote, Lists, Link, Image, Table, Footnote, Horizontal rule, Alert, Toggle preview, Swap panel sides), shown while the editor pane is visible.
 - Smart Markdown editing continues blockquotes and bullet, numbered, and task lists on Enter (incrementing numbered lists and resetting task items), terminates empty items, and pairs brackets and inline backticks.
@@ -82,6 +83,7 @@ These application shortcuts apply when the editor and other application controls
 | Ctrl+P | Print rendered preview |
 | Ctrl+W | Close current tab |
 | Ctrl+Shift+T | Reopen last closed tab |
+| Ctrl+E | Search open tabs |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Alt+Left | Go back to where the last wiki-link jump was made from |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |

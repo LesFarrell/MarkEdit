@@ -223,10 +223,23 @@ static void draw_tab_item(const DRAWITEMSTRUCT *dis) {
     int padTop = pad + 1, padBottom = pad;
     HPEN closePen = CreatePen(PS_SOLID, 2, fg);
     SelectObject(dis->hDC, closePen);
-    MoveToEx(dis->hDC, glyph.left + pad, glyph.top + padTop, NULL);
-    LineTo(dis->hDC, glyph.right - pad, glyph.bottom - padBottom);
-    MoveToEx(dis->hDC, glyph.right - pad, glyph.top + padTop, NULL);
-    LineTo(dis->hDC, glyph.left + pad, glyph.bottom - padBottom);
+    if (g_documentStore.documents[index].pinned) {
+        /* A compact push-pin in the close-button slot. Pinned tabs have no X
+           and that hit target is inert until Unpin Tab is chosen. */
+        int left = glyph.left + pad, right = glyph.right - pad;
+        int top = glyph.top + padTop, bottom = glyph.bottom - padBottom;
+        int middle = (left + right) / 2;
+        MoveToEx(dis->hDC, left, top, NULL); LineTo(dis->hDC, right, top);
+        MoveToEx(dis->hDC, left + 2, top, NULL); LineTo(dis->hDC, left + 2, top + 5);
+        MoveToEx(dis->hDC, right - 2, top, NULL); LineTo(dis->hDC, right - 2, top + 5);
+        MoveToEx(dis->hDC, left, top + 5, NULL); LineTo(dis->hDC, right, top + 5);
+        MoveToEx(dis->hDC, middle, top + 5, NULL); LineTo(dis->hDC, middle, bottom);
+    } else {
+        MoveToEx(dis->hDC, glyph.left + pad, glyph.top + padTop, NULL);
+        LineTo(dis->hDC, glyph.right - pad, glyph.bottom - padBottom);
+        MoveToEx(dis->hDC, glyph.right - pad, glyph.top + padTop, NULL);
+        LineTo(dis->hDC, glyph.left + pad, glyph.bottom - padBottom);
+    }
     SelectObject(dis->hDC, oldPen);
     DeleteObject(closePen);
     DeleteObject(borderPen);

@@ -553,6 +553,10 @@ static int command_state(UINT id, CommandState *state) {
             state->enabled = g_currentFile != NULL && !active_document_is_image(); break;
         case IDM_FILE_REOPEN_CLOSED: state->enabled = g_closedDocumentCount != 0; break;
         case IDM_FILE_GO_BACK: state->enabled = g_wikiBackCount != 0; break;
+        case IDM_FILE_CLOSE:
+            state->enabled = !g_documentStore.documents[g_documentStore.active].pinned; break;
+        case IDM_VIEW_PIN_TAB:
+            STATE_CHECK(g_documentStore.documents[g_documentStore.active].pinned); break;
         case IDM_MARKDOWN_BACKLINKS:
             state->enabled = g_currentFile && g_activeLanguage == LANG_MARKDOWN &&
                              !active_document_is_image(); break;

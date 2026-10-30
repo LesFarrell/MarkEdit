@@ -64,6 +64,8 @@ static const MenuCommand COMMANDS[] = {
     {"view.editor", IDM_VIEW_TOGGLEEDITOR, "Ctrl+Shift+E"},
     {"view.next_tab", IDM_VIEW_NEXT_TAB, "Ctrl+Tab"},
     {"view.previous_tab", IDM_VIEW_PREVIOUS_TAB, "Ctrl+Shift+Tab"},
+    {"view.tab_switcher", IDM_VIEW_TAB_SWITCHER, "Ctrl+E"},
+    {"view.pin_tab", IDM_VIEW_PIN_TAB, NULL},
     {"view.cycle_panes", IDM_VIEW_CYCLE_PANE, "Ctrl+F6"},
     {"view.cycle_panes_previous", IDM_VIEW_CYCLE_PANE_PREV, "Ctrl+Shift+F6"},
     {"view.theme_light", IDM_VIEW_THEME_GITHUB_LIGHT, NULL},

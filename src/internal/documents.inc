@@ -91,6 +91,55 @@ static void update_tab_label(int index) {
     InvalidateRect(g_hTabs, NULL, FALSE);
 }
 
+static void toggle_document_pinned(int index) {
+    if (index < 0 || index >= g_documentStore.count) return;
+    Document *doc = &g_documentStore.documents[index];
+    doc->pinned = !doc->pinned;
+    update_tab_label(index);
+    refresh_menu(g_hMainWnd);
+    show_plugin_reload_status(doc->pinned ? L"Tab pinned" : L"Tab unpinned");
+}
+
+static int compare_tab_recency(const void *left, const void *right) {
+    int a = *(const int *)left, b = *(const int *)right;
+    unsigned long long first = g_documentStore.documents[a].lastActivated;
+    unsigned long long second = g_documentStore.documents[b].lastActivated;
+    if (first != second) return first > second ? -1 : 1;
+    return a - b;
+}
+
+/* Ctrl+E: searchable open tabs, ordered most-recently-used with the current
+   tab last. Enter therefore switches straight back to the previous tab. */
+static void show_tab_switcher(void) {
+    if (g_documentStore.count <= 1) { MessageBeep(MB_ICONASTERISK); return; }
+    int order[MAX_DOCUMENTS], count = 0;
+    for (int i = 0; i < g_documentStore.count; i++)
+        if (i != g_documentStore.active) order[count++] = i;
+    qsort(order, (size_t)count, sizeof(order[0]), compare_tab_recency);
+    order[count++] = g_documentStore.active;
+
+    WCHAR *labels[MAX_DOCUMENTS] = {0};
+    for (int row = 0; row < count; row++) {
+        const Document *doc = &g_documentStore.documents[order[row]];
+        WCHAR name[MAX_PATH + 32];
+        format_document_label(doc, name, sizeof(name) / sizeof(name[0]));
+        const WCHAR *prefix = doc->pinned ? L"[Pinned] " : L"";
+        size_t capacity = wcslen(prefix) + wcslen(name) +
+                          (doc->path ? wcslen(doc->path) + 4 : 1);
+        labels[row] = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+        if (!labels[row]) {
+            for (int i = 0; i < row; i++) free(labels[i]);
+            return;
+        }
+        if (doc->path) swprintf(labels[row], capacity, L"%ls%ls — %ls", prefix, name, doc->path);
+        else swprintf(labels[row], capacity, L"%ls%ls", prefix, name);
+    }
+    int selected = show_choice_dialog(L"Open Tab", L"Type part of a tab name or path:",
+                                      labels, count, L"Open");
+    for (int i = 0; i < count; i++) free(labels[i]);
+    if (selected >= 0 && selected < count) switch_document(order[selected]);
+}
+
 static void save_active_document_view(void) {
     if (!g_hEdit || g_documentStore.count <= 0) return;
     Document *doc = &g_documentStore.documents[g_documentStore.active];
@@ -167,6 +216,7 @@ static void switch_document(int index) {
     save_active_document_view();
     g_documentStore.switching = 1;
     g_documentStore.active = index;
+    g_documentStore.documents[index].lastActivated = ++g_tabActivationSerial;
     set_active_editor_document(g_documentStore.documents[index].sciDocument);
     apply_preview_host_theme();
     apply_webview_background_colour();
@@ -211,6 +261,7 @@ static int create_document_tab_internal(int deferPresentation) {
     memset(&g_documentStore.documents[index], 0, sizeof(g_documentStore.documents[index]));
     g_documentStore.documents[index].sciDocument = sciDoc;
     g_documentStore.documents[index].untitledNumber = g_documentStore.nextUntitledNumber++;
+    g_documentStore.documents[index].lastActivated = ++g_tabActivationSerial;
     g_documentStore.active = index;
     g_documentStore.switching = 1;
     set_active_editor_document(sciDoc);
@@ -852,6 +903,7 @@ static void set_document_encoding(TextEncoding encoding, int hasBom) {
 
 static int active_document_is_reusable(void) {
     return !g_currentFile && !g_dirty &&
+           !g_documentStore.documents[g_documentStore.active].pinned &&
            (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) == 0;
 }
 
@@ -945,14 +997,19 @@ static void save_session_documents(void) {
     int savedCount = 0;
     for (int i = 0; i < g_documentStore.count; i++) {
         if (!g_documentStore.documents[i].path) continue;
-        WCHAR key[24];
+        WCHAR key[24], pinnedKey[24];
         swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", savedCount++);
         write_setting_string(L"Session", key, g_documentStore.documents[i].path, settings);
+        swprintf(pinnedKey, sizeof(pinnedKey) / sizeof(pinnedKey[0]), L"Pinned%d", savedCount - 1);
+        write_setting_string(L"Session", pinnedKey,
+                             g_documentStore.documents[i].pinned ? L"1" : L"0", settings);
     }
     for (int i = savedCount; i < MAX_DOCUMENTS; i++) {
-        WCHAR key[24];
+        WCHAR key[24], pinnedKey[24];
         swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", i);
         write_setting_string(L"Session", key, NULL, settings);
+        swprintf(pinnedKey, sizeof(pinnedKey) / sizeof(pinnedKey[0]), L"Pinned%d", i);
+        write_setting_string(L"Session", pinnedKey, NULL, settings);
     }
     WCHAR count[24];
     swprintf(count, sizeof(count) / sizeof(count[0]), L"%d", savedCount);
@@ -970,10 +1027,15 @@ static void restore_session_documents(void) {
     if (count > MAX_DOCUMENTS) count = MAX_DOCUMENTS;
     WCHAR *activeFile = read_profile_string(L"Session", L"ActiveFile", settings);
     for (int i = 0; i < count; i++) {
-        WCHAR key[24];
+        WCHAR key[24], pinnedKey[24];
         swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", i);
+        swprintf(pinnedKey, sizeof(pinnedKey) / sizeof(pinnedKey[0]), L"Pinned%d", i);
         WCHAR *file = read_profile_string(L"Session", key, settings);
-        if (file) open_file_in_tab(file);
+        int pinned = read_setting_int(L"Session", pinnedKey, 0, settings) != 0;
+        if (file && open_file_in_tab(file)) {
+            g_documentStore.documents[g_documentStore.active].pinned = pinned;
+            update_tab_label(g_documentStore.active);
+        }
         free(file);
     }
     if (activeFile) {
@@ -1732,6 +1794,11 @@ static void push_closed_document(Document removed, int index) {
 
 static void do_close_document_at(int index) {
     if (index < 0 || index >= g_documentStore.count) return;
+    if (g_documentStore.documents[index].pinned) {
+        MessageBeep(MB_ICONASTERISK);
+        show_plugin_reload_status(L"Unpin the tab before closing it");
+        return;
+    }
     if (index != g_documentStore.active) switch_document(index);
     fire_plugin_event("close", g_currentFile);
     if (!confirm_discard_if_dirty()) return;
@@ -1777,6 +1844,7 @@ static void do_close_document_at(int index) {
     memset(&g_documentStore.documents[g_documentStore.count - 1], 0, sizeof(g_documentStore.documents[0]));
     g_documentStore.count--;
     g_documentStore.active = removeIndex < g_documentStore.count ? removeIndex : g_documentStore.count - 1;
+    g_documentStore.documents[g_documentStore.active].lastActivated = ++g_tabActivationSerial;
     g_documentStore.switching = 1;
     set_active_editor_document(g_documentStore.documents[g_documentStore.active].sciDocument);
     apply_editor_font();
@@ -1834,6 +1902,7 @@ static void do_reopen_closed_tab(void) {
         g_documentStore.documents[index] = restored;
         g_documentStore.count++;
         g_documentStore.active = index;
+        g_documentStore.documents[index].lastActivated = ++g_tabActivationSerial;
         g_documentStore.switching = 1;
         set_active_editor_document(restored.sciDocument);
         g_documentStore.switching = 0;

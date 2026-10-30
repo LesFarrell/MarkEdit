@@ -106,6 +106,8 @@ return {
     "-",
     { "&Next Tab", "view.next_tab" },
     { "&Previous Tab", "view.previous_tab" },
+    { "Open Tab &Switcher...", "view.tab_switcher" },
+    { "&Pin Current Tab", "view.pin_tab" },
     { "Cycle &Panes", "view.cycle_panes" },
     { "Cycle Panes &Backwards", "view.cycle_panes_previous" },
     "-",

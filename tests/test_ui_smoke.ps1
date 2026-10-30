@@ -36,6 +36,11 @@ public static class TinkerEditorUiTestNative {
 
 $WM_COMMAND = 0x0111
 $WM_CLOSE = 0x0010
+$TCM_GETITEMCOUNT = 0x1304
+$IDM_FILE_NEW = 201
+$IDM_FILE_CLOSE = 208
+$IDM_VIEW_PIN_TAB = 345
+$ID_TABS = 103
 $IDM_VIEW_GIT = 414
 $ID_OUTPUT_PANEL = 112
 $ID_OUTPUT_CLOSE = 120
@@ -57,6 +62,11 @@ function Wait-Until([scriptblock]$Condition, [string]$Failure, [int]$TimeoutMs =
 function Send-Command([IntPtr]$Window, [int]$Command) {
     [void][TinkerEditorUiTestNative]::SendMessage(
         $Window, $WM_COMMAND, [IntPtr]$Command, [IntPtr]::Zero)
+}
+
+function Get-TabCount([IntPtr]$Tabs) {
+    return [int][TinkerEditorUiTestNative]::SendMessage(
+        $Tabs, $TCM_GETITEMCOUNT, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
 function Assert-PanelLayout([IntPtr]$Main, [IntPtr]$Panel) {
@@ -92,8 +102,21 @@ try {
     Wait-Until { $process.Refresh(); $process.MainWindowHandle -ne [IntPtr]::Zero } `
         'Tinker Editor did not create its main window.'
     $main = $process.MainWindowHandle
+    $tabs = [TinkerEditorUiTestNative]::GetDlgItem($main, $ID_TABS)
+    if ($tabs -eq [IntPtr]::Zero) { throw 'The tab control was not created.' }
     $panel = [TinkerEditorUiTestNative]::GetDlgItem($main, $ID_OUTPUT_PANEL)
     if ($panel -eq [IntPtr]::Zero) { throw 'The output panel control was not created.' }
+
+    if ((Get-TabCount $tabs) -ne 1) { throw 'The clean test profile did not start with one tab.' }
+    Send-Command $main $IDM_FILE_NEW
+    Wait-Until { (Get-TabCount $tabs) -eq 2 } 'New did not create a second tab.'
+    Send-Command $main $IDM_VIEW_PIN_TAB
+    Send-Command $main $IDM_FILE_CLOSE
+    Start-Sleep -Milliseconds 100
+    if ((Get-TabCount $tabs) -ne 2) { throw 'Close removed a pinned tab.' }
+    Send-Command $main $IDM_VIEW_PIN_TAB
+    Send-Command $main $IDM_FILE_CLOSE
+    Wait-Until { (Get-TabCount $tabs) -eq 1 } 'Close did not remove the unpinned tab.'
 
     Send-Command $main $IDM_VIEW_GIT
     Wait-Until { [TinkerEditorUiTestNative]::IsWindowVisible($panel) } `

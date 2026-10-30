@@ -156,6 +156,7 @@ static void schedule_visible_spell_check(void);
 static void perform_spell_check(void);
 static void update_status_position(void);
 static void update_status_bar(void);
+static void show_plugin_reload_status(const WCHAR *text);
 static void refresh_git_status(void);
 static void refresh_plugin_performance_problems(void);
 static void write_recovery_snapshot(void);
