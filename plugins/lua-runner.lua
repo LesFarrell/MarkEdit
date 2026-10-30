@@ -204,13 +204,10 @@ local function run(code, title)
     return
   end
   local results = table.pack(xpcall(chunk, function(message)
-    local text = tostring(message)
-    if text == "interrupted" or text:match(":%d+: interrupted$") then return "interrupted" end
-    return app.traceback(text)
+    return app.traceback(tostring(message))
   end))
   if not results[1] then
-    local message = results[2] == "interrupted" and "[Interrupted]" or results[2]
-    terminal.write(string.char(27) .. "[31m" .. message .. string.char(27) .. "[0m\r\n\r\n")
+    terminal.write(string.char(27) .. "[31m" .. results[2] .. string.char(27) .. "[0m\r\n\r\n")
     terminal.finish()
     return
   end

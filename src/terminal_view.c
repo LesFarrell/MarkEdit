@@ -32,6 +32,8 @@ struct TerminalView {
     size_t inputCursor;
     size_t inputCapacity;
     int inputDisplayCharacters;
+    int inputDisplayCursorCharacters;
+    int inputDisplayCapacity;
     char *inputResult;
     char *inputHistory[50];
     int inputHistoryCount;
@@ -210,6 +212,16 @@ static void copy_selection(TerminalView *view) {
 
 static int append_session_input(TerminalView *view, const char *bytes, size_t length);
 
+/* A single trailing line break (common when copying a whole line) doesn't
+   make this a multi-line paste; a break with more text after it does. */
+static int clipboard_is_multiline(const char *text, size_t length) {
+    while (length && (text[length - 1] == '\n' || text[length - 1] == '\r')) length--;
+    for (size_t i = 0; i < length; i++) {
+        if (text[i] == '\n' || text[i] == '\r') return 1;
+    }
+    return 0;
+}
+
 static void paste_clipboard(TerminalView *view) {
     if ((!view->running && !(view->sessionMode && view->inputPending)) ||
         !OpenClipboard(view->hwnd)) return;
@@ -228,7 +240,11 @@ static void paste_clipboard(TerminalView *view) {
                         while (lineLength < length && utf8[lineLength] != '\r' &&
                                utf8[lineLength] != '\n') lineLength++;
                         append_session_input(view, utf8, lineLength);
-                    } else {
+                    } else if (!clipboard_is_multiline(utf8, length) ||
+                               MessageBoxW(view->hwnd,
+                                   L"The clipboard has more than one line. Pasting into the "
+                                   L"terminal runs each line as a command. Continue?",
+                                   L"MarkEdit", MB_YESNO | MB_ICONWARNING) == IDYES) {
                         terminal_process_write(view->process, utf8, length);
                     }
                     free(utf8);
@@ -466,6 +482,15 @@ static int utf8_characters(const char *text, size_t length) {
     return count;
 }
 
+static size_t utf8_byte_at_character(const char *text, size_t length, int character) {
+    size_t position = 0;
+    while (position < length && character > 0) {
+        position = utf8_next(text, length, position);
+        character--;
+    }
+    return position;
+}
+
 static void session_cursor_move(TerminalView *view, int count, char direction) {
     if (count <= 0) return;
     char sequence[32];
@@ -473,18 +498,29 @@ static void session_cursor_move(TerminalView *view, int count, char direction) {
     if (length > 0) session_write(view, sequence, (size_t)length);
 }
 
-/* Rewrites only the editable portion of the current row, leaving a prompt
-   written before terminal.read() intact. */
-static void redraw_session_input(TerminalView *view, int oldCursorChars) {
-    int newChars = utf8_characters(view->inputText, view->inputLength);
-    int newCursorChars = utf8_characters(view->inputText, view->inputCursor);
-    int padding = view->inputDisplayCharacters > newChars
-        ? view->inputDisplayCharacters - newChars : 0;
-    session_cursor_move(view, oldCursorChars, 'D');
-    session_write(view, view->inputText, view->inputLength);
+/* Keeps editable input on one terminal row. Long values use a horizontal
+   window around the logical cursor, avoiding VT cursor moves across wrapped
+   rows (which clamp at the edge and would overwrite the prompt). */
+static void redraw_session_input(TerminalView *view) {
+    const char *text = view->inputText ? view->inputText : "";
+    int totalChars = utf8_characters(text, view->inputLength);
+    int cursorChars = utf8_characters(text, view->inputCursor);
+    int capacity = view->inputDisplayCapacity;
+    if (capacity < 1) capacity = 1;
+    int firstChar = cursorChars > capacity ? cursorChars - capacity : 0;
+    int visibleChars = totalChars - firstChar;
+    if (visibleChars > capacity) visibleChars = capacity;
+    int visibleCursor = cursorChars - firstChar;
+    size_t firstByte = utf8_byte_at_character(text, view->inputLength, firstChar);
+    size_t lastByte = utf8_byte_at_character(text, view->inputLength, firstChar + visibleChars);
+    int padding = view->inputDisplayCharacters > visibleChars
+        ? view->inputDisplayCharacters - visibleChars : 0;
+    session_cursor_move(view, view->inputDisplayCursorCharacters, 'D');
+    session_write(view, text + firstByte, lastByte - firstByte);
     for (int i = 0; i < padding; i++) session_write(view, " ", 1);
-    session_cursor_move(view, newChars - newCursorChars + padding, 'D');
-    view->inputDisplayCharacters = newChars;
+    session_cursor_move(view, visibleChars - visibleCursor + padding, 'D');
+    view->inputDisplayCharacters = visibleChars;
+    view->inputDisplayCursorCharacters = visibleCursor;
 }
 
 static int append_session_input(TerminalView *view, const char *bytes, size_t length) {
@@ -499,36 +535,34 @@ static int append_session_input(TerminalView *view, const char *bytes, size_t le
         view->inputText = grown;
         view->inputCapacity = capacity;
     }
-    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
     memmove(view->inputText + view->inputCursor + length,
             view->inputText + view->inputCursor,
-            view->inputLength - view->inputCursor + 1);
+            view->inputLength - view->inputCursor);
     memcpy(view->inputText + view->inputCursor, bytes, length);
     view->inputLength += length;
     view->inputCursor += length;
-    redraw_session_input(view, oldCursorChars);
+    view->inputText[view->inputLength] = 0;
+    redraw_session_input(view);
     return 1;
 }
 
 static void erase_session_input_character(TerminalView *view) {
     if (!view->inputPending || !view->inputCursor) return;
-    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
     size_t start = utf8_previous(view->inputText, view->inputCursor);
     memmove(view->inputText + start, view->inputText + view->inputCursor,
             view->inputLength - view->inputCursor + 1);
     view->inputLength -= view->inputCursor - start;
     view->inputCursor = start;
-    redraw_session_input(view, oldCursorChars);
+    redraw_session_input(view);
 }
 
 static void delete_session_input_character(TerminalView *view) {
     if (!view->inputPending || view->inputCursor >= view->inputLength) return;
-    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
     size_t next = utf8_next(view->inputText, view->inputLength, view->inputCursor);
     memmove(view->inputText + view->inputCursor, view->inputText + next,
             view->inputLength - next + 1);
     view->inputLength -= next - view->inputCursor;
-    redraw_session_input(view, oldCursorChars);
+    redraw_session_input(view);
 }
 
 static void replace_session_input(TerminalView *view, const char *text) {
@@ -540,12 +574,11 @@ static void replace_session_input(TerminalView *view, const char *text) {
         view->inputText = grown;
         view->inputCapacity = length + 1;
     }
-    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
     memcpy(view->inputText, text, length);
     view->inputText[length] = 0;
     view->inputLength = length;
     view->inputCursor = length;
-    redraw_session_input(view, oldCursorChars);
+    redraw_session_input(view);
 }
 
 static void browse_session_history(TerminalView *view, int delta) {
@@ -654,7 +687,17 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             return 0;
         }
         case WM_SIZE:
+            int previousCols = view->cols;
             resize_to_client(view);
+            if (view->inputPending && view->cols != previousCols) {
+                /* Resizing invalidates the single-row input viewport's start
+                   column. Continue it on a fresh row at the new width. */
+                session_write(view, "\r\n", 2);
+                view->inputDisplayCharacters = 0;
+                view->inputDisplayCursorCharacters = 0;
+                view->inputDisplayCapacity = view->cols > 1 ? view->cols - 1 : 1;
+                redraw_session_input(view);
+            }
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         case WM_SETFOCUS: case WM_KILLFOCUS:
@@ -695,6 +738,7 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             }
             return 0;
         case WM_RBUTTONUP:
+            if (view->sessionTranscript) restore_shell_grid(view);
             paste_clipboard(view);
             return 0;
         case WM_MOUSEWHEEL: {
@@ -749,26 +793,23 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
                 } else if (wParam == VK_LEFT) {
                     if (view->inputCursor > 0) {
                         view->inputCursor = utf8_previous(view->inputText, view->inputCursor);
-                        session_cursor_move(view, 1, 'D');
+                        redraw_session_input(view);
                     }
                     view->suppressTranslatedChar = 1;
                 } else if (wParam == VK_RIGHT) {
                     if (view->inputCursor < view->inputLength) {
                         view->inputCursor = utf8_next(view->inputText, view->inputLength,
                                                       view->inputCursor);
-                        session_cursor_move(view, 1, 'C');
+                        redraw_session_input(view);
                     }
                     view->suppressTranslatedChar = 1;
                 } else if (wParam == VK_HOME) {
-                    int characters = utf8_characters(view->inputText, view->inputCursor);
                     view->inputCursor = 0;
-                    session_cursor_move(view, characters, 'D');
+                    redraw_session_input(view);
                     view->suppressTranslatedChar = 1;
                 } else if (wParam == VK_END) {
-                    int characters = utf8_characters(view->inputText + view->inputCursor,
-                                                     view->inputLength - view->inputCursor);
                     view->inputCursor = view->inputLength;
-                    session_cursor_move(view, characters, 'C');
+                    redraw_session_input(view);
                     view->suppressTranslatedChar = 1;
                 } else if (wParam == VK_UP) {
                     browse_session_history(view, -1);
@@ -987,9 +1028,18 @@ char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt
     if (interrupted) *interrupted = 0;
     if (!view || !view->sessionMode || view->inputPending) return NULL;
     if (prompt) session_write(view, prompt, strlen(prompt));
+    int cursorCol = 0;
+    terminal_grid_cursor(view->grid, &cursorCol, NULL, NULL);
+    if (view->cols > 1 && cursorCol >= view->cols - 1) {
+        session_write(view, "\r\n", 2);
+        cursorCol = 0;
+    }
     view->inputLength = 0;
     view->inputCursor = 0;
     view->inputDisplayCharacters = 0;
+    view->inputDisplayCursorCharacters = 0;
+    view->inputDisplayCapacity = view->cols - cursorCol - 1;
+    if (view->inputDisplayCapacity < 1) view->inputDisplayCapacity = 1;
     if (view->inputText) view->inputText[0] = 0;
     free(view->inputResult);
     view->inputResult = NULL;

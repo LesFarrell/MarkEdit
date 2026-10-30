@@ -8,6 +8,8 @@
 #      translation unit by src\markedit.c and nowhere else.
 #   3. Every src\internal\*.inc file is actually reached from markedit.c (no
 #      orphaned component left behind by an extraction).
+#   4. Every src\*.h file is #included from somewhere, so a header left behind
+#      by a deleted or renamed .c file is caught instead of drifting silently.
 #
 # The checks are structural, not stylistic; they exist so a new file cannot
 # silently drift out of the build or the include surface.
@@ -51,6 +53,21 @@ $unityText = Get-Content -LiteralPath $unity -Raw
 foreach ($inc in Get-ChildItem -LiteralPath (Join-Path $root 'src\internal') -Filter '*.inc') {
     if ($unityText -notmatch [regex]::Escape("internal/$($inc.Name)")) {
         $failures.Add("src/internal/$($inc.Name) is not included by src/markedit.c")
+    }
+}
+
+# 4. No header is left orphaned by a deleted or renamed .c file.
+$allSources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Recurse -File -Include '*.c', '*.inc')
+$includedHeaders = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase)
+foreach ($src in $allSources) {
+    foreach ($hit in Select-String -LiteralPath $src.FullName -Pattern '#\s*include\s+["<]([^">]+\.h)[">]') {
+        [void]$includedHeaders.Add((Split-Path -Leaf $hit.Matches[0].Groups[1].Value))
+    }
+}
+foreach ($h in Get-ChildItem -LiteralPath (Join-Path $root 'src') -Recurse -Filter '*.h') {
+    if (-not $includedHeaders.Contains($h.Name)) {
+        $failures.Add("src/$($h.Name) is not #included by any .c or .inc file")
     }
 }
 

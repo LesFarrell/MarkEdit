@@ -205,9 +205,10 @@ static void time_limit_hook(lua_State *L, lua_Debug *ar) {
     (void)ar;
     if (s_ctrlCInterrupt && (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
         (GetAsyncKeyState('C') & 0x8000)) {
-        /* Disable first so Lua's error handler can build a traceback without
-           immediately being interrupted by the same held key. */
+        /* This is a cancellation, not an ordinary Lua error: guarded pcall,
+           xpcall and coroutine operations must not be able to swallow it. */
         s_ctrlCInterrupt = 0;
+        plugin_lua_mark_stopped(L);
         luaL_error(L, "interrupted");
     }
     if (s_timeLimited && GetTickCount64() - s_callStarted > PLUGIN_TIME_LIMIT_MS) {
@@ -230,10 +231,15 @@ char *protected_call(int nargs) {
     lua_insert(s_lua, base);
     s_callStarted = GetTickCount64();
     int status = lua_pcall(s_lua, nargs, 0, base);
+    int failed = status != LUA_OK;
     char *error = status == LUA_OK ? NULL : dup_string(lua_tostring(s_lua, -1));
     lua_settop(s_lua, base - 1);
     clear_stopped(s_lua);
     s_ctrlCInterrupt = 0;
+    /* A command may have opened an in-process terminal before an uncatchable
+       timeout, interrupt, or allocation failure. Always close that session
+       on the host error path; terminal_end is deliberately idempotent. */
+    if (failed && s_callbacks.terminal_end) s_callbacks.terminal_end();
     return error;
 }
 

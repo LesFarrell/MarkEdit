@@ -1172,6 +1172,7 @@ static int terminal_read(lua_State *L) {
     restart_time_limit();
     if (interrupted) {
         free(answer);
+        plugin_lua_mark_stopped(L);
         return luaL_error(L, "interrupted");
     }
     if (answer) lua_pushstring(L, answer); else lua_pushnil(L);

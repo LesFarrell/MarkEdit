@@ -804,10 +804,17 @@ static void test_isolation(HWND editor) {
     expect(run_ok(third, editor), "a plugin can't change the string library for others");
 }
 
+static int s_limitTerminalEnds;
+static void fake_limit_terminal_end(void) { s_limitTerminalEnds++; }
+
 static void test_time_limit(void) {
+    static const PluginHostCallbacks callbacks = { .terminal_end = fake_limit_terminal_end };
+    plugin_host_set_callbacks(&callbacks);
+    int endsBefore = s_limitTerminalEnds;
     const char *loop = "while true do end";
     char *error = plugin_host_load_chunk("loop.lua", loop, strlen(loop));
-    expect(error && strstr(error, "stopped after"), "runaway script is stopped");
+    expect(error && strstr(error, "stopped after") && s_limitTerminalEnds == endsBefore + 1,
+           "runaway script is stopped and closes an in-process terminal session");
     free(error);
     /* Neither pcall, xpcall nor coroutine.resume can catch the limit's error. */
     const char *caught =
@@ -819,7 +826,8 @@ static void test_time_limit(void) {
         "  end, function(e) return e end)\n"
         "end";
     error = plugin_host_load_chunk("caught.lua", caught, strlen(caught));
-    expect(error && strstr(error, "stopped after"), "a script can't catch the time limit");
+    expect(error && strstr(error, "stopped after") && s_limitTerminalEnds == endsBefore + 2,
+           "a script can't catch the time limit");
     free(error);
     const char *catches = "assert(not pcall(error, 'x')) assert(not coroutine.resume(coroutine.create(error)))";
     error = plugin_host_load_chunk("catches.lua", catches, strlen(catches));
@@ -830,6 +838,7 @@ static void test_time_limit(void) {
     expect(error && (strstr(error, "memory") || strstr(error, "allocate")),
            "plugin heap exhaustion is reported instead of exhausting the process");
     free(error);
+    plugin_host_set_callbacks(NULL);
 }
 
 static void write_script(const WCHAR *directory, const WCHAR *name, const char *code) {
@@ -937,6 +946,7 @@ static int find_command(const char *label) {
 static char s_outputText[2048];
 static int s_outputShown;
 static int s_terminalInputCancelled;
+static int s_terminalInputInterrupted;
 static int s_terminalInputsRemaining = -1;
 static char s_problemSource[64], s_problemText[4096];
 
@@ -951,8 +961,9 @@ static int fake_terminal_begin(void) {
 }
 static void fake_terminal_write(const char *text) { fake_output_write(text); }
 static char *fake_terminal_read(const char *prompt, int *interrupted) {
-    if (interrupted) *interrupted = 0;
+    if (interrupted) *interrupted = s_terminalInputInterrupted;
     if (prompt) fake_output_write(prompt);
+    if (s_terminalInputInterrupted) return NULL;
     if (s_terminalInputCancelled || s_terminalInputsRemaining == 0) return NULL;
     if (s_terminalInputsRemaining > 0) s_terminalInputsRemaining--;
     fake_output_write("42\r\n");
@@ -2155,6 +2166,12 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(luaRun, editor) && strstr(s_outputText, "cancelnil\r\n"),
            "Lua runner input ends when terminal input is cancelled");
     s_terminalInputCancelled = 0;
+    set_document(editor, "local ok = pcall(io.read)\nprint(ok)");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    s_terminalInputInterrupted = 1;
+    expect(run_fails(luaRun, editor, "interrupted"),
+           "Lua terminal Ctrl+C cannot be swallowed by a script pcall");
+    s_terminalInputInterrupted = 0;
 
     int luaFormatDocument = find_command("/Tools/Interpreters/Lua/Format Document");
     int luaFormatSelection = find_command("/Tools/Interpreters/Lua/Format Selection");
