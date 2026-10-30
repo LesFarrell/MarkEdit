@@ -686,7 +686,7 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             EndPaint(hwnd, &paint);
             return 0;
         }
-        case WM_SIZE:
+        case WM_SIZE: {
             int previousCols = view->cols;
             resize_to_client(view);
             if (view->inputPending && view->cols != previousCols) {
@@ -700,6 +700,7 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             }
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
+        }
         case WM_SETFOCUS: case WM_KILLFOCUS:
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
