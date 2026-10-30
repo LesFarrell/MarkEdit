@@ -1089,7 +1089,11 @@ static void run_plugin_command(int index) {
        object, so refresh its state explicitly after Lua returns. */
     update_view_menu(g_hMainWnd);
     if (!plugin_host_is_busy()) queue_plugin_tab_check();
-    SetFocus(active_edit_view());
+    /* A command that moved focus to the output panel itself - e.g. the Lua
+       runner's terminal.begin(), left showing "press any key" once it ends -
+       knows better than this default where focus belongs; forcing it back to
+       the editor would strand that panel waiting for a key it never gets. */
+    if (!focus_outside_editor_area()) SetFocus(active_edit_view());
 }
 
 static void run_plugin_context_menu_item(int id, HWND hEdit) {
@@ -1102,7 +1106,7 @@ static void run_plugin_context_menu_item(int id, HWND hEdit) {
     free(error);
     update_view_menu(g_hMainWnd);
     if (!plugin_host_is_busy()) queue_plugin_tab_check();
-    SetFocus(hEdit);
+    if (!focus_outside_editor_area()) SetFocus(hEdit);
 }
 
 static void handle_main_command(HWND hwnd, WORD cmd) {
