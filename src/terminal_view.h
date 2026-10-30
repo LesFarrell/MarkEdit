@@ -60,7 +60,8 @@ void terminal_view_clear_scrollback(TerminalView *view);
    the transcript remains until the next key restarts the normal shell. */
 int terminal_view_begin_session(TerminalView *view);
 void terminal_view_write(TerminalView *view, const char *text, size_t length);
-char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt);
+char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt,
+                              int *interrupted);
 void terminal_view_end_session(TerminalView *view);
 
 /* The 16 ANSI colours and the default foreground/background for the current

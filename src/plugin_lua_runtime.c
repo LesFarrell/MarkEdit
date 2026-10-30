@@ -20,6 +20,7 @@ lua_State *s_lua = NULL;
 int s_timeLimited = 1;
 LuaMemory s_memory = { 0, PLUGIN_MEMORY_LIMIT_BYTES };
 static ULONGLONG s_callStarted = 0;
+static int s_ctrlCInterrupt;
 
 static void *limited_alloc(void *ud, void *pointer, size_t oldSize, size_t newSize) {
     LuaMemory *memory = (LuaMemory *)ud;
@@ -202,6 +203,13 @@ void plugin_lua_guard_catching(lua_State *L) {
 
 static void time_limit_hook(lua_State *L, lua_Debug *ar) {
     (void)ar;
+    if (s_ctrlCInterrupt && (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+        (GetAsyncKeyState('C') & 0x8000)) {
+        /* Disable first so Lua's error handler can build a traceback without
+           immediately being interrupted by the same held key. */
+        s_ctrlCInterrupt = 0;
+        luaL_error(L, "interrupted");
+    }
     if (s_timeLimited && GetTickCount64() - s_callStarted > PLUGIN_TIME_LIMIT_MS) {
         plugin_lua_mark_stopped(L);
         luaL_error(L, "stopped after %d seconds without finishing", PLUGIN_TIME_LIMIT_MS / 1000);
@@ -225,12 +233,17 @@ char *protected_call(int nargs) {
     char *error = status == LUA_OK ? NULL : dup_string(lua_tostring(s_lua, -1));
     lua_settop(s_lua, base - 1);
     clear_stopped(s_lua);
+    s_ctrlCInterrupt = 0;
     return error;
 }
 
 /* Time spent waiting on the user doesn't count against the plugin. */
 void restart_time_limit(void) {
     s_callStarted = GetTickCount64();
+}
+
+void plugin_host_set_ctrl_c_interrupt(int enabled) {
+    s_ctrlCInterrupt = enabled != 0;
 }
 
 /* A Lua state whose allocations are counted in *memory and refused beyond

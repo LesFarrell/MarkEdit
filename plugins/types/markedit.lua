@@ -90,6 +90,10 @@ function app.platform() end
 function app.memory_used() end
 ---@return string?
 function app.workspace_path() end
+---Builds a Lua stack traceback for an error handler.
+---@param message? string
+---@return string
+function app.traceback(message) end
 ---@return table<string, boolean>
 function app.capabilities() end
 ---@param milliseconds integer 0 to 60000.
@@ -197,7 +201,7 @@ function output.hide() end
 function output.visible() end
 
 terminal = {}
----Starts an in-process session on the Terminal tab, replacing its shell.
+---Starts an in-process session on the Terminal tab, preserving its shell.
 function terminal.begin() end
 ---Writes UTF-8/ANSI text to the active terminal session.
 ---@param ... string
@@ -206,6 +210,8 @@ function terminal.write(...) end
 ---@param prompt? string
 ---@return string?
 function terminal.read(prompt) end
+---Clears the active terminal session's screen and scrollback.
+function terminal.clear() end
 ---Ends the session and leaves its transcript visible.
 function terminal.finish() end
 
@@ -217,6 +223,8 @@ function problems.report(source, text) end
 ---Removes one named source's report from the Problems tab.
 ---@param source string
 function problems.clear(source) end
+---Removes every report from the Problems tab.
+function problems.clear_all() end
 
 spell = {}
 ---The Windows spelling dictionary's locale name, such as "en-GB", or nil when

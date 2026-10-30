@@ -21,7 +21,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 9
+#define MARKEDIT_PLUGIN_API_VERSION 10
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -100,15 +100,20 @@ typedef struct {
     /* An interactive in-process session on the Terminal tab. */
     int (*terminal_begin)(void);
     void (*terminal_write)(const char *text);
-    char *(*terminal_read)(const char *prompt);
+    char *(*terminal_read)(const char *prompt, int *interrupted);
+    void (*terminal_clear)(void);
     void (*terminal_end)(void);
     /* Replaces a named producer's text in the Problems tab. Empty text
        removes that producer without disturbing other diagnostics. */
     void (*problems_report)(const char *source, const char *text);
+    void (*problems_clear_all)(void);
 } PluginHostCallbacks;
 
 /* Copied; call before running commands. */
 void plugin_host_set_callbacks(const PluginHostCallbacks *callbacks);
+/* Enables Ctrl+C interruption while an in-process terminal command owns the
+   plugin runtime. The application bridge brackets terminal sessions with it. */
+void plugin_host_set_ctrl_c_interrupt(int enabled);
 
 /* ---- menu definitions (menus.lua) ---- */
 

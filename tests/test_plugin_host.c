@@ -937,6 +937,7 @@ static int find_command(const char *label) {
 static char s_outputText[2048];
 static int s_outputShown;
 static int s_terminalInputCancelled;
+static int s_terminalInputsRemaining = -1;
 static char s_problemSource[64], s_problemText[4096];
 
 static void fake_output_write(const char *text) {
@@ -949,12 +950,15 @@ static int fake_terminal_begin(void) {
     return 1;
 }
 static void fake_terminal_write(const char *text) { fake_output_write(text); }
-static char *fake_terminal_read(const char *prompt) {
+static char *fake_terminal_read(const char *prompt, int *interrupted) {
+    if (interrupted) *interrupted = 0;
     if (prompt) fake_output_write(prompt);
-    if (s_terminalInputCancelled) return NULL;
+    if (s_terminalInputCancelled || s_terminalInputsRemaining == 0) return NULL;
+    if (s_terminalInputsRemaining > 0) s_terminalInputsRemaining--;
     fake_output_write("42\r\n");
     return _strdup("42");
 }
+static void fake_terminal_clear(void) { s_outputText[0] = 0; }
 static void fake_terminal_end(void) {}
 static void fake_output_clear(void) { s_outputText[0] = 0; }
 static void fake_output_show(void) { s_outputShown = 1; }
@@ -964,6 +968,10 @@ static int fake_output_visible(void) { return s_outputShown; }
 static void fake_problems_report(const char *source, const char *text) {
     snprintf(s_problemSource, sizeof(s_problemSource), "%s", source ? source : "");
     snprintf(s_problemText, sizeof(s_problemText), "%s", text ? text : "");
+}
+static void fake_problems_clear_all(void) {
+    s_problemSource[0] = 0;
+    s_problemText[0] = 0;
 }
 
 static int s_autoReload;
@@ -1048,8 +1056,9 @@ static void test_bundled_plugins(HWND editor) {
         .schedule_deferred = fake_schedule_deferred,
         .output_write = fake_output_write, .output_show = fake_output_show,
         .terminal_begin = fake_terminal_begin, .terminal_write = fake_terminal_write,
-        .terminal_read = fake_terminal_read, .terminal_end = fake_terminal_end,
-        .problems_report = fake_problems_report,
+        .terminal_read = fake_terminal_read, .terminal_clear = fake_terminal_clear,
+        .terminal_end = fake_terminal_end, .problems_report = fake_problems_report,
+        .problems_clear_all = fake_problems_clear_all,
         .document_auto_reload = fake_document_auto_reload
     };
     plugin_host_set_callbacks(&fakes);
@@ -2122,6 +2131,23 @@ static void test_bundled_plugins(HWND editor) {
     expect(run_ok(luaRun, editor) &&
            strstr(s_outputText, "Name? 42\r\nhi 42\r\nInput for the Lua script: 42\r\n42"),
            "Lua runner flushes prompts, then reads and echoes terminal input");
+    set_document(editor,
+        "assert(io.type(io.stdin) == 'file')\n"
+        "assert(io.type(io.stdout) == 'file')\n"
+        "assert(io.stdout:write('stream'):flush())\n"
+        "io.stderr:write(' error')\n"
+        "assert(io.read(2, 'l') == '42')");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    s_outputText[0] = 0;
+    expect(run_ok(luaRun, editor) && strstr(s_outputText, "stream error42\r\n"),
+           "Lua runner exposes stream proxies and shares buffered input formats");
+    set_document(editor, "assert(io.read('*a') == '42\\n42\\n')\nprint('all input')");
+    SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
+    s_outputText[0] = 0;
+    s_terminalInputsRemaining = 2;
+    expect(run_ok(luaRun, editor) && strstr(s_outputText, "all input\r\n"),
+           "Lua runner reads all terminal input until end-of-input");
+    s_terminalInputsRemaining = -1;
     set_document(editor, "io.write('cancel')\nprint(io.read())");
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     s_outputText[0] = 0;
@@ -2376,7 +2402,9 @@ static void test_output_api(HWND editor) {
     static const PluginHostCallbacks fakes = {
         .output_write = fake_output_write, .output_clear = fake_output_clear,
         .output_show = fake_output_show, .output_hide = fake_output_hide,
-        .output_visible = fake_output_visible
+        .output_visible = fake_output_visible,
+        .problems_report = fake_problems_report,
+        .problems_clear_all = fake_problems_clear_all
     };
     plugin_host_set_callbacks(&fakes);
     int first = load_ok("output.lua",
@@ -2391,12 +2419,17 @@ static void test_output_api(HWND editor) {
         "  assert(not output.visible())\n"
         "  output.show()\n"
         "  assert(not pcall(output.write, {}), 'output.write needs strings')\n"
+        "  problems.report('test', 'file:1: issue')\n"
+        "  problems.clear_all()\n"
         "  assert(app.capabilities().output_panel)\n"
         "end)\n");
     s_outputText[0] = 0;
     s_outputShown = 0;
-    expect(run_ok(first, editor) && strcmp(s_outputText, "ab\n") == 0 && s_outputShown,
-           "output.write, output.clear and output.show reach the output panel");
+    snprintf(s_problemSource, sizeof(s_problemSource), "old");
+    snprintf(s_problemText, sizeof(s_problemText), "old problem");
+    expect(run_ok(first, editor) && strcmp(s_outputText, "ab\n") == 0 && s_outputShown &&
+           !s_problemSource[0] && !s_problemText[0],
+           "clear APIs reach the Output and Problems panels");
     plugin_host_set_callbacks(NULL);
     expect(run_fails(first, editor, "not available"), "the output API needs the panel");
 }

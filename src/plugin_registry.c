@@ -828,6 +828,11 @@ static int app_memory_used(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)s_memory.used);
     return 1;
 }
+static int app_traceback(lua_State *L) {
+    const char *message = optional_cstring(L, 1, NULL, "traceback message");
+    luaL_traceback(L, L, message, 1);
+    return 1;
+}
 static int app_workspace_path(lua_State *L) {
     char *path = s_callbacks.workspace_path ? s_callbacks.workspace_path() : NULL;
     if (path) lua_pushstring(L, path); else lua_pushnil(L);
@@ -1068,7 +1073,8 @@ static const luaL_Reg app_functions[] = {
     {"date", app_date}, {"time", app_time}, {"date_time", app_date_time},
     {"version", app_version}, {"api_version", app_api_version},
     {"platform", app_platform}, {"memory_used", app_memory_used},
-    {"workspace_path", app_workspace_path}, {"capabilities", app_capabilities},
+    {"workspace_path", app_workspace_path}, {"traceback", app_traceback},
+    {"capabilities", app_capabilities},
     {"defer", app_defer}, {"cancel", app_cancel},
     {NULL, NULL}
 };
@@ -1161,8 +1167,13 @@ static int terminal_read(lua_State *L) {
     const char *prompt = optional_cstring(L, 1, NULL, "terminal prompt");
     if (!s_callbacks.terminal_read)
         return luaL_error(L, "terminal.read is not available here");
-    char *answer = s_callbacks.terminal_read(prompt);
+    int interrupted = 0;
+    char *answer = s_callbacks.terminal_read(prompt, &interrupted);
     restart_time_limit();
+    if (interrupted) {
+        free(answer);
+        return luaL_error(L, "interrupted");
+    }
     if (answer) lua_pushstring(L, answer); else lua_pushnil(L);
     free(answer);
     return 1;
@@ -1176,9 +1187,18 @@ static int terminal_end(lua_State *L) {
     return 0;
 }
 
+static int terminal_clear(lua_State *L) {
+    (void)L;
+    if (!s_callbacks.terminal_clear)
+        return luaL_error(L, "terminal.clear is not available here");
+    s_callbacks.terminal_clear();
+    return 0;
+}
+
 static const luaL_Reg terminal_functions[] = {
     {"begin", terminal_begin}, {"write", terminal_write},
-    {"read", terminal_read}, {"finish", terminal_end}, {NULL, NULL}
+    {"read", terminal_read}, {"clear", terminal_clear},
+    {"finish", terminal_end}, {NULL, NULL}
 };
 static int problems_report(lua_State *L) {
     const char *source = checked_cstring(L, 1, "problem source");
@@ -1197,8 +1217,17 @@ static int problems_clear(lua_State *L) {
     return 0;
 }
 
+static int problems_clear_all(lua_State *L) {
+    (void)L;
+    if (!s_callbacks.problems_clear_all)
+        return luaL_error(L, "problems.clear_all is not available here");
+    s_callbacks.problems_clear_all();
+    return 0;
+}
+
 static const luaL_Reg problems_functions[] = {
-    {"report", problems_report}, {"clear", problems_clear}, {NULL, NULL}
+    {"report", problems_report}, {"clear", problems_clear},
+    {"clear_all", problems_clear_all}, {NULL, NULL}
 };
 static const luaL_Reg spell_functions[] = {
     {"language", spell_language}, {"check", spell_check}, {NULL, NULL}

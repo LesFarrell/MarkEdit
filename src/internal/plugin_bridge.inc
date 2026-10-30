@@ -154,6 +154,7 @@ static void plugin_output_hide(void) { hide_output_panel(); }
 static int plugin_output_visible(void) { return g_outputPanelVisible; }
 static int plugin_terminal_begin(void) {
     if (!terminal_view_begin_session(g_terminalView)) return 0;
+    plugin_host_set_ctrl_c_interrupt(1);
     show_output_panel(OUTPUT_TAB_TERMINAL, 1);
     update_output_controls();
     return 1;
@@ -161,10 +162,12 @@ static int plugin_terminal_begin(void) {
 static void plugin_terminal_write(const char *text) {
     terminal_view_write(g_terminalView, text, strlen(text));
 }
-static char *plugin_terminal_read(const char *prompt) {
-    return terminal_view_read_line(g_terminalView, g_hMainWnd, prompt);
+static char *plugin_terminal_read(const char *prompt, int *interrupted) {
+    return terminal_view_read_line(g_terminalView, g_hMainWnd, prompt, interrupted);
 }
+static void plugin_terminal_clear(void) { terminal_view_clear_scrollback(g_terminalView); }
 static void plugin_terminal_end(void) {
+    plugin_host_set_ctrl_c_interrupt(0);
     terminal_view_end_session(g_terminalView);
     update_output_controls();
 }
@@ -175,6 +178,7 @@ static void plugin_problems_report(const char *source, const char *text) {
     set_problem_report(source, text, directory);
     free(directory);
 }
+static void plugin_problems_clear_all(void) { clear_problem_reports(); }
 
 static void refresh_plugin_performance_problems(void) {
     char *warnings = plugin_host_performance_report(1);
@@ -769,7 +773,9 @@ static void load_menus_and_plugins(void) {
         .output_show = plugin_output_show, .output_hide = plugin_output_hide,
         .output_visible = plugin_output_visible, .problems_report = plugin_problems_report,
         .terminal_begin = plugin_terminal_begin, .terminal_write = plugin_terminal_write,
-        .terminal_read = plugin_terminal_read, .terminal_end = plugin_terminal_end,
+        .terminal_read = plugin_terminal_read, .terminal_clear = plugin_terminal_clear,
+        .terminal_end = plugin_terminal_end,
+        .problems_clear_all = plugin_problems_clear_all,
     };
     /* A reload is the explicit boundary at which edits made directly to the
        settings file become visible to Lua configuration reads. */

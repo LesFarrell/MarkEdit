@@ -19,15 +19,24 @@ struct TerminalView {
     HWND hwnd;
     TerminalProcess *process;
     TerminalGrid *grid;
+    TerminalGrid *savedGrid; /* live shell while a Lua transcript is shown */
     int session;
     int running;
     int sessionMode;
+    int sessionTranscript;
     int inputPending;
     int inputDone;
+    int inputInterrupted;
     char *inputText;
     size_t inputLength;
+    size_t inputCursor;
     size_t inputCapacity;
+    int inputDisplayCharacters;
     char *inputResult;
+    char *inputHistory[50];
+    int inputHistoryCount;
+    int inputHistoryIndex;
+    char *inputDraft;
     DWORD exitCode;
 
     int cols, rows;
@@ -56,6 +65,19 @@ struct TerminalView {
 
 static int next_session = 1;
 #define TERMINAL_SESSION_INPUT_MAX 4096
+static void clear_selection(TerminalView *view);
+
+static void restore_shell_grid(TerminalView *view) {
+    if (view->savedGrid) {
+        terminal_grid_free(view->grid);
+        view->grid = view->savedGrid;
+        view->savedGrid = NULL;
+    }
+    view->sessionTranscript = 0;
+    view->scrollOffset = 0;
+    clear_selection(view);
+    InvalidateRect(view->hwnd, NULL, FALSE);
+}
 
 /* ---- layout ---- */
 
@@ -83,6 +105,7 @@ static void resize_to_client(TerminalView *view) {
     view->cols = cols;
     view->rows = rows;
     terminal_grid_resize(view->grid, cols, rows);
+    if (view->savedGrid) terminal_grid_resize(view->savedGrid, cols, rows);
     terminal_process_resize(view->process, cols, rows);
     view->scrollOffset = 0;
 }
@@ -422,6 +445,48 @@ static void session_write(TerminalView *view, const char *bytes, size_t length) 
     if (terminal_grid_take_dirty(view->grid)) InvalidateRect(view->hwnd, NULL, FALSE);
 }
 
+static size_t utf8_previous(const char *text, size_t position) {
+    if (!position) return 0;
+    position--;
+    while (position > 0 && ((unsigned char)text[position] & 0xc0) == 0x80) position--;
+    return position;
+}
+
+static size_t utf8_next(const char *text, size_t length, size_t position) {
+    if (position >= length) return length;
+    position++;
+    while (position < length && ((unsigned char)text[position] & 0xc0) == 0x80) position++;
+    return position;
+}
+
+static int utf8_characters(const char *text, size_t length) {
+    int count = 0;
+    for (size_t i = 0; i < length; i++)
+        if (((unsigned char)text[i] & 0xc0) != 0x80) count++;
+    return count;
+}
+
+static void session_cursor_move(TerminalView *view, int count, char direction) {
+    if (count <= 0) return;
+    char sequence[32];
+    int length = snprintf(sequence, sizeof(sequence), "\x1b[%d%c", count, direction);
+    if (length > 0) session_write(view, sequence, (size_t)length);
+}
+
+/* Rewrites only the editable portion of the current row, leaving a prompt
+   written before terminal.read() intact. */
+static void redraw_session_input(TerminalView *view, int oldCursorChars) {
+    int newChars = utf8_characters(view->inputText, view->inputLength);
+    int newCursorChars = utf8_characters(view->inputText, view->inputCursor);
+    int padding = view->inputDisplayCharacters > newChars
+        ? view->inputDisplayCharacters - newChars : 0;
+    session_cursor_move(view, oldCursorChars, 'D');
+    session_write(view, view->inputText, view->inputLength);
+    for (int i = 0; i < padding; i++) session_write(view, " ", 1);
+    session_cursor_move(view, newChars - newCursorChars + padding, 'D');
+    view->inputDisplayCharacters = newChars;
+}
+
 static int append_session_input(TerminalView *view, const char *bytes, size_t length) {
     if (!view->inputPending || !length ||
         view->inputLength + length > TERMINAL_SESSION_INPUT_MAX) return 0;
@@ -434,27 +499,88 @@ static int append_session_input(TerminalView *view, const char *bytes, size_t le
         view->inputText = grown;
         view->inputCapacity = capacity;
     }
-    memcpy(view->inputText + view->inputLength, bytes, length);
+    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
+    memmove(view->inputText + view->inputCursor + length,
+            view->inputText + view->inputCursor,
+            view->inputLength - view->inputCursor + 1);
+    memcpy(view->inputText + view->inputCursor, bytes, length);
     view->inputLength += length;
-    view->inputText[view->inputLength] = 0;
-    session_write(view, bytes, length);
+    view->inputCursor += length;
+    redraw_session_input(view, oldCursorChars);
     return 1;
 }
 
 static void erase_session_input_character(TerminalView *view) {
-    if (!view->inputPending || !view->inputLength) return;
-    size_t start = view->inputLength - 1;
-    while (start > 0 && ((unsigned char)view->inputText[start] & 0xc0) == 0x80) start--;
-    view->inputLength = start;
-    view->inputText[start] = 0;
-    session_write(view, "\b \b", 3);
+    if (!view->inputPending || !view->inputCursor) return;
+    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
+    size_t start = utf8_previous(view->inputText, view->inputCursor);
+    memmove(view->inputText + start, view->inputText + view->inputCursor,
+            view->inputLength - view->inputCursor + 1);
+    view->inputLength -= view->inputCursor - start;
+    view->inputCursor = start;
+    redraw_session_input(view, oldCursorChars);
+}
+
+static void delete_session_input_character(TerminalView *view) {
+    if (!view->inputPending || view->inputCursor >= view->inputLength) return;
+    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
+    size_t next = utf8_next(view->inputText, view->inputLength, view->inputCursor);
+    memmove(view->inputText + view->inputCursor, view->inputText + next,
+            view->inputLength - next + 1);
+    view->inputLength -= next - view->inputCursor;
+    redraw_session_input(view, oldCursorChars);
+}
+
+static void replace_session_input(TerminalView *view, const char *text) {
+    size_t length = strlen(text);
+    if (length > TERMINAL_SESSION_INPUT_MAX) length = TERMINAL_SESSION_INPUT_MAX;
+    if (length + 1 > view->inputCapacity) {
+        char *grown = (char *)realloc(view->inputText, length + 1);
+        if (!grown) return;
+        view->inputText = grown;
+        view->inputCapacity = length + 1;
+    }
+    int oldCursorChars = utf8_characters(view->inputText, view->inputCursor);
+    memcpy(view->inputText, text, length);
+    view->inputText[length] = 0;
+    view->inputLength = length;
+    view->inputCursor = length;
+    redraw_session_input(view, oldCursorChars);
+}
+
+static void browse_session_history(TerminalView *view, int delta) {
+    int index = view->inputHistoryIndex + delta;
+    if (index < 0 || index > view->inputHistoryCount || index == view->inputHistoryIndex) return;
+    if (view->inputHistoryIndex == view->inputHistoryCount) {
+        free(view->inputDraft);
+        view->inputDraft = _strdup(view->inputText ? view->inputText : "");
+    }
+    view->inputHistoryIndex = index;
+    replace_session_input(view, index < view->inputHistoryCount
+        ? view->inputHistory[index] : (view->inputDraft ? view->inputDraft : ""));
+}
+
+static void remember_session_input(TerminalView *view) {
+    if (!view->inputText || !view->inputText[0]) return;
+    if (view->inputHistoryCount &&
+        strcmp(view->inputHistory[view->inputHistoryCount - 1], view->inputText) == 0) return;
+    if (view->inputHistoryCount == 50) {
+        free(view->inputHistory[0]);
+        memmove(view->inputHistory, view->inputHistory + 1, 49 * sizeof(char *));
+        view->inputHistoryCount--;
+    }
+    char *copy = _strdup(view->inputText);
+    if (copy) view->inputHistory[view->inputHistoryCount++] = copy;
 }
 
 static void finish_session_input(TerminalView *view, int cancelled) {
     if (!view->inputPending) return;
     free(view->inputResult);
     view->inputResult = cancelled ? NULL : _strdup(view->inputText ? view->inputText : "");
-    if (!cancelled) session_write(view, "\r\n", 2);
+    if (!cancelled) {
+        remember_session_input(view);
+        session_write(view, "\r\n", 2);
+    }
     view->inputPending = 0;
     view->inputDone = 1;
 }
@@ -473,8 +599,12 @@ static void send_notification(TerminalView *view, UINT code) {
 
 static void handle_chunk(TerminalView *view, TerminalChunk *chunk) {
     if (chunk->session == view->session) {
-        int oldScrollback = terminal_grid_scrollback_count(view->grid);
-        if (chunk->length) terminal_grid_feed(view->grid, chunk->data, chunk->length, grid_reply, view);
+        /* A preserved shell keeps producing output while the Lua grid is
+           active or its finished transcript remains on screen. */
+        TerminalGrid *target = view->savedGrid ? view->savedGrid : view->grid;
+        int visible = target == view->grid;
+        int oldScrollback = terminal_grid_scrollback_count(target);
+        if (chunk->length) terminal_grid_feed(target, chunk->data, chunk->length, grid_reply, view);
         if (chunk->finished) {
             view->running = 0;
             view->exitCode = chunk->exitCode;
@@ -482,21 +612,22 @@ static void handle_chunk(TerminalView *view, TerminalChunk *chunk) {
             snprintf(note, sizeof(note),
                     "\r\n\x1b[90m[The shell exited with code %lu. Press any key to start it again.]\x1b[0m\r\n",
                     (unsigned long)chunk->exitCode);
-            terminal_grid_feed(view->grid, note, strlen(note), NULL, NULL);
+            terminal_grid_feed(target, note, strlen(note), NULL, NULL);
             send_notification(view, TVN_EXITED);
         }
         /* New output normally keeps the live tail pinned. If the user has
            scrolled back, compensate for newly archived rows so the text
            currently under the pointer stays in place instead of drifting. */
-        if (view->scrollOffset > 0) {
-            int added = terminal_grid_scrollback_count(view->grid) - oldScrollback;
+        if (visible && view->scrollOffset > 0) {
+            int added = terminal_grid_scrollback_count(target) - oldScrollback;
             if (added > 0) {
                 long long offset = (long long)view->scrollOffset + added;
                 int maximum = max_scroll_offset(view);
                 view->scrollOffset = offset > maximum ? maximum : (int)offset;
             }
         }
-        if (terminal_grid_take_dirty(view->grid)) InvalidateRect(view->hwnd, NULL, FALSE);
+        if (terminal_grid_take_dirty(target) && visible)
+            InvalidateRect(view->hwnd, NULL, FALSE);
     }
     free(chunk);
 }
@@ -588,6 +719,7 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
                 view->suppressTranslatedChar = 1;
                 return 0;
             }
+            if (view->sessionTranscript) restore_shell_grid(view);
             if (ctrl && shift && (wParam == 'V')) {
                 paste_clipboard(view);
                 view->suppressTranslatedChar = 1;
@@ -595,7 +727,11 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             }
             if (view->sessionMode) {
                 if (!view->inputPending) return 0;
-                if (shift && wParam == VK_INSERT) {
+                if (ctrl && wParam == 'C') {
+                    view->inputInterrupted = 1;
+                    finish_session_input(view, 1);
+                    view->suppressTranslatedChar = 1;
+                } else if (shift && wParam == VK_INSERT) {
                     paste_clipboard(view);
                     view->suppressTranslatedChar = 1;
                 } else if (wParam == VK_RETURN) {
@@ -606,6 +742,39 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
                     view->suppressTranslatedChar = 1;
                 } else if (wParam == VK_BACK) {
                     erase_session_input_character(view);
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_DELETE) {
+                    delete_session_input_character(view);
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_LEFT) {
+                    if (view->inputCursor > 0) {
+                        view->inputCursor = utf8_previous(view->inputText, view->inputCursor);
+                        session_cursor_move(view, 1, 'D');
+                    }
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_RIGHT) {
+                    if (view->inputCursor < view->inputLength) {
+                        view->inputCursor = utf8_next(view->inputText, view->inputLength,
+                                                      view->inputCursor);
+                        session_cursor_move(view, 1, 'C');
+                    }
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_HOME) {
+                    int characters = utf8_characters(view->inputText, view->inputCursor);
+                    view->inputCursor = 0;
+                    session_cursor_move(view, characters, 'D');
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_END) {
+                    int characters = utf8_characters(view->inputText + view->inputCursor,
+                                                     view->inputLength - view->inputCursor);
+                    view->inputCursor = view->inputLength;
+                    session_cursor_move(view, characters, 'C');
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_UP) {
+                    browse_session_history(view, -1);
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_DOWN) {
+                    browse_session_history(view, 1);
                     view->suppressTranslatedChar = 1;
                 }
                 return 0;
@@ -716,14 +885,19 @@ void terminal_view_free(TerminalView *view) {
     while (PeekMessageW(&msg, view->hwnd, WM_TERMINAL_CHUNK, WM_TERMINAL_CHUNK, PM_REMOVE))
         free((TerminalChunk *)msg.lParam);
     terminal_grid_free(view->grid);
+    terminal_grid_free(view->savedGrid);
     free(view->inputText);
     free(view->inputResult);
+    free(view->inputDraft);
+    for (int i = 0; i < view->inputHistoryCount; i++) free(view->inputHistory[i]);
     release_back_buffer(view);
     if (view->hwnd) DestroyWindow(view->hwnd);
     free(view);
 }
 
 int terminal_view_start(TerminalView *view, const WCHAR *commandLine, const WCHAR *directory) {
+    if (view->savedGrid) restore_shell_grid(view);
+    view->sessionTranscript = 0;
     terminal_process_free(view->process);
     view->process = NULL;
     view->running = 0;
@@ -766,6 +940,8 @@ void terminal_view_stop(TerminalView *view) {
     if (view && view->sessionMode) {
         finish_session_input(view, 1);
         view->sessionMode = 0;
+        view->sessionTranscript = 1;
+        return;
     }
     if (view->process) terminal_process_stop(view->process);
 }
@@ -779,10 +955,17 @@ void terminal_view_clear_scrollback(TerminalView *view) {
 
 int terminal_view_begin_session(TerminalView *view) {
     if (!view) return 0;
-    terminal_process_free(view->process);
-    view->process = NULL;
-    view->running = 0;
+    if (view->savedGrid) restore_shell_grid(view);
+    if (view->running) {
+        TerminalGrid *sessionGrid = terminal_grid_create(view->cols, view->rows);
+        if (!sessionGrid) return 0;
+        view->savedGrid = view->grid;
+        view->grid = sessionGrid;
+    } else {
+        terminal_grid_clear(view->grid);
+    }
     view->sessionMode = 1;
+    view->sessionTranscript = 0;
     view->inputPending = 0;
     view->inputDone = 0;
     view->inputLength = 0;
@@ -799,14 +982,22 @@ void terminal_view_write(TerminalView *view, const char *text, size_t length) {
     if (view && view->sessionMode) session_write(view, text, length);
 }
 
-char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt) {
+char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt,
+                              int *interrupted) {
+    if (interrupted) *interrupted = 0;
     if (!view || !view->sessionMode || view->inputPending) return NULL;
     if (prompt) session_write(view, prompt, strlen(prompt));
     view->inputLength = 0;
+    view->inputCursor = 0;
+    view->inputDisplayCharacters = 0;
     if (view->inputText) view->inputText[0] = 0;
     free(view->inputResult);
     view->inputResult = NULL;
     view->inputDone = 0;
+    view->inputInterrupted = 0;
+    view->inputHistoryIndex = view->inputHistoryCount;
+    free(view->inputDraft);
+    view->inputDraft = NULL;
     view->inputPending = 1;
     SetFocus(view->hwnd);
 
@@ -826,6 +1017,7 @@ char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt
     view->inputDone = 0;
     char *answer = view->inputResult;
     view->inputResult = NULL;
+    if (interrupted) *interrupted = view->inputInterrupted;
     return answer;
 }
 
@@ -833,9 +1025,10 @@ void terminal_view_end_session(TerminalView *view) {
     if (!view || !view->sessionMode) return;
     finish_session_input(view, 1);
     view->sessionMode = 0;
+    view->sessionTranscript = 1;
     session_write(view,
-        "\r\n\x1b[90m[Lua finished. Press any key to start PowerShell.]\x1b[0m\r\n",
-        sizeof("\r\n\x1b[90m[Lua finished. Press any key to start PowerShell.]\x1b[0m\r\n") - 1);
+        "\r\n\x1b[90m[Lua finished. Press any key to return to PowerShell.]\x1b[0m\r\n",
+        sizeof("\r\n\x1b[90m[Lua finished. Press any key to return to PowerShell.]\x1b[0m\r\n") - 1);
 }
 
 void terminal_view_apply_theme(TerminalView *view, const COLORREF ansi[16],
