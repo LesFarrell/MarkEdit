@@ -179,28 +179,13 @@ static void visible_spell_range(HWND view, Sci_Position textLength,
     *rangeEnd = end > textLength ? textLength : end;
 }
 
-static void perform_spell_check(void) {
-    if (!g_hEdit) return;
-    if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
-    if (g_largeFile) return;
-
-    Sci_Position textLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
-    SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
-    if (!g_spellCheckEnabled || !g_spellChecker ||
-        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT)) {
-        SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
-        g_clearAllSpellingPending = 0;
-        return;
-    }
-
-    if (textLength <= 0) return;
-    if (g_clearAllSpellingPending) {
-        SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
-        g_clearAllSpellingPending = 0;
-    }
-
+/* Checks one view's visible range. All indicator and text access still goes
+   through g_hEdit: g_hSplitEdit shares g_hEdit's document (see ui_shell.inc),
+   so indicators set there show up in both views regardless of which one's
+   viewport the range came from. */
+static void spell_check_visible_range(HWND view, Sci_Position textLength) {
     Sci_Position rangeStart = 0, rangeEnd = 0;
-    visible_spell_range(tracked_edit_view(), textLength, &rangeStart, &rangeEnd);
+    visible_spell_range(view, textLength, &rangeStart, &rangeEnd);
     Sci_Position rangeLength = rangeEnd - rangeStart;
     if (rangeLength <= 0) return;
 
@@ -255,6 +240,34 @@ static void perform_spell_check(void) {
     }
     free(wide);
     free(utf8);
+}
+
+static void perform_spell_check(void) {
+    if (!g_hEdit) return;
+    if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
+    if (g_largeFile) return;
+
+    Sci_Position textLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
+    if (!g_spellCheckEnabled || !g_spellChecker ||
+        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT)) {
+        SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
+        g_clearAllSpellingPending = 0;
+        return;
+    }
+
+    if (textLength <= 0) return;
+    if (g_clearAllSpellingPending) {
+        SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
+        g_clearAllSpellingPending = 0;
+    }
+
+    HWND tracked = tracked_edit_view();
+    spell_check_visible_range(tracked, textLength);
+    /* The split pane shares the document, so its own viewport can hold text
+       the tracked pane's range never covers; check it too when visible. */
+    if (g_hSplitEdit && g_splitEditorVisible && g_hSplitEdit != tracked)
+        spell_check_visible_range(g_hSplitEdit, textLength);
 }
 
 /* ---- spell.check for plugins. ------------------------------------------

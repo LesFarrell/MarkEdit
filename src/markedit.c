@@ -651,14 +651,17 @@ static void run_deferred_startup_init(void) {
 static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotification *scn) {
     /* A shared document can produce UI notifications from both editor views.
        Only the pane the user is actually working in should drive caret,
-       brace, preview-scroll, and plugin-selection updates. */
+       brace, preview-scroll, and plugin-selection updates. Live spell
+       checking is the exception: an unfocused split pane can still be
+       scrolled (mouse wheel, dragging its own scrollbar) without moving
+       focus, and the text newly brought into view there needs checking too. */
     if (GetFocus() == editor) g_lastEditView = editor;
+    if (scn->updated & SC_UPDATE_V_SCROLL) schedule_visible_spell_check();
     if (editor != tracked_edit_view()) return;
     if ((scn->updated & SC_UPDATE_V_SCROLL) && g_editorVisible && g_previewVisible) {
             if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
             else SetTimer(hwnd, IDT_SCROLL_SYNC, SCROLL_SYNC_DELAY_MS, NULL);
     }
-    if (scn->updated & SC_UPDATE_V_SCROLL) schedule_visible_spell_check();
     if (scn->updated & SC_UPDATE_SELECTION) {
         /* Brace matching and column calculation can both scan beyond the
            changed byte. Coalesce them with the existing selection debounce
