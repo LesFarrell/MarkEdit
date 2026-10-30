@@ -52,6 +52,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 #define IDT_PLUGIN_STATUS 12
 #define IDT_PLUGIN_SELECTION 13
 #define IDT_MINIMAP_UPDATE 14
+#define IDT_WORD_COMPLETION 15
 #define IDT_PLUGIN_DEFER_BASE 1000
 
 /* ---- timer intervals, in milliseconds ----
@@ -72,6 +73,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 #define PLUGIN_STATUS_DURATION_MS 1800       /* how long a plugin reload message shows */
 #define PLUGIN_SELECTION_DELAY_MS 100
 #define MINIMAP_UPDATE_DELAY_MS 1000
+#define WORD_COMPLETION_DELAY_MS 120
 #define PLUGIN_DEFER_RETRY_MS 50             /* retry while a plugin is still running */
 #define DEBUGGER_EXIT_WAIT_MS 1000           /* for a stopped debugger to release its files */
 

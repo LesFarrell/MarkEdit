@@ -335,6 +335,11 @@ static int g_tabDragIndex = -1;
 static int g_tabDragged = 0;
 static int g_activeLanguage = 0; /* Language of the active document; 0 is LANG_MARKDOWN. */
 static ISpellChecker *g_spellChecker = NULL;
+/* SCN_CHARADDED must return promptly. Remember the view/document that caused
+   it so word completion can scan after a short pause instead of inside the
+   keypress notification itself. */
+static HWND g_pendingCompletionView = NULL;
+static sptr_t g_pendingCompletionDocument = 0;
 
 /* Long file operations report through progress_dialog.c, which wraps the
    shell's IProgressDialog. Its host table is filled in once the main window
@@ -665,6 +670,13 @@ static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotif
         update_minimap_viewport();
 }
 
+static void schedule_word_completions(HWND hwnd, HWND editor) {
+    if (g_largeFile) return;
+    g_pendingCompletionView = editor;
+    g_pendingCompletionDocument = (sptr_t)SendMessageA(editor, SCI_GETDOCPOINTER, 0, 0);
+    SetTimer(hwnd, IDT_WORD_COMPLETION, WORD_COMPLETION_DELAY_MS, NULL);
+}
+
 static void handle_editor_margin_click(const struct SCNotification *scn) {
     if (scn->margin != MARGIN_BOOKMARKS) return;
 
@@ -764,7 +776,7 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
             break;
         case SCN_CHARADDED:
             g_lastEditView = notification->hwndFrom;
-            update_word_completions(notification->hwndFrom);
+            schedule_word_completions(hwnd, notification->hwndFrom);
             break;
         case SCN_MARGINCLICK:
             handle_editor_margin_click(scn);
@@ -796,6 +808,7 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_PLUGIN_STATUS);
     KillTimer(hwnd, IDT_PLUGIN_SELECTION);
     KillTimer(hwnd, IDT_MINIMAP_UPDATE);
+    KillTimer(hwnd, IDT_WORD_COMPLETION);
     explorer_shutdown();
     shutdown_output_panel();
     plugin_config_cache_clear();
@@ -948,6 +961,17 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
             KillTimer(hwnd, IDT_MINIMAP_UPDATE);
             refresh_minimap_after_edit();
             break;
+        case IDT_WORD_COMPLETION: {
+            KillTimer(hwnd, IDT_WORD_COMPLETION);
+            HWND editor = g_pendingCompletionView;
+            sptr_t document = g_pendingCompletionDocument;
+            g_pendingCompletionView = NULL;
+            g_pendingCompletionDocument = 0;
+            if (editor && IsWindow(editor) &&
+                (sptr_t)SendMessageA(editor, SCI_GETDOCPOINTER, 0, 0) == document)
+                update_word_completions(editor);
+            break;
+        }
         default: return 0;
     }
     return 1;

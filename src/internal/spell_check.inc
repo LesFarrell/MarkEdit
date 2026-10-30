@@ -125,11 +125,9 @@ static int markdown_style_is_prose(int style) {
            style == SCE_MARKDOWN_BLOCKQUOTE || style == SCE_MARKDOWN_STRIKEOUT;
 }
 
-/* A full scan is still useful after opening a file, changing language, or
-   changing dictionaries. Ordinary edits and scrolling only need the text
-   around the visible viewport; existing indicators elsewhere move with the
-   Scintilla document and remain valid. */
-static int g_fullSpellCheckPending = 1;
+/* Opening a file or changing language/dictionary invalidates every old
+   indicator, but live checking still examines only text in the viewport. */
+static int g_clearAllSpellingPending = 1;
 
 static void schedule_spell_check(void) {
     if (!g_hMainWnd) return;
@@ -137,7 +135,7 @@ static void schedule_spell_check(void) {
         KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
         return;
     }
-    g_fullSpellCheckPending = 1;
+    g_clearAllSpellingPending = 1;
     SetTimer(g_hMainWnd, IDT_SPELL_CHECK, SPELL_CHECK_DELAY_MS, NULL);
 }
 
@@ -152,10 +150,34 @@ static void schedule_visible_spell_check(void) {
     SetTimer(g_hMainWnd, IDT_SPELL_CHECK, SPELL_CHECK_DELAY_MS, NULL);
 }
 
-/* A full ISpellChecker_Check() is a synchronous COM call on the UI thread.
-   Bound one-off full scans to this size; larger ordinary documents are still
-   checked in the small visible ranges scheduled by edits and scrolling. */
-#define SPELLCHECK_MAX_LENGTH (256 * 1024)
+static void visible_spell_range(HWND view, Sci_Position textLength,
+                                Sci_Position *rangeStart, Sci_Position *rangeEnd) {
+    Sci_Position firstVisible = (Sci_Position)SendMessageA(
+        view, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    Sci_Position visibleLines = (Sci_Position)SendMessageA(
+        view, SCI_LINESONSCREEN, 0, 0);
+    Sci_Position firstLine = (Sci_Position)SendMessageA(
+        view, SCI_DOCLINEFROMVISIBLE, (WPARAM)firstVisible, 0);
+    /* The line at firstVisible + visibleLines may be partly visible, and is
+       therefore part of the viewport too. Unlike a bottom-right pixel lookup,
+       this remains reliable when that row is blank or shorter than the view. */
+    Sci_Position lastLine = (Sci_Position)SendMessageA(
+        view, SCI_DOCLINEFROMVISIBLE, (WPARAM)(firstVisible + visibleLines), 0);
+    Sci_Position lineCount = (Sci_Position)SendMessageA(
+        view, SCI_GETLINECOUNT, 0, 0);
+    if (firstLine < 0) firstLine = 0;
+    if (lastLine < firstLine) lastLine = firstLine;
+    if (lastLine >= lineCount) lastLine = lineCount - 1;
+
+    Sci_Position start = (Sci_Position)SendMessageA(
+        view, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
+    Sci_Position end = lastLine + 1 < lineCount
+        ? (Sci_Position)SendMessageA(
+              view, SCI_POSITIONFROMLINE, (WPARAM)(lastLine + 1), 0)
+        : textLength;
+    *rangeStart = start < 0 ? 0 : start;
+    *rangeEnd = end > textLength ? textLength : end;
+}
 
 static void perform_spell_check(void) {
     if (!g_hEdit) return;
@@ -167,41 +189,18 @@ static void perform_spell_check(void) {
     if (!g_spellCheckEnabled || !g_spellChecker ||
         (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT)) {
         SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
-        g_fullSpellCheckPending = 0;
+        g_clearAllSpellingPending = 0;
         return;
     }
 
-    int fullCheck = g_fullSpellCheckPending;
-    g_fullSpellCheckPending = 0;
     if (textLength <= 0) return;
-    if (fullCheck && textLength > SPELLCHECK_MAX_LENGTH) {
-        /* Large ordinary documents are checked lazily as their text becomes
-           visible instead of freezing the UI for one oversized COM call. */
+    if (g_clearAllSpellingPending) {
         SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
-        return;
+        g_clearAllSpellingPending = 0;
     }
 
-    Sci_Position rangeStart = 0;
-    Sci_Position rangeEnd = textLength;
-    if (!fullCheck) {
-        HWND view = tracked_edit_view();
-        Sci_Position firstVisible = (Sci_Position)SendMessageA(view, SCI_GETFIRSTVISIBLELINE, 0, 0);
-        Sci_Position visibleCount = (Sci_Position)SendMessageA(view, SCI_LINESONSCREEN, 0, 0);
-        Sci_Position firstLine = (Sci_Position)SendMessageA(
-            view, SCI_DOCLINEFROMVISIBLE, (WPARAM)firstVisible, 0);
-        Sci_Position lastLine = (Sci_Position)SendMessageA(
-            view, SCI_DOCLINEFROMVISIBLE, (WPARAM)(firstVisible + visibleCount), 0);
-        Sci_Position lineCount = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLINECOUNT, 0, 0);
-        if (firstLine > 0) firstLine--;
-        if (lastLine + 1 < lineCount) lastLine++;
-        rangeStart = (Sci_Position)SendMessageA(
-            g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)firstLine, 0);
-        rangeEnd = lastLine + 1 < lineCount
-            ? (Sci_Position)SendMessageA(g_hEdit, SCI_POSITIONFROMLINE, (WPARAM)(lastLine + 1), 0)
-            : textLength;
-        if (rangeStart < 0) rangeStart = 0;
-        if (rangeEnd > textLength) rangeEnd = textLength;
-    }
+    Sci_Position rangeStart = 0, rangeEnd = 0;
+    visible_spell_range(tracked_edit_view(), textLength, &rangeStart, &rangeEnd);
     Sci_Position rangeLength = rangeEnd - rangeStart;
     if (rangeLength <= 0) return;
 

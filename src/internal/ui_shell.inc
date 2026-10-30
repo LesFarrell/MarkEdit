@@ -54,9 +54,11 @@ static void update_status_bar(void) {
     }
     Sci_Position length = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     Sci_Position characters = (Sci_Position)SendMessageA(g_hEdit, SCI_COUNTCHARACTERS, 0, (LPARAM)length);
-    Sci_Position ignored = 0;
     int words = 0;
-    char *text = get_edit_text(g_hEdit, &ignored);
+    /* Scintilla owns a contiguous UTF-8 buffer. Reading it in place avoids a
+       document-sized allocation and copy after every pause in typing. The
+       pointer remains valid for this synchronous scan. */
+    const char *text = (const char *)SendMessageA(g_hEdit, SCI_GETCHARACTERPOINTER, 0, 0);
     if (text) {
         int inWord = 0;
         for (Sci_Position i = 0; i < length; i++) {
@@ -65,7 +67,6 @@ static void update_status_bar(void) {
             if (wordChar && !inWord) words++;
             inWord = wordChar;
         }
-        free(text);
     }
     swprintf(g_statusPartText[1], 128, L"Words %d   Characters %lld", words, (long long)characters);
     InvalidateRect(g_hStatus, NULL, FALSE);
@@ -1353,7 +1354,8 @@ static void theme_autocomplete_popup(void) {
    primitive ctrl_click_jump_to_occurrence() uses). Called on every
    SCN_CHARADDED; does nothing once the list is already showing, since
    Scintilla narrows the visible entries itself as more of the word is
-   typed. */
+   typed. SCN_CHARADDED schedules this after a short idle delay so the bounded
+   document scan never runs synchronously in the keypress notification. */
 static void update_word_completions(HWND hEdit) {
     if (g_largeFile) return;
     Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
