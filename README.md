@@ -110,6 +110,7 @@ src/                     application sources, including:
   path_utils.c / .h        Windows path utilities, including allocation-free workspace filtering
   text_codec.c / .h        UTF conversion, text-file encoding detection and conversion, JSON string encoding
   git_status.c / .h        testable parser for NUL-delimited Git porcelain v2 status
+  markdown_links.c / .h    testable Markdown link extraction and heading-anchor checks
   markdown.c / .h          cmark-gfm rendering adapter
   plugin_host.c / .h       plugin host entry points, menu definition and help page rendering
   plugin_lua_runtime.c     sandboxed Lua state, memory and time limits, protected calls

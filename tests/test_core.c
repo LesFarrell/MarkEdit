@@ -7,9 +7,30 @@
 #include "../src/path_utils.h"
 #include "../src/plugin_settings.h"
 #include "../src/workspace_text.h"
+#include "../src/markdown_links.h"
 
 static int failures;
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); failures++; } } while (0)
+
+typedef struct LinkProbe {
+    MarkdownLinkKind kinds[16];
+    int lines[16];
+    char targets[16][128];
+    int count;
+} LinkProbe;
+
+static void collect_link(MarkdownLinkKind kind, int line, const char *target,
+                         size_t targetLength, void *context) {
+    LinkProbe *probe = (LinkProbe *)context;
+    if (probe->count >= 16) return;
+    int index = probe->count++;
+    probe->kinds[index] = kind;
+    probe->lines[index] = line;
+    if (targetLength >= sizeof(probe->targets[index]))
+        targetLength = sizeof(probe->targets[index]) - 1;
+    memcpy(probe->targets[index], target, targetLength);
+    probe->targets[index][targetLength] = 0;
+}
 
 typedef struct ProgressProbe { int calls, cancelAfter; size_t completed, total; } ProgressProbe;
 
@@ -354,8 +375,38 @@ static void test_workspace_text(void) {
     free(rewritten);
 }
 
+static void test_markdown_links(void) {
+    const char *text = "# First heading\n"
+                       "[page](docs/page.md#details) ![plot](<images/plot one.png>)\n"
+                       "[[Notes|read this]] and `[[not a link]]`\n"
+                       "[guide]: guide.md \"Guide\"\n"
+                       "```markdown\n[ignored](missing.md)\n[[Ignored]]\n```\n"
+                       "## First heading\n"
+                       "Details\n-------\n";
+    LinkProbe probe = {0};
+    markdown_links_visit(text, collect_link, &probe);
+    CHECK(probe.count == 4);
+    CHECK(probe.kinds[0] == MARKDOWN_LINK_FILE && probe.lines[0] == 2 &&
+          strcmp(probe.targets[0], "docs/page.md#details") == 0);
+    CHECK(probe.kinds[1] == MARKDOWN_LINK_IMAGE &&
+          strcmp(probe.targets[1], "images/plot one.png") == 0);
+    CHECK(probe.kinds[2] == MARKDOWN_LINK_WIKI && probe.lines[2] == 3 &&
+          strcmp(probe.targets[2], "Notes") == 0);
+    CHECK(probe.kinds[3] == MARKDOWN_LINK_FILE && probe.lines[3] == 4 &&
+          strcmp(probe.targets[3], "guide.md") == 0);
+    CHECK(markdown_heading_anchor_exists(text, "first-heading"));
+    CHECK(markdown_heading_anchor_exists(text, "first-heading-1"));
+    CHECK(markdown_heading_anchor_exists(text, "details"));
+    CHECK(!markdown_heading_anchor_exists(text, "missing"));
+
+    probe = (LinkProbe){0};
+    markdown_links_visit("unmatched ` [still](linked.md)\n", collect_link, &probe);
+    CHECK(probe.count == 1 && strcmp(probe.targets[0], "linked.md") == 0);
+}
+
 int main(void) {
     test_codecs(); test_lossless_progress(); test_files(); test_plugin_settings(); test_workspace_text();
+    test_markdown_links();
     if (failures) return 1;
     puts("All core tests passed.");
     return 0;

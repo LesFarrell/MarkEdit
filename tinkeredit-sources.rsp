@@ -10,6 +10,7 @@ src/file_io.c
 src/text_codec.c
 src/git_status.c
 src/workspace_text.c
+src/markdown_links.c
 src/markdown.c
 src/settings.c
 src/recent_list.c

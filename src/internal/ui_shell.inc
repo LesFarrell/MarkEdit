@@ -553,6 +553,9 @@ static int command_state(UINT id, CommandState *state) {
             state->enabled = g_currentFile != NULL && !active_document_is_image(); break;
         case IDM_FILE_REOPEN_CLOSED: state->enabled = g_closedDocumentCount != 0; break;
         case IDM_FILE_GO_BACK: state->enabled = g_wikiBackCount != 0; break;
+        case IDM_MARKDOWN_BACKLINKS:
+            state->enabled = g_currentFile && g_activeLanguage == LANG_MARKDOWN &&
+                             !active_document_is_image(); break;
         case IDM_VIEW_TOGGLEPREVIEW: STATE_CHECK(g_previewVisible); break;
         case IDM_VIEW_TOGGLEEDITOR: STATE_CHECK(g_editorVisible); break;
         case IDM_VIEW_THEME_GITHUB_LIGHT: STATE_RADIO(!g_editorDarkMode); break;
@@ -1326,7 +1329,8 @@ static void update_brace_highlight(HWND hEdit) {
 #define WORD_COMPLETION_SCAN_RADIUS (256 * 1024)
 
 static int compare_words_ordinal(const void *a, const void *b) {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
+    int folded = _stricmp(*(const char *const *)a, *(const char *const *)b);
+    return folded ? folded : strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
 static BOOL CALLBACK find_autocomplete_popup_proc(HWND hwnd, LPARAM lParam) {
@@ -1375,6 +1379,7 @@ static void theme_autocomplete_popup(void) {
    document scan never runs synchronously in the keypress notification. */
 static void update_word_completions(HWND hEdit) {
     if (g_largeFile) return;
+    if (update_wikilink_completions(hEdit)) return;
     Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
     Sci_Position wordStart = (Sci_Position)SendMessageA(hEdit, SCI_WORDSTARTPOSITION, (WPARAM)pos, (LPARAM)1);
     Sci_Position prefixLen = pos - wordStart;
@@ -1430,7 +1435,7 @@ static void update_word_completions(HWND hEdit) {
             size_t wordLen = strlen(words[w]);
             memcpy(list + o, words[w], wordLen);
             o += wordLen;
-            if (w + 1 < wordCount) list[o++] = ' ';
+            if (w + 1 < wordCount) list[o++] = '\n';
         }
         list[o] = 0;
         SendMessageA(hEdit, SCI_AUTOCSHOW, (WPARAM)prefixLen, (LPARAM)list);

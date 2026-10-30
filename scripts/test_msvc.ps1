@@ -71,7 +71,7 @@ $tests = @(
     @{ Name="test_language"; Sources=@("src\editor_language.c", "src\theme.c"); Libraries=@("user32.lib", "shlwapi.lib", "gdi32.lib", "uxtheme.lib") },
     @{ Name="test_outline"; Sources=@("src\outline_minimap.c", "src\theme.c", "src\text_codec.c"); Libraries=@("user32.lib", "comctl32.lib", "gdi32.lib", "msimg32.lib") },
     @{ Name="test_theme"; Sources=@("src\theme.c") + $pluginSources; Objects=$luaObjects; Libraries=@("user32.lib", "gdi32.lib", "uxtheme.lib") },
-    @{ Name="test_core"; Sources=@("src\text_codec.c", "src\workspace_text.c", "src\file_io.c", "src\path_utils.c", "src\plugin_settings.c"); Libraries=@() },
+    @{ Name="test_core"; Sources=@("src\text_codec.c", "src\workspace_text.c", "src\markdown_links.c", "src\file_io.c", "src\path_utils.c", "src\plugin_settings.c"); Libraries=@() },
     @{ Name="test_output"; Sources=@("src\output_text.c", "src\output_process.c"); Libraries=@("user32.lib") },
     @{ Name="test_git_status"; Sources=@("src\git_status.c"); Libraries=@() },
     @{ Name="test_git_workflow"; Sources=@(); Libraries=@() },

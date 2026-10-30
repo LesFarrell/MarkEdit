@@ -154,6 +154,11 @@ return {
   } },
 
   { "&Tools", {
+    { "&Markdown", {
+      { "Check Workspace &Links", "tools.markdown_check_workspace_links" },
+      { "Find &Backlinks", "tools.markdown_backlinks" },
+    } },
+    "-",
     { "Settin&gs...", "tools.settings" },
   } },
 

@@ -65,6 +65,12 @@ static int handle_file_command(HWND hwnd, WORD cmd) {
         case IDM_SETTINGS:
             show_settings_dialog();
             break;
+        case IDM_MARKDOWN_CHECK_WORKSPACE_LINKS:
+            check_workspace_markdown_links();
+            break;
+        case IDM_MARKDOWN_BACKLINKS:
+            show_markdown_backlinks();
+            break;
         case IDM_FILE_EXIT:
             do_exit();
             break;

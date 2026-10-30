@@ -80,7 +80,11 @@ static int workspace_file_extension(const WCHAR *name) {
 
 /* Scans stop (and report themselves as truncated) past these limits, so
    a workspace rooted at a huge tree stays responsive. */
-enum { WORKSPACE_MAX_FILES = 5000, WORKSPACE_MAX_DEPTH = 24 };
+enum {
+    WORKSPACE_MAX_FILES = 5000,
+    WORKSPACE_MAX_DEPTH = 24,
+    WORKSPACE_SCAN_MAX_FILE_BYTES = 4 * 1024 * 1024
+};
 
 static void enumerate_workspace_files(WorkspaceFiles *files, const WCHAR *directory, int depth) {
     if (depth > WORKSPACE_MAX_DEPTH || files->count >= WORKSPACE_MAX_FILES) { files->truncated = 1; return; }
@@ -159,6 +163,480 @@ static int collect_workspace_files_at(WorkspaceFiles *files, const WCHAR *root) 
     return 1;
 }
 
+/* ---- workspace Markdown index ----------------------------------------- */
+
+/* File names are enough for completion and wiki-link resolution. The cache
+   is short-lived as well as explicitly invalidated, so it remains useful
+   when the explorer panel (and therefore its live watcher) is hidden. */
+static WorkspaceFiles g_markdownWorkspaceFiles;
+static ULONGLONG g_markdownWorkspaceScanAt;
+static int g_markdownWorkspaceIndexPinned;
+
+static int markdown_file_path(const WCHAR *path) {
+    const LanguageInfo *language = language_for_known_path(path);
+    return language && language->id == LANG_MARKDOWN;
+}
+
+static WCHAR *active_markdown_workspace_root(void) {
+    if (g_currentWorkspaceFolder) return wcsdup_heap(g_currentWorkspaceFolder);
+    return g_currentFile ? path_directory(g_currentFile) : NULL;
+}
+
+static void invalidate_markdown_workspace_cache(void) {
+    free_workspace_files(&g_markdownWorkspaceFiles);
+    g_markdownWorkspaceScanAt = 0;
+}
+
+static int collect_markdown_workspace_files(WorkspaceFiles *markdown, const WCHAR *root) {
+    WorkspaceFiles all;
+    if (!root || !collect_workspace_files_at(&all, root)) return 0;
+    memset(markdown, 0, sizeof(*markdown));
+    markdown->root = wcsdup_heap(all.root);
+    markdown->truncated = all.truncated;
+    if (!markdown->root) {
+        free_workspace_files(&all);
+        return 0;
+    }
+    for (int i = 0; i < all.count; i++) {
+        if (markdown_file_path(all.paths[i]) &&
+            !add_workspace_item(markdown, all.paths[i], all.labels[i], 0)) {
+            markdown->truncated = 1;
+            break;
+        }
+    }
+    free_workspace_files(&all);
+    return 1;
+}
+
+static WorkspaceFiles *markdown_workspace_files(int forceRefresh) {
+    WCHAR *root = active_markdown_workspace_root();
+    if (!root) return NULL;
+    ULONGLONG now = GetTickCount64();
+    int differentRoot = !g_markdownWorkspaceFiles.root ||
+                        _wcsicmp(g_markdownWorkspaceFiles.root, root) != 0;
+    int expired = !g_markdownWorkspaceScanAt || now - g_markdownWorkspaceScanAt > 5000;
+    if (forceRefresh || differentRoot || (expired && !g_markdownWorkspaceIndexPinned)) {
+        invalidate_markdown_workspace_cache();
+        if (!collect_markdown_workspace_files(&g_markdownWorkspaceFiles, root)) {
+            free(root);
+            return NULL;
+        }
+        g_markdownWorkspaceScanAt = now;
+    }
+    free(root);
+    return &g_markdownWorkspaceFiles;
+}
+
+static WCHAR *without_markdown_extension(const WCHAR *value) {
+    WCHAR *copy = wcsdup_heap(value);
+    if (!copy) return NULL;
+    WCHAR *extension = PathFindExtensionW(copy);
+    if (extension && markdown_file_path(copy)) *extension = 0;
+    return copy;
+}
+
+static int path_separator_present(const WCHAR *value) {
+    return wcschr(value, L'\\') != NULL || wcschr(value, L'/') != NULL;
+}
+
+/* Resolves local wiki links first, then workspace-relative paths, then a
+   unique workspace-wide page name. With chooseAmbiguous, duplicate page
+   names are offered in the existing searchable choice dialog. */
+static WCHAR *resolve_workspace_wikilink(const WCHAR *name, int chooseAmbiguous,
+                                         int *ambiguous) {
+    if (ambiguous) *ambiguous = 0;
+    if (!name || !*name) return NULL;
+    WCHAR *target = wcsdup_heap(name);
+    if (!target) return NULL;
+    WCHAR *fragment = wcschr(target, L'#');
+    if (fragment) *fragment = 0;
+    WCHAR *query = wcschr(target, L'?');
+    if (query) *query = 0;
+    for (WCHAR *p = target; *p; p++) if (*p == L'/') *p = L'\\';
+    if (!*target || path_escapes_base(target)) { free(target); return NULL; }
+
+    WCHAR *withExtension = target;
+    if (!*PathFindExtensionW(target)) {
+        size_t length = wcslen(target);
+        withExtension = (WCHAR *)malloc((length + 4) * sizeof(WCHAR));
+        if (!withExtension) { free(target); return NULL; }
+        memcpy(withExtension, target, length * sizeof(WCHAR));
+        memcpy(withExtension + length, L".md", 4 * sizeof(WCHAR));
+    }
+
+    WCHAR *documentDirectory = g_currentFile ? path_directory(g_currentFile) : NULL;
+    WCHAR *joined = documentDirectory ? path_join(documentDirectory, withExtension) : NULL;
+    WCHAR *local = joined ? absolute_path(joined) : NULL;
+    free(joined);
+    free(documentDirectory);
+    if (file_exists(local)) {
+        if (withExtension != target) free(withExtension);
+        free(target);
+        return local;
+    }
+    free(local);
+
+    WorkspaceFiles *files = markdown_workspace_files(0);
+    if (!files) {
+        if (withExtension != target) free(withExtension);
+        free(target);
+        return NULL;
+    }
+    joined = path_join(files->root, withExtension);
+    WCHAR *fromRoot = joined ? absolute_path(joined) : NULL;
+    free(joined);
+    if (file_exists(fromRoot)) {
+        if (withExtension != target) free(withExtension);
+        free(target);
+        return fromRoot;
+    }
+    free(fromRoot);
+
+    WCHAR *needle = without_markdown_extension(target);
+    int hasPath = path_separator_present(target);
+    int matches[WORKSPACE_MAX_FILES];
+    int matchCount = 0;
+    for (int i = 0; needle && i < files->count; i++) {
+        WCHAR *candidate = without_markdown_extension(files->labels[i]);
+        const WCHAR *comparison = candidate
+            ? (hasPath ? candidate : PathFindFileNameW(candidate)) : NULL;
+        if (comparison && _wcsicmp(comparison, needle) == 0 && matchCount < WORKSPACE_MAX_FILES)
+            matches[matchCount++] = i;
+        free(candidate);
+    }
+    free(needle);
+    if (withExtension != target) free(withExtension);
+    free(target);
+    if (matchCount == 1) return wcsdup_heap(files->paths[matches[0]]);
+    if (matchCount > 1) {
+        if (ambiguous) *ambiguous = 1;
+        if (chooseAmbiguous) {
+            WCHAR **labels = (WCHAR **)malloc((size_t)matchCount * sizeof(WCHAR *));
+            if (!labels) return NULL;
+            for (int i = 0; i < matchCount; i++) labels[i] = files->labels[matches[i]];
+            int selected = show_choice_dialog(L"Open Wiki Link",
+                                              L"More than one page has that name:",
+                                              labels, matchCount, L"Open");
+            free(labels);
+            if (selected >= 0 && selected < matchCount)
+                return wcsdup_heap(files->paths[matches[selected]]);
+        }
+    }
+    return NULL;
+}
+
+/* Returns nonzero whenever the caret is in an unfinished [[target, even if
+   there are no candidates, so ordinary prose-word completion stays out of
+   the link target. */
+static int update_wikilink_completions(HWND hEdit) {
+    if (g_activeLanguage != LANG_MARKDOWN) return 0;
+    Sci_Position pos = (Sci_Position)SendMessageA(hEdit, SCI_GETCURRENTPOS, 0, 0);
+    Sci_Position line = (Sci_Position)SendMessageA(hEdit, SCI_LINEFROMPOSITION, (WPARAM)pos, 0);
+    Sci_Position start = (Sci_Position)SendMessageA(hEdit, SCI_POSITIONFROMLINE, (WPARAM)line, 0);
+    char *before = get_text_range(hEdit, start, pos);
+    if (!before) return 0;
+    char *open = NULL;
+    for (char *p = before; p[0] && p[1]; p++) {
+        if (p[0] == '[' && p[1] == '[') { open = p + 2; p++; }
+        else if (p[0] == ']' && p[1] == ']') { open = NULL; p++; }
+    }
+    if (!open || strchr(open, '|') || strchr(open, '\n') || strchr(open, '\r')) {
+        free(before);
+        return 0;
+    }
+    size_t prefixLength = strlen(open);
+    WorkspaceFiles *files = markdown_workspace_files(0);
+    char *candidates[WORD_COMPLETION_MAX_WORDS];
+    int count = 0;
+    for (int i = 0; files && i < files->count && count < WORD_COMPLETION_MAX_WORDS; i++) {
+        const WCHAR *label = PathFindFileNameW(files->labels[i]);
+        WCHAR *without = without_markdown_extension(label);
+        char *candidate = without ? to_utf8(without) : NULL;
+        free(without);
+        if (!candidate) continue;
+        for (char *p = candidate; *p; p++) if (*p == '\\') *p = '/';
+        const char *match = utf8_case_find(candidate, open);
+        if (match != candidate) { free(candidate); continue; }
+        int duplicate = 0;
+        for (int c = 0; c < count; c++)
+            if (_stricmp(candidates[c], candidate) == 0) { duplicate = 1; break; }
+        if (duplicate) free(candidate);
+        else candidates[count++] = candidate;
+    }
+    free(before);
+    if (!count) {
+        SendMessageA(hEdit, SCI_AUTOCCANCEL, 0, 0);
+        return 1;
+    }
+    qsort(candidates, (size_t)count, sizeof(char *), compare_words_ordinal);
+    size_t total = 1;
+    for (int i = 0; i < count; i++) total += strlen(candidates[i]) + 1;
+    char *list = (char *)malloc(total);
+    if (list) {
+        size_t used = 0;
+        for (int i = 0; i < count; i++) {
+            size_t length = strlen(candidates[i]);
+            memcpy(list + used, candidates[i], length);
+            used += length;
+            if (i + 1 < count) list[used++] = '\n';
+        }
+        list[used] = 0;
+        SendMessageA(hEdit, SCI_AUTOCSHOW, (WPARAM)prefixLength, (LPARAM)list);
+        theme_autocomplete_popup();
+        free(list);
+    }
+    for (int i = 0; i < count; i++) free(candidates[i]);
+    return 1;
+}
+
+/* ---- workspace link diagnostics and backlinks ------------------------ */
+
+/* Defined with the workspace replacement helpers below. A declaration here
+   lets link diagnostics share their open-buffer-aware reader. */
+typedef struct WorkspaceText {
+    char *text;
+    size_t length;
+    int openIndex; /* -1 when read from disk */
+    int encoding;
+    int hasBom;
+} WorkspaceText;
+static int load_workspace_text(const WCHAR *path, WorkspaceText *out);
+
+typedef struct MarkdownLinkReport {
+    char *text;
+    size_t length;
+    size_t capacity;
+    int count;
+} MarkdownLinkReport;
+
+static int append_markdown_link_report(MarkdownLinkReport *report, const WCHAR *label,
+                                       int line, const char *message, const char *target) {
+    char *file = to_utf8(label);
+    if (!file) return 0;
+    int needed = snprintf(NULL, 0, "%s:%d: %s%s%s\n", file, line, message,
+                          target ? " \"" : "", target ? target : "");
+    if (target) needed++; /* closing quote */
+    if (needed < 0) { free(file); return 0; }
+    size_t required = report->length + (size_t)needed + 1;
+    if (required > report->capacity) {
+        size_t next = report->capacity ? report->capacity * 2 : 1024;
+        while (next < required) next *= 2;
+        char *grown = (char *)realloc(report->text, next);
+        if (!grown) { free(file); return 0; }
+        report->text = grown;
+        report->capacity = next;
+    }
+    int written;
+    if (target)
+        written = snprintf(report->text + report->length, report->capacity - report->length,
+                           "%s:%d: %s \"%s\"\n", file, line, message, target);
+    else
+        written = snprintf(report->text + report->length, report->capacity - report->length,
+                           "%s:%d: %s\n", file, line, message);
+    free(file);
+    if (written < 0) return 0;
+    report->length += (size_t)written;
+    report->count++;
+    return 1;
+}
+
+static char *copy_markdown_link_target(const char *target, size_t length) {
+    char *copy = (char *)malloc(length + 1);
+    if (!copy) return NULL;
+    memcpy(copy, target, length);
+    copy[length] = 0;
+    return copy;
+}
+
+static int markdown_link_is_external(const char *target) {
+    if (!target || !*target || target[0] == '#') return 0;
+    if (target[0] == '/' || target[0] == '\\') return 1;
+    const char *colon = strchr(target, ':');
+    const char *slash = strpbrk(target, "/\\");
+    return colon && (!slash || colon < slash);
+}
+
+/* Separates and percent-decodes a link's path and fragment. The returned
+   path is absolute for ordinary Markdown links and workspace-resolved for
+   wiki links. */
+static WCHAR *resolved_markdown_link_path(const WCHAR *sourcePath,
+                                          MarkdownLinkKind kind, const char *raw,
+                                          char **fragment, int *ambiguous) {
+    if (fragment) *fragment = NULL;
+    if (ambiguous) *ambiguous = 0;
+    if (!raw || markdown_link_is_external(raw)) return NULL;
+    char *copy = _strdup(raw);
+    if (!copy) return NULL;
+    char *hash = strchr(copy, '#');
+    if (hash) {
+        *hash++ = 0;
+        char *questionInFragment = strchr(hash, '?');
+        if (questionInFragment) *questionInFragment = 0;
+        WCHAR *wideFragment = to_wide(hash);
+        WCHAR *decodedFragment = wideFragment
+            ? percent_decode_wide(wideFragment, wideFragment + wcslen(wideFragment)) : NULL;
+        if (fragment && decodedFragment) *fragment = to_utf8(decodedFragment);
+        free(decodedFragment);
+        free(wideFragment);
+    }
+    char *query = strchr(copy, '?');
+    if (query) *query = 0;
+    WCHAR *encoded = to_wide(copy);
+    free(copy);
+    if (!encoded) return NULL;
+    WCHAR *decoded = *encoded
+        ? percent_decode_wide(encoded, encoded + wcslen(encoded)) : wcsdup_heap(L"");
+    free(encoded);
+    if (!decoded) return NULL;
+    for (WCHAR *p = decoded; *p; p++) if (*p == L'/') *p = L'\\';
+    if (kind == MARKDOWN_LINK_WIKI) {
+        WCHAR *resolved = resolve_workspace_wikilink(decoded, 0, ambiguous);
+        free(decoded);
+        return resolved;
+    }
+    if (!*decoded) {
+        free(decoded);
+        return absolute_path(sourcePath);
+    }
+    WCHAR *directory = path_directory(sourcePath);
+    WCHAR *joined = directory ? path_join(directory, decoded) : NULL;
+    WCHAR *resolved = joined ? absolute_path(joined) : NULL;
+    free(joined);
+    free(directory);
+    free(decoded);
+    return resolved;
+}
+
+static int filesystem_path_exists(const WCHAR *path) {
+    return path && GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static int markdown_anchor_at_path(const WCHAR *path, const char *fragment) {
+    if (!path || !fragment || !*fragment || !markdown_file_path(path)) return 1;
+    WorkspaceText document;
+    int loaded = load_workspace_text(path, &document);
+    int exists = loaded > 0 && markdown_heading_anchor_exists(document.text, fragment);
+    free(document.text);
+    return exists;
+}
+
+typedef struct MarkdownLinkScan {
+    const WCHAR *sourcePath;
+    const WCHAR *sourceLabel;
+    const WCHAR *backlinkTarget;
+    MarkdownLinkReport *report;
+} MarkdownLinkScan;
+
+static void inspect_workspace_link(MarkdownLinkKind kind, int line,
+                                   const char *target, size_t targetLength,
+                                   void *context) {
+    MarkdownLinkScan *scan = (MarkdownLinkScan *)context;
+    char *raw = copy_markdown_link_target(target, targetLength);
+    if (!raw || markdown_link_is_external(raw)) { free(raw); return; }
+    char *fragment = NULL;
+    int ambiguous = 0;
+    WCHAR *resolved = resolved_markdown_link_path(scan->sourcePath, kind, raw,
+                                                  &fragment, &ambiguous);
+    if (scan->backlinkTarget) {
+        if (resolved && _wcsicmp(resolved, scan->backlinkTarget) == 0 &&
+            _wcsicmp(scan->sourcePath, scan->backlinkTarget) != 0)
+            append_markdown_link_report(scan->report, scan->sourceLabel, line,
+                                        "Links to the active document.", NULL);
+        free(fragment); free(resolved); free(raw);
+        return;
+    }
+    if (ambiguous) {
+        append_markdown_link_report(scan->report, scan->sourceLabel, line,
+                                    "Ambiguous wiki link:", raw);
+    } else if (!filesystem_path_exists(resolved)) {
+        const char *message = kind == MARKDOWN_LINK_IMAGE ? "Missing image:"
+                              : kind == MARKDOWN_LINK_WIKI ? "Missing wiki page:"
+                              : "Missing linked file:";
+        append_markdown_link_report(scan->report, scan->sourceLabel, line, message, raw);
+    } else if (fragment && *fragment && !markdown_anchor_at_path(resolved, fragment)) {
+        append_markdown_link_report(scan->report, scan->sourceLabel, line,
+                                    "Missing heading anchor:", fragment);
+    }
+    free(fragment);
+    free(resolved);
+    free(raw);
+}
+
+static int workspace_markdown_file_too_large(const WCHAR *path) {
+    WIN32_FILE_ATTRIBUTE_DATA attributes;
+    return GetFileAttributesExW(path, GetFileExInfoStandard, &attributes) &&
+           (attributes.nFileSizeHigh || attributes.nFileSizeLow > WORKSPACE_SCAN_MAX_FILE_BYTES);
+}
+
+static void check_workspace_markdown_links(void) {
+    WorkspaceFiles *files = markdown_workspace_files(1);
+    if (!files) {
+        MessageBoxW(g_hMainWnd, L"Open a workspace or save the document before checking links.",
+                    L"Check Workspace Links", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    MarkdownLinkReport report = {0};
+    int unreadable = 0, skippedLarge = 0;
+    g_markdownWorkspaceIndexPinned++;
+    for (int i = 0; i < files->count; i++) {
+        if (workspace_markdown_file_too_large(files->paths[i])) { skippedLarge++; continue; }
+        WorkspaceText document;
+        if (load_workspace_text(files->paths[i], &document) <= 0) { unreadable++; continue; }
+        MarkdownLinkScan scan = { files->paths[i], files->labels[i], NULL, &report };
+        markdown_links_visit(document.text, inspect_workspace_link, &scan);
+        free(document.text);
+    }
+    g_markdownWorkspaceIndexPinned--;
+    set_problem_report("Workspace Links", report.text, files->root);
+    if (report.count) {
+        show_output_panel(OUTPUT_TAB_PROBLEMS, 1);
+        WCHAR status[96];
+        swprintf(status, 96, L"%d workspace link problem%ls found", report.count,
+                 report.count == 1 ? L"" : L"s");
+        show_plugin_reload_status(status);
+    } else {
+        show_plugin_reload_status(L"Every workspace Markdown link resolves");
+    }
+    warn_incomplete_workspace_scan(L"Check Workspace Links", files->truncated,
+                                   skippedLarge, unreadable, 0);
+    free(report.text);
+}
+
+static void show_markdown_backlinks(void) {
+    if (!g_currentFile || !markdown_file_path(g_currentFile)) return;
+    WorkspaceFiles *files = markdown_workspace_files(1);
+    if (!files) return;
+    WCHAR *target = absolute_path(g_currentFile);
+    if (!target) return;
+    MarkdownLinkReport report = {0};
+    int unreadable = 0, skippedLarge = 0;
+    g_markdownWorkspaceIndexPinned++;
+    for (int i = 0; i < files->count; i++) {
+        if (_wcsicmp(files->paths[i], target) == 0) continue;
+        if (workspace_markdown_file_too_large(files->paths[i])) { skippedLarge++; continue; }
+        WorkspaceText document;
+        if (load_workspace_text(files->paths[i], &document) <= 0) { unreadable++; continue; }
+        MarkdownLinkScan scan = { files->paths[i], files->labels[i], target, &report };
+        markdown_links_visit(document.text, inspect_workspace_link, &scan);
+        free(document.text);
+    }
+    g_markdownWorkspaceIndexPinned--;
+    if (!report.text) {
+        char *name = to_utf8(PathFindFileNameW(target));
+        size_t capacity = (name ? strlen(name) : 0) + 48;
+        report.text = (char *)malloc(capacity);
+        if (report.text)
+            snprintf(report.text, capacity, "No backlinks found for %s.\n", name ? name : "this document");
+        free(name);
+    }
+    set_problem_report("Markdown Backlinks", report.text, files->root);
+    show_output_panel(OUTPUT_TAB_PROBLEMS, 1);
+    warn_incomplete_workspace_scan(L"Find Backlinks", files->truncated,
+                                   skippedLarge, unreadable, 0);
+    free(report.text);
+    free(target);
+}
+
 static int collect_workspace_files(WorkspaceFiles *files) {
     WCHAR *root = choose_workspace_folder();
     if (!root) { memset(files, 0, sizeof(*files)); return 0; }
@@ -198,6 +676,7 @@ static void do_quick_open(void) {
    (do_open_recent_workspace's own "folder no longer exists" early-out is
    deliberately not part of this, since only that one caller needs it). */
 static void adopt_workspace_folder(HWND hwnd, const WCHAR *root) {
+    invalidate_markdown_workspace_cache();
     replace_wstring(&g_currentWorkspaceFolder, root);
     SetCurrentDirectoryW(root);
     recent_list_add(&g_recentFolderList, root);
@@ -253,7 +732,6 @@ static void toggle_explorer_panel(HWND hwnd) {
 }
 
 #define WORKSPACE_SCAN_MAX_MATCHES 2000
-#define WORKSPACE_SCAN_MAX_FILE_BYTES (4 * 1024 * 1024)
 
 /* Stores one match found by scan_workspace_matches(). `label` (the
    "file:line — snippet" text) is the callback's to keep or free. Returns 0
@@ -376,14 +854,6 @@ static int find_open_document_for_path(const WCHAR *path) {
 
 /* A workspace file's text for a folder-wide edit: the open tab's buffer
    (unsaved edits included) when it's open, otherwise the file on disk. */
-typedef struct WorkspaceText {
-    char *text;
-    size_t length;
-    int openIndex; /* -1 when read from disk */
-    int encoding;
-    int hasBom;
-} WorkspaceText;
-
 /* Returns 1 with `out` filled, 0 when the text couldn't be read, or -1 when
    it contains a NUL (possible in UTF-16): line-based rewrites walk
    NUL-terminated text and would write such a file back cut short. */
@@ -837,6 +1307,7 @@ static void update_workspace_links_after_rename(const WCHAR *oldPath, const WCHA
 }
 
 static void explorer_path_renamed(const WCHAR *oldPath, const WCHAR *newPath, int isDirectory) {
+    invalidate_markdown_workspace_cache();
     if (!oldPath || !newPath) return;
     for (int i = 0; i < g_documentStore.count; i++) {
         if (!g_documentStore.documents[i].path ||

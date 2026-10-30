@@ -250,6 +250,9 @@ static void configure_scintilla_feedback(HWND hEdit) {
        typed so far matches any entry. */
     SendMessageA(hEdit, SCI_AUTOCSETIGNORECASE, TRUE, 0);
     SendMessageA(hEdit, SCI_AUTOCSETAUTOHIDE, TRUE, 0);
+    /* Newline permits wiki-page candidates such as "Project Notes"; plain
+       word completion uses the same separator. */
+    SendMessageA(hEdit, SCI_AUTOCSETSEPARATOR, '\n', 0);
     SendMessageA(hEdit, SCI_AUTOCSETORDER, SC_ORDER_PRESORTED, 0);
     SendMessageA(hEdit, SCI_AUTOCSETMAXHEIGHT, 8, 0);
 }

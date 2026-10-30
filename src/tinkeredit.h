@@ -189,5 +189,9 @@ static void apply_custom_preview_css(int reportErrors);
 static int paste_image_from_clipboard(void);
 static const char *builtin_script(int id, size_t *length);
 static void apply_large_file_mode_after_growth(int documentIndex);
+static void invalidate_markdown_workspace_cache(void);
+static WCHAR *resolve_workspace_wikilink(const WCHAR *name, int chooseAmbiguous,
+                                         int *ambiguous);
+static int update_wikilink_completions(HWND hEdit);
 
 #endif

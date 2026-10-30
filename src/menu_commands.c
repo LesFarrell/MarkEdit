@@ -130,6 +130,8 @@ static const MenuCommand COMMANDS[] = {
     {"markdown.alert", IDM_FMT_ALERT, NULL},
 
     {"tools.settings", IDM_SETTINGS, NULL},
+    {"tools.markdown_check_workspace_links", IDM_MARKDOWN_CHECK_WORKSPACE_LINKS, NULL},
+    {"tools.markdown_backlinks", IDM_MARKDOWN_BACKLINKS, NULL},
     {"git.status", IDM_GIT_REFRESH, NULL},
     {"git.diff_file", IDM_GIT_DIFF_FILE, NULL},
     {"git.diff_file_staged", IDM_GIT_DIFF_FILE_STAGED, NULL},

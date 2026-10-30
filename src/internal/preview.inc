@@ -488,6 +488,20 @@ static void open_wikilink_target(const WCHAR *encoded) {
     for (WCHAR *p = name; *p; p++) if (*p == L'/') *p = L'\\';
     if (!*name || path_escapes_base(name)) { free(name); return; }
 
+    int ambiguous = 0;
+    WCHAR *resolved = resolve_workspace_wikilink(name, 1, &ambiguous);
+    if (resolved) {
+        push_wiki_back();
+        open_file_in_tab(resolved);
+        refresh_menu(g_hMainWnd);
+        free(resolved);
+        free(name);
+        return;
+    }
+    /* Choosing Cancel in an ambiguity dialog means "don't navigate", not
+       "create another same-named note beside this document". */
+    if (ambiguous) { free(name); return; }
+
     WCHAR *directory = document_or_module_directory();
     if (!directory) { free(name); return; }
 

@@ -64,6 +64,7 @@
 #include "text_codec.h"
 #include "git_status.h"
 #include "workspace_text.h"
+#include "markdown_links.h"
 #include "theme.h"
 #include "themed_scrollbar.h"
 #include "toolbar_icons.h"
@@ -844,6 +845,7 @@ static void destroy_main_window(HWND hwnd) {
     KillTimer(hwnd, IDT_MINIMAP_UPDATE);
     KillTimer(hwnd, IDT_WORD_COMPLETION);
     explorer_shutdown();
+    invalidate_markdown_workspace_cache();
     shutdown_output_panel();
     plugin_config_cache_clear();
     plugin_host_shutdown();
@@ -981,6 +983,7 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
         case IDT_DEBUG_LOCATION: poll_debug_location(); break;
         case IDT_EXPLORER_REFRESH:
             KillTimer(hwnd, IDT_EXPLORER_REFRESH);
+            invalidate_markdown_workspace_cache();
             explorer_handle_change_message();
             break;
         case IDT_PLUGIN_STATUS:

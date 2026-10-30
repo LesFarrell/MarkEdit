@@ -340,7 +340,7 @@ test_project("test_outline", { "src/outline_minimap.c", "src/outline_minimap.h",
              { "user32", "comctl32", "gdi32" })
 test_project("test_theme", { "src/theme.c", "src/theme.h", "src/plugin_host.h" },
              { "user32", "gdi32", "uxtheme" }, "plugins")
-test_project("test_core", { "src/text_codec.c", "src/workspace_text.c", "src/file_io.c", "src/path_utils.c",
+test_project("test_core", { "src/text_codec.c", "src/workspace_text.c", "src/markdown_links.c", "src/file_io.c", "src/path_utils.c",
                             "src/plugin_settings.c", "src/plugin_settings.h" }, {})
 test_project("test_output", { "src/output_text.c", "src/output_text.h", "src/output_process.c",
                               "src/output_process.h" }, { "user32" })

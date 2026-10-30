@@ -153,6 +153,7 @@ depend on a UI module.
 | `git_status.c` | `git_status.h` | NUL-delimited Git porcelain v2 status parsing, including branch tracking state and exact UTF-8 paths | none (pure logic) |
 | `file_io.c` | `file_io.h` | Atomic file read/write helpers | `path_utils.h` |
 | `workspace_text.c` | `workspace_text.h` | Workspace text helpers | — |
+| `markdown_links.c` | `markdown_links.h` | Markdown link extraction and heading-anchor checks | none (pure logic) |
 | `plugin_settings.c` | `plugin_settings.h` | Sectioned JSON settings store shared by application preferences and Lua plugins | `file_io.h` |
 | `preview_fallback.c` | `preview_fallback.h` | Self-contained preview page for WebView2 runtimes without virtual-host folder mapping | — |
 | `markdown.c` | `markdown.h` | Markdown rendering via cmark-gfm | cmark-gfm |
