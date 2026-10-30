@@ -5,7 +5,7 @@
 #include "lualib.h"
 
 /* read_file(path): the file's contents, so the tests can assemble the
-   example sources. MarkEdit's Lua has no io library to do it with. */
+   example sources. Tinker Editor's Lua has no io library to do it with. */
 static int read_file(lua_State *L) {
     FILE *file = fopen(luaL_checkstring(L, 1), "rb");
     if (!file) return luaL_error(L, "cannot open %s", lua_tostring(L, 1));

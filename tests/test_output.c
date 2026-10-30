@@ -198,9 +198,9 @@ static int collect(HWND window, int session, char *output, size_t capacity, DWOR
 
 static void test_process(void) {
     HWND window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
-    WCHAR command[] = L"cmd.exe /q /c \"echo out & echo %MARKEDIT_TEST% & set /p line= & "
+    WCHAR command[] = L"cmd.exe /q /c \"echo out & echo %TINKEREDIT_TEST% & set /p line= & "
                       L"call echo got %line% & echo err 1>&2 & exit /b 7\"";
-    OutputProcess *process = output_process_start(command, NULL, L"MARKEDIT_TEST=added\0",
+    OutputProcess *process = output_process_start(command, NULL, L"TINKEREDIT_TEST=added\0",
                                                   window, WM_TEST_OUTPUT, 1);
     expect(process != NULL, "a program starts on pipes");
     if (!process) return;
@@ -223,7 +223,7 @@ static void test_process(void) {
                "stopping ends the program and everything it started");
         output_process_free(process);
     }
-    WCHAR missing[] = L"markedit-no-such-program.exe";
+    WCHAR missing[] = L"tinkeredit-no-such-program.exe";
     expect(output_process_start(missing, NULL, NULL, window, WM_TEST_OUTPUT, 3) == NULL,
            "a program that doesn't exist doesn't start");
     DestroyWindow(window);

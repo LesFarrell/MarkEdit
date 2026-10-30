@@ -1,6 +1,6 @@
 -- Tests for the bundled assemblers in plugins/assemblers.
 
--- MarkEdit gives each plugin a require() that loads from its own folder;
+-- Tinker Editor gives each plugin a require() that loads from its own folder;
 -- this stands in for it.
 local loaded = {}
 function require(name)

@@ -44,7 +44,7 @@ mkdir "%DIST_DIR%" || (echo Failed to create the distribution folder. & exit /b 
 rem The exe and runtime DLLs go straight into dist\ from where they are built
 rem or vendored, so the project root holds no build output.
 for %%F in (
-    %OBJ_DIR%\markedit.exe
+    %OBJ_DIR%\tinkeredit.exe
     third_party\scintilla\bin\Scintilla.dll
     third_party\webview2\x64\WebView2Loader.dll
     preview_shell.html
@@ -98,5 +98,5 @@ copy /y third_party\webview2\VERSION.txt "%DIST_DIR%\third_party\webview2\" >nul
 if exist "%DIST_BACKUP%\" rmdir /s /q "%DIST_BACKUP%"
 if exist "%DIST_BACKUP%\" echo Warning: dist.previous is still locked and will be retried on the next build.
 
-for %%I in ("%DIST_DIR%\markedit.exe") do echo Build succeeded: markedit.exe ^(%%~zI bytes^)
+for %%I in ("%DIST_DIR%\tinkeredit.exe") do echo Build succeeded: tinkeredit.exe ^(%%~zI bytes^)
 echo Distribution staged in: "%DIST_DIR%"

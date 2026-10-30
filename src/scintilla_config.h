@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_SCINTILLA_CONFIG_H
-#define MARKEDIT_SCINTILLA_CONFIG_H
+#ifndef TINKEREDIT_SCINTILLA_CONFIG_H
+#define TINKEREDIT_SCINTILLA_CONFIG_H
 
 #include <windows.h>
 
@@ -49,7 +49,7 @@ void apply_change_markers(HWND hEdit);
 void reset_undo_history(HWND hEdit);
 
 /* The setup steps configure_scintilla() runs; feedback and the entry point
-   stay in markedit.c because they also apply the language and theme. */
+   stay in tinkeredit.c because they also apply the language and theme. */
 void configure_scintilla_editing(HWND hEdit);
 void configure_scintilla_view(HWND hEdit);
 void configure_scintilla_margins(HWND hEdit);

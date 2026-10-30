@@ -8,14 +8,14 @@
 #define IDR_BUILTIN_FORMATTING_TABLES 7
 #define IDR_BUILTIN_FORMATTING_TEXT 8
 
-IDI_APPICON ICON "markedit.ico"
+IDI_APPICON ICON "tinkeredit.ico"
 IDR_DEFAULT_MENUS RCDATA "src/menus.lua"
 IDR_BUILTIN_FORMATTING_BASE RCDATA "src/lua/formatting_base.lua"
 IDR_BUILTIN_FORMATTING_TABLES RCDATA "src/lua/formatting_tables.lua"
 IDR_BUILTIN_FORMATTING_TEXT RCDATA "src/lua/formatting_text.lua"
 IDR_HELP_MARKDOWN RCDATA "src/help/markdown-reference.md"
 IDR_HELP_SHORTCUTS RCDATA "src/help/keyboard-shortcuts.lua"
-1 24 "markedit.manifest"
+1 24 "tinkeredit.manifest"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,0,0
@@ -35,12 +35,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Les Farrell\0"
-            VALUE "FileDescription", "MarkEdit Markdown editor\0"
+            VALUE "FileDescription", "Tinker Editor Markdown editor\0"
             VALUE "FileVersion", "1.0.0\0"
-            VALUE "InternalName", "markedit\0"
+            VALUE "InternalName", "tinkeredit\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Les Farrell\0"
-            VALUE "OriginalFilename", "markedit.exe\0"
-            VALUE "ProductName", "MarkEdit\0"
+            VALUE "OriginalFilename", "tinkeredit.exe\0"
+            VALUE "ProductName", "Tinker Editor\0"
             VALUE "ProductVersion", "1.0.0\0"
         END
     END

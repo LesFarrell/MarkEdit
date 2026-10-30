@@ -1,5 +1,5 @@
 /*
- * markedit - a tiny live-preview Markdown editor for Win32.
+ * tinkeredit - a tiny live-preview Markdown editor for Win32.
  * Left pane: plain-text edit control for Markdown source.
  * Right pane: WebView2-hosted HTML preview (supports Mermaid diagrams,
  * with native browser zoom/pan/scroll), re-rendered on every edit.
@@ -73,7 +73,7 @@
 #include "../third_party/lexilla/include/Lexilla.h"
 #include "../third_party/lexilla/include/SciLexer.h"
 
-#include "markedit.h"
+#include "tinkeredit.h"
 
 typedef struct AppWindows {
     HWND edit, preview, tabs, status, outline, minimap, splitEdit, lastEditView;
@@ -169,7 +169,7 @@ static WCHAR *g_debugCommandPath = NULL;
 static WCHAR *g_debugOutputPath = NULL;
 static WCHAR *g_lastDebugSource = NULL;
 static HANDLE g_debugProcess = NULL;
-static HANDLE g_debugJob = NULL; /* owns the hidden GDB process tree so it cannot outlive MarkEdit */
+static HANDLE g_debugJob = NULL; /* owns the hidden GDB process tree so it cannot outlive Tinker Editor */
 static int g_lastDebugLine = -1;
 static int g_activeDebuggerKind = 0; /* 1 = pdb, 2 = GDB */
 static char *g_lastDebugState = NULL;
@@ -443,7 +443,7 @@ static void save_workspace_settings(void) {
 /* The standard error message box, owned by the main window. Messages about
    one feature (Run, Debug, Plugins) use their own title instead. */
 static void show_error(const WCHAR *message) {
-    MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_OK | MB_ICONERROR);
+    MessageBoxW(g_hMainWnd, message, L"Tinker Editor", MB_OK | MB_ICONERROR);
 }
 
 #include "internal/editor_view.inc"
@@ -1193,7 +1193,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_PLUGIN_TAB_CHECK:
             check_plugin_active_document();
             return 0;
-        case MARKEDIT_WM_EXPLORER_CHANGED:
+        case TINKEREDIT_WM_EXPLORER_CHANGED:
             /* Debounced rather than refreshing immediately: a burst of
                changes (e.g. a git operation) collapses into one refresh
                shortly after the burst ends, same idea as the outline/status
@@ -1259,7 +1259,7 @@ static void register_main_window_class(HINSTANCE instance, HICON largeIcon, HICO
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = WndProc;
     windowClass.hInstance = instance;
-    windowClass.lpszClassName = L"MarkEditWndClass";
+    windowClass.lpszClassName = L"TinkerEditorWndClass";
     windowClass.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
     /* WM_ERASEBKGND paints the themed background; a class brush would flash. */
     windowClass.hbrBackground = NULL;
@@ -1275,8 +1275,8 @@ static HWND create_main_window(HINSTANCE instance, HICON largeIcon, HICON smallI
         ? g_savedWindowRect.right - g_savedWindowRect.left : DEFAULT_WINDOW_WIDTH;
     int height = g_haveSavedWindowRect
         ? g_savedWindowRect.bottom - g_savedWindowRect.top : DEFAULT_WINDOW_HEIGHT;
-    HWND window = CreateWindowExW(WS_EX_ACCEPTFILES, L"MarkEditWndClass",
-        L"Untitled.txt - MarkEdit", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+    HWND window = CreateWindowExW(WS_EX_ACCEPTFILES, L"TinkerEditorWndClass",
+        L"Untitled.txt - Tinker Editor", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, width, height, NULL, NULL, instance, NULL);
     if (largeIcon) SendMessageW(window, WM_SETICON, ICON_BIG, (LPARAM)largeIcon);
     if (smallIcon) SendMessageW(window, WM_SETICON, ICON_SMALL, (LPARAM)smallIcon);
@@ -1359,8 +1359,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     WCHAR *commandLineFile = command_line_file();
     HMODULE scintillaModule = LoadLibraryW(L"Scintilla.dll");
     if (!scintillaModule) {
-        MessageBoxW(NULL, L"Could not load Scintilla.dll (expected next to markedit.exe).",
-                    L"MarkEdit", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, L"Could not load Scintilla.dll (expected next to tinkeredit.exe).",
+                    L"Tinker Editor", MB_OK | MB_ICONERROR);
         free(commandLineFile);
         return 1;
     }

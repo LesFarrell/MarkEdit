@@ -1,6 +1,6 @@
--- Example themes.lua: Solarized colours for MarkEdit's light and dark themes.
+-- Example themes.lua: Solarized colours for Tinker Editor's light and dark themes.
 --
--- To use it, copy this file to %APPDATA%\markedit\themes.lua (or paste the
+-- To use it, copy this file to %APPDATA%\tinkeredit\themes.lua (or paste the
 -- parts you want into the one Plugins > Customize Theme Colours creates),
 -- then choose Plugins > Reload Plugins. Delete that file to go back to the
 -- built-in colours.

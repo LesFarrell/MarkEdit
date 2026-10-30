@@ -1,12 +1,12 @@
-# MarkEdit architecture
+# Tinker Editor architecture
 
-MarkEdit keeps platform integration native and uses Lua as its document-transformation and extension layer.
+Tinker Editor keeps platform integration native and uses Lua as its document-transformation and extension layer.
 
 ## Structure diagram
 
 ```mermaid
 flowchart TB
-    entry["WinMain<br/>startup and message loop"] --> shell["markedit.c<br/>application shell"]
+    entry["WinMain<br/>startup and message loop"] --> shell["tinkeredit.c<br/>application shell"]
     shell --> state["AppWindows + DocumentStore<br/>shared application state"]
     shell --> wndproc["WndProc<br/>message router"]
 
@@ -105,11 +105,11 @@ flowchart TB
 
 The solid arrows show runtime delegation. The dotted state connection highlights
 that the internal components currently share private application state because
-they are included into the `markedit.c` translation unit.
+they are included into the `tinkeredit.c` translation unit.
 
 ## Native shell
 
-`src/markedit.c` owns startup, the main window procedure and cross-subsystem orchestration. Large implementation components are kept in `src/internal/` and included at the point where their private declarations are available. They cover documents, dialogs, the UI shell, preview, debugger, editor input, outline/minimap, workspace operations, settings and command dispatch. In particular:
+`src/tinkeredit.c` owns startup, the main window procedure and cross-subsystem orchestration. Large implementation components are kept in `src/internal/` and included at the point where their private declarations are available. They cover documents, dialogs, the UI shell, preview, debugger, editor input, outline/minimap, workspace operations, settings and command dispatch. In particular:
 
 - `preview.inc`: WebView2 hosting, preview navigation and preview/editor synchronisation.
 - `documents.inc`: document tabs, file operations, encodings, export and session behaviour, plus the background access used to read or change other tabs' documents.
@@ -132,7 +132,7 @@ These components deliberately remain in the main translation unit for now. Their
 
 `spell_check.inc` has not. It shares a live `ISpellChecker` with the editor's right-click context menu and leans on several shell helpers (`get_edit_text`, `save_layout_settings`, `refresh_menu`, `show_choice_dialog`) plus `g_activeLanguage` and `g_largeFile`, so it presently needs more than a small context to stand alone.
 
-`AppWindows` and `DocumentStore` in `markedit.c` group window handles and document ownership respectively. New state should be added to the appropriate structure rather than introduced as another unrelated global. `DocumentStore` is the single owner of the open-document array; the old `g_documents`/`g_documentCount`/`g_activeDocument` macros that shadowed its fields are gone, so edits go through `g_documentStore.<field>` directly.
+`AppWindows` and `DocumentStore` in `tinkeredit.c` group window handles and document ownership respectively. New state should be added to the appropriate structure rather than introduced as another unrelated global. `DocumentStore` is the single owner of the open-document array; the old `g_documents`/`g_documentCount`/`g_activeDocument` macros that shadowed its fields are gone, so edits go through `g_documentStore.<field>` directly.
 
 ## Module map and layering
 
@@ -148,7 +148,7 @@ depend on a UI module.
 | `settings_io.h` | — | Load/save entry points over the values above | `settings_values.h` |
 | `layout_metrics.{h,c}` | `layout_metrics.h` | Explorer geometry values and `explorer_content_x()` | `settings_values.h` |
 | `settings.h` | — | Umbrella over the three headers above, for the app shell only | `settings_values.h`, `settings_io.h`, `find_state.h` |
-| `path_utils.c` | `path_utils.h` | Path manipulation, `LONG_PATH_CAPACITY`, and the per-user `%LOCALAPPDATA%\MarkEdit` folders | shlwapi |
+| `path_utils.c` | `path_utils.h` | Path manipulation, `LONG_PATH_CAPACITY`, and the per-user `%LOCALAPPDATA%\Tinker Editor` folders | shlwapi |
 | `text_codec.c` | `text_codec.h` | UTF-8/16 and BOM handling | — |
 | `git_status.c` | `git_status.h` | NUL-delimited Git porcelain v2 status parsing, including branch tracking state and exact UTF-8 paths | none (pure logic) |
 | `file_io.c` | `file_io.h` | Atomic file read/write helpers | `path_utils.h` |
@@ -180,7 +180,7 @@ depend on a UI module.
 | `terminal_grid.c` | `terminal_grid.h` | VT100/ECMA-48 screen buffer: cursor-addressed cells, SGR colours, scroll regions, the alternate screen, and bounded ring-buffer scrollback | none (pure logic) |
 | `terminal_input.c` | `terminal_input.h` | Pure translation of Win32 virtual keys and modifier flags into xterm-compatible VT input sequences | windows.h for virtual-key constants |
 | `terminal_view.c` | `terminal_view.h` | The Terminal tab's rendering and input control, owning one `TerminalProcess` and one `TerminalGrid`; repeated keys are batched and focused keyboard messages are handled before queued output and application accelerators | `terminal_process.h`, `terminal_grid.h`, `terminal_input.h` |
-| `markedit.c` + `src/internal/*.inc` | `markedit.h` | Application shell and subsystems | everything above |
+| `tinkeredit.c` + `src/internal/*.inc` | `tinkeredit.h` | Application shell and subsystems | everything above |
 
 Two dependency rules fall out of the table:
 
@@ -188,7 +188,7 @@ Two dependency rules fall out of the table:
   for the explorer's geometry values, not `file_explorer.h`; loading or saving
   preferences never needs the tree control.
 - **Headers are included at the narrowest scope that works.** A module that only
-  reads persisted values includes `settings_values.h`; only `markedit.c` pulls in
+  reads persisted values includes `settings_values.h`; only `tinkeredit.c` pulls in
   the umbrella `settings.h`.
 
 ## Responsiveness and background work
@@ -226,11 +226,11 @@ collects line pieces before joining them, occurrence counting advances one line
 cursor, and the anagram index counts letters instead of sorting every word.
 
 Compiled sources are listed in the repo-root `*.rsp` response files.
-The default MSVC scripts read `markedit-sources.rsp`, `cmark-gfm-sources.rsp`,
+The default MSVC scripts read `tinkeredit-sources.rsp`, `cmark-gfm-sources.rsp`,
 `lua-sources.rsp` and `lexilla-sources.rsp` and compile each dependency with
 its own include and warning policy. `plugin-sources.rsp` lists the plugin-host
 subset for `test.bat` and the Premake test projects; those files are also in
-`markedit-sources.rsp`. MSVC whole-program optimization lets the final link
+`tinkeredit-sources.rsp`. MSVC whole-program optimization lets the final link
 optimize across the separately compiled modules and vendored static objects.
 `release-flags.rsp` contains the corresponding GCC/Zig flags for the optional
 Premake builds.
@@ -238,7 +238,7 @@ Premake builds.
 `.c` file is a one-line change to its `.rsp` rather than an edit in two build
 systems.
 
-`tests/test_ui_smoke.ps1` runs after the packaged build. It launches MarkEdit
+`tests/test_ui_smoke.ps1` runs after the packaged build. It launches Tinker Editor
 with isolated AppData folders and drives stable Win32 command/control IDs to
 verify output-panel tab switching, close/reopen, Git reopening and resize
 layout. `.github/workflows/windows.yml` runs the warning-free unit suite, the
@@ -252,7 +252,7 @@ Native dispatch remains grouped by responsibility in `handle_file_command`, `han
 
 ## Lua
 
-The plugin host is split across four files. `plugin_lua_runtime.c` owns the sandboxed Lua state, memory/time limits and protected calls; `plugin_registry.c` owns the API plugins see (`ui`, `menu`, `contextmenu`, `events`, `commands`, `config`, `app`, `documents`, `spell`, `output`, `problems`), the command and event registries and running a registered command; `plugin_discovery.c` owns extension discovery and the folder-local module loader; and `plugin_host.c` keeps the entry points, the menu definition and help page rendering. Bundled extensions load first and personal extensions from `%APPDATA%\markedit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
+The plugin host is split across four files. `plugin_lua_runtime.c` owns the sandboxed Lua state, memory/time limits and protected calls; `plugin_registry.c` owns the API plugins see (`ui`, `menu`, `contextmenu`, `events`, `commands`, `config`, `app`, `documents`, `spell`, `output`, `problems`), the command and event registries and running a registered command; `plugin_discovery.c` owns extension discovery and the folder-local module loader; and `plugin_host.c` keeps the entry points, the menu definition and help page rendering. Bundled extensions load first and personal extensions from `%APPDATA%\tinkeredit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
 
 The built-in formatter is stored as three focused files:
 

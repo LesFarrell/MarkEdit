@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_FIND_STATE_H
-#define MARKEDIT_FIND_STATE_H
+#ifndef TINKEREDIT_FIND_STATE_H
+#define TINKEREDIT_FIND_STATE_H
 
 #include <windows.h>
 

@@ -88,7 +88,7 @@ static int restore_recovery_snapshot(void) {
     free(root);
     if (!orphanCount) return 0;
     int recover = MessageBoxW(g_hMainWnd,
-        L"MarkEdit found autosaved documents from an interrupted session. Recover them?",
+        L"Tinker Editor found autosaved documents from an interrupted session. Recover them?",
         L"Recover Documents", MB_YESNO | MB_ICONQUESTION) == IDYES;
 
     int restored = 0, complete[RECOVERY_MAX_SESSIONS];

@@ -3,7 +3,7 @@
 
 #include "settings_values.h"
 
-/* Reading and writing %APPDATA%\markedit\settings.json. A module that only
+/* Reading and writing %APPDATA%\tinkeredit\settings.json. A module that only
    needs the persisted values includes settings_values.h; this header is for
    callers that load or store them. */
 

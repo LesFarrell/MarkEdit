@@ -109,7 +109,7 @@ WCHAR *extended_path(const WCHAR *path) {
 }
 
 /* Shared by the workspace-scoped file enumeration (Quick Open/Find-in-Folder,
-   in markedit.c) and the file explorer's live watcher (file_explorer.c), so
+   in tinkeredit.c) and the file explorer's live watcher (file_explorer.c), so
    both agree on which directories are noisy/uninteresting to recurse into. */
 static const WCHAR *const SKIPPED_WORKSPACE_DIRECTORIES[] = {
     L".git", L".svn", L".hg", L"node_modules", L"build", L"dist", L"Output",
@@ -149,8 +149,8 @@ int path_has_skipped_component(const WCHAR *path) {
     return 0;
 }
 
-/* %LOCALAPPDATA%\MarkEdit\<name>, created if needed: per-user, machine-local
-   state that has to be writable wherever markedit.exe itself lives -
+/* %LOCALAPPDATA%\TinkerEditor\<name>, created if needed: per-user, machine-local
+   state that has to be writable wherever tinkeredit.exe itself lives -
    including a Program Files install a standard user can't write to. */
 WCHAR *get_local_app_directory(const WCHAR *name) {
     DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", NULL, 0);
@@ -160,7 +160,7 @@ WCHAR *get_local_app_directory(const WCHAR *name) {
         free(local);
         return NULL;
     }
-    WCHAR *app = path_join(local, L"MarkEdit");
+    WCHAR *app = path_join(local, L"TinkerEditor");
     free(local);
     if (!app) return NULL;
     CreateDirectoryW(app, NULL);

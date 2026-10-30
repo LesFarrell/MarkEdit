@@ -138,11 +138,11 @@ char *theme_template_lua(void) {
     char *text = NULL;
     size_t used = 0, capacity = 0;
     if (!append(&text, &used, &capacity,
-            "-- MarkEdit theme colours. Each value is \"#RRGGBB\". Delete any line to\n"
+            "-- Tinker Editor theme colours. Each value is \"#RRGGBB\". Delete any line to\n"
             "-- keep the built-in colour; edit the rest, then use Plugins > Reload.\n"
             "-- This covers the editor and window; the preview is styled by CSS\n"
             "-- (View > Custom CSS). For a complete example that computes its colours,\n"
-            "-- see plugins\\examples\\themes.lua in the MarkEdit folder.\n"
+            "-- see plugins\\examples\\themes.lua in the Tinker Editor folder.\n"
             "return {\n")) return NULL;
     static const char *const themes[] = { "light", "dark" };
     for (int theme = 0; theme < 2; theme++) {

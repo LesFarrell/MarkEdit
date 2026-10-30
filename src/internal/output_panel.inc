@@ -26,7 +26,7 @@
 enum { OUTPUT_STYLE_NOTE = OUTPUT_STYLE_COUNT, OUTPUT_STYLE_FAILURE, OUTPUT_STYLE_INPUT };
 
 /* Python writes to a pipe in large blocks and in the ANSI code page unless
-   asked otherwise; everything else inherits MarkEdit's environment. */
+   asked otherwise; everything else inherits Tinker Editor's environment. */
 static const WCHAR OUTPUT_ENVIRONMENT[] = L"PYTHONUNBUFFERED=1\0PYTHONIOENCODING=utf-8\0";
 
 typedef struct OutputPane {
@@ -1742,7 +1742,7 @@ static void create_output_panel(HWND hwnd) {
     update_output_controls();
 }
 
-/* Ends every program the panel started, when MarkEdit closes. */
+/* Ends every program the panel started, when Tinker Editor closes. */
 static void shutdown_output_panel(void) {
     end_output_program(&g_outputPanes[OUTPUT_TAB_RUN]);
     free(g_outputPanes[OUTPUT_TAB_RUN].directory);

@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_FILE_EXPLORER_H
-#define MARKEDIT_FILE_EXPLORER_H
+#ifndef TINKEREDIT_FILE_EXPLORER_H
+#define TINKEREDIT_FILE_EXPLORER_H
 
 #include <windows.h>
 
@@ -7,25 +7,25 @@
 
 /* Posted (with no payload - the receiver drains file_explorer.c's own
    pending-directories queue) by the watcher thread whenever it observes a
-   change under the current root. markedit.c's WndProc handles this by
+   change under the current root. tinkeredit.c's WndProc handles this by
    (re)starting a short debounce timer rather than refreshing immediately,
    so a burst of changes (e.g. a git operation) collapses into one refresh. */
-#define MARKEDIT_WM_EXPLORER_CHANGED (WM_APP + 3)
+#define TINKEREDIT_WM_EXPLORER_CHANGED (WM_APP + 3)
 
 /* Called with the absolute path of a file the user double-clicked/pressed
-   Enter on/chose "Open" for in the tree. markedit.c wires this to
-   open_file_in_tab(), which is static to markedit.c's own translation unit
+   Enter on/chose "Open" for in the tree. tinkeredit.c wires this to
+   open_file_in_tab(), which is static to tinkeredit.c's own translation unit
    and so cannot be called by name from here. */
 typedef void (*ExplorerOpenFileFn)(const WCHAR *path);
 
-/* Matches show_text_input()'s exact signature (also static to markedit.c) so
-   markedit.c can hand explorer_init() that function's address directly, with
+/* Matches show_text_input()'s exact signature (also static to tinkeredit.c) so
+   tinkeredit.c can hand explorer_init() that function's address directly, with
    no wrapper glue, for the New File/New Folder/Rename name prompts. */
 typedef int (*ExplorerPromptTextFn)(const WCHAR *title, const WCHAR *prompt,
                                     const WCHAR *initial, WCHAR *output, int outputCapacity);
 
 /* Shows the given path selected in Windows Explorer - reused from
-   markedit.c's own "Show in Explorer" command (reveal_path_in_explorer())
+   tinkeredit.c's own "Show in Explorer" command (reveal_path_in_explorer())
    rather than file_explorer.c reimplementing the same ShellExecuteW call. */
 typedef void (*ExplorerRevealFn)(const WCHAR *path);
 
@@ -39,7 +39,7 @@ typedef void (*ExplorerRenameFn)(const WCHAR *oldPath, const WCHAR *newPath, int
 typedef void (*ExplorerChangeRootFn)(const WCHAR *path);
 
 /* Creates the explorer's TreeView child control (initially hidden) and
-   records the callbacks used to reach markedit.c's static functions. Call
+   records the callbacks used to reach tinkeredit.c's static functions. Call
    once, from initialize_main_window(). */
 void explorer_init(HWND hParent, ExplorerOpenFileFn openFile, ExplorerPromptTextFn promptText,
                    ExplorerRevealFn revealPath, ExplorerRenameFn renamedPath,
@@ -62,7 +62,7 @@ void explorer_stop_watch(void);
    data. Call once from destroy_main_window(). */
 void explorer_shutdown(void);
 
-/* Routes a WM_NOTIFY from the tree control. markedit.c calls this from its
+/* Routes a WM_NOTIFY from the tree control. tinkeredit.c calls this from its
    own WM_NOTIFY handler whenever notification->hwndFrom == g_hExplorerTree. */
 void explorer_handle_notify(NMHDR *notification);
 
@@ -73,7 +73,7 @@ int explorer_pretranslate_message(const MSG *message);
 
 /* Drains the pending-changed-directories queue built up by the watcher
    thread and refreshes just the affected, currently-loaded tree nodes.
-   markedit.c calls this from its MARKEDIT_WM_EXPLORER_CHANGED debounce
+   tinkeredit.c calls this from its TINKEREDIT_WM_EXPLORER_CHANGED debounce
    timer (IDT_EXPLORER_REFRESH). */
 void explorer_handle_change_message(void);
 

@@ -137,7 +137,7 @@ void discard_context_menu_items_from(int first) {
 }
 
 static const char *current_title(void) {
-    return s_runningLabel ? s_runningLabel : "MarkEdit Plugin";
+    return s_runningLabel ? s_runningLabel : "Tinker Editor Plugin";
 }
 
 static int ui_message(lua_State *L) {
@@ -479,7 +479,7 @@ static int contextmenu_remove(lua_State *L) {
 static int commands_register(lua_State *L) {
     const char *name = checked_cstring(L, 1, "command name");
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    const char *title = optional_cstring(L, 3, "MarkEdit", "command title");
+    const char *title = optional_cstring(L, 3, "Tinker Editor", "command title");
     PluginCommand *command = append_command(L, title, 2, "plugin");
     command->placed = 1;
     keep_command_string(L, &command->overrides, name);
@@ -820,7 +820,7 @@ static int app_date_time(lua_State *L) {
 
 static int app_version(lua_State *L) { lua_pushliteral(L, "1.0.0"); return 1; }
 static int app_api_version(lua_State *L) {
-    lua_pushinteger(L, MARKEDIT_PLUGIN_API_VERSION);
+    lua_pushinteger(L, TINKEREDIT_PLUGIN_API_VERSION);
     return 1;
 }
 static int app_platform(lua_State *L) { lua_pushliteral(L, "windows"); return 1; }

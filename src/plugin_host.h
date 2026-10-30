@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_PLUGIN_HOST_H
-#define MARKEDIT_PLUGIN_HOST_H
+#ifndef TINKEREDIT_PLUGIN_HOST_H
+#define TINKEREDIT_PLUGIN_HOST_H
 
 #include <stddef.h>
 #include <windows.h>
@@ -21,7 +21,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 10
+#define TINKEREDIT_PLUGIN_API_VERSION 10
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -178,7 +178,7 @@ char *plugin_host_load_theme(const char *name, const char *code, size_t length,
 char *plugin_host_load_directory(const WCHAR *directory, const char *scope);
 /* Runs one plugin script's top-level code, starting the Lua state if needed. */
 char *plugin_host_load_chunk(const char *name, const char *code, size_t length);
-/* The same, for a script built into MarkEdit: its commands have no time limit. */
+/* The same, for a script built into Tinker Editor: its commands have no time limit. */
 char *plugin_host_load_builtin(const char *name, const char *code, size_t length);
 /* Discards every command, handler and the menu definition. Does nothing
    while plugin code is running. */

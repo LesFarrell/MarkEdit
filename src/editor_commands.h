@@ -5,7 +5,7 @@
 #include "../third_party/scintilla/include/Scintilla.h"
 
 /* The app's Scintilla margin indices, in left-to-right order. Shared by the
-   main editor's setup in markedit.c and the minimap's in outline_minimap.c. */
+   main editor's setup in tinkeredit.c and the minimap's in outline_minimap.c. */
 #define MARGIN_LINENUMBERS 0
 #define MARGIN_CHANGES 1 /* change-history bars, just after the line numbers */
 #define MARGIN_BOOKMARKS 2

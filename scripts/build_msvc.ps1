@@ -55,7 +55,7 @@ $commonIncludes = @(
     "/DCMARK_GFM_EXTENSIONS_STATIC_DEFINE"
 )
 
-$markeditObjects = Compile-Sources "C" (Get-RspSources "markedit-sources.rsp") (Join-Path $objectRoot "markedit") ($commonIncludes + @("/wd4152", "/wd4702", "/Ob3"))
+$tinkereditObjects = Compile-Sources "C" (Get-RspSources "tinkeredit-sources.rsp") (Join-Path $objectRoot "tinkeredit") ($commonIncludes + @("/wd4152", "/wd4702", "/Ob3"))
 $luaObjects = Compile-Sources "C" (Get-RspSources "lua-sources.rsp") (Join-Path $objectRoot "lua") @(
     "/I$(Join-Path $repo 'third_party\lua\src')", "/wd4244", "/wd4310", "/wd4324", "/wd4701", "/wd4702"
 )
@@ -70,11 +70,11 @@ $lexillaObjects = Compile-Sources "C++" (Get-RspSources "lexilla-sources.rsp") (
     "/I$(Join-Path $repo 'third_party\scintilla\include')"
 )
 
-$resource = Join-Path $output "markedit.res"
-Invoke-Tool "rc.exe" @("/nologo", "/fo$resource", (Join-Path $repo "markedit.rc")) "Resource compilation failed"
+$resource = Join-Path $output "tinkeredit.res"
+Invoke-Tool "rc.exe" @("/nologo", "/fo$resource", (Join-Path $repo "tinkeredit.rc")) "Resource compilation failed"
 
-$executable = Join-Path $output "markedit.exe"
-$importLibrary = Join-Path $output "markedit.lib"
+$executable = Join-Path $output "tinkeredit.exe"
+$importLibrary = Join-Path $output "tinkeredit.lib"
 $libraries = @(
     (Join-Path $repo "third_party\webview2\x64\WebView2Loader.dll.lib"),
     "gdi32.lib", "msimg32.lib", "user32.lib", "comdlg32.lib", "comctl32.lib",
@@ -84,8 +84,8 @@ $libraries = @(
 $linkArguments = @(
     "/nologo", "/LTCG", "/OPT:REF", "/OPT:ICF", "/SUBSYSTEM:WINDOWS", "/MANIFEST:NO",
     "/OUT:$executable", "/IMPLIB:$importLibrary"
-) + $markeditObjects + $luaObjects + $cmarkObjects + $lexillaObjects + @($resource) + $libraries
-Invoke-Tool "link.exe" $linkArguments "MSVC failed linking markedit.exe"
+) + $tinkereditObjects + $luaObjects + $cmarkObjects + $lexillaObjects + @($resource) + $libraries
+Invoke-Tool "link.exe" $linkArguments "MSVC failed linking tinkeredit.exe"
 
 $size = (Get-Item -LiteralPath $executable).Length
 Write-Host "MSVC build succeeded: $executable ($size bytes)"

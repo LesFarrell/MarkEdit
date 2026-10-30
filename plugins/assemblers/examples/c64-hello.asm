@@ -1,6 +1,6 @@
 ; Commodore 64 "HELLO, WORLD!" for the bundled 6502 assembler.
 ;
-; Open this file in MarkEdit, then choose
+; Open this file in Tinker Editor, then choose
 ;   Tools -> 6502 Assembler -> Compile C64 PRG
 ; and save the .prg file. In a C64 (or emulator):
 ;   LOAD "HELLO",8,1

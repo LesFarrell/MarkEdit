@@ -3,9 +3,9 @@
    offsets, so each reported range is converted before applying an indicator.
    Lexer styles keep code, links, rules, and Markdown punctuation unmarked. */
 
-static const GUID MARKEDIT_CLSID_SPELL_CHECKER_FACTORY =
+static const GUID TINKEREDIT_CLSID_SPELL_CHECKER_FACTORY =
     {0x7ab36653, 0x1796, 0x484b, {0xbd, 0xfa, 0xe7, 0x4f, 0x1d, 0xb7, 0xc1, 0xdc}};
-static const GUID MARKEDIT_IID_SPELL_CHECKER_FACTORY =
+static const GUID TINKEREDIT_IID_SPELL_CHECKER_FACTORY =
     {0x8e018a9d, 0x2415, 0x4677, {0xbf, 0x08, 0x79, 0x4e, 0xa6, 0x1f, 0x94, 0xbb}};
 
 static void copy_locale_name(WCHAR destination[LOCALE_NAME_MAX_LENGTH], const WCHAR *source) {
@@ -15,8 +15,8 @@ static void copy_locale_name(WCHAR destination[LOCALE_NAME_MAX_LENGTH], const WC
 
 static int create_spell_checker_for_language(const WCHAR *requested, int reportErrors) {
     ISpellCheckerFactory *factory = NULL;
-    HRESULT hr = CoCreateInstance(&MARKEDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
-        CLSCTX_INPROC_SERVER, &MARKEDIT_IID_SPELL_CHECKER_FACTORY, (void **)&factory);
+    HRESULT hr = CoCreateInstance(&TINKEREDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
+        CLSCTX_INPROC_SERVER, &TINKEREDIT_IID_SPELL_CHECKER_FACTORY, (void **)&factory);
     if (FAILED(hr) || !factory) return 0;
 
     WCHAR language[LOCALE_NAME_MAX_LENGTH] = L"";
@@ -61,8 +61,8 @@ static void init_spell_checker(void) {
 
 static void choose_spell_language(void) {
     ISpellCheckerFactory *factory = NULL;
-    if (FAILED(CoCreateInstance(&MARKEDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
-                                CLSCTX_INPROC_SERVER, &MARKEDIT_IID_SPELL_CHECKER_FACTORY,
+    if (FAILED(CoCreateInstance(&TINKEREDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
+                                CLSCTX_INPROC_SERVER, &TINKEREDIT_IID_SPELL_CHECKER_FACTORY,
                                 (void **)&factory)) || !factory) return;
     IEnumString *languages = NULL;
     WCHAR **labels = NULL;
@@ -308,8 +308,8 @@ static unsigned __stdcall plugin_spell_worker(void *argument) {
     ISpellCheckerFactory *factory = NULL;
     ISpellChecker *checker = NULL;
     IEnumSpellingError *errors = NULL;
-    if (SUCCEEDED(CoCreateInstance(&MARKEDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
-            CLSCTX_INPROC_SERVER, &MARKEDIT_IID_SPELL_CHECKER_FACTORY, (void **)&factory)) &&
+    if (SUCCEEDED(CoCreateInstance(&TINKEREDIT_CLSID_SPELL_CHECKER_FACTORY, NULL,
+            CLSCTX_INPROC_SERVER, &TINKEREDIT_IID_SPELL_CHECKER_FACTORY, (void **)&factory)) &&
         factory && SUCCEEDED(ISpellCheckerFactory_CreateSpellChecker(
             factory, slice->language, &checker)) &&
         checker && SUCCEEDED(ISpellChecker_Check(checker, slice->text, &errors)) && errors) {

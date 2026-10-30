@@ -1,4 +1,4 @@
--- MarkEdit joins formatting_base.lua, formatting_tables.lua and this file
+-- Tinker Editor joins formatting_base.lua, formatting_tables.lua and this file
 -- into one chunk before loading it, so the helpers used here are defined in
 -- the earlier files. A language server checking this file on its own can't
 -- see them.

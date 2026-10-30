@@ -16,7 +16,7 @@ function New-IconBitmap([int]$size) {
         $rect = New-Object System.Drawing.Rectangle $margin, $margin, ($size - 2*$margin), ($size - 2*$margin)
         $radius = [Math]::Max(2, [int]($size * 0.16))
 
-        # rounded-rect document background
+        # rounded-rect background
         $path = New-Object System.Drawing.Drawing2D.GraphicsPath
         $d = $radius * 2
         $path.AddArc($rect.X, $rect.Y, $d, $d, 180, 90)
@@ -25,34 +25,38 @@ function New-IconBitmap([int]$size) {
         $path.AddArc($rect.X, $rect.Bottom - $d, $d, $d, 90, 90)
         $path.CloseFigure()
 
-        $bg1 = [System.Drawing.Color]::FromArgb(255, 41, 98, 189)
-        $bg2 = [System.Drawing.Color]::FromArgb(255, 27, 66, 138)
+        $bg1 = [System.Drawing.Color]::FromArgb(255, 37, 99, 235)
+        $bg2 = [System.Drawing.Color]::FromArgb(255, 29, 60, 150)
         $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $bg1, $bg2, 90.0)
         $g.FillPath($brush, $path)
 
-        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 20, 48, 100)), ([Math]::Max(1, $size * 0.02))
+        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 15, 35, 90)), ([Math]::Max(1, $size * 0.02))
         $g.DrawPath($pen, $path)
 
-        # "M" glyph plus a small down-arrow to evoke markdown / live preview
-        $fontSize = $size * 0.46
+        # bold "T" glyph, nudged up-left a touch to leave room for the bolt accent
+        $fontSize = $size * 0.50
         $font = New-Object System.Drawing.Font "Segoe UI", $fontSize, ([System.Drawing.FontStyle]::Bold)
         $textBrush = [System.Drawing.Brushes]::White
-        $mFormat = New-Object System.Drawing.StringFormat
-        $mFormat.Alignment = [System.Drawing.StringAlignment]::Center
-        $mFormat.LineAlignment = [System.Drawing.StringAlignment]::Center
-        $mRect = New-Object System.Drawing.RectangleF 0, ($size * -0.06), $size, $size
-        $g.DrawString("M", $font, $textBrush, $mRect, $mFormat)
+        $tFormat = New-Object System.Drawing.StringFormat
+        $tFormat.Alignment = [System.Drawing.StringAlignment]::Center
+        $tFormat.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $tRect = New-Object System.Drawing.RectangleF (($size * -0.08)), ($size * -0.08), $size, $size
+        $g.DrawString("T", $font, $textBrush, $tRect, $tFormat)
 
-        # small arrow/caret at bottom right suggesting "preview / down"
-        $arrowSize = $size * 0.20
-        $ax = $size * 0.66
-        $ay = $size * 0.64
-        $arrowPts = @(
-            (New-Object System.Drawing.PointF ($ax), ($ay)),
-            (New-Object System.Drawing.PointF ($ax + $arrowSize), ($ay)),
-            (New-Object System.Drawing.PointF ($ax + $arrowSize/2), ($ay + $arrowSize*0.85))
-        )
-        $g.FillPolygon([System.Drawing.Brushes]::White, $arrowPts)
+        # small hex-nut accent, bottom-right, evoking "tinker" / tools
+        $cx = $size * 0.745
+        $cy = $size * 0.745
+        $hr = $size * 0.155
+        $hexPts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
+        for ($i = 0; $i -lt 6; $i++) {
+            $angle = (60 * $i - 90) * [Math]::PI / 180.0
+            $hexPts.Add((New-Object System.Drawing.PointF (($cx + $hr * [Math]::Cos($angle))), ($cy + $hr * [Math]::Sin($angle))))
+        }
+        $g.FillPolygon([System.Drawing.Brushes]::White, $hexPts.ToArray())
+        $holeBrush = New-Object System.Drawing.SolidBrush $bg2
+        $holeR = $hr * 0.42
+        $g.FillEllipse($holeBrush, ($cx - $holeR), ($cy - $holeR), ($holeR * 2), ($holeR * 2))
+        $holeBrush.Dispose()
     }
     finally {
         $g.Dispose()
@@ -68,7 +72,7 @@ $sizes = @(16, 24, 32, 48, 64, 128, 256)
 $bitmaps = @()
 foreach ($s in $sizes) { $bitmaps += New-IconBitmap $s }
 
-$icoPath = Join-Path $PSScriptRoot "markedit.ico"
+$icoPath = Join-Path $PSScriptRoot "tinkeredit.ico"
 $fs = New-Object System.IO.FileStream $icoPath, ([System.IO.FileMode]::Create)
 try {
     $bw = New-Object System.IO.BinaryWriter $fs

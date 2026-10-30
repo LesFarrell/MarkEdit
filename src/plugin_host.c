@@ -28,7 +28,7 @@ int s_busy = 0;
 const char *s_runningLabel = NULL;
 const char *s_runningOwner = NULL;
 /* The script whose top-level code is running, while it loads, and whether
-   it is one built into MarkEdit. */
+   it is one built into Tinker Editor. */
 const char *s_loadingName = NULL;
 int s_loadingBuiltIn = 0;
 const WCHAR *s_loadingModuleRoot = NULL;
@@ -198,7 +198,7 @@ static void open_safe_libraries(lua_State *L, const luaL_Reg *libraries, size_t 
     static const char textOnlyLoad[] =
         "local load = load\n"
         "_G.load = function(chunk, name, _, ...) return load(chunk, name, 't', ...) end\n";
-    if (luaL_loadbufferx(L, textOnlyLoad, sizeof(textOnlyLoad) - 1, "=markedit", "t") != LUA_OK)
+    if (luaL_loadbufferx(L, textOnlyLoad, sizeof(textOnlyLoad) - 1, "=tinkeredit", "t") != LUA_OK)
         lua_error(L);
     lua_call(L, 0, 0);
     plugin_lua_guard_catching(L);

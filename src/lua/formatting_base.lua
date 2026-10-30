@@ -1,6 +1,6 @@
--- MarkEdit's built-in Markdown formatting commands, written in Lua.
+-- Tinker Editor's built-in Markdown formatting commands, written in Lua.
 --
--- MarkEdit joins this file, formatting_tables.lua and formatting_text.lua
+-- Tinker Editor joins this file, formatting_tables.lua and formatting_text.lua
 -- into one chunk before loading it, so many locals here are only used by the
 -- later files. A language server checking this file on its own reports them
 -- as unused.
@@ -14,12 +14,12 @@
 --   Edit menu           Toggle Comment, Trim Trailing Whitespace
 --   Registration        the command names, at the bottom of the file
 --
--- How it's loaded: markedit.rc builds this file into markedit.exe, and
--- MarkEdit runs it after the menu definition and before any plugin, so a
+-- How it's loaded: tinkeredit.rc builds this file into tinkeredit.exe, and
+-- Tinker Editor runs it after the menu definition and before any plugin, so a
 -- plugin can replace any of these commands by registering the same name:
 --   commands.register("markdown.bold", function() ... end)
 -- It uses only the plugin API (editor.*, ui.*, commands.*), documented in
--- plugins/README.md. docs/lua.md explains how all of MarkEdit's Lua fits
+-- plugins/README.md. docs/lua.md explains how all of Tinker Editor's Lua fits
 -- together. Changes here need a rebuild; tests/test_formatting.c tests it.
 --
 -- Conventions:

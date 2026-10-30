@@ -1,7 +1,7 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 
-/* Umbrella header kept for the application shell (markedit.c), which uses the
+/* Umbrella header kept for the application shell (tinkeredit.c), which uses the
    persisted values, the load/save surface and the Find dialog state together.
    Smaller modules should include the narrower header they actually need:
    settings_values.h (persisted values + metrics), settings_io.h (load/save) or

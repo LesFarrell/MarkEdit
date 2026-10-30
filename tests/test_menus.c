@@ -208,7 +208,7 @@ static void test_shortcuts_page(void) {
     char *page = menus ? render_shortcuts(menus) : NULL;
     free(menus);
     if (!page) return;
-    expect(strncmp(page, "# MarkEdit Keyboard Shortcuts\n", 30) == 0, "the page has its title");
+    expect(strncmp(page, "# Tinker Editor Keyboard Shortcuts\n", 30) == 0, "the page has its title");
     for (int command_index = 0; menu_command_at(command_index); command_index++) {
         const char *shortcut = menu_command_at(command_index)->shortcut;
         if (!shortcut) continue;

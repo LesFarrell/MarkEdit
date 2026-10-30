@@ -17,7 +17,7 @@
 
 /* Pixel width of the editor/preview splitter; save_layout_settings() converts
    the live splitter position to/from a ratio using this. Also used by the
-   splitter's own layout/hit-testing code in markedit.c. */
+   splitter's own layout/hit-testing code in tinkeredit.c. */
 #define SPLITTER_WIDTH 4
 
 /* User-configurable Run/Debug C/C++ compiler backend; see load_compiler_settings()
@@ -28,8 +28,8 @@ typedef enum {
     COMPILER_BACKEND_ZIG, COMPILER_BACKEND_MSVC
 } CompilerBackendPreference;
 
-/* Shared application state persisted to %APPDATA%\markedit\settings.json.
-   Defined (without static) in markedit.c; read and written here. Transient
+/* Shared application state persisted to %APPDATA%\tinkeredit\settings.json.
+   Defined (without static) in tinkeredit.c; read and written here. Transient
    Find/Replace state lives in find_state.h instead. */
 extern HWND g_hMainWnd;
 extern WCHAR g_fontFaceName[MAX_FONT_FACE_NAME];

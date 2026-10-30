@@ -1,6 +1,6 @@
 -- HTML snippets under Snippets > HTML. These are ordinary bundled-plugin
 -- commands: they need only the public editor and ui APIs, and can be disabled
--- independently from MarkEdit's built-in Markdown formatting.
+-- independently from Tinker Editor's built-in Markdown formatting.
 
 local ROOT = "/Snippets/HTML"
 

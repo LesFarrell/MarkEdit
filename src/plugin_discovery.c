@@ -66,12 +66,12 @@ static char s_moduleLoadingSentinel;
 /* Leaves the module cache table on the stack, and a cached value above it
    when one exists. */
 static int push_module_cache(lua_State *L, const char *cacheKey) {
-    lua_getfield(L, LUA_REGISTRYINDEX, "markedit.modules");
+    lua_getfield(L, LUA_REGISTRYINDEX, "tinkeredit.modules");
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
         lua_newtable(L);
         lua_pushvalue(L, -1);
-        lua_setfield(L, LUA_REGISTRYINDEX, "markedit.modules");
+        lua_setfield(L, LUA_REGISTRYINDEX, "tinkeredit.modules");
     }
     lua_getfield(L, -1, cacheKey);
     if (!lua_isnil(L, -1)) return 1;

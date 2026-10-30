@@ -356,15 +356,15 @@ static int handle_git_command(WORD cmd) {
     return 1;
 }
 
-/* Help > Plugin Guide: plugins\README.md beside markedit.exe, in a tab. */
+/* Help > Plugin Guide: plugins\README.md beside tinkeredit.exe, in a tab. */
 static void show_plugin_guide(void) {
     WCHAR *directory = module_directory();
     WCHAR *guide = existing_file_in_directory(directory, L"plugins\\README.md");
     if (guide) {
         open_file_in_tab(guide);
     } else {
-        MessageBoxW(g_hMainWnd, L"The plugin guide (plugins\\README.md beside markedit.exe) is missing.",
-                    L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_hMainWnd, L"The plugin guide (plugins\\README.md beside tinkeredit.exe) is missing.",
+                    L"Tinker Editor", MB_OK | MB_ICONINFORMATION);
     }
     free(guide);
     free(directory);
@@ -393,7 +393,7 @@ static int handle_help_command(WORD cmd) {
 static void show_plugin_error(const char *report) {
     WCHAR *text = to_wide(report);
     MessageBoxW(g_hMainWnd, text ? text : L"A plugin failed; its error message isn't valid UTF-8.",
-        L"MarkEdit Plugins", MB_OK | MB_ICONWARNING);
+        L"Tinker Editor Plugins", MB_OK | MB_ICONWARNING);
     free(text);
 }
 

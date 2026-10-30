@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_GIT_STATUS_H
-#define MARKEDIT_GIT_STATUS_H
+#ifndef TINKEREDIT_GIT_STATUS_H
+#define TINKEREDIT_GIT_STATUS_H
 
 #include <stddef.h>
 

@@ -839,9 +839,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 }
 
 static void show_settings_dialog(void) {
-    if (!register_popup_class(L"MarkEditSettingsDialog", SettingsWndProc)) return;
+    if (!register_popup_class(L"TinkerEditorSettingsDialog", SettingsWndProc)) return;
     SettingsDialogState state = {0};
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditSettingsDialog", L"Settings",
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"TinkerEditorSettingsDialog", L"Settings",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, 660, 420, g_hMainWnd, NULL,
         GetModuleHandleW(NULL), &state);

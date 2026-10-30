@@ -1,6 +1,6 @@
 /* ---- Run / compile / debug: source launching, compiler discovery, GDB and
    Python debugger control, and breakpoint persistence. Included directly from
-   markedit.c so the dependency is visible in one place. */
+   tinkeredit.c so the dependency is visible in one place. */
 
 typedef enum DebugSourceKind {
     DEBUG_SOURCE_NONE = 0, DEBUG_SOURCE_PYTHON, DEBUG_SOURCE_C, DEBUG_SOURCE_CPP, DEBUG_SOURCE_LUA
@@ -288,7 +288,7 @@ static WCHAR *executable_on_search_path(const WCHAR *name) {
     return path;
 }
 
-/* A release keeps GDB beside MarkEdit under third_party/gdb/bin. Developer
+/* A release keeps GDB beside Tinker Editor under third_party/gdb/bin. Developer
    builds use the same layout at the repository root. An explicit setting is
    authoritative; otherwise prefer that reproducibly packaged copy and retain
    PATH as a fallback for older/custom distributions. */
@@ -303,7 +303,7 @@ static WCHAR *find_gdb_executable(void) {
 
 /* Prefer an activated environment, then a project-local .venv/venv found by
    walking up from the script, and finally the standard launcher/interpreters
-   on PATH. This lets common Python projects work without MarkEdit settings. */
+   on PATH. This lets common Python projects work without Tinker Editor settings. */
 static WCHAR *find_python_interpreter(const WCHAR *scriptPath) {
     DWORD environmentLength = GetEnvironmentVariableW(L"VIRTUAL_ENV", NULL, 0);
     if (environmentLength) {
@@ -435,7 +435,7 @@ static WCHAR *debug_temporary_path(const WCHAR *extension) {
     DWORD length = GetTempPathW(MAX_PATH, temporaryDirectory);
     if (!length || length >= MAX_PATH) return NULL;
     WCHAR name[96];
-    swprintf(name, sizeof(name) / sizeof(name[0]), L"markedit-debug-%lu-%llu.%ls",
+    swprintf(name, sizeof(name) / sizeof(name[0]), L"tinkeredit-debug-%lu-%llu.%ls",
              GetCurrentProcessId(), (unsigned long long)GetTickCount64(), extension);
     return path_join(temporaryDirectory, name);
 }
@@ -498,9 +498,9 @@ static void add_debug_variable(const char *name, const char *value) {
    prefix parsed either side of this call still reads correctly. */
 static void update_debug_variables(char *snapshot) {
     if (!g_hDebugVariables || !snapshot) return;
-    char *variables = strstr(snapshot, "__MARKEDIT_VARIABLES__");
+    char *variables = strstr(snapshot, "__TINKEREDIT_VARIABLES__");
     if (!variables) return;
-    variables += strlen("__MARKEDIT_VARIABLES__");
+    variables += strlen("__TINKEREDIT_VARIABLES__");
     while (*variables == '\r' || *variables == '\n') variables++;
     ListView_DeleteAllItems(g_hDebugVariables);
     char *line = variables;
@@ -537,7 +537,7 @@ static void stop_debug_location_tracking(void) {
     if (g_debugJob) {
         /* JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates PowerShell, the
            debugger (pdb or GDB), and the program being debugged together,
-           including when MarkEdit itself is exiting. See launch_debug_console(). */
+           including when Tinker Editor itself is exiting. See launch_debug_console(). */
         CloseHandle(g_debugJob);
         g_debugJob = NULL;
         /* Closing the job requests termination; wait briefly for its file
@@ -584,7 +584,7 @@ static void start_debug_location_tracking(const WCHAR *locationPath,
 
 /* Starts a debugger's PowerShell host inside a JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
    job, so closing the job (stop_debug_location_tracking(), including when
-   MarkEdit exits) ends the shell, the debugger, and the program being
+   Tinker Editor exits) ends the shell, the debugger, and the program being
    debugged together. The process is created suspended and only resumed
    once it's in the job, so nothing it starts can be launched outside it.
    Returns the process handle, with the job in *outJob (NULL if a job
@@ -867,18 +867,18 @@ static int write_pdb_driver(const WCHAR *path, const WCHAR *statePath, const WCH
         L"STATE = %ls\n"
         L"SCRIPT = %ls\n"
         L"SCRIPT = os.path.realpath(SCRIPT)\n"
-        L"class MarkEditPdb(pdb.Pdb):\n"
-        L"    def interaction(self, frame, traceback, _markedit_state=STATE, _markedit_pprint=pprint):\n"
+        L"class TinkerEditorPdb(pdb.Pdb):\n"
+        L"    def interaction(self, frame, traceback, _tinkeredit_state=STATE, _tinkeredit_pprint=pprint):\n"
         L"        try:\n"
-        L"            with open(_markedit_state, 'w', encoding='utf-8') as stream:\n"
+        L"            with open(_tinkeredit_state, 'w', encoding='utf-8') as stream:\n"
         L"                stream.write(frame.f_code.co_filename + '\\n' + str(frame.f_lineno) + "
-        L"'\\n__MARKEDIT_VARIABLES__\\n')\n"
+        L"'\\n__TINKEREDIT_VARIABLES__\\n')\n"
         L"                for key in sorted(frame.f_locals, key=str):\n"
         L"                    if str(key).startswith('__'):\n"
         L"                        continue\n"
         L"                    value = frame.f_locals[key]\n"
         L"                    try:\n"
-        L"                        rendered = _markedit_pprint.pformat(value, width=100, compact=True)\n"
+        L"                        rendered = _tinkeredit_pprint.pformat(value, width=100, compact=True)\n"
         L"                    except Exception as error:\n"
         L"                        rendered = '<unavailable: ' + repr(error) + '>'\n"
         L"                    rendered = rendered.replace('\\\\', '\\\\\\\\').replace('\\t', '\\\\t').replace('\\r', '\\\\r').replace('\\n', '\\\\n')\n"
@@ -888,10 +888,10 @@ static int write_pdb_driver(const WCHAR *path, const WCHAR *statePath, const WCH
         L"        except OSError:\n"
         L"            pass\n"
         L"        print('\\nLocals:')\n"
-        L"        _markedit_pprint.pprint({key: value for key, value in frame.f_locals.items() "
+        L"        _tinkeredit_pprint.pprint({key: value for key, value in frame.f_locals.items() "
         L"if not key.startswith('__')})\n"
         L"        return super().interaction(frame, traceback)\n"
-        L"debugger = MarkEditPdb()\n"
+        L"debugger = TinkerEditorPdb()\n"
         L"debugger.rcLines.extend([\n"
         L"    'alias vars pp locals()',\n"
         L"    'alias globals pp globals()',\n"
@@ -999,7 +999,7 @@ static void launch_python_file(int debug) {
                 L"-NoLogo -NoProfile -NoExit -Command \"Write-Host "
                 L"'pdb: F10/n next, F11/s step, Shift+F11/r return, F6/c continue; vars, globals, b <line>, p <expr>, where, q'; "
                 L"& %ls%ls '-c' 'import runpy,sys; "
-                L"runpy.run_path(sys.argv[1],run_name=\"markedit_pdb_driver\")' %ls; "
+                L"runpy.run_path(sys.argv[1],run_name=\"tinkeredit_pdb_driver\")' %ls; "
                 L"try { [System.IO.File]::Delete(%ls) } catch {}; "
                 L"try { [System.IO.File]::Delete(%ls) } catch {}\"",
                 quotedPython, launcherArgument, quotedPdbDriver,
@@ -1211,7 +1211,7 @@ static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const 
         L"  set logging enabled on\n"
         L"  frame\n"
         L"  set print pretty off\n"
-        L"  echo \\n__MARKEDIT_VARIABLES__\\n\n"
+        L"  echo \\n__TINKEREDIT_VARIABLES__\\n\n"
         L"  echo Arguments:\\n\n"
         L"  info args\n"
         L"  echo Locals:\\n\n"
@@ -1256,7 +1256,7 @@ static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const 
    even inside "...", and so does !VAR! under delayed expansion - so no path
    or flag is spliced into the command line. Each is handed to the child
    through an environment variable (set here just around the launch, which
-   the console inherits) and referenced as !MARKEDIT_...!: delayed
+   the console inherits) and referenced as !TINKEREDIT_...!: delayed
    expansion runs after cmd has parsed quotes, & | < > and %-variables, and
    it doesn't rescan what it substitutes. /v:on is required for that, and
    for !errorlevel! to report the run's exit code rather than the value from
@@ -1264,7 +1264,7 @@ static int write_gdb_commands(const WCHAR *path, const WCHAR *sourcePath, const 
    The one exception is vcvarsall.bat: `call` re-expands its argument, so a
    VS install path containing ! or % still can't be used. */
 static const WCHAR *const MSVC_ENVIRONMENT[] = {
-    L"MARKEDIT_VCVARS", L"MARKEDIT_SOURCE", L"MARKEDIT_OUTPUT", L"MARKEDIT_FLAGS",
+    L"TINKEREDIT_VCVARS", L"TINKEREDIT_SOURCE", L"TINKEREDIT_OUTPUT", L"TINKEREDIT_FLAGS",
 };
 
 static void launch_msvc_file(DebugSourceKind kind, WCHAR *vcvarsallPath) {
@@ -1284,15 +1284,15 @@ static void launch_msvc_file(DebugSourceKind kind, WCHAR *vcvarsallPath) {
     WCHAR command[512];
     if (ready &&
         swprintf(command, sizeof(command) / sizeof(command[0]),
-                 L"/v:on %ls \"call \"!MARKEDIT_VCVARS!\" x64 >nul && "
+                 L"/v:on %ls \"call \"!TINKEREDIT_VCVARS!\" x64 >nul && "
                  L"echo Building %ls... && "
-                 L"cl.exe /nologo %ls%ls /O2 /EHsc /Fe:\"!MARKEDIT_OUTPUT!\" \"!MARKEDIT_SOURCE!\" && "
-                 L"(\"!MARKEDIT_OUTPUT!\" & echo. & echo Process exited with code !errorlevel!) & "
-                 L"del /f /q \"!MARKEDIT_OUTPUT!\" >nul 2>nul\"",
+                 L"cl.exe /nologo %ls%ls /O2 /EHsc /Fe:\"!TINKEREDIT_OUTPUT!\" \"!TINKEREDIT_SOURCE!\" && "
+                 L"(\"!TINKEREDIT_OUTPUT!\" & echo. & echo Process exited with code !errorlevel!) & "
+                 L"del /f /q \"!TINKEREDIT_OUTPUT!\" >nul 2>nul\"",
                  g_runInConsole ? L"/k" : L"/c",
                  kind == DEBUG_SOURCE_C ? L"C" : L"C++",
                  kind == DEBUG_SOURCE_C ? L"/std:c11" : L"/std:c++17",
-                 extraFlags ? L" !MARKEDIT_FLAGS!" : L"") > 0) {
+                 extraFlags ? L" !TINKEREDIT_FLAGS!" : L"") > 0) {
         launch_run_command(L"cmd.exe", command, directory,
                      L"The C/C++ build console could not be started.", L"Run C/C++");
     }
@@ -1393,7 +1393,7 @@ static WCHAR *native_launch_parameters(const NativeLaunch *launch, DebugSourceKi
     const WCHAR *standard = kind == DEBUG_SOURCE_C ? L"-std=gnu11" : L"-std=gnu++17";
     const WCHAR *buildFlags = debug
         ? L"'-g' '-O0' '-fno-omit-frame-pointer'" : L"'-O2'";
-    /* Debugger output and controls live in MarkEdit, so the host PowerShell
+    /* Debugger output and controls live in Tinker Editor, so the host PowerShell
        console stays hidden for GDB sessions and exits with GDB. */
     const WCHAR *shellOptions = debug
         ? L"-NoLogo -NoProfile -WindowStyle Hidden -Command"
@@ -1414,8 +1414,8 @@ static WCHAR *native_launch_parameters(const NativeLaunch *launch, DebugSourceKi
             launch->quotedDebugger, launch->quotedGdbCommands, launch->quotedOutput);
     else
         ok = ok && append_format(parameters, capacity, &used,
-            L"& %ls; $markeditExit = $LASTEXITCODE; Write-Host ''; "
-            L"Write-Host ('Process exited with code ' + $markeditExit); ", launch->quotedOutput);
+            L"& %ls; $tinkereditExit = $LASTEXITCODE; Write-Host ''; "
+            L"Write-Host ('Process exited with code ' + $tinkereditExit); ", launch->quotedOutput);
     /* Deleting the just-executed binary can transiently fail with "Access is
        denied" (Windows Defender's on-execute scan holds a brief lock on a
        freshly run .exe); a bare Delete() call would surface that as a scary

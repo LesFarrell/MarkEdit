@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-MarkEdit is a native Win32 editor written primarily in C. `src/markedit.c` owns startup and the window procedure; UI subsystems live in `src/internal/*.inc`. Reusable modules use paired `.c`/`.h` files under `src/`. Text transformations are in `src/lua/`, while `src/menus.lua` defines the menu bar.
+Tinker Editor is a native Win32 editor written primarily in C. `src/tinkeredit.c` owns startup and the window procedure; UI subsystems live in `src/internal/*.inc`. Reusable modules use paired `.c`/`.h` files under `src/`. Text transformations are in `src/lua/`, while `src/menus.lua` defines the menu bar.
 
-Only `src/markedit.c` includes `src/internal/*.inc`; those components stay in the unity translation unit until they can be expressed through a small context structure. Every `src/*.c` must be listed in a repo-root `*.rsp` response file, and every `src/*.h` must be `#include`d from some `.c` or `.inc` file so a header left behind by a deleted or renamed source doesn't drift unnoticed. `check_structure.ps1` (run by `test.bat`) enforces all three rules.
+Only `src/tinkeredit.c` includes `src/internal/*.inc`; those components stay in the unity translation unit until they can be expressed through a small context structure. Every `src/*.c` must be listed in a repo-root `*.rsp` response file, and every `src/*.h` must be `#include`d from some `.c` or `.inc` file so a header left behind by a deleted or renamed source doesn't drift unnoticed. `check_structure.ps1` (run by `test.bat`) enforces all three rules.
 
 Tests live in `tests/`; `test_preview.js` covers the preview bridge. Bundled extensions and Lua types live in `plugins/`. Preview assets are at the root and in `katex/`; dependencies are under `third_party/`. Treat `build/`, `dist/`, and root binaries as generated output.
 
@@ -12,7 +12,7 @@ Tests live in `tests/`; `test_preview.js` covers the preview bridge. Bundled ext
 
 - `build.bat` builds an optimized Windows release with MSVC and stages the complete runtime in `dist/`.
 - `test.bat` compiles and runs all C tests, then runs the Node.js preview tests when Node is installed.
-- `dist\markedit.exe` launches the packaged build.
+- `dist\tinkeredit.exe` launches the packaged build.
 - `premake5 --zig gmake` generates an alternative make-based Zig build. `premake5 vs2022` generates a Visual Studio solution.
 
 Visual Studio's Desktop development with C++ workload must be installed; the
@@ -33,4 +33,4 @@ Recent commits use short, direct summaries such as `added vertical splitter bar`
 
 ## Configuration & Security
 
-Application and plugin settings belong in `%APPDATA%\markedit\settings.json`; never package personal settings. Keep preview assets local and preserve the existing restrictions on raw HTML, URL schemes, and Lua plugin file/network access.
+Application and plugin settings belong in `%APPDATA%\tinkeredit\settings.json`; never package personal settings. Keep preview assets local and preserve the existing restrictions on raw HTML, URL schemes, and Lua plugin file/network access.

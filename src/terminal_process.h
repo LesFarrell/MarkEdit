@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_TERMINAL_PROCESS_H
-#define MARKEDIT_TERMINAL_PROCESS_H
+#ifndef TINKEREDIT_TERMINAL_PROCESS_H
+#define TINKEREDIT_TERMINAL_PROCESS_H
 
 #include <windows.h>
 
@@ -7,7 +7,7 @@
    programs (vim, less, PSReadLine's live completion) work the way they would
    in any other terminal - unlike output_process.c's plain pipes, which only
    suit a line-oriented log. It runs in a job that ends the shell and
-   everything it started when it is stopped or MarkEdit exits, the same as
+   everything it started when it is stopped or Tinker Editor exits, the same as
    output_process.c.
 
    A reader thread posts each piece of output - already UTF-8 VT/xterm text,
@@ -29,7 +29,7 @@ typedef struct TerminalProcess TerminalProcess;
 
 /* Whether this Windows build exposes the ConPTY API at all (Windows 10
    1809+). Resolved with GetProcAddress rather than linked directly, so
-   markedit.exe still loads on an older Windows - terminal_process_start()
+   tinkeredit.exe still loads on an older Windows - terminal_process_start()
    just returns NULL there instead of failing to launch at all. */
 int terminal_process_available(void);
 

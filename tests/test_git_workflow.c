@@ -26,6 +26,22 @@ static DWORD run_git(const WCHAR *directory, const WCHAR *arguments) {
     return exitCode;
 }
 
+/* GitHub's Windows runners have shown a transient failure immediately after
+   a command that just wrote ref/lock state - observed with --abort right
+   after a conflicting merge/rebase, not reproducible locally across repeated
+   runs - consistent with filesystem-cache or antivirus-scan contention
+   rather than a real git error. One short retry absorbs it without
+   weakening the assertion: the command still has to succeed, just not
+   necessarily on the first try. */
+static DWORD run_git_retrying(const WCHAR *directory, const WCHAR *arguments) {
+    DWORD exitCode = run_git(directory, arguments);
+    if (exitCode != 0) {
+        Sleep(200);
+        exitCode = run_git(directory, arguments);
+    }
+    return exitCode;
+}
+
 static int write_file(const WCHAR *path, const char *text) {
     FILE *file = _wfopen(path, L"wb");
     if (!file) return 0;
@@ -91,7 +107,7 @@ int main(void) {
     CHECK(write_file(tracked, "base\n"));
     CHECK(run_git(repository, L"add -- tracked.txt") == 0);
     CHECK(run_git(repository,
-        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c user.name=TinkerEditor -c user.email=tinkeredit-tests@example.invalid "
         L"-c commit.gpgsign=false commit --no-verify -q -m initial") == 0);
 
     /* Staged and working-tree diffs must remain distinct. */
@@ -117,7 +133,7 @@ int main(void) {
     CHECK(write_file(tracked, "topic\n"));
     CHECK(run_git(repository, L"add -- tracked.txt") == 0);
     CHECK(run_git(repository,
-        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c user.name=TinkerEditor -c user.email=tinkeredit-tests@example.invalid "
         L"-c commit.gpgsign=false commit --no-verify -q -m topic") == 0);
     CHECK(run_git(repository, L"switch -q main") == 0);
     CHECK(run_git(repository, L"branch -d topic") != 0);
@@ -150,16 +166,16 @@ int main(void) {
     CHECK(write_file(tracked, "merge-topic\n"));
     CHECK(run_git(repository, L"add -- tracked.txt") == 0);
     CHECK(run_git(repository,
-        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c user.name=TinkerEditor -c user.email=tinkeredit-tests@example.invalid "
         L"-c commit.gpgsign=false commit --no-verify -q -m merge-topic") == 0);
     CHECK(run_git(repository, L"switch -q main") == 0);
     CHECK(write_file(tracked, "merge-main\n"));
     CHECK(run_git(repository, L"add -- tracked.txt") == 0);
     CHECK(run_git(repository,
-        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c user.name=TinkerEditor -c user.email=tinkeredit-tests@example.invalid "
         L"-c commit.gpgsign=false commit --no-verify -q -m merge-main") == 0);
     CHECK(run_git(repository, L"merge merge-topic") != 0);
-    CHECK(run_git(repository, L"merge --abort") == 0);
+    CHECK(run_git_retrying(repository, L"merge --abort") == 0);
     CHECK(read_file_equals(tracked, "merge-main\n"));
 
     /* The same conflict lifecycle is available for rebase. */
@@ -167,17 +183,17 @@ int main(void) {
     CHECK(write_file(tracked, "rebase-topic\n"));
     CHECK(run_git(repository, L"add -- tracked.txt") == 0);
     CHECK(run_git(repository,
-        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c user.name=TinkerEditor -c user.email=tinkeredit-tests@example.invalid "
         L"-c commit.gpgsign=false commit --no-verify -q -m rebase-topic") == 0);
     CHECK(run_git(repository, L"switch -q main") == 0);
     CHECK(write_file(tracked, "rebase-main\n"));
     CHECK(run_git(repository, L"add -- tracked.txt") == 0);
     CHECK(run_git(repository,
-        L"-c user.name=MarkEdit -c user.email=markedit-tests@example.invalid "
+        L"-c user.name=TinkerEditor -c user.email=tinkeredit-tests@example.invalid "
         L"-c commit.gpgsign=false commit --no-verify -q -m rebase-main") == 0);
     CHECK(run_git(repository, L"switch -q rebase-topic") == 0);
     CHECK(run_git(repository, L"rebase main") != 0);
-    CHECK(run_git(repository, L"rebase --abort") == 0);
+    CHECK(run_git_retrying(repository, L"rebase --abort") == 0);
     CHECK(read_file_equals(tracked, "rebase-topic\n"));
 
     remove_tree(sandbox);

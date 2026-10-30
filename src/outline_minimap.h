@@ -1,19 +1,19 @@
-#ifndef MARKEDIT_OUTLINE_MINIMAP_H
-#define MARKEDIT_OUTLINE_MINIMAP_H
+#ifndef TINKEREDIT_OUTLINE_MINIMAP_H
+#define TINKEREDIT_OUTLINE_MINIMAP_H
 
 #include <windows.h>
 
 #include "../third_party/scintilla/include/Scintilla.h" /* Sci_Position */
 
 /* Upper bound on the number of ATX headings the outline pane will list; also
-   sizes markedit.c's own g_outlineLines table, which the module writes. */
+   sizes tinkeredit.c's own g_outlineLines table, which the module writes. */
 #define OUTLINE_MAX_HEADINGS 1024
 
 /* The outline/minimap module is a self-contained view over the active
    Scintilla document: the outline reads it directly, while the minimap keeps
-   a throttled snapshot. Both windows are created by markedit.c and their
+   a throttled snapshot. Both windows are created by tinkeredit.c and their
    state is owned by the shell.
-   Rather than reaching into markedit.c's translation-unit statics by name,
+   Rather than reaching into tinkeredit.c's translation-unit statics by name,
    the shell hands in this table once at startup. Members that point into
    live shell state are followed on each use, so a later change to the
    underlying global is observed without re-initialising. */
@@ -39,7 +39,7 @@ typedef struct OutlineMinimapHost {
     /* Shell values that change over time, so read through a accessor. */
     int (*largeFile)(void);
 
-    /* Shell helpers static to markedit.c, passed in rather than duplicated. */
+    /* Shell helpers static to tinkeredit.c, passed in rather than duplicated. */
     HWND (*trackedEditView)(void);
     void (*syncSplitDocument)(void);
     void (*relayoutAndSave)(HWND hwnd);
@@ -91,7 +91,7 @@ void toggle_split_editor(HWND hwnd, int vertical);
 /* Restores the split-editor divider to an even 50/50. */
 void reset_split_editor(HWND hwnd);
 
-/* Subclass procedure installed on the minimap view; see markedit.c. */
+/* Subclass procedure installed on the minimap view; see tinkeredit.c. */
 LRESULT CALLBACK MinimapSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                      UINT_PTR id, DWORD_PTR data);
 

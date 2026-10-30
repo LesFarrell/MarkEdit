@@ -174,7 +174,7 @@ sources, as well as with parentheses. Only A loads from or to an address:
 `LD HL,(nn)` is reported rather than read as `LD HL,nn`.
 
 **Compile ROM** saves a 32 KB cartridge with no memory bank controller, which
-every emulator and flash cartridge runs. MarkEdit writes the header at
+every emulator and flash cartridge runs. Tinker Editor writes the header at
 `$0100`-`$014F` itself: `NOP` and `JP` to the entry point (`ENTRY`/`END`,
 otherwise the first byte of code), the Nintendo logo the boot ROM checks, a
 title from the file name, and both checksums. So code starts at `$0150`;
@@ -185,7 +185,7 @@ reported.
 ## Examples
 
 `examples/` holds a runnable "Hello, World!" for each assembler. Open one in
-MarkEdit and use that CPU's **Compile** command:
+Tinker Editor and use that CPU's **Compile** command:
 
 | File | CPU | Run it with |
 |---|---|---|
@@ -194,7 +194,7 @@ MarkEdit and use that CPU's **Compile** command:
 | `examples/c64-hello.asm` | 6502 (Commodore 64) | The saved `.prg`, with `SYS 49152`. |
 | `examples/gb-hello.asm` | Game Boy | The saved `.gb` in an emulator such as SameBoy, BGB or mGBA. |
 
-The `examples` folder has no `init.lua`, so MarkEdit doesn't load it as a
+The `examples` folder has no `init.lua`, so Tinker Editor doesn't load it as a
 plugin.
 
 ## Files

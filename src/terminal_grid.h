@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_TERMINAL_GRID_H
-#define MARKEDIT_TERMINAL_GRID_H
+#ifndef TINKEREDIT_TERMINAL_GRID_H
+#define TINKEREDIT_TERMINAL_GRID_H
 
 #include <stddef.h>
 #include <windows.h>

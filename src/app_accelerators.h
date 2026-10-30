@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_APP_ACCELERATORS_H
-#define MARKEDIT_APP_ACCELERATORS_H
+#ifndef TINKEREDIT_APP_ACCELERATORS_H
+#define TINKEREDIT_APP_ACCELERATORS_H
 
 #include <stddef.h>
 #include <windows.h>

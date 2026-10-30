@@ -1,6 +1,6 @@
 /* Scintilla view setup: marker/indicator IDs, line-number gutter sizing and
    the per-view settings (word wrap, whitespace, indent guides, tabs, margins)
-   that were previously private to markedit.c. Shell-owned state arrives
+   that were previously private to tinkeredit.c. Shell-owned state arrives
    through ScintillaConfigHost; persisted settings come straight from
    settings_values.h. */
 #include "scintilla_config.h"

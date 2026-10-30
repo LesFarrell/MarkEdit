@@ -1,6 +1,6 @@
 ; ZX Spectrum "Hello, World!" for the bundled Z80 assembler.
 ;
-; Open this file in MarkEdit, then choose
+; Open this file in Tinker Editor, then choose
 ;   Tools -> Assemblers -> Z80 Assembler -> Compile
 ; and save the .tap file, or use Compile and Run to open it in the application
 ; associated with .tap files. Load it in a Spectrum emulator (or real hardware)

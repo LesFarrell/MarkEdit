@@ -151,7 +151,7 @@ int main(void) {
 
     const WCHAR *orphan = L"document-00000000-0000-0000-0000000000000000-0.txt";
     const WCHAR *staged = L"document-00000000-0000-0000-0000000000000000.ini";
-    const WCHAR *partial = L"document-00000000-0000-0000-0000000000000000-0.txt.markedit-123-0.tmp";
+    const WCHAR *partial = L"document-00000000-0000-0000-0000000000000000-0.txt.tinkeredit-123-0.tmp";
     create_artifact(directory, orphan);
     create_artifact(directory, staged);
     create_artifact(directory, partial);

@@ -346,8 +346,8 @@ static void run_modal_popup(HWND dialog) {
 }
 
 static void show_goto_line_dialog(void) {
-    if (!register_popup_class(L"MarkEditGotoLine", GotoLineWndProc)) return;
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditGotoLine", L"Go to Line",
+    if (!register_popup_class(L"TinkerEditorGotoLine", GotoLineWndProc)) return;
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"TinkerEditorGotoLine", L"Go to Line",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, 258, 138, g_hMainWnd, NULL, GetModuleHandleW(NULL), NULL);
     if (!dialog) return;
@@ -466,9 +466,9 @@ static LRESULT CALLBACK ChoiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 static int show_choice_dialog(const WCHAR *title, const WCHAR *prompt,
                               WCHAR **labels, int count, const WCHAR *okLabel) {
     if (!labels || count <= 0) return -1;
-    if (!register_popup_class(L"MarkEditChoiceDialog", ChoiceWndProc)) return -1;
+    if (!register_popup_class(L"TinkerEditorChoiceDialog", ChoiceWndProc)) return -1;
     ChoiceDialogState state = { labels, count, -1, prompt, okLabel, NULL, NULL };
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditChoiceDialog", title,
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"TinkerEditorChoiceDialog", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, 620, 460, g_hMainWnd, NULL,
         GetModuleHandleW(NULL), &state);
@@ -533,9 +533,9 @@ static LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 static int show_text_input(const WCHAR *title, const WCHAR *prompt,
                            const WCHAR *initial, WCHAR *output, int outputCapacity) {
-    if (!register_popup_class(L"MarkEditTextInput", TextInputWndProc)) return 0;
+    if (!register_popup_class(L"TinkerEditorTextInput", TextInputWndProc)) return 0;
     TextInputState state = { prompt, initial ? initial : L"", output, outputCapacity, 0, NULL };
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditTextInput", title,
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"TinkerEditorTextInput", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, 460, 165, g_hMainWnd, NULL,
         GetModuleHandleW(NULL), &state);
@@ -895,9 +895,9 @@ static LRESULT CALLBACK ReplaceReviewWndProc(HWND hwnd, UINT msg, WPARAM wParam,
    is edited in place (accepted flags) and the function returns 1 if the
    user clicked Replace, 0 if they cancelled. */
 static int show_replace_review_dialog(ReplaceMatch *matches, int count) {
-    if (!register_popup_class(L"MarkEditReplaceDialog", ReplaceReviewWndProc)) return 0;
+    if (!register_popup_class(L"TinkerEditorReplaceDialog", ReplaceReviewWndProc)) return 0;
     ReplaceReviewState state = { matches, count, {0}, NULL, 0 };
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditReplaceDialog", L"Replace in Folder",
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"TinkerEditorReplaceDialog", L"Replace in Folder",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, 620, 460, g_hMainWnd, NULL,
         GetModuleHandleW(NULL), &state);
@@ -1191,8 +1191,8 @@ static void show_find_dialog(int replace) {
     /* In selection searches the selection, so it isn't the text to find. */
     if (!g_findInSelection) find_text_from_selection();
     if (!g_hFindDlg) {
-        if (!register_popup_class(L"MarkEditFindDialog", FindWndProc)) return;
-        g_hFindDlg = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, L"MarkEditFindDialog", L"Find",
+        if (!register_popup_class(L"TinkerEditorFindDialog", FindWndProc)) return;
+        g_hFindDlg = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, L"TinkerEditorFindDialog", L"Find",
             WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 480, 220, g_hMainWnd, NULL, GetModuleHandleW(NULL), NULL);
         if (!g_hFindDlg) return;
         layout_find_dialog(g_hFindDlg);

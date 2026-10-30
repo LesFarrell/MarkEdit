@@ -57,8 +57,8 @@ static int owned_name(const WCHAR *name) {
     else if (generation_name(body, length) && !wcsncmp(dot, L".ini", 4)) suffix = dot + 4;
     else return 0;
     if (!*suffix) return 1;
-    if (wcsncmp(suffix, L".markedit-", 10)) return 0;
-    const WCHAR *pid = suffix + 10, *dash = wcschr(pid, L'-');
+    if (wcsncmp(suffix, L".tinkeredit-", 12)) return 0;
+    const WCHAR *pid = suffix + 12, *dash = wcschr(pid, L'-');
     const WCHAR *ext = dash ? wcschr(dash + 1, L'.') : NULL;
     return dash && ext && digits(pid, dash) && digits(dash + 1, ext) && !wcscmp(ext, L".tmp");
 }

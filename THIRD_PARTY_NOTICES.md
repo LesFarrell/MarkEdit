@@ -1,6 +1,6 @@
 # Third-party notices
 
-MarkEdit redistributes the following components. Their licences remain with
+Tinker Editor redistributes the following components. Their licences remain with
 their respective copyright holders.
 
 ## cmark-gfm 0.29.0.gfm.13
@@ -22,14 +22,14 @@ MIT License. A copy is at `third_party/mermaid/LICENSE`.
 
 C/C++ debugging launches a separate copy of
 [GNU GDB](https://sourceware.org/gdb/) built by w64devkit 2.7.0. GDB is not
-linked into `markedit.exe`; it remains a standalone program distributed under
+linked into `tinkeredit.exe`; it remains a standalone program distributed under
 the GNU General Public License, version 3. The licence is reproduced at
 `third_party/gdb/COPYING.txt`.
 
 The complete corresponding source inputs, including GDB 17.1, its statically
 linked Expat 2.7.5, GNU libiconv 1.19 and PDCurses 3.9 sources, plus the exact
 w64devkit Dockerfile and GDB patches used for this binary, are available in the
-[MarkEdit source repository](https://github.com/LesFarrell/MarkEdit/tree/main/third_party/gdb/source).
+[Tinker Editor source repository](https://github.com/LesFarrell/Tinker Editor/tree/main/third_party/gdb/source).
 They are not duplicated in the smaller binary package. Provenance and checksums are recorded in
 `third_party/gdb/SOURCE.md` and `third_party/gdb/SHA256SUMS.txt`. Applicable
 MinGW-w64 runtime notices are reproduced at
@@ -76,7 +76,7 @@ Source-editor syntax highlighting uses lexers from
 [Lexilla](https://github.com/ScintillaOrg/lexilla), copyright 1998–2021 by
 Neil Hodgson and contributors, distributed under the same permissive licence
 as Scintilla. It's built from a trimmed copy of the upstream source under
-`third_party/lexilla` and linked directly into `markedit.exe`, carrying the
+`third_party/lexilla` and linked directly into `tinkeredit.exe`, carrying the
 Markdown, JSON, XML/HTML, YAML, C/C++, Python, Bash, PowerShell, Lua, CSS,
 SQL, properties (INI), TOML, batch and makefile lexers with their required
 support code; a copy of the licence is at
@@ -99,4 +99,4 @@ in `third_party/scowl/VERSION.txt`.
 Plugins run on [Lua](https://www.lua.org/), copyright (C) 1994–2026 Lua.org,
 PUC-Rio, licensed under the MIT License. It's built from the unmodified
 release sources under `third_party/lua` and linked directly into
-`markedit.exe`; a copy of the licence is at `third_party/lua/LICENSE`.
+`tinkeredit.exe`; a copy of the licence is at `third_party/lua/LICENSE`.

@@ -1,6 +1,6 @@
 ; Game Boy "HELLO, WORLD!" for the bundled SM83 assembler.
 ;
-; Open this file in MarkEdit, then choose
+; Open this file in Tinker Editor, then choose
 ;   Tools -> Assemblers -> Game Boy Assembler -> Compile ROM
 ; and open the saved .gb in an emulator such as SameBoy, BGB or mGBA.
 ;

@@ -1,14 +1,14 @@
 ---@meta
--- MarkEdit Lua API definitions for Lua Language Server. This file documents
--- globals supplied by MarkEdit; it is not loaded as an extension.
+-- Tinker Editor Lua API definitions for Lua Language Server. This file documents
+-- globals supplied by Tinker Editor; it is not loaded as an extension.
 
----@class MarkEditSelection
+---@class TinkerEditorSelection
 ---@field start integer
 ---@field finish integer
 ---@field caret integer
 ---@field anchor integer
 
----@class MarkEditMenu
+---@class TinkerEditorMenu
 menu = {}
 ---@param label string
 ---@param fn fun()
@@ -145,7 +145,7 @@ function ui.pick_file(title) end
 function ui.pick_folder(title) end
 
 documents = {}
----@alias MarkEditEncoding 'utf-8'|'utf-8-bom'|'utf-16le'|'utf-16be'|'ansi'
+---@alias TinkerEditorEncoding 'utf-8'|'utf-8-bom'|'utf-16le'|'utf-16be'|'ansi'
 ---@return integer
 function documents.count() end
 ---@return integer
@@ -179,8 +179,8 @@ function documents.modified(index) end
 ---@param on? boolean
 ---@return boolean
 function documents.auto_reload(index, on) end
----@overload fun(): MarkEditEncoding
----@param value MarkEditEncoding
+---@overload fun(): TinkerEditorEncoding
+---@param value TinkerEditorEncoding
 ---@return boolean success
 function documents.encoding(value) end
 
@@ -253,10 +253,10 @@ function editor.get_selection(n) end
 function editor.get_line(n) end
 ---@return integer
 function editor.length() end
----@alias MarkEditLineEnding '\r\n'|'\n'|'\r'
----@overload fun(): MarkEditLineEnding
----@param value MarkEditLineEnding
----@return MarkEditLineEnding
+---@alias TinkerEditorLineEnding '\r\n'|'\n'|'\r'
+---@overload fun(): TinkerEditorLineEnding
+---@param value TinkerEditorLineEnding
+---@return TinkerEditorLineEnding
 function editor.eol(value) end
 ---@return integer
 function editor.tab_width() end
@@ -281,7 +281,7 @@ function editor.get_selection_range(n) end
 function editor.set_selection(start, finish, n) end
 ---@return integer
 function editor.selection_count() end
----@return MarkEditSelection[]
+---@return TinkerEditorSelection[]
 function editor.get_selections() end
 ---@param texts string|string[]
 function editor.replace_selections(texts) end
@@ -325,7 +325,7 @@ function editor.visible_range() end
 ---Moves the caret there, replacing the selections, and scrolls it into view.
 ---@param position integer
 function editor.scroll_to(position) end
----@class MarkEditFindOptions
+---@class TinkerEditorFindOptions
 ---@field match_case boolean|nil
 ---@field whole_word boolean|nil
 ---@field word_start boolean|nil
@@ -337,7 +337,7 @@ function editor.scroll_to(position) end
 ---more than 1,000,000 characters.
 ---@param text string
 ---@param start? integer
----@param options? MarkEditFindOptions
+---@param options? TinkerEditorFindOptions
 ---@return integer? start, integer? finish
 function editor.find(text, start, options) end
 function editor.begin_undo() end

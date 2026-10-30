@@ -4,9 +4,9 @@
  * The outline listbox is rebuilt from the active Scintilla document's ATX
  * headings. The minimap uses a throttled snapshot of that document and
  * mirrors the main editor's scroll position without joining its live edit
- * notifications. Both are created by markedit.c, so this module drives them
+ * notifications. Both are created by tinkeredit.c, so this module drives them
  * through the OutlineMinimapHost table handed in by outline_minimap_init()
- * rather than reaching into markedit.c's translation-unit statics by name.
+ * rather than reaching into tinkeredit.c's translation-unit statics by name.
  */
 
 #include "outline_minimap.h"

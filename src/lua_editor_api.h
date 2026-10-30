@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_LUA_EDITOR_API_H
-#define MARKEDIT_LUA_EDITOR_API_H
+#ifndef TINKEREDIT_LUA_EDITOR_API_H
+#define TINKEREDIT_LUA_EDITOR_API_H
 
 #include <windows.h>
 #include "lua.h"

@@ -43,7 +43,7 @@ static void apply_main_theme(HWND hwnd) {
     explorer_apply_theme();
 }
 
-/* Popup menus need an explicit uxtheme opt-in to follow MarkEdit's theme.
+/* Popup menus need an explicit uxtheme opt-in to follow Tinker Editor's theme.
    The visible menu bar is owner-drawn below because Windows does not repaint
    that non-client area when this preference changes at runtime. These private
    ordinal exports are available from Windows 10 1903 onward. */

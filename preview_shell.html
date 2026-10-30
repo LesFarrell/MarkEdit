@@ -104,10 +104,10 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
 .theme-dark .document-outline a{color:#58a6ff;}
 .theme-dark .markdown-body blockquote.markdown-alert{border-left-color:var(--alert-color);color:inherit;}
 </style>
-<link id="gh-css-local" rel="stylesheet" href="https://markedit.local/github-markdown.css">
-<link id="hljs-light" rel="stylesheet" href="https://markedit.local/highlight-github.min.css">
-<link id="hljs-dark" rel="stylesheet" href="https://markedit.local/highlight-github-dark.min.css" disabled>
-<link rel="stylesheet" href="https://markedit.local/katex/katex.min.css">
+<link id="gh-css-local" rel="stylesheet" href="https://tinkeredit.local/github-markdown.css">
+<link id="hljs-light" rel="stylesheet" href="https://tinkeredit.local/highlight-github.min.css">
+<link id="hljs-dark" rel="stylesheet" href="https://tinkeredit.local/highlight-github-dark.min.css" disabled>
+<link rel="stylesheet" href="https://tinkeredit.local/katex/katex.min.css">
 <script>
 (function(){
   function applyTheme(theme) {
@@ -126,18 +126,18 @@ h1:hover>.heading-anchor,h2:hover>.heading-anchor,h3:hover>.heading-anchor,h4:ho
   }
   function apply() {
     document.getElementById('content').classList.add('markdown-body');
-    if (!window.__markeditTheme) {
+    if (!window.__tinkereditTheme) {
       var params = new URLSearchParams(window.location.search);
-      window.__markeditTheme = params.get('theme') === 'dark' ? 'dark' : 'light';
+      window.__tinkereditTheme = params.get('theme') === 'dark' ? 'dark' : 'light';
     }
-    applyTheme(window.__markeditTheme);
+    applyTheme(window.__tinkereditTheme);
   }
   /* scrollbarColours, when given, is the app palette's [thumb, hot, drag]
      for this theme; the scrollbar rules read them as CSS variables. */
   var SCROLLBAR_VARIABLES = ['--scrollbar-thumb', '--scrollbar-thumb-hot', '--scrollbar-thumb-drag'];
   window.setTheme = function(theme, scrollbarColours) {
-    window.__markeditTheme = theme === 'dark' ? 'dark' : 'light';
-    applyTheme(window.__markeditTheme);
+    window.__tinkereditTheme = theme === 'dark' ? 'dark' : 'light';
+    applyTheme(window.__tinkereditTheme);
     if (Array.isArray(scrollbarColours)) {
       SCROLLBAR_VARIABLES.forEach(function(name, i) {
         if (/^#[0-9a-f]{6}$/i.test(scrollbarColours[i] || ''))
@@ -598,12 +598,12 @@ function setContent(html) {
   highlightCodeBlocks(article);
   enhanceCodeCopy(article);
   wrapMermaidBlocks();
-  window.__markeditRenderPromise = mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => updateSoloDiagramLayout());
-  window.__markeditRenderPromise.then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+  window.__tinkereditRenderPromise = mermaid.run({ querySelector: '.mermaid-inner' }).catch(() => {}).then(() => updateSoloDiagramLayout());
+  window.__tinkereditRenderPromise.then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
     if (renderGeneration === contentRenderGeneration) contentRenderPending = false;
   })));
   updateSoloDiagramLayout();
-  window.setTheme(window.__markeditTheme || 'light');
+  window.setTheme(window.__tinkereditTheme || 'light');
 }
 
 window.setContent = setContent;
@@ -613,7 +613,7 @@ window.exportRenderedHTML = async function(baseHref, title) {
   // #content while a diagram is still an un-rendered code block.
   // The native caller sends the resolved result through postMessage;
   // ExecuteScript itself does not wait for this Promise to settle.
-  if (window.__markeditRenderPromise) { try { await window.__markeditRenderPromise; } catch (_) {} }
+  if (window.__tinkereditRenderPromise) { try { await window.__tinkereditRenderPromise; } catch (_) {} }
   const source = document.querySelector('#content > .markdown-body');
   if (!source) return '';
   const article = source.cloneNode(true);

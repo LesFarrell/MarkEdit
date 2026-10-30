@@ -1,4 +1,4 @@
--- Example bundled MarkEdit plugin. Top-level *.lua files and folders with
+-- Example bundled Tinker Editor plugin. Top-level *.lua files and folders with
 -- init.lua load at startup and again through Plugins > Reload Plugins.
 --
 -- It shows each kind of thing a plugin can do:
@@ -63,7 +63,7 @@ menu.add("Text/Wrap Selection...", function()
   editor.replace_selection(marker .. editor.get_selection() .. closing)
 end)
 
--- A persistent checkable command. MarkEdit stores its state and passes the
+-- A persistent checkable command. Tinker Editor stores its state and passes the
 -- new value to the function after each click. Off by default, so installing
 -- this example never changes anyone's files unasked.
 menu.checkbox("Text/Trim Whitespace on Save", "trim_on_save", false, function(checked)

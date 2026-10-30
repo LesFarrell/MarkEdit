@@ -1,8 +1,8 @@
 -- View > Follow EOF, like tail -f: the active document keeps showing
 -- the end of its file while another program adds to it, which is handy for
--- watching a log. MarkEdit checks open files for changes every second and a
+-- watching a log. Tinker Editor checks open files for changes every second and a
 -- half; a followed one reloads without asking (documents.auto_reload) and
--- moves to its last line. Typing into it pauses that, since MarkEdit then
+-- moves to its last line. Typing into it pauses that, since Tinker Editor then
 -- asks before reloading over unsaved edits. Choose the command again to
 -- stop; following also ends when the tab closes. The check mark shows
 -- whether the active tab is followed.
@@ -12,7 +12,7 @@
 -- Followed files, by lower-cased path, for the documents set to reload.
 local followed = {}
 
--- The menu.checkbox state, which MarkEdit saves; following never outlives
+-- The menu.checkbox state, which Tinker Editor saves; following never outlives
 -- the session, so it starts cleared.
 local CHECK_KEY = "following"
 config.set(CHECK_KEY, false)

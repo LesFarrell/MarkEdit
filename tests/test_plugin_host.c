@@ -861,7 +861,7 @@ static int test_plugin_enabled(const char *scope, const char *name) {
 static void test_directory(HWND editor) {
     WCHAR temp[MAX_PATH], directory[MAX_PATH];
     GetTempPathW(MAX_PATH, temp);
-    swprintf(directory, MAX_PATH, L"%lsmarkedit_plugins_%lu", temp, GetCurrentProcessId());
+    swprintf(directory, MAX_PATH, L"%lstinkeredit_plugins_%lu", temp, GetCurrentProcessId());
     CreateDirectoryW(directory, NULL);
     write_script(directory, L"b.lua", "menu.add('From B', function() end)");
     write_script(directory, L"a.lua", "menu.add('From A', function() end)");
@@ -1825,14 +1825,14 @@ static void test_bundled_plugins(HWND editor) {
            document_is(editor, "{\n  \"a\": {\n    \"a\": 2,\n    \"z\": 1\n  },\n  \"z\": 0\n}"),
            "bundled JSON plugin recursively sorts object keys");
 
-    set_document(editor, "{\"name\":\"MarkEdit\",\"enabled\":true,\"items\":[1,{\"value\":null}]}");
+    set_document(editor, "{\"name\":\"Tinker Editor\",\"enabled\":true,\"items\":[1,{\"value\":null}]}");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
     expect(run_ok(jsonToYaml, editor) &&
-           document_is(editor, "\"name\": \"MarkEdit\"\n\"enabled\": true\n\"items\":\n  - 1\n  -\n    \"value\": null"),
+           document_is(editor, "\"name\": \"Tinker Editor\"\n\"enabled\": true\n\"items\":\n  - 1\n  -\n    \"value\": null"),
            "bundled JSON plugin converts JSON to YAML");
     SendMessageA(editor, SCI_SETSEL, 0, 0);
     expect(run_ok(yamlToJson, editor) &&
-           document_is(editor, "{\n  \"name\": \"MarkEdit\",\n  \"enabled\": true,\n  \"items\": [\n    1,\n    {\n      \"value\": null\n    }\n  ]\n}"),
+           document_is(editor, "{\n  \"name\": \"Tinker Editor\",\n  \"enabled\": true,\n  \"items\": [\n    1,\n    {\n      \"value\": null\n    }\n  ]\n}"),
            "bundled JSON plugin converts its YAML output back to JSON");
 
     set_document(editor, "name: Example # comment\nnote: 'it''s # data'\nports:\n  - 80\n  - 443\nowner:\n  first: Ada\n  active: TRUE");

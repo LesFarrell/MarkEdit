@@ -1,14 +1,14 @@
--- Premake5 script for MarkEdit.
+-- Premake5 script for Tinker Editor.
 -- Premake supplies project, files, filter and its other functions as
 -- globals, which a Lua language server doesn't know about.
 ---@diagnostic disable: undefined-global, lowercase-global
 -- Alternative generator to the direct MSVC build.bat / test.bat scripts, for three
--- toolchains (builds markedit.exe, statically linking Lexilla, and the
+-- toolchains (builds tinkeredit.exe, statically linking Lexilla, and the
 -- test programs, then stages dist/ the same way build.bat does):
 --
 --   MinGW-w64 GCC:  premake5 gmake          then  make -C build config=release_x64
 --   Zig:            premake5 --zig gmake    then  make -C build config=release_x64
---   MSVC:           premake5 vs2022         then  build build/MarkEdit.sln
+--   MSVC:           premake5 vs2022         then  build build/Tinker Editor.sln
 --                   (or any later vs20xx action Premake supports)
 --
 -- The gmake builds need GNU make running its recipes under a POSIX sh (as
@@ -31,7 +31,7 @@ newoption {
     description = "With gmake: compile and link with zig cc / zig c++ instead of GCC",
 }
 
-workspace "MarkEdit"
+workspace "Tinker Editor"
     configurations { "Release" }
     platforms { "x64" }
     location "build"
@@ -100,7 +100,7 @@ function cmark_gfm_settings()
     includedirs { CMARK_GFM_DIR.."/src", CMARK_GFM_DIR.."/extensions" }
     defines { "CMARK_GFM_STATIC_DEFINE", "CMARK_GFM_EXTENSIONS_STATIC_DEFINE" }
     -- Scoped to cmark-gfm's own files (as build.bat compiles them apart), so
-    -- MarkEdit's sources keep the unused-parameter warning.
+    -- Tinker Editor's sources keep the unused-parameter warning.
     filter { "files:"..CMARK_GFM_DIR.."/**.c", "toolset:gcc or clang" }
         buildoptions { "-Wno-unused-parameter" }
     filter { "files:"..CMARK_GFM_DIR.."/**.c", "toolset:msc" }
@@ -126,7 +126,7 @@ end
 -- script's role as the lighter-weight alternative to build.bat.
 -- All paths are relative to the repo root.
 DIST_FILES = {
-    "build/bin/markedit.exe",
+    "build/bin/tinkeredit.exe",
     "preview_shell.html", "github-markdown.css", "mermaid.min.js", "highlight.min.js",
     "highlight-powershell.min.js", "highlight-github.min.css", "highlight-github-dark.min.css",
     "LICENSE", "THIRD_PARTY_NOTICES.md",
@@ -149,7 +149,7 @@ DIST_LICENCES = {
     ["webview2"]    = { WEBVIEW2_DIR.."/LICENSE.txt", WEBVIEW2_DIR.."/VERSION.txt" },
 }
 -- The two runtime DLLs go straight into dist/ from where they're vendored,
--- like markedit.exe from build/bin, so the repo root holds no build output.
+-- like tinkeredit.exe from build/bin, so the repo root holds no build output.
 RUNTIME_DLLS = { WEBVIEW2_DIR.."/x64/WebView2Loader.dll", SCINTILLA_DIR.."/bin/Scintilla.dll" }
 
 -- Post-build commands run with cwd = the build/ directory (where both the
@@ -202,9 +202,9 @@ local function staging_commands(posix)
 end
 
 -- Trimmed down from Lexilla's full catalogue to the languages supported by
--- MarkEdit; keep this list aligned with lexilla-sources.rsp.
--- A static lib rather than a SharedLib: linked straight into markedit.exe
--- instead of shipped as its own Lexilla.dll (see the markedit project below).
+-- Tinker Editor; keep this list aligned with lexilla-sources.rsp.
+-- A static lib rather than a SharedLib: linked straight into tinkeredit.exe
+-- instead of shipped as its own Lexilla.dll (see the tinkeredit project below).
 project "lexilla"
     kind "StaticLib"
     language "C++"
@@ -219,28 +219,28 @@ project "lexilla"
     -- No -fno-exceptions/-fno-rtti, as in build.bat: lexlib's
     -- CharacterCategory.cxx uses try/catch.
 
-project "markedit"
+project "tinkeredit"
     kind "WindowedApp"
     language "C"
     cdialect "C11"
-    targetname "markedit"
+    targetname "tinkeredit"
     targetdir "build/bin"
-    objdir "build/obj/markedit"
+    objdir "build/obj/tinkeredit"
 
-    files(sources_from_rsp("markedit-sources.rsp"))
+    files(sources_from_rsp("tinkeredit-sources.rsp"))
     -- Not compiled on their own: the unity build's *.inc components, the
-    -- headers, and the scripts and help markedit.rc embeds. Wildcards, so a
+    -- headers, and the scripts and help tinkeredit.rc embeds. Wildcards, so a
     -- new header or component shows up in the IDE without editing this list.
     files {
         "src/internal/*.inc", "src/*.h",
         "src/menus.lua", "src/lua/*.lua", "src/help/*",
-        "markedit.rc",
+        "tinkeredit.rc",
     }
     cmark_gfm_settings()
     lua_settings()
 
     includedirs { "." }
-    -- windres (used to compile markedit.rc) doesn't understand gcc's -isystem,
+    -- windres (used to compile tinkeredit.rc) doesn't understand gcc's -isystem,
     -- which externalincludedirs would otherwise add to its command line too;
     -- scope it to the C sources only.
     filter "files:not **.rc"
@@ -274,15 +274,15 @@ project "markedit"
         links { "c++" }
         -- Zig has no windres for the gmake resource rule; zig rc compiles
         -- the script to a .res that lld links directly (as build.bat does).
-        removefiles { "markedit.rc" }
-        prebuildcommands { "zig rc ../markedit.rc markedit.res" }
-        linkoptions { "markedit.res" }
+        removefiles { "tinkeredit.rc" }
+        prebuildcommands { "zig rc ../tinkeredit.rc tinkeredit.res" }
+        linkoptions { "tinkeredit.res" }
 
     filter "toolset:msc"
         -- The same DLL-backed loader as the GCC/Zig builds, so every
         -- toolchain ships the same WebView2Loader.dll in dist/.
         links { "WebView2Loader.dll.lib" }
-        -- markedit.rc already embeds markedit.manifest; a linker-generated
+        -- tinkeredit.rc already embeds tinkeredit.manifest; a linker-generated
         -- manifest as well is a duplicate-resource link error.
         flags { "NoManifest" }
         -- Function/data pointer casts are how the WebView2 COM handler

@@ -40,8 +40,8 @@ static void apply_custom_preview_css(int reportErrors) {
         css = _strdup("");
     }
     if (!css) return;
-    execute_webview_string_call("(()=>{let s=document.getElementById('markedit-custom-css');"
-        "if(!s){s=document.createElement('style');s.id='markedit-custom-css';document.head.appendChild(s)}"
+    execute_webview_string_call("(()=>{let s=document.getElementById('tinkeredit-custom-css');"
+        "if(!s){s=document.createElement('style');s.id='tinkeredit-custom-css';document.head.appendChild(s)}"
         "s.textContent='",
         css, "';})()");
     free(css);
@@ -51,12 +51,12 @@ static void apply_custom_preview_css(int reportErrors) {
 
 static ULONG STDMETHODCALLTYPE Handler_AddRef(void *this_) { (void)this_; return 1; }
 static ULONG STDMETHODCALLTYPE Handler_Release(void *this_) { (void)this_; return 1; }
-static const IID MARKEDIT_IID_IUNKNOWN =
+static const IID TINKEREDIT_IID_IUNKNOWN =
     {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 static HRESULT Handler_QueryInterface(void *this_, REFIID riid, void **out, REFIID handlerIid) {
     if (!out) return E_POINTER;
     *out = NULL;
-    if (IsEqualIID(riid, &MARKEDIT_IID_IUNKNOWN) || IsEqualIID(riid, handlerIid)) {
+    if (IsEqualIID(riid, &TINKEREDIT_IID_IUNKNOWN) || IsEqualIID(riid, handlerIid)) {
         *out = this_;
         Handler_AddRef(this_);
         return S_OK;
@@ -170,7 +170,7 @@ static HRESULT STDMETHODCALLTYPE PdfDone_Invoke(ICoreWebView2PrintToPdfCompleted
     if (FAILED(errorCode) || !result)
         show_error(L"Could not export the rendered preview to PDF.");
     else
-        MessageBoxW(g_hMainWnd, L"PDF export completed.", L"MarkEdit",
+        MessageBoxW(g_hMainWnd, L"PDF export completed.", L"Tinker Editor",
                     MB_OK | MB_ICONINFORMATION);
     free(g_pendingPdfPath);
     g_pendingPdfPath = NULL;
@@ -188,7 +188,7 @@ static void open_wikilink_target(const WCHAR *encoded);
 /* The preview shell page itself, with or without a query (the initial
    "?theme=dark|light") or fragment. */
 static int is_shell_page_url(const WCHAR *uri) {
-    static const WCHAR shellPrefix[] = L"https://markedit.local/preview_shell.html";
+    static const WCHAR shellPrefix[] = L"https://tinkeredit.local/preview_shell.html";
     size_t shellLength = wcslen(shellPrefix);
     return uri && _wcsnicmp(uri, shellPrefix, shellLength) == 0 &&
            (uri[shellLength] == 0 || uri[shellLength] == L'?' || uri[shellLength] == L'#');
@@ -403,7 +403,7 @@ static WCHAR *percent_encode_url_segment(const WCHAR *segment) {
     return encoded;
 }
 
-/* The active document's folder, or markedit.exe's own for an unsaved one -
+/* The active document's folder, or tinkeredit.exe's own for an unsaved one -
    the base for relative links, the preview's document.local mapping, export,
    and Open Terminal Here. Caller frees. */
 static WCHAR *document_or_module_directory(void) {
@@ -497,7 +497,7 @@ static void open_wikilink_target(const WCHAR *encoded) {
         WCHAR *prompt = (WCHAR *)malloc(promptCapacity * sizeof(WCHAR));
         if (!prompt) { free(full); return; }
         swprintf(prompt, promptCapacity, L"\"%ls\" doesn't exist yet. Create it?", fileName);
-        int create = MessageBoxW(g_hMainWnd, prompt, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES;
+        int create = MessageBoxW(g_hMainWnd, prompt, L"Tinker Editor", MB_YESNO | MB_ICONQUESTION) == IDYES;
         free(prompt);
         if (create) {
             HANDLE file = CreateFileW(full, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -541,11 +541,11 @@ static void open_local_link(const WCHAR *path) {
         show_error(message);
     } else if (AssocIsDangerous(path)) {
         swprintf(message, capacity,
-                 L"\"%ls\" is a program or script, so MarkEdit won't open it from the preview.", fileName);
+                 L"\"%ls\" is a program or script, so Tinker Editor won't open it from the preview.", fileName);
         show_error(message);
     } else {
         swprintf(message, capacity, L"Open \"%ls\" with its default program?", fileName);
-        if (MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES)
+        if (MessageBoxW(g_hMainWnd, message, L"Tinker Editor", MB_YESNO | MB_ICONQUESTION) == IDYES)
             ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
     }
     free(message);
@@ -570,7 +570,7 @@ static void open_preview_link(const WCHAR *uri) {
    images-as-links, etc.) should open in the user's default browser instead of
    navigating the embedded WebView away from the preview shell. Our own shell
    page load is allowed through - either the virtual-host URL
-   (https://markedit.local/preview_shell.html) or, on older WebView2 Runtimes
+   (https://tinkeredit.local/preview_shell.html) or, on older WebView2 Runtimes
    lacking ICoreWebView2_3, the "about:..." page produced by NavigateToString -
    and so is show_html_file_preview()'s own navigation to the HTML file being
    previewed (g_expectedHtmlPreviewUrl, consumed here so it only ever allows
@@ -651,7 +651,7 @@ static void open_terminal_here(void) {
 
 /* Shared with the file explorer panel's "Reveal in Explorer" context-menu
    command (passed to explorer_init() as a callback, since file_explorer.c
-   can't call a static markedit.c function by name). */
+   can't call a static tinkeredit.c function by name). */
 static void reveal_path_in_explorer(const WCHAR *path) {
     size_t capacity = wcslen(path) + 16;
     WCHAR *parameters = (WCHAR *)malloc(capacity * sizeof(WCHAR));
@@ -721,8 +721,8 @@ static void navigate_to_shell(void) {
            to dark only once apply_preview_theme() runs after navigation
            completes (which caused a visible light-then-dark flash). */
         const WCHAR *shellUrl = g_previewDarkMode
-            ? L"https://markedit.local/preview_shell.html?theme=dark"
-            : L"https://markedit.local/preview_shell.html?theme=light";
+            ? L"https://tinkeredit.local/preview_shell.html?theme=dark"
+            : L"https://tinkeredit.local/preview_shell.html?theme=light";
         ICoreWebView2_Navigate(g_webview, shellUrl);
     } else {
         WCHAR *wHtml = to_wide(preview_fallback_html);
@@ -822,7 +822,7 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
     if (g_webview3) {
         WCHAR *exeDir = module_directory();
         if (!exeDir) return S_OK;
-        ICoreWebView2_3_SetVirtualHostNameToFolderMapping(g_webview3, L"markedit.local", exeDir, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+        ICoreWebView2_3_SetVirtualHostNameToFolderMapping(g_webview3, L"tinkeredit.local", exeDir, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
         free(exeDir);
         update_document_mapping();
     }
@@ -836,7 +836,7 @@ static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebVie
     if (FAILED(errorCode) || !env) {
         char msg[256];
         wsprintfA(msg, "Failed to create WebView2 environment (hr=0x%08lX). Is the WebView2 Runtime installed?", (unsigned long)errorCode);
-        MessageBoxA(g_hMainWnd, msg, "MarkEdit", MB_OK | MB_ICONERROR);
+        MessageBoxA(g_hMainWnd, msg, "Tinker Editor", MB_OK | MB_ICONERROR);
         return S_OK;
     }
     ICoreWebView2Environment_CreateCoreWebView2Controller(env, g_hPreview, &g_ctrlHandler);
@@ -845,7 +845,7 @@ static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebVie
 
 static void init_webview(void) {
     /* The browser profile lives with the other per-user state rather than
-       beside markedit.exe: an installed copy in Program Files can't write
+       beside tinkeredit.exe: an installed copy in Program Files can't write
        there, which made creating the WebView2 environment fail outright. */
     WCHAR *userDataDir = get_local_app_directory(L"WebView2");
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(NULL, userDataDir, NULL, &g_envHandler);
@@ -853,7 +853,7 @@ static void init_webview(void) {
     if (FAILED(hr)) {
         char msg[256];
         wsprintfA(msg, "CreateCoreWebView2EnvironmentWithOptions call failed (hr=0x%08lX).", (unsigned long)hr);
-        MessageBoxA(g_hMainWnd, msg, "MarkEdit", MB_OK | MB_ICONERROR);
+        MessageBoxA(g_hMainWnd, msg, "Tinker Editor", MB_OK | MB_ICONERROR);
     }
 }
 

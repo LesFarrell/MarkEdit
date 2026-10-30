@@ -37,7 +37,7 @@ static int plugin_choose(const char *title, const char *label, const char *const
 static void plugin_message(const char *title, const char *text, const char *kind) {
     WCHAR *wideTitle = to_wide(title);
     WCHAR *wideText = to_wide(text);
-    const char *heading = wideTitle ? title : "MarkEdit Plugin";
+    const char *heading = wideTitle ? title : "Tinker Editor Plugin";
     const char *message = wideText ? text : "(This message isn't valid UTF-8 text.)";
     const char *colour = strcmp(kind, "error") == 0 ? "\x1b[1;31m"
                        : strcmp(kind, "warning") == 0 ? "\x1b[1;33m" : "\x1b[1;36m";
@@ -119,7 +119,7 @@ static int plugin_save_binary(const char *title, const char *defaultName,
 static int plugin_confirm(const char *title, const char *text) {
     WCHAR *wideTitle = to_wide(title), *wideText = to_wide(text);
     int result = MessageBoxW(g_hMainWnd, wideText ? wideText : L"Confirm?",
-                             wideTitle ? wideTitle : L"MarkEdit", MB_YESNO | MB_ICONQUESTION);
+                             wideTitle ? wideTitle : L"Tinker Editor", MB_YESNO | MB_ICONQUESTION);
     free(wideTitle); free(wideText);
     return result == IDYES;
 }
@@ -131,7 +131,7 @@ static void plugin_status(const char *text) {
 }
 
 static void plugin_log(const char *plugin, const char *text) {
-    OutputDebugStringA("[MarkEdit plugin: ");
+    OutputDebugStringA("[Tinker Editor plugin: ");
     OutputDebugStringA(plugin ? plugin : "unknown");
     OutputDebugStringA("] ");
     OutputDebugStringA(text);
@@ -270,7 +270,7 @@ static int confirm_plugin_open(const WCHAR *path) {
     WCHAR *prompt = (WCHAR *)malloc(capacity * sizeof(WCHAR));
     if (!prompt) return 0;
     swprintf(prompt, capacity, L"A plugin wants to open this file:\n\n%ls\n\nOpen it?", path);
-    int allowed = MessageBoxW(g_hMainWnd, prompt, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES;
+    int allowed = MessageBoxW(g_hMainWnd, prompt, L"Tinker Editor", MB_YESNO | MB_ICONQUESTION) == IDYES;
     free(prompt);
     return allowed;
 }
@@ -475,7 +475,7 @@ static int set_plugin_enabled(const char *scope, const char *name, int enabled) 
 
 #define MENU_DEFINITION_MAX_BYTES (1024 * 1024)
 
-/* %APPDATA%\markedit\menus.lua: the user's menu definition, when it exists. */
+/* %APPDATA%\tinkeredit\menus.lua: the user's menu definition, when it exists. */
 static WCHAR *user_settings_item_path(const WCHAR *name) {
     WCHAR *settings = get_settings_path();
     WCHAR *directory = settings ? path_directory(settings) : NULL;
@@ -492,10 +492,10 @@ static WCHAR *user_menu_definition_path(void) {
 static void install_plugin_type_definitions(const WCHAR *directory) {
     WCHAR *types = path_join(directory, L"types");
     if (types) CreateDirectoryW(types, NULL);
-    WCHAR *destination = types ? path_join(types, L"markedit.lua") : NULL;
+    WCHAR *destination = types ? path_join(types, L"tinkeredit.lua") : NULL;
     if (destination) {
         WCHAR *module = module_directory();
-        WCHAR *source = module ? path_join(module, L"plugins\\types\\markedit.lua") : NULL;
+        WCHAR *source = module ? path_join(module, L"plugins\\types\\tinkeredit.lua") : NULL;
         if (source) CopyFileW(source, destination, FALSE);
         free(source); free(module);
     }
@@ -517,7 +517,7 @@ static void install_plugin_editor_metadata(const WCHAR *directory) {
     free(luarc);
 }
 
-/* %APPDATA%\markedit\plugins, created with editor metadata when needed. */
+/* %APPDATA%\tinkeredit\plugins, created with editor metadata when needed. */
 static WCHAR *user_plugin_directory(void) {
     WCHAR *directory = user_settings_item_path(L"plugins");
     if (!directory) return NULL;
@@ -526,7 +526,7 @@ static WCHAR *user_plugin_directory(void) {
     return directory;
 }
 
-/* A Lua script built into the exe (markedit.rc). Not NUL-terminated. */
+/* A Lua script built into the exe (tinkeredit.rc). Not NUL-terminated. */
 static const char *builtin_script(int id, size_t *length) {
     HRSRC resource = FindResourceW(NULL, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
     HGLOBAL loaded = resource ? LoadResource(NULL, resource) : NULL;
@@ -534,15 +534,15 @@ static const char *builtin_script(int id, size_t *length) {
     return loaded ? (const char *)LockResource(loaded) : NULL;
 }
 
-/* The source checkout markedit.exe was built in, when it runs from one
-   (dist\ or build\ beside markedit.rc), or NULL. Reload Plugins then reads
+/* The source checkout tinkeredit.exe was built in, when it runs from one
+   (dist\ or build\ beside tinkeredit.rc), or NULL. Reload Plugins then reads
    the bundled plugins and built-in scripts from the checkout, so edits to
    them apply without rebuilding. */
 static WCHAR *source_checkout_directory(void) {
     WCHAR *module = module_directory();
     WCHAR *parent = module ? path_directory(module) : NULL;
     free(module);
-    WCHAR *rc = parent ? path_join(parent, L"markedit.rc") : NULL;
+    WCHAR *rc = parent ? path_join(parent, L"tinkeredit.rc") : NULL;
     WCHAR *menus = parent ? path_join(parent, L"src\\menus.lua") : NULL;
     int found = rc && menus && file_exists(rc) && file_exists(menus);
     free(rc);
@@ -551,7 +551,7 @@ static WCHAR *source_checkout_directory(void) {
     return parent;
 }
 
-/* Where each built-in script's source lives in a checkout (markedit.rc). */
+/* Where each built-in script's source lives in a checkout (tinkeredit.rc). */
 static const struct { int id; const WCHAR *path; } BUILTIN_SCRIPT_SOURCES[] = {
     { IDR_DEFAULT_MENUS, L"src\\menus.lua" },
     { IDR_BUILTIN_FORMATTING_BASE, L"src\\lua\\formatting_base.lua" },
@@ -634,7 +634,7 @@ static char *load_menu_definition(char *report) {
         size_t length;
         char *code = load_builtin_script(IDR_DEFAULT_MENUS, &length);
         char *error = code ? plugin_host_load_menu("built-in menus.lua", code, length) : NULL;
-        if (!code) report = append_report(report, "", "The built-in menus are missing from markedit.exe.");
+        if (!code) report = append_report(report, "", "The built-in menus are missing from tinkeredit.exe.");
         if (error) report = append_report(report, "", error);
         free(error);
         free(code);
@@ -660,7 +660,7 @@ static const char *set_theme_colour(void *context, int dark, const char *name, c
     return NULL;
 }
 
-/* Starts from the built-in palettes, then applies %APPDATA%\markedit\
+/* Starts from the built-in palettes, then applies %APPDATA%\tinkeredit\
    themes.lua when there is one. Problems are added to the report; the
    colours that did load still apply. */
 static char *load_theme_colours(char *report) {
@@ -707,7 +707,7 @@ static char *load_builtin_formatting(char *report) {
     char *formatting = builtin_script_parts(formattingParts,
         (int)(sizeof(formattingParts) / sizeof(formattingParts[0])), &length);
     char *formattingError = formatting ? plugin_host_load_builtin("formatting.lua", formatting, length) : NULL;
-    if (!formatting) report = append_report(report, "", "The formatting commands are missing from markedit.exe.");
+    if (!formatting) report = append_report(report, "", "The formatting commands are missing from tinkeredit.exe.");
     if (formattingError) report = append_report(report, "", formattingError);
     free(formattingError);
     free(formatting);
@@ -721,7 +721,7 @@ static char *load_plugin_directory(char *report, const WCHAR *directory, const c
     return report;
 }
 
-/* plugins\ beside markedit.exe, or the checkout's own when it runs from one. */
+/* plugins\ beside tinkeredit.exe, or the checkout's own when it runs from one. */
 static WCHAR *bundled_plugin_directory(void) {
     WCHAR *directory = source_checkout_directory();
     if (!directory) directory = module_directory();
@@ -739,7 +739,7 @@ static void show_plugin_load_errors(const char *report) {
     if (question) swprintf(question, size, L"%ls\n\nOpen the first failing script?",
                            wide ? wide : L"A plugin failed.");
     int answer = MessageBoxW(g_hMainWnd, question ? question : L"A plugin failed. Open it?",
-                             L"MarkEdit Plugins", MB_YESNO | MB_ICONWARNING);
+                             L"Tinker Editor Plugins", MB_YESNO | MB_ICONWARNING);
     free(question);
     free(wide);
     if (answer != IDYES || !open_file_in_tab(errorPath)) return;
@@ -820,7 +820,7 @@ static void open_plugin_folder(void) {
         HINSTANCE result = ShellExecuteW(g_hMainWnd, L"open", directory, NULL, NULL, SW_SHOWNORMAL);
         if ((INT_PTR)result <= 32)
             MessageBoxW(g_hMainWnd, L"Could not open the personal plugins folder.",
-                        L"MarkEdit Plugins", MB_OK | MB_ICONERROR);
+                        L"Tinker Editor Plugins", MB_OK | MB_ICONERROR);
     }
     free(directory);
 }
@@ -859,7 +859,7 @@ static void new_plugin(void) {
     }
     WCHAR *path = new_plugin_path(answer);
     static const char starter[] =
-        "-- MarkEdit plugin\n"
+        "-- Tinker Editor plugin\n"
         "menu.add(\"My Plugin/Hello\", function()\n"
         "  ui.message(\"Hello from Lua!\")\n"
         "end, \"Ctrl+Alt+H\")\n";
@@ -1053,11 +1053,11 @@ static void manage_plugins(void) {
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (!register_popup_class(L"MarkEditManagePlugins", ManagePluginsWndProc)) return;
+    if (!register_popup_class(L"TinkerEditorManagePlugins", ManagePluginsWndProc)) return;
     ManagePluginsState state = { count, (int *)calloc((size_t)count, sizeof(int)), {0}, NULL, 0 };
     if (!state.enabled) return;
     for (int i = 0; i < count; i++) state.enabled[i] = plugin_host_extension_is_enabled(i);
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MarkEditManagePlugins", L"Manage Plugins",
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"TinkerEditorManagePlugins", L"Manage Plugins",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, 580, 500, g_hMainWnd, NULL, GetModuleHandleW(NULL), &state);
     if (dialog) run_modal_popup(dialog);

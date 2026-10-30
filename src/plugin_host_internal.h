@@ -20,7 +20,7 @@ typedef struct {
     int ref;          /* the command's function, in the Lua registry */
     int placed;       /* by the menu definition, rather than by its label */
     char *overrides;  /* the built-in command it runs for (commands.register), or NULL */
-    int builtIn;      /* from a script built into MarkEdit: no time limit */
+    int builtIn;      /* from a script built into Tinker Editor: no time limit */
     int separator;    /* menu.separator: label is a menu path, ref is LUA_NOREF */
     char *owner;       /* script name, used to namespace config values */
     char *configKey;   /* menu.checkbox's persisted key, or NULL */

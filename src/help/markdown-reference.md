@@ -1,6 +1,6 @@
-# MarkEdit Markdown Reference
+# Tinker Editor Markdown Reference
 
-CommonMark with GitHub-flavoured extensions and MarkEdit preview features.
+CommonMark with GitHub-flavoured extensions and Tinker Editor preview features.
 Edit this document freely to experiment - it is unsaved, so nothing is
 overwritten.
 

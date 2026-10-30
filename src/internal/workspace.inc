@@ -223,7 +223,7 @@ static void do_open_recent_workspace(int index) {
     if (!root) return;
     DWORD attrs = GetFileAttributesW(root);
     if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-        MessageBoxW(g_hMainWnd, L"That folder could not be found.", L"MarkEdit",
+        MessageBoxW(g_hMainWnd, L"That folder could not be found.", L"Tinker Editor",
                     MB_OK | MB_ICONINFORMATION);
         recent_list_remove(&g_recentFolderList, root);
         refresh_menu(g_hMainWnd);

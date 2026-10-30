@@ -1,5 +1,5 @@
 param(
-    [string]$Executable = (Join-Path $PSScriptRoot '..\dist\markedit.exe')
+    [string]$Executable = (Join-Path $PSScriptRoot '..\dist\tinkeredit.exe')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,7 +9,7 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class MarkEditUiTestNative {
+public static class TinkerEditorUiTestNative {
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -55,15 +55,15 @@ function Wait-Until([scriptblock]$Condition, [string]$Failure, [int]$TimeoutMs =
 }
 
 function Send-Command([IntPtr]$Window, [int]$Command) {
-    [void][MarkEditUiTestNative]::SendMessage(
+    [void][TinkerEditorUiTestNative]::SendMessage(
         $Window, $WM_COMMAND, [IntPtr]$Command, [IntPtr]::Zero)
 }
 
 function Assert-PanelLayout([IntPtr]$Main, [IntPtr]$Panel) {
-    $mainRect = [MarkEditUiTestNative+RECT]::new()
-    $panelRect = [MarkEditUiTestNative+RECT]::new()
-    if (-not [MarkEditUiTestNative]::GetWindowRect($Main, [ref]$mainRect) -or
-        -not [MarkEditUiTestNative]::GetWindowRect($Panel, [ref]$panelRect)) {
+    $mainRect = [TinkerEditorUiTestNative+RECT]::new()
+    $panelRect = [TinkerEditorUiTestNative+RECT]::new()
+    if (-not [TinkerEditorUiTestNative]::GetWindowRect($Main, [ref]$mainRect) -or
+        -not [TinkerEditorUiTestNative]::GetWindowRect($Panel, [ref]$panelRect)) {
         throw 'Could not read the main/output panel rectangles.'
     }
     $width = $panelRect.Right - $panelRect.Left
@@ -75,7 +75,7 @@ function Assert-PanelLayout([IntPtr]$Main, [IntPtr]$Panel) {
     }
 }
 
-$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('markedit-ui-' + [guid]::NewGuid().ToString('N'))
+$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('tinkeredit-ui-' + [guid]::NewGuid().ToString('N'))
 $oldAppData = $env:APPDATA
 $oldLocalAppData = $env:LOCALAPPDATA
 $process = $null
@@ -90,13 +90,13 @@ try {
     $env:LOCALAPPDATA = $oldLocalAppData
 
     Wait-Until { $process.Refresh(); $process.MainWindowHandle -ne [IntPtr]::Zero } `
-        'MarkEdit did not create its main window.'
+        'Tinker Editor did not create its main window.'
     $main = $process.MainWindowHandle
-    $panel = [MarkEditUiTestNative]::GetDlgItem($main, $ID_OUTPUT_PANEL)
+    $panel = [TinkerEditorUiTestNative]::GetDlgItem($main, $ID_OUTPUT_PANEL)
     if ($panel -eq [IntPtr]::Zero) { throw 'The output panel control was not created.' }
 
     Send-Command $main $IDM_VIEW_GIT
-    Wait-Until { [MarkEditUiTestNative]::IsWindowVisible($panel) } `
+    Wait-Until { [TinkerEditorUiTestNative]::IsWindowVisible($panel) } `
         'Opening the Git panel did not make the output panel visible.'
     Assert-PanelLayout $main $panel
 
@@ -106,15 +106,15 @@ try {
     Assert-PanelLayout $main $panel
 
     Send-Command $panel $ID_OUTPUT_CLOSE
-    Wait-Until { -not [MarkEditUiTestNative]::IsWindowVisible($panel) } `
+    Wait-Until { -not [TinkerEditorUiTestNative]::IsWindowVisible($panel) } `
         'Closing the output panel did not hide it.'
 
     Send-Command $main $IDM_VIEW_GIT
-    Wait-Until { [MarkEditUiTestNative]::IsWindowVisible($panel) } `
+    Wait-Until { [TinkerEditorUiTestNative]::IsWindowVisible($panel) } `
         'Reopening the Git panel did not make the output panel visible.'
     Assert-PanelLayout $main $panel
 
-    if (-not [MarkEditUiTestNative]::SetWindowPos(
+    if (-not [TinkerEditorUiTestNative]::SetWindowPos(
         $main, [IntPtr]::Zero, 0, 0, 1000, 700, $SWP_NOMOVE -bor $SWP_NOZORDER)) {
         throw 'Could not resize the main window.'
     }
@@ -126,7 +126,7 @@ finally {
     $env:APPDATA = $oldAppData
     $env:LOCALAPPDATA = $oldLocalAppData
     if ($process -and -not $process.HasExited) {
-        [void][MarkEditUiTestNative]::SendMessage(
+        [void][TinkerEditorUiTestNative]::SendMessage(
             $process.MainWindowHandle, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
         if (-not $process.WaitForExit(5000)) { $process.Kill() }
     }

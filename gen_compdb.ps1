@@ -43,10 +43,10 @@ $releaseFlags = (Read-Rsp 'release-flags.rsp').Flags
 $cmark = Read-Rsp 'cmark-gfm-sources.rsp'
 $lua = Read-Rsp 'lua-sources.rsp'
 
-# MarkEdit's own sources carry no per-file flags in the .rsp (build.bat adds
+# Tinker Editor's own sources carry no per-file flags in the .rsp (build.bat adds
 # them on the command line); mirror that command line here. It also carries
 # the cmark-gfm and Lua -D/-I flags, which markdown.c and the plugin host need.
-$markeditFlags = @('-std=c11') + $releaseFlags + @(
+$tinkereditFlags = @('-std=c11') + $releaseFlags + @(
     '-Wall', '-Wextra', '-Wno-unknown-pragmas',
     '-I.', '-isystem', 'third_party/webview2/include',
     '-isystem', 'third_party/lexilla/include',
@@ -64,7 +64,7 @@ $lexillaFlags = @('-std=c++17') + $releaseFlags + @(
 )
 
 $entries = [System.Collections.Generic.List[object]]::new()
-$entries.AddRange((New-Entries -Driver @('zig','cc')  -BaseFlags $markeditFlags -Rsp (Read-Rsp 'markedit-sources.rsp')))
+$entries.AddRange((New-Entries -Driver @('zig','cc')  -BaseFlags $tinkereditFlags -Rsp (Read-Rsp 'tinkeredit-sources.rsp')))
 $entries.AddRange((New-Entries -Driver @('zig','cc')  -BaseFlags $cmarkFlags    -Rsp $cmark))
 $entries.AddRange((New-Entries -Driver @('zig','cc')  -BaseFlags @('-std=c11')  -Rsp $lua))
 $entries.AddRange((New-Entries -Driver @('zig','c++') -BaseFlags $lexillaFlags  -Rsp (Read-Rsp 'lexilla-sources.rsp')))

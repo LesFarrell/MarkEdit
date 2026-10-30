@@ -143,7 +143,7 @@ int write_file_atomic_progress(const WCHAR *target, const char *text, size_t len
     HANDLE hFile = INVALID_HANDLE_VALUE;
     if (temporary) {
         for (unsigned attempt = 0; attempt < 100 && hFile == INVALID_HANDLE_VALUE; attempt++) {
-            swprintf(temporary, temporaryCapacity, L"%ls.markedit-%lu-%u.tmp",
+            swprintf(temporary, temporaryCapacity, L"%ls.tinkeredit-%lu-%u.tmp",
                      target, GetCurrentProcessId(), attempt);
             hFile = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                 FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, NULL);

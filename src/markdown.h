@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_MARKDOWN_H
-#define MARKEDIT_MARKDOWN_H
+#ifndef TINKEREDIT_MARKDOWN_H
+#define TINKEREDIT_MARKDOWN_H
 
 #include <stddef.h>
 

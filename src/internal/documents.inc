@@ -198,7 +198,7 @@ static void switch_document(int index) {
 
 static int create_document_tab(void) {
     if (g_documentStore.count >= MAX_DOCUMENTS) {
-        MessageBoxW(g_hMainWnd, L"MarkEdit can keep up to 32 documents open at once.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_hMainWnd, L"Tinker Editor can keep up to 32 documents open at once.", L"Tinker Editor", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
     if (g_documentStore.count > 0) save_active_document_view();
@@ -254,7 +254,7 @@ static void update_title(void) {
     size_t cap = wcslen(name) + 32;
     WCHAR *title = (WCHAR *)malloc(cap * sizeof(WCHAR));
     if (!title) return;
-    swprintf(title, cap, L"%ls%ls - MarkEdit", name, g_dirty ? L"*" : L"");
+    swprintf(title, cap, L"%ls%ls - Tinker Editor", name, g_dirty ? L"*" : L"");
     SetWindowTextW(g_hMainWnd, title);
     free(title);
 }
@@ -813,11 +813,11 @@ static void apply_large_file_mode_after_growth(int documentIndex) {
 static void reopen_with_encoding(TextEncoding encoding) {
     if (!g_currentFile) {
         MessageBoxW(g_hMainWnd, L"Save the document first - there's no file to reopen yet.",
-                    L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+                    L"Tinker Editor", MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_dirty && MessageBoxW(g_hMainWnd, L"Reopening discards your unsaved changes. Continue?",
-                               L"MarkEdit", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+                               L"Tinker Editor", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     WCHAR *path = wcsdup_heap(g_currentFile);
     if (path) load_file_as(path, encoding);
     free(path);
@@ -929,7 +929,7 @@ static void restore_session_documents(void) {
    Returns 0 if the caller should abort. */
 static int confirm_discard_if_dirty(void) {
     if (!g_dirty) return 1;
-    int r = MessageBoxW(g_hMainWnd, L"Save changes to the current document?", L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
+    int r = MessageBoxW(g_hMainWnd, L"Save changes to the current document?", L"Tinker Editor", MB_YESNOCANCEL | MB_ICONWARNING);
     if (r == IDCANCEL) return 0;
     if (r == IDYES) {
         if (!do_save()) return 0;
@@ -1319,7 +1319,7 @@ static int confirm_lossy_encoding(TextEncoding *encoding, int *hasBom) {
                  L"reopened with the wrong encoding - and they can't be stored in UTF-16.\n\n"
                  L"Yes: save it as UTF-8 instead, keeping those bytes as they are.\n"
                  L"No: save as UTF-16 anyway, replacing them with \x201C\xFFFD\x201D.");
-    int answer = MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNOCANCEL | MB_ICONWARNING);
+    int answer = MessageBoxW(g_hMainWnd, message, L"Tinker Editor", MB_YESNOCANCEL | MB_ICONWARNING);
     if (answer == IDCANCEL) return 0;
     if (answer == IDYES) {
         *encoding = TEXT_ENCODING_UTF8;
@@ -1489,11 +1489,11 @@ static int do_save_all(void) {
 
 static void do_export_html(void) {
     if (!g_webview || !g_webviewReady) {
-        MessageBoxW(g_hMainWnd, L"The preview is not ready yet.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_hMainWnd, L"The preview is not ready yet.", L"Tinker Editor", MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_exportPath) {
-        MessageBoxW(g_hMainWnd, L"An HTML export is already in progress.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_hMainWnd, L"An HTML export is already in progress.", L"Tinker Editor", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -1562,12 +1562,12 @@ static void do_export_html(void) {
 
 static void prepare_rendered_print(int exportPdf) {
     if (!g_webview || !g_webviewReady) {
-        MessageBoxW(g_hMainWnd, L"The rendered preview is not ready yet.", L"MarkEdit",
+        MessageBoxW(g_hMainWnd, L"The rendered preview is not ready yet.", L"Tinker Editor",
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_pendingPrintAction != PRINT_ACTION_NONE) {
-        MessageBoxW(g_hMainWnd, L"A print or PDF operation is already in progress.", L"MarkEdit",
+        MessageBoxW(g_hMainWnd, L"A print or PDF operation is already in progress.", L"Tinker Editor",
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -1754,7 +1754,7 @@ static void do_reopen_closed_tab(void) {
     } else {
         if (g_documentStore.count >= MAX_DOCUMENTS) {
             g_closedDocuments[g_closedDocumentCount++] = restored;
-            MessageBoxW(g_hMainWnd, L"Close a tab before reopening this document.", L"MarkEdit", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(g_hMainWnd, L"Close a tab before reopening this document.", L"Tinker Editor", MB_OK | MB_ICONINFORMATION);
             return;
         }
         for (int i = g_documentStore.count; i > index; i--) g_documentStore.documents[i] = g_documentStore.documents[i - 1];
@@ -1808,7 +1808,7 @@ static void prompt_reload_external_change(int index) {
                     g_dirty
                         ? L"This file was deleted or moved on disk. Your unsaved text is still open; saving will recreate the old path."
                         : L"This file was deleted or moved on disk. Its text remains open; saving will recreate the old path.",
-                    L"MarkEdit", MB_OK | MB_ICONWARNING);
+                    L"Tinker Editor", MB_OK | MB_ICONWARNING);
         return;
     }
     /* A document set to reload by itself (documents.auto_reload()) doesn't
@@ -1820,7 +1820,7 @@ static void prompt_reload_external_change(int index) {
     const WCHAR *message = g_dirty
         ? L"This file changed on disk. Reload it and discard your unsaved changes?"
         : L"This file changed on disk. Reload the updated version?";
-    if (MessageBoxW(g_hMainWnd, message, L"MarkEdit", MB_YESNO | MB_ICONQUESTION) == IDYES)
+    if (MessageBoxW(g_hMainWnd, message, L"Tinker Editor", MB_YESNO | MB_ICONQUESTION) == IDYES)
         reload_active_document();
 }
 

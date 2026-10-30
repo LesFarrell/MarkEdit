@@ -67,12 +67,12 @@ static void push_shallow_table_copy(lua_State *L, int sourceIndex) {
    string library behind string methods is guarded separately, by
    plugin_lua_protect_string_metatable(). */
 static void push_plugin_environment(lua_State *L, const char *owner) {
-    lua_getfield(L, LUA_REGISTRYINDEX, "markedit.environments");
+    lua_getfield(L, LUA_REGISTRYINDEX, "tinkeredit.environments");
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
         lua_newtable(L);
         lua_pushvalue(L, -1);
-        lua_setfield(L, LUA_REGISTRYINDEX, "markedit.environments");
+        lua_setfield(L, LUA_REGISTRYINDEX, "tinkeredit.environments");
     }
     lua_getfield(L, -1, owner);
     if (!lua_isnil(L, -1)) {

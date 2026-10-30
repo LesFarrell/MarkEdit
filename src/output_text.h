@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_OUTPUT_TEXT_H
-#define MARKEDIT_OUTPUT_TEXT_H
+#ifndef TINKEREDIT_OUTPUT_TEXT_H
+#define TINKEREDIT_OUTPUT_TEXT_H
 
 #include <stddef.h>
 

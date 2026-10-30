@@ -1,6 +1,6 @@
 ; CHIP-8 "HELLO" for the bundled CHIP-8 assembler.
 ;
-; Open this file in MarkEdit, then choose
+; Open this file in Tinker Editor, then choose
 ;   Tools -> CHIP-8 Assembler -> Compile
 ; and save the .ch8 file. Load it in a CHIP-8 interpreter.
 ;

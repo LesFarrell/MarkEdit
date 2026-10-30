@@ -1,12 +1,12 @@
-#ifndef MARKEDIT_H
-#define MARKEDIT_H
+#ifndef TINKEREDIT_H
+#define TINKEREDIT_H
 
 #include <windows.h>
 
 #include "settings_values.h" /* SPLITTER_WIDTH */
 
 /* The output panel's tabs (see output_panel.inc). Declared here, rather than
-   there, so debugger.inc - included before output_panel.inc in markedit.c's
+   there, so debugger.inc - included before output_panel.inc in tinkeredit.c's
    unity build - can name OUTPUT_TAB_DEBUG when starting a debug session. */
 enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBUG, OUTPUT_TAB_GIT,
       OUTPUT_TAB_COUNT };
@@ -80,7 +80,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 /* ---- window messages and layout metrics ---- */
 #define WM_APP_CLOSE_TAB (WM_APP + 1)
 #define WM_APP_DEFERRED_INIT (WM_APP + 2)
-/* WM_APP + 3 is MARKEDIT_WM_EXPLORER_CHANGED (file_explorer.h). */
+/* WM_APP + 3 is TINKEREDIT_WM_EXPLORER_CHANGED (file_explorer.h). */
 #define WM_APP_PLUGIN_TAB_CHECK (WM_APP + 4)
 #define WM_APP_APPLY_LARGE_FILE_MODE (WM_APP + 5)
 #define WM_APP_PLUGIN_DOCUMENT_ACTION (WM_APP + 6)
@@ -127,7 +127,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 
 #include "command_ids.h"
 
-/* ---- resource IDs (markedit.rc) ---- */
+/* ---- resource IDs (tinkeredit.rc) ---- */
 #define IDI_APPICON 1
 #define IDR_DEFAULT_MENUS 2 /* src/menus.lua, the menu bar used without a user copy */
 #define IDR_BUILTIN_FORMATTING_BASE 3 /* src/lua/formatting_base.lua */
@@ -136,7 +136,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 #define IDR_BUILTIN_FORMATTING_TABLES 7
 #define IDR_BUILTIN_FORMATTING_TEXT 8
 
-/* ---- forward declarations for functions defined in markedit.c ----
+/* ---- forward declarations for functions defined in tinkeredit.c ----
    Grouped roughly by area: preview/theme, menu/layout, spell check,
    status/outline, recovery, dialogs, and document/tab management. */
 /* Nonzero on success; zero on cancellation or write failure. */

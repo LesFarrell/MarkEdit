@@ -16,7 +16,7 @@
 /* CreatePseudoConsole/ResizePseudoConsole/ClosePseudoConsole are resolved
    with GetProcAddress rather than called directly, even though the headers
    declare them: ConPTY only exists on Windows 10 1809+, and a direct import
-   would keep markedit.exe from loading at all on an older Windows, rather
+   would keep tinkeredit.exe from loading at all on an older Windows, rather
    than just this one feature being unavailable. */
 typedef HRESULT(WINAPI *PFN_CreatePseudoConsole)(COORD, HANDLE, HANDLE, DWORD, HPCON *);
 typedef HRESULT(WINAPI *PFN_ResizePseudoConsole)(HPCON, COORD);
@@ -251,7 +251,7 @@ TerminalProcess *terminal_process_start(const WCHAR *commandLine, const WCHAR *d
         startup.StartupInfo.cb = sizeof(startup);
         startup.lpAttributeList = attributeList;
         /* Without this, a shell launched from a process that itself has a
-           console (e.g. MarkEdit started from a command prompt rather than
+           console (e.g. Tinker Editor started from a command prompt rather than
            by double-clicking it) inherits that console's standard handles
            for its own stdout/stderr - CreateProcess copies them by default
            whenever STARTF_USESTDHANDLES is absent, regardless of

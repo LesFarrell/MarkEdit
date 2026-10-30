@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_TEXT_CODEC_H
-#define MARKEDIT_TEXT_CODEC_H
+#ifndef TINKEREDIT_TEXT_CODEC_H
+#define TINKEREDIT_TEXT_CODEC_H
 
 #include <windows.h>
 

@@ -12,7 +12,7 @@
 #include "text_codec.h"
 #include "text_search.h" /* SEARCH_* find options */
 
-/* ---- persisted settings, stored in %APPDATA%\markedit\settings.json ---- */
+/* ---- persisted settings, stored in %APPDATA%\tinkeredit\settings.json ---- */
 WCHAR *get_settings_path(void) {
     DWORD capacity = GetEnvironmentVariableW(L"APPDATA", NULL, 0);
     WCHAR *appData = NULL;
@@ -27,7 +27,7 @@ WCHAR *get_settings_path(void) {
         capacity = length;
     }
     if (!appData) return NULL;
-    WCHAR *directory = path_join(appData, L"markedit");
+    WCHAR *directory = path_join(appData, L"tinkeredit");
     free(appData);
     if (!directory) return NULL;
     CreateDirectoryW(directory, NULL);

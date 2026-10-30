@@ -58,7 +58,7 @@ static unsigned __stdcall read_output(void *argument) {
     return 0;
 }
 
-/* MarkEdit's environment with `additions` merged in, as a block for
+/* Tinker Editor's environment with `additions` merged in, as a block for
    CreateProcessW, or NULL when out of memory. */
 static WCHAR *merged_environment(const WCHAR *additions) {
     WCHAR *current = GetEnvironmentStringsW();
@@ -101,7 +101,7 @@ static HANDLE create_kill_on_close_job(void) {
 }
 
 /* Creates a pipe whose `childEnd` the program inherits and whose other end
-   stays private to MarkEdit. childReads picks the direction. */
+   stays private to Tinker Editor. childReads picks the direction. */
 static int create_pipe(HANDLE *ourEnd, HANDLE *childEnd, int childReads) {
     SECURITY_ATTRIBUTES inherit = { sizeof(inherit), NULL, TRUE };
     HANDLE readEnd, writeEnd;
@@ -153,7 +153,7 @@ OutputProcess *output_process_start(const WCHAR *commandLine, const WCHAR *direc
         CloseHandle(info.hThread);
     }
     /* The reader sees the end of the output only once every copy of the
-       pipe's write end is closed, including MarkEdit's copy of the child's. */
+       pipe's write end is closed, including Tinker Editor's copy of the child's. */
     close_handle(&childInput);
     close_handle(&childOutput);
     free(command);

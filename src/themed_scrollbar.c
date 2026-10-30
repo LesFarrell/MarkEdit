@@ -20,7 +20,7 @@
 #define BAR_HORIZONTAL 1
 #define BAR_COUNT      2
 #define OVERLAY_ID_BASE 0x5340
-#define OVERLAY_CLASS   L"MarkEditThemedScrollbarOverlay"
+#define OVERLAY_CLASS   L"TinkerEditorThemedScrollbarOverlay"
 
 #define BAR_THICKNESS_DIP  14
 #define THUMB_INSET_DIP    3

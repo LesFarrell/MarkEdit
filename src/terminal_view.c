@@ -243,7 +243,7 @@ static void paste_clipboard(TerminalView *view) {
                                MessageBoxW(view->hwnd,
                                    L"The clipboard has more than one line. Pasting into the "
                                    L"terminal runs each line as a command. Continue?",
-                                   L"MarkEdit", MB_YESNO | MB_ICONWARNING) == IDYES) {
+                                   L"Tinker Editor", MB_YESNO | MB_ICONWARNING) == IDYES) {
                         terminal_process_write(view->process, utf8, length);
                     }
                     free(utf8);
@@ -683,7 +683,7 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             GetClientRect(hwnd, &client);
             paint_view(view, hdc, &client);
             EndPaint(hwnd, &paint);
-            return 0;
+            return 0; 
         }
         case WM_SIZE: {
             int previousCols = view->cols;

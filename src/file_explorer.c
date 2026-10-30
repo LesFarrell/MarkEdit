@@ -3,9 +3,9 @@
  * the current workspace folder, with New/Rename/Delete and a background
  * ReadDirectoryChangesW watcher that keeps it in sync with external changes.
  *
- * markedit.h's own forward declarations are static to markedit.c's
+ * tinkeredit.h's own forward declarations are static to tinkeredit.c's
  * translation unit (that header is only ever included there), so this file
- * cannot call markedit.c functions like open_file_in_tab() or
+ * cannot call tinkeredit.c functions like open_file_in_tab() or
  * show_text_input() by name. The operations it needs are instead handed in
  * once as plain function pointers by explorer_init().
  */
@@ -82,7 +82,7 @@ static WCHAR *s_pendingRootChoice = NULL;  /* queued drive/share to adopt, see q
 static int s_pendingParentNavigation = 0; /* queued move up one folder */
 
 /* Posted to the tree itself (handled by its subclass), so it never collides
-   with the WM_APP messages markedit.c's main window uses. */
+   with the WM_APP messages tinkeredit.c's main window uses. */
 #define EXPLORER_WM_NAVIGATE (WM_APP + 1)
 
 static CRITICAL_SECTION s_pendingLock;
@@ -194,7 +194,7 @@ static int icon_index_for_path(const WCHAR *path, int isDirectory)
 /* ---- tree item helpers ----
    TVM_INSERTITEM/TVM_GETITEM have distinct ANSI/Unicode message codes and
    this project defines neither UNICODE nor _UNICODE, so (matching how
-   markedit.c itself always sends TCM_INSERTITEMW explicitly rather than
+   tinkeredit.c itself always sends TCM_INSERTITEMW explicitly rather than
    relying on the ambiguous TabCtrl_InsertItem macro) these two go through
    explicit *_W messages instead of the generic TreeView_InsertItem/GetItem
    macros. Every other TreeView_* macro used below wraps a message with no
@@ -1335,8 +1335,8 @@ void explorer_handle_notify(NMHDR *notification)
 /* ---- live file-system watcher ----
    One background thread per open root. It never touches the TreeView (or
    any other UI) directly - it only appends to the critical-section-guarded
-   pending-directories queue and posts MARKEDIT_WM_EXPLORER_CHANGED, which
-   markedit.c's WndProc debounces before calling explorer_handle_change_message()
+   pending-directories queue and posts TINKEREDIT_WM_EXPLORER_CHANGED, which
+   tinkeredit.c's WndProc debounces before calling explorer_handle_change_message()
    back on the UI thread. This is the app's first background thread, so its
    shutdown path is deliberately conservative: CancelIoEx before joining, so
    a still-pending overlapped read can never leave the thread stuck in
@@ -1375,7 +1375,7 @@ static void queue_changed_directory(const WCHAR *directory)
     }
     LeaveCriticalSection(&s_pendingLock);
     if (s_hParent)
-        PostMessageW(s_hParent, MARKEDIT_WM_EXPLORER_CHANGED, 0, 0);
+        PostMessageW(s_hParent, TINKEREDIT_WM_EXPLORER_CHANGED, 0, 0);
 }
 
 static unsigned __stdcall explorer_watch_thread_proc(void *param)

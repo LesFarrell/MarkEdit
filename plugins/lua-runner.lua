@@ -1,4 +1,4 @@
--- Runs Lua code with the Lua built into MarkEdit, on Tools > Interpreters > Lua:
+-- Runs Lua code with the Lua built into Tinker Editor, on Tools > Interpreters > Lua:
 --   Run Document        the whole document
 --   Run Selection       the selected text
 --   Evaluate Selection  shows the value of an expression, as a REPL would

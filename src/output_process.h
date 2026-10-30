@@ -1,12 +1,12 @@
-#ifndef MARKEDIT_OUTPUT_PROCESS_H
-#define MARKEDIT_OUTPUT_PROCESS_H
+#ifndef TINKEREDIT_OUTPUT_PROCESS_H
+#define TINKEREDIT_OUTPUT_PROCESS_H
 
 #include <windows.h>
 
 /* A program run for the output panel, with its standard input, output and
    error on pipes (output and error share one, so they stay in order). It
    runs without a console window, in a job that ends the program and
-   everything it starts when it is stopped or MarkEdit exits.
+   everything it starts when it is stopped or Tinker Editor exits.
 
    A reader thread posts each piece of output to the window as `message`,
    with an OutputChunk in lParam that the window must free. The last chunk,
@@ -26,7 +26,7 @@ typedef struct OutputProcess OutputProcess;
 
 /* Runs commandLine in directory. environment, when not NULL, is a block of
    "NAME=value" strings each ending in a NUL, with one more NUL at the end;
-   they are added to MarkEdit's own environment, replacing any variable of
+   they are added to Tinker Editor's own environment, replacing any variable of
    the same name. Returns NULL when the program can't be started. */
 OutputProcess *output_process_start(const WCHAR *commandLine, const WCHAR *directory,
                                     const WCHAR *environment, HWND window, UINT message,

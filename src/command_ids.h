@@ -1,5 +1,5 @@
-#ifndef MARKEDIT_COMMAND_IDS_H
-#define MARKEDIT_COMMAND_IDS_H
+#ifndef TINKEREDIT_COMMAND_IDS_H
+#define TINKEREDIT_COMMAND_IDS_H
 
 /* WM_COMMAND IDs of the built-in commands, shared by the menu, the
    toolbar and menu_commands.c's name table. */

@@ -1,4 +1,4 @@
-# MarkEdit
+# Tinker Editor
 
 A tiny, native Win32 Markdown editor with live HTML preview.
 
@@ -6,14 +6,14 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library. Every file type previews: Markdown renders as a document, HTML files render as the saved web page, and any other recognised type (source code, JSON, YAML, `.txt`) shows as its own syntax-highlighted source, with highlighting skipped above 512 KB. Files of an unrecognised type, and new untitled tabs, preview as Markdown.
 - A formatting toolbar above the editor for bold, italic, strikethrough, inline code, fenced code blocks, headings, blockquotes, bullet/numbered/task lists, links, images, tables, footnotes, horizontal rules, alerts, toggling the preview pane, and swapping the panel sides.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
-- GitHub Light and GitHub Dark themes (View → Editor Theme and View → Markdown Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash). Their colours can be changed in Lua: Plugins → Customize Theme Colours writes `%APPDATA%\markedit\themes.lua` listing every colour, and `plugins/examples/themes.lua` is a complete example.
+- GitHub Light and GitHub Dark themes (View → Editor Theme and View → Markdown Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash). Their colours can be changed in Lua: Plugins → Customize Theme Colours writes `%APPDATA%\tinkeredit\themes.lua` listing every colour, and `plugins/examples/themes.lua` is a complete example.
 - The window appears immediately on launch; spell-check activation, the WebView2 preview engine, and reopening the previous session's files happen in the background right after, instead of delaying the window's appearance.
 
-Launching with no arguments opens the editor with the saved workspace layout; launching with a Markdown file path shows just the rendered preview (`markedit.exe notes.md`), and any other file opens in the editor.
+Launching with no arguments opens the editor with the saved workspace layout; launching with a Markdown file path shows just the rendered preview (`tinkeredit.exe notes.md`), and any other file opens in the editor.
 
 ## Features
 
-MarkEdit combines a native Markdown workspace with the tools needed for
+Tinker Editor combines a native Markdown workspace with the tools needed for
 writing and small software projects:
 
 - Live GFM preview with local Mermaid, KaTeX and syntax-highlighting assets.
@@ -38,10 +38,10 @@ build.bat
 This uses MSVC's C/C++ toolchain with size optimization, function/data-level
 linking, whole-program optimization, and a statically linked C/C++ runtime.
 After compiling, the script safely clears and recreates `dist/`, then stages
-`markedit.exe`, the required runtime DLLs, offline preview assets, and licence
+`tinkeredit.exe`, the required runtime DLLs, offline preview assets, and licence
 files there.
 
-A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC, Zig, and MSVC builds. Each builds the same targets (`markedit.exe` in `build\bin`, statically linking Lexilla and Lua, and the test programs under `build\tests`) and stages `dist/` the way `build.bat` does:
+A [premake5.lua](premake5.lua) is also provided for MinGW-w64 GCC, Zig, and MSVC builds. Each builds the same targets (`tinkeredit.exe` in `build\bin`, statically linking Lexilla and Lua, and the test programs under `build\tests`) and stages `dist/` the way `build.bat` does:
 
 ```bat
 rem MinGW-w64 GCC
@@ -52,9 +52,9 @@ rem Zig (zig cc / zig c++ / zig rc stand in for the GCC toolchain)
 premake5 --zig gmake
 make -C build config=release_x64
 
-rem MSVC (Visual Studio 2022 or later; open build\MarkEdit.sln, or:)
+rem MSVC (Visual Studio 2022 or later; open build\Tinker Editor.sln, or:)
 premake5 vs2022
-msbuild build\MarkEdit.sln /p:Configuration=Release /p:Platform=x64
+msbuild build\Tinker Editor.sln /p:Configuration=Release /p:Platform=x64
 ```
 
 The two `gmake` builds need GNU make running its recipes under a POSIX shell, as [w64devkit](https://github.com/skeeto/w64devkit) or MSYS2 provide.
@@ -70,39 +70,39 @@ switching, close/reopen, Git-panel reopening and resize layout against the
 packaged executable:
 
 ```powershell
-pwsh -File tests/test_ui_smoke.ps1 -Executable dist/markedit.exe
+pwsh -File tests/test_ui_smoke.ps1 -Executable dist/tinkeredit.exe
 ```
 
 The Windows CI workflow runs all three steps and uploads the staged `dist/`
 folder.
 
-Running `markedit.exe` also requires the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) to be installed (present by default on current Windows 10/11).
+Running `tinkeredit.exe` also requires the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) to be installed (present by default on current Windows 10/11).
 
 ## Distribution folder
 
 `dist/` is the clean, unpacked release staging folder generated by `build.bat`. It contains only:
 
-- `markedit.exe` (Lexilla is linked straight into it, not shipped separately), the two required runtime DLLs (`Scintilla.dll` and `WebView2Loader.dll`), and the standalone bundled GDB 17.1 executable;
+- `tinkeredit.exe` (Lexilla is linked straight into it, not shipped separately), the two required runtime DLLs (`Scintilla.dll` and `WebView2Loader.dll`), and the standalone bundled GDB 17.1 executable;
 - the preview shell, Mermaid, Highlight.js, GitHub Markdown CSS, and the complete `katex/` asset tree needed for offline rendering;
-- the `plugins/` folder with bundled extensions, the plugin guide, examples, and Lua Language Server definitions (Lua itself is linked into `markedit.exe`); and
-- `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`. The packaged GDB folder contains only `gdb.exe` and its small licence/provenance files; corresponding source remains in the MarkEdit source repository rather than the binary distribution.
+- the `plugins/` folder with bundled extensions, the plugin guide, examples, and Lua Language Server definitions (Lua itself is linked into `tinkeredit.exe`); and
+- `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`. The packaged GDB folder contains only `gdb.exe` and its small licence/provenance files; corresponding source remains in the Tinker Editor source repository rather than the binary distribution.
 
-Do not package `settings.json`, debug symbols, import libraries, compiler objects, or temporary archives. Application preferences and Lua plugin settings share `%APPDATA%\markedit\settings.json`; the WebView2 browser profile and recovery snapshots live under `%LOCALAPPDATA%\MarkEdit`. The Inno Setup manifest mirrors this runtime-and-licences layout.
+Do not package `settings.json`, debug symbols, import libraries, compiler objects, or temporary archives. Application preferences and Lua plugin settings share `%APPDATA%\tinkeredit\settings.json`; the WebView2 browser profile and recovery snapshots live under `%LOCALAPPDATA%\TinkerEditor`. The Inno Setup manifest mirrors this runtime-and-licences layout.
 
 ## Project layout
 
 ```
 src/                     application sources, including:
-  markedit.c / .h          Win32 application and UI orchestration
-  internal/                named private Win32 subsystems included by markedit.c
+  tinkeredit.c / .h          Win32 application and UI orchestration
+  internal/                named private Win32 subsystems included by tinkeredit.c
   command_ids.h            WM_COMMAND IDs of the built-in commands
   app_accelerators.c / .h  fixed Win32 shortcuts, checked against the command registry by tests
-  menus.lua                default menu bar definition, built into markedit.exe
-  lua/formatting_*.lua     Markdown and Markdown-aware Edit commands built into markedit.exe
+  menus.lua                default menu bar definition, built into tinkeredit.exe
+  lua/formatting_*.lua     Markdown and Markdown-aware Edit commands built into tinkeredit.exe
   menu_commands.c / .h     built-in command names used by menus.lua, with their shortcut text
   settings.c / settings*.h  settings.json persistence; settings_values.h holds the persisted
                             values, settings_io.h the load/save surface, settings.h the umbrella
-  help/                    Help pages built into markedit.exe: markdown-reference.md, and keyboard-shortcuts.lua,
+  help/                    Help pages built into tinkeredit.exe: markdown-reference.md, and keyboard-shortcuts.lua,
                            which generates the Keyboard Shortcuts page from the menus and shortcut table
   file_explorer.c / .h     workspace file explorer panel
   layout_metrics.c / .h    explorer panel geometry shared by layout and settings
@@ -132,29 +132,29 @@ src/                     application sources, including:
   theme.c / .h             light/dark palettes by role, their themes.lua names and template,
                            and paint helpers
 plugins/                 bundled Lua extensions, plugin guide, examples, and language-server types
-docs/lua.md              developer guide to MarkEdit's Lua files: what each is, load order, how commands reach Lua
+docs/lua.md              developer guide to Tinker Editor's Lua files: what each is, load order, how commands reach Lua
 docs/architecture.md     native/Lua boundaries and subsystem ownership
 release-flags.rsp        release flags used by the optional GCC/Zig Premake builds
 cmark-gfm-sources.rsp    vendored renderer source list and its defines/include paths
-markedit-sources.rsp     application source list used by build.bat
+tinkeredit-sources.rsp     application source list used by build.bat
 lexilla-sources.rsp      supported lexer source list used by build.bat
 lua-sources.rsp          Lua core and plugin-library source list used by build.bat and test.bat
 plugin-sources.rsp       plugin host sources the plugin, menu, formatting and theme tests link
 check_structure.ps1      checks the source-layout rules in AGENTS.md; run by test.bat
 gen_compdb.ps1, .clangd  generate compile_commands.json for the clangd language server
-markedit.rc / .ico       Win32 resources (icon, version info)
-markedit.manifest        DPI-awareness and long-path declarations
+tinkeredit.rc / .ico       Win32 resources (icon, version info)
+tinkeredit.manifest        DPI-awareness and long-path declarations
 preview_shell.html       HTML/JS shell hosting the WebView2 preview + Mermaid
 github-markdown.css      GitHub-flavored preview stylesheet (light + dark)
 mermaid.min.js           bundled Mermaid renderer
 highlight*.js / .css     bundled Highlight.js renderer and light/dark themes
 katex/                    bundled KaTeX renderer, stylesheet, and fonts
-make_icon.ps1            regenerates markedit.ico
+make_icon.ps1            regenerates tinkeredit.ico
 build.bat                size-optimized MSVC build and distribution script
 scripts/*_msvc.ps1       shared MSVC compilation logic for build.bat and test.bat
 scripts/msvc-env.bat     locates Visual Studio and initializes its x64 tools
 premake5.lua             alternative build for MinGW GCC, Zig (make) or MSVC (Visual Studio)
-markedit.iss             Inno Setup installer script
+tinkeredit.iss             Inno Setup installer script
 dist/                    clean unpacked release staging folder (generated, not tracked)
 test.bat / tests/        test programs: parser, editor commands, language, outline, theme, core,
                           output, Git status/workflows, terminal grid/input/process/view, recovery, plugin host, menus,
@@ -174,11 +174,11 @@ third_party/scowl/       SCOWL 2026.02.25 licence and provenance for the anagram
 
 The preview uses GitHub-flavored CSS (`github-markdown.css`, checked in next to `preview_shell.html`) for a more authentic look. Its light and dark variants are synchronized with the matching GitHub editor palette. Mermaid, Highlight.js, and KaTeX assets are also local, so rendering works offline and does not silently fetch executable content, styles, or fonts from a CDN.
 
-Build outputs such as `markedit.exe` and the assembled `dist/` folder are generated locally and are not tracked in git; neither is a `webview2_data/` folder left beside the exe by builds from before the WebView2 profile moved to `%LOCALAPPDATA%\MarkEdit\WebView2`.
+Build outputs such as `tinkeredit.exe` and the assembled `dist/` folder are generated locally and are not tracked in git; neither is a `webview2_data/` folder left beside the exe by builds from before the WebView2 profile moved to `%LOCALAPPDATA%\TinkerEditor\WebView2`.
 
 ## Security and Markdown scope
 
-MarkEdit uses cmark-gfm without its unsafe-rendering option, so raw HTML is
+Tinker Editor uses cmark-gfm without its unsafe-rendering option, so raw HTML is
 omitted and dangerous URL schemes are scrubbed rather than executed in the
 preview. KaTeX runs with trusted commands disabled and bounded expansion and
 output sizing. Links using HTTP, HTTPS, and `mailto:` open in the system handler;
@@ -191,10 +191,10 @@ more than five seconds is stopped. Binary output can only be written through
 a user-controlled Save As dialog; its optional open-after-save action can use
 the saved file's Windows association or a plugin-supplied application, but
 only after that dialog is accepted. Only install plugins you trust. Personal
-extensions live in `%APPDATA%\markedit\plugins`; folder extensions can read
-only their own Lua modules through MarkEdit's restricted `require` loader.
+extensions live in `%APPDATA%\tinkeredit\plugins`; folder extensions can read
+only their own Lua modules through Tinker Editor's restricted `require` loader.
 
 ## Licence
 
-MarkEdit is available under the MIT License. See `LICENSE` and
+Tinker Editor is available under the MIT License. See `LICENSE` and
 `THIRD_PARTY_NOTICES.md` for bundled-component licences and provenance.

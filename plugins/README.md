@@ -1,6 +1,6 @@
-# Writing MarkEdit plugins
+# Writing Tinker Editor plugins
 
-A MarkEdit plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
+A Tinker Editor plugin is a Lua script that adds commands, menus, and automatic actions to the editor. Plugins can read and change the document, ask simple questions, and show messages. They can't access arbitrary files, start programs, or reach the network. A folder extension can load its own Lua modules through the restricted `require` function.
 
 This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, spelling report, readability, anagram, Lua runner, tail (follow a log file), Markdown structure/link/lint tools, HTML snippets, selection statistics, text, calculator, assembler, Lua formatting, and developer-oriented extensions.
 
@@ -8,7 +8,7 @@ This guide covers everything a plugin can do. [`example.lua`](example.lua), in t
 
 ## Quick start
 
-1. Choose **Plugins → New Plugin**, enter `hello.lua`, and edit the file MarkEdit creates in `%APPDATA%\markedit\plugins`:
+1. Choose **Plugins → New Plugin**, enter `hello.lua`, and edit the file Tinker Editor creates in `%APPDATA%\tinkeredit\plugins`:
 
    ```lua
    menu.add("Say Hello", function()
@@ -20,7 +20,7 @@ This guide covers everything a plugin can do. [`example.lua`](example.lua), in t
    end)
    ```
 
-2. Choose **Plugins → Reload Plugins** (or restart MarkEdit).
+2. Choose **Plugins → Reload Plugins** (or restart Tinker Editor).
 
 3. **Plugins → Say Hello** and **Plugins → Text → Shout** are now in the menu.
 
@@ -28,12 +28,12 @@ Use **Plugins → Open Plugins Folder** whenever you need the folder in Explorer
 
 ## How plugins are loaded
 
-- MarkEdit loads bundled extensions from `plugins` beside `markedit.exe`, then personal extensions from `%APPDATA%\markedit\plugins`. Within each location, entries load alphabetically (ignoring case), so a personal extension can replace a bundled command.
+- Tinker Editor loads bundled extensions from `plugins` beside `tinkeredit.exe`, then personal extensions from `%APPDATA%\tinkeredit\plugins`. Within each location, entries load alphabetically (ignoring case), so a personal extension can replace a bundled command.
 - An extension is either a single `.lua` file or a folder containing `init.lua`. A folder extension can split code into private modules and load them at startup or later from a callback with `require("module")`; dots address subfolders, as in `require("text.wrap")`. Paths outside that extension folder are rejected.
 - **Plugins → Manage Plugins** enables or disables discovered extensions. The state is stored in `settings.json`; disabled extensions remain visible in the manager and do not run.
 - Loading a plugin runs its top-level code once. That code normally registers commands and event handlers; the functions it registers run later, when they're used.
 - **Plugins → Reload Plugins** throws away everything loaded (commands, handlers, and all Lua variables) and loads every plugin again. It also reloads the menu definition, so changes to plugins and menus take effect without restarting.
-- If a plugin's top-level code fails, MarkEdit lists the error with its file name and line and offers to open the first failing source. A plugin that fails part-way adds none of its commands or handlers. The other plugins still load.
+- If a plugin's top-level code fails, Tinker Editor lists the error with its file name and line and offers to open the first failing source. A plugin that fails part-way adds none of its commands or handlers. The other plugins still load.
 - Plugin files must be UTF-8 text (with or without a byte-order mark) and at most 1 MiB.
 - Every plugin has a private global environment, private copies of library/API tables, and a private module cache. Globals in one extension cannot overwrite another extension's globals. Modules belonging to the same folder extension share its environment.
 
@@ -60,7 +60,7 @@ Names, labels, menu paths, and dialog text must be valid UTF-8 and cannot contai
 
 Adds a command. Choosing it runs `fn()`. `label` decides where it appears; see [Where commands appear](#where-commands-appear). The same label can be added more than once. Each becomes its own item. `shortcut` may combine Ctrl and/or Alt, optional Shift, and a letter, digit, F1–F24, Tab, Space, Insert, or Delete, for example `"Ctrl+Alt+M"`. Built-in shortcuts win if two commands use the same keys.
 
-When `enabled` is supplied, MarkEdit evaluates it while refreshing menu state and greys out the command when it returns `false` or `nil`. The editor API is available. Pass `nil` for `shortcut` when only an enabled predicate is needed:
+When `enabled` is supplied, Tinker Editor evaluates it while refreshing menu state and greys out the command when it returns `false` or `nil`. The editor API is available. Pass `nil` for `shortcut` when only an enabled predicate is needed:
 
 ```lua
 menu.add("Text/Uppercase Selection", uppercase, nil, function()
@@ -70,7 +70,7 @@ end)
 
 #### `menu.checkbox(label, key, default, fn [, shortcut])`
 
-Adds a command with a check mark. `key` identifies its saved state inside this plugin, `default` is a boolean used until a state has been saved, and choosing the item toggles it before running `fn(checked)` with the new boolean value. If the function fails, MarkEdit restores the previous state. The optional shortcut uses the same format as `menu.add`.
+Adds a command with a check mark. `key` identifies its saved state inside this plugin, `default` is a boolean used until a state has been saved, and choosing the item toggles it before running `fn(checked)` with the new boolean value. If the function fails, Tinker Editor restores the previous state. The optional shortcut uses the same format as `menu.add`.
 
 ```lua
 menu.checkbox("Text/Trim Whitespace on Save", "trim_on_save", false, function(checked)
@@ -104,9 +104,9 @@ Separators follow the same rules as `"-"` in the menu definition: one at the sta
 
 #### `contextmenu.add(label, fn [, enabled])`
 
-Adds an item to the editor's right-click menu and returns its numeric handle. Choosing the item runs `fn()` with the editor APIs acting on the pane that was clicked. Items appear after MarkEdit's standard editing and spelling commands. Slash-separated label parts create or reuse submenus, up to eight levels deep; for example, `"Formatting/Inline/Code"` creates **Formatting → Inline → Code**.
+Adds an item to the editor's right-click menu and returns its numeric handle. Choosing the item runs `fn()` with the editor APIs acting on the pane that was clicked. Items appear after Tinker Editor's standard editing and spelling commands. Slash-separated label parts create or reuse submenus, up to eight levels deep; for example, `"Formatting/Inline/Code"` creates **Formatting → Inline → Code**.
 
-When the optional `enabled` function is supplied, MarkEdit evaluates it each time the menu opens and greys out the item when it returns `false` or `nil`. The editor API is available, so `function() return editor.get_selection() ~= "" end` enables a command only while text is selected.
+When the optional `enabled` function is supplied, Tinker Editor evaluates it each time the menu opens and greys out the item when it returns `false` or `nil`. The editor API is available, so `function() return editor.get_selection() ~= "" end` enables a command only while text is selected.
 
 #### `contextmenu.remove(item)`
 
@@ -114,7 +114,7 @@ Removes an item previously added by this plugin. It returns `true` when the item
 
 #### `contextmenu.checkbox(label, key, default, fn [, enabled])`
 
-Adds a checkable right-click item and returns its numeric handle. Its state is stored in this plugin's settings under `key`, survives restarts and plugin reloads, and begins at the boolean `default` until it has been changed. Choosing it toggles the state before calling `fn(checked)`; if the callback fails, MarkEdit restores the previous state. Slash-separated labels and the optional `enabled` function work as they do for `contextmenu.add`.
+Adds a checkable right-click item and returns its numeric handle. Its state is stored in this plugin's settings under `key`, survives restarts and plugin reloads, and begins at the boolean `default` until it has been changed. Choosing it toggles the state before calling `fn(checked)`; if the callback fails, Tinker Editor restores the previous state. Slash-separated labels and the optional `enabled` function work as they do for `contextmenu.add`.
 
 ```lua
 local item
@@ -148,7 +148,7 @@ end)
 
 #### `commands.register(name, fn [, title])`
 
-Makes the built-in command called `name` run `fn()` instead of its usual code, wherever it's used from: menu, toolbar, or keyboard shortcut. `title` is used as the title of dialogs `fn` shows (default `"MarkEdit"`). If several plugins register the same name, the last one loaded wins. See [Replacing built-in commands](#replacing-built-in-commands).
+Makes the built-in command called `name` run `fn()` instead of its usual code, wherever it's used from: menu, toolbar, or keyboard shortcut. `title` is used as the title of dialogs `fn` shows (default `"Tinker Editor"`). If several plugins register the same name, the last one loaded wins. See [Replacing built-in commands](#replacing-built-in-commands).
 
 `commands.execute(name)` queues a named built-in command to run after the current plugin callback finishes and returns whether the name exists. The `run.*` commands (run, debug, step, breakpoints) can't be executed from a plugin and raise an error.
 
@@ -163,7 +163,7 @@ Runs `fn(path)` each time the event happens, where `path` is the document's file
 | `"save"` | Just before the document is written to disk, so anything the handler changes is saved. | Where it's being saved, including a new name chosen with Save As. |
 | `"open"` | After a file is loaded into the editor, including when a file changed by another program is reloaded. | The loaded file. |
 | `"reload"` | After `"open"`, when the file loaded was the document's own, reloaded because another program changed it. The selection and scroll position have been put back by then, so a handler can move them. | The reloaded file. |
-| `"tab_changed"` | After a different document becomes the active one: switching tabs, opening a new tab, or closing one. Brief switches MarkEdit makes itself, such as Save All visiting each tab, don't count. | The newly active document. |
+| `"tab_changed"` | After a different document becomes the active one: switching tabs, opening a new tab, or closing one. Brief switches Tinker Editor makes itself, such as Save All visiting each tab, don't count. | The newly active document. |
 | `"before_save"` / `"after_save"` | Immediately before or after a successful write. `"save"` remains the compatibility alias for `"before_save"`. | The save destination. |
 | `"close"` | Before a tab asks to save/discard and closes. | The document being closed. |
 | `"text_changed"` / `"selection_changed"` | After a short host-side debounce following an edit or selection move. Expensive live analysis can run here directly; do not add another debounce unless it also combines other event sources. | The active document. |
@@ -174,7 +174,7 @@ Handlers work on the active document, exactly as commands do. A handler that fai
 
 ### config
 
-Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.json` alongside application preferences. Keys are 1 to 64 characters and may contain letters, digits, `.`, `_`, and `-`.
+Settings are private to each plugin and persist in `%APPDATA%\tinkeredit\settings.json` alongside application preferences. Keys are 1 to 64 characters and may contain letters, digits, `.`, `_`, and `-`.
 
 | Function | Does |
 |---|---|
@@ -187,7 +187,7 @@ Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.
 
 ### documents
 
-`documents.count()` and `documents.active()` describe the tabs. `documents.activate(index)`, `new()`, `open(path)`, `save([save_as])`, and `close([index])` manage them. `documents.open(path)` asks the user before opening a file that isn't already in a tab, and does nothing if they decline. `documents.path([index])`, `modified([index])`, and `encoding()` return document metadata. `documents.auto_reload([index] [, on])` returns whether a document reloads changes made on disk by another program without asking, and sets it when `on` is given (a boolean); MarkEdit still asks when the document has unsaved edits. It lasts until the tab closes. Passing `"utf-8"`, `"utf-8-bom"`, `"utf-16le"`, `"utf-16be"`, or `"ansi"` to `documents.encoding(value)` changes how the active document will be saved and marks it modified. Save-encoding changes are document metadata and are not reverted by text Undo. Indices are 1-based. File pickers remain user-controlled through `ui.pick_file()` and `ui.pick_folder()`.
+`documents.count()` and `documents.active()` describe the tabs. `documents.activate(index)`, `new()`, `open(path)`, `save([save_as])`, and `close([index])` manage them. `documents.open(path)` asks the user before opening a file that isn't already in a tab, and does nothing if they decline. `documents.path([index])`, `modified([index])`, and `encoding()` return document metadata. `documents.auto_reload([index] [, on])` returns whether a document reloads changes made on disk by another program without asking, and sets it when `on` is given (a boolean); Tinker Editor still asks when the document has unsaved edits. It lasts until the tab closes. Passing `"utf-8"`, `"utf-8-bom"`, `"utf-16le"`, `"utf-16be"`, or `"ansi"` to `documents.encoding(value)` changes how the active document will be saved and marks it modified. Save-encoding changes are document metadata and are not reverted by text Undo. Indices are 1-based. File pickers remain user-controlled through `ui.pick_file()` and `ui.pick_folder()`.
 
 ### output
 
@@ -198,7 +198,7 @@ These write to the Output tab of the output panel docked under the editor (View 
 | `output.write(text, ...)` | Appends each string. Text isn't followed by a line break unless it ends with one, and ANSI colour sequences such as `"[32m"` colour it. The panel isn't opened. |
 | `output.clear()` | Empties the Output tab. |
 | `output.show()` | Opens the panel on the Output tab, without moving the keyboard focus. |
-| `output.report(title, text)` | Appends `text` under a coloured heading naming the report and the document ("Grammar Checker - notes.md"), followed by a blank line, and opens the panel. MarkEdit's bundled plugins show their longer reports this way. |
+| `output.report(title, text)` | Appends `text` under a coloured heading naming the report and the document ("Grammar Checker - notes.md"), followed by a blank line, and opens the panel. Tinker Editor's bundled plugins show their longer reports this way. |
 | `output.hide()` | Closes the panel, whichever tab it is showing. Programs running in it keep running. |
 | `output.visible()` | Returns `true` while the panel is open. |
 
@@ -316,18 +316,18 @@ editor.replace_selections(replacements)
 | Function | Returns |
 |---|---|
 | `editor.file_path()` | The document's full path, or `nil` if it has never been saved. |
-| `editor.language()` | How MarkEdit is treating the document: `"markdown"`, `"json"`, `"xml"`, `"html"`, `"yaml"`, `"cpp"` (C, C++, JavaScript, and TypeScript), `"python"`, `"bash"`, `"powershell"`, `"lua"`, `"css"`, `"sql"`, `"ini"` (also `.cfg`, `.conf` and `.properties`), `"toml"`, `"batch"` (`.bat` and `.cmd`), `"makefile"`, or `"text"`. |
+| `editor.language()` | How Tinker Editor is treating the document: `"markdown"`, `"json"`, `"xml"`, `"html"`, `"yaml"`, `"cpp"` (C, C++, JavaScript, and TypeScript), `"python"`, `"bash"`, `"powershell"`, `"lua"`, `"css"`, `"sql"`, `"ini"` (also `.cfg`, `.conf` and `.properties`), `"toml"`, `"batch"` (`.bat` and `.cmd`), `"makefile"`, or `"text"`. |
 | `editor.modified()` / `editor.read_only([value])` | The modified and read-only states. |
 | `editor.visible_range()` / `editor.scroll_to(position)` | The visible byte range, or move the caret to a position and scroll it into view. Moving the caret replaces the selections, so select after scrolling. |
 | `editor.find(text [, start [, options]])` | Finds text; options support `match_case`, `whole_word`, `word_start`, and `regex`. Returns the matching range or `nil`. A `regex` pattern that looks like classic catastrophic backtracking (e.g. `(a+)+`), or a search spanning more than 1,000,000 characters, raises an error instead of running. |
 | `editor.annotation(...)`, `editor.marker(...)` | Adds/removes line annotations and markers; matching clear functions remove them. |
-| `editor.indicator(...)` / `editor.clear_indicator(...)` | Adds or removes temporary highlighted ranges using plugin indicator numbers 8–19. Markers use the same reserved numeric range so they cannot overwrite MarkEdit's bookmarks, debugger markers, folding markers, or spelling indicator. |
+| `editor.indicator(...)` / `editor.clear_indicator(...)` | Adds or removes temporary highlighted ranges using plugin indicator numbers 8–19. Markers use the same reserved numeric range so they cannot overwrite Tinker Editor's bookmarks, debugger markers, folding markers, or spelling indicator. |
 | `editor.fold(line [, expanded])` / `editor.style_at(position)` | Controls folding and reads the lexer style at a position. |
 | `editor.clipboard([text])` | Reads Unicode clipboard text, or replaces it when `text` is supplied. |
 
 ### ui
 
-These collect input with MarkEdit's own dialogs, except for `ui.message`, which writes a non-interactive notice to the output panel. Time spent waiting for a dialog doesn't count towards the [time limit](#how-commands-run). Unless given a `title`, a notice or dialog is titled with the command's label (or `script.lua: event` for an event handler). `ui.message` can also be used from a plugin's top-level code, while it loads; the others are for commands and event handlers.
+These collect input with Tinker Editor's own dialogs, except for `ui.message`, which writes a non-interactive notice to the output panel. Time spent waiting for a dialog doesn't count towards the [time limit](#how-commands-run). Unless given a `title`, a notice or dialog is titled with the command's label (or `script.lua: event` for an event handler). `ui.message` can also be used from a plugin's top-level code, while it loads; the others are for commands and event handlers.
 
 #### `ui.message(text [, title [, kind]])`
 
@@ -380,13 +380,13 @@ A command's label is a path separated by `/`. Each part before the last names a 
 - A leading `/` places the command relative to the menu bar. Its first part names a top-level menu: an existing one if the name matches (ignoring case and `&`), otherwise a new one. Plugins can add new top-level menus until the menu bar holds 24.
 - Submenus are found the same way, by name, and created when they don't exist yet.
 - A label of just `/Name` has no menu to go in, so it goes on the Plugins menu like `Name`.
-- "The Plugins menu" means wherever the menu definition puts its plugins list (see [Customizing the menu bar](#customizing-the-menu-bar)). If the definition has no plugins list, MarkEdit adds a Plugins menu for these commands.
+- "The Plugins menu" means wherever the menu definition puts its plugins list (see [Customizing the menu bar](#customizing-the-menu-bar)). If the definition has no plugins list, Tinker Editor adds a Plugins menu for these commands.
 - A path has at most 8 parts; anything beyond that is ignored.
 - Top-level menu names are drawn using the system's ANSI code page, so plain letters, digits, and common punctuation are safest there. Submenu and item names can use any characters.
 
 ## Replacing built-in commands
 
-`commands.register` replaces what a built-in command does everywhere it can be used: the menu, the formatting toolbar, and keyboard shortcuts. MarkEdit's own internal actions aren't affected. For example, replacing `file.save` changes the Save command and Ctrl+S, but not the save MarkEdit offers when closing a document with unsaved changes.
+`commands.register` replaces what a built-in command does everywhere it can be used: the menu, the formatting toolbar, and keyboard shortcuts. Tinker Editor's own internal actions aren't affected. For example, replacing `file.save` changes the Save command and Ctrl+S, but not the save Tinker Editor offers when closing a document with unsaved changes.
 
 ```lua
 -- Bold with __ instead of **.
@@ -396,7 +396,7 @@ commands.register("markdown.bold", function()
 end)
 ```
 
-MarkEdit's Markdown formatting commands, plus Toggle Comment and Trim Trailing Whitespace (the ones marked (Lua) below), are written this way in the `src/lua/formatting_*.lua` files built into MarkEdit. HTML snippets, general Edit conversions and JSON support are standalone bundled plugins in `plugins/html-tools.lua`, `plugins/edit-convert.lua` and `plugins/json-tools.lua`; those plugins create their own menu entries rather than overriding built-in command names.
+Tinker Editor's Markdown formatting commands, plus Toggle Comment and Trim Trailing Whitespace (the ones marked (Lua) below), are written this way in the `src/lua/formatting_*.lua` files built into Tinker Editor. HTML snippets, general Edit conversions and JSON support are standalone bundled plugins in `plugins/html-tools.lua`, `plugins/edit-convert.lua` and `plugins/json-tools.lua`; those plugins create their own menu entries rather than overriding built-in command names.
 
 ### Built-in command names
 
@@ -414,7 +414,7 @@ These are the names `commands.register` and the menu definition use.
 
 ## Customizing theme colours
 
-The colours of the light and dark themes come from `%APPDATA%\markedit\themes.lua` when it exists, over the built-in ones. **Plugins → Customize Theme Colours** writes that file (if it isn't there yet), listing every colour with its built-in value and what it paints, and opens it. Edit it, save it, then choose **Plugins → Reload Plugins**. Delete a line to go back to that colour's built-in value, or the file to go back to all of them.
+The colours of the light and dark themes come from `%APPDATA%\tinkeredit\themes.lua` when it exists, over the built-in ones. **Plugins → Customize Theme Colours** writes that file (if it isn't there yet), listing every colour with its built-in value and what it paints, and opens it. Edit it, save it, then choose **Plugins → Reload Plugins**. Delete a line to go back to that colour's built-in value, or the file to go back to all of them.
 
 ```lua
 return {
@@ -428,11 +428,11 @@ return {
 - The file runs in a Lua state of its own with only the base and string libraries, so it can compute colours but can't see plugins or the editor.
 - It covers the editor and window. The rendered preview is styled by CSS; use **View → Custom CSS** for that.
 
-[examples/themes.lua](examples/themes.lua) is a complete example: Solarized colours for both themes, built from one function, with in-between shades computed by a small `mix()` helper. Copy it to `%APPDATA%\markedit\themes.lua` to try it. Folders in `plugins` without an `init.lua`, like `examples`, aren't loaded as plugins.
+[examples/themes.lua](examples/themes.lua) is a complete example: Solarized colours for both themes, built from one function, with in-between shades computed by a small `mix()` helper. Copy it to `%APPDATA%\tinkeredit\themes.lua` to try it. Folders in `plugins` without an `init.lua`, like `examples`, aren't loaded as plugins.
 
 ## Customizing the menu bar
 
-The whole menu bar is defined by a Lua file. MarkEdit uses `%APPDATA%\markedit\menus.lua` when it exists, and otherwise its built-in default menus. **Plugins → Customize Menus** copies the default menus to that file (if it isn't there yet) and opens it. Edit it, save it, then choose **Plugins → Reload Plugins**. Delete the file to go back to the default menus.
+The whole menu bar is defined by a Lua file. Tinker Editor uses `%APPDATA%\tinkeredit\menus.lua` when it exists, and otherwise its built-in default menus. **Plugins → Customize Menus** copies the default menus to that file (if it isn't there yet) and opens it. Edit it, save it, then choose **Plugins → Reload Plugins**. Delete the file to go back to the default menus.
 
 The file returns a list of top-level menus. Each menu is `{ label, { items } }`, and each item is one of:
 
@@ -478,19 +478,19 @@ return {
 - Separators at the start or end of a menu, or next to another separator, are left out, so a list that turns out to be empty leaves no gap.
 - Plugins place `/Menu/...` commands by menu name, so renaming a menu changes where those commands go.
 - Keep the plugin management commands somewhere convenient, especially **Reload Plugins** and **Customize Menus**.
-- If the file has a mistake (Lua that doesn't run, or a table in the wrong shape) MarkEdit says what and where, and uses the default menus instead. An unknown command name is reported and just that item is left out.
+- If the file has a mistake (Lua that doesn't run, or a table in the wrong shape) Tinker Editor says what and where, and uses the default menus instead. An unknown command name is reported and just that item is left out.
 
 ## How commands run
 
 - **Commands act on the pane being edited**: the split editor's second pane when it has the focus, otherwise the main one. Event handlers act on the main pane.
 - **One undo step.** Everything a command or event handler changes is undone together by a single Undo.
-- **Errors are reported and undone.** If a command raises an error (from `error(...)`, a failed `assert`, or a bug), MarkEdit shows the message and a traceback, and undoes any changes the command had made.
-- **The time limit.** A command, event handler, or plugin's top-level code that runs for more than 5 seconds is stopped, with an error, and its changes are undone. Time spent waiting for the user in a `ui` dialog doesn't count. MarkEdit's own formatting commands have no limit.
+- **Errors are reported and undone.** If a command raises an error (from `error(...)`, a failed `assert`, or a bug), Tinker Editor shows the message and a traceback, and undoes any changes the command had made.
+- **The time limit.** A command, event handler, or plugin's top-level code that runs for more than 5 seconds is stopped, with an error, and its changes are undone. Time spent waiting for the user in a `ui` dialog doesn't count. Tinker Editor's own formatting commands have no limit.
 - **One plugin at a time.** While a plugin's dialog is open, events (such as an automatic save) don't run other plugins' handlers, and plugin commands can't be started.
 
 ## The Lua environment
 
-Plugins run in Lua 5.4, built into `markedit.exe`. No separate Lua installation is needed.
+Plugins run in Lua 5.4, built into `tinkeredit.exe`. No separate Lua installation is needed.
 
 - **Available:** the basic functions (`pairs`, `ipairs`, `tostring`, `tonumber`, `pcall`, `error`, `assert`, `select`, `type`, `setmetatable`, and so on) and the `string`, `table`, `math`, `utf8`, and `coroutine` libraries.
 - **Not available:** `io`, `os`, `package`, `debug`, `dofile`, and `loadfile`. Plugins can't touch arbitrary files or run programs.
@@ -504,7 +504,7 @@ Plugins run in Lua 5.4, built into `markedit.exe`. No separate Lua installation 
 | Limit | Value |
 |---|---|
 | Size of a plugin file | 1 MiB |
-| Commands, in total | 1,024, shared by plugins (`menu.add`, `menu.checkbox`, `menu.separator` and `commands.register`), functions in the menu definition, and MarkEdit's built-in Lua commands |
+| Commands, in total | 1,024, shared by plugins (`menu.add`, `menu.checkbox`, `menu.separator` and `commands.register`), functions in the menu definition, and Tinker Editor's built-in Lua commands |
 | Event handlers, in total | 100 |
 | Editor context-menu items, in total | 256 registered; the first 64 are shown |
 | Time a call may run | 5 seconds (not counting dialogs) |
@@ -584,7 +584,7 @@ end)
 
 ### Keep a setting
 
-Use `config` for values that should survive plugin reloads and MarkEdit restarts.
+Use `config` for values that should survive plugin reloads and Tinker Editor restarts.
 
 ```lua
 menu.add("Text/Set Wrap Width...", function()
@@ -598,7 +598,7 @@ end)
 
 | Problem | What to check |
 |---|---|
-| The plugin's commands don't appear. | Is it a `.lua` file in `%APPDATA%\markedit\plugins`, or a folder there with `init.lua`? Is it enabled in **Manage Plugins**? Did you reload plugins? Was a load error reported? |
+| The plugin's commands don't appear. | Is it a `.lua` file in `%APPDATA%\tinkeredit\plugins`, or a folder there with `init.lua`? Is it enabled in **Manage Plugins**? Did you reload plugins? Was a load error reported? |
 | "the editor is only available while a plugin command runs" | `editor` functions were called from a plugin's top-level code. Move that code into the function passed to `menu.add` or `events.on`. |
 | "stopped after 5 seconds without finishing" | A loop that never ends, or work that's too slow on a large document. Read only the lines or range you need rather than the whole text. |
 | A command does nothing visible. | Check for an `if ... then return end` that always returns. `ui.message` is the quickest way to see what a command is doing. |

@@ -1,10 +1,10 @@
--- MarkEdit's menu bar.
+-- Tinker Editor's menu bar.
 --
--- MarkEdit reads %APPDATA%\markedit\menus.lua when it exists, and otherwise
--- uses the default menus built into markedit.exe. Plugins > Customize
+-- Tinker Editor reads %APPDATA%\tinkeredit\menus.lua when it exists, and otherwise
+-- uses the default menus built into tinkeredit.exe. Plugins > Customize
 -- Menus... copies the default menus there (if the file isn't there yet) and
 -- opens it. After editing it, save it and use Plugins > Reload Plugins.
--- Delete it to go back to the default menus. If it has a mistake, MarkEdit
+-- Delete it to go back to the default menus. If it has a mistake, Tinker Editor
 -- says what and where, and uses the default menus instead.
 --
 -- The file returns a list of top-level menus: { label, { items } }.
@@ -14,7 +14,7 @@
 --                                    (see plugins/README.md)
 --   { "Label", { items } }           a submenu
 --   "-"                              a separator
---   { list = "name" }                items MarkEdit fills in:
+--   { list = "name" }                items Tinker Editor fills in:
 --                                      "recent_files", "recent_workspaces",
 --                                      or "plugins" (commands that plugins add
 --                                      without a leading "/")
@@ -129,9 +129,11 @@ return {
     { "Spell Check &Language...", "view.spell_check_language" },
     { "Document &Outline", "view.outline" },
     { "&File Explorer", "view.file_explorer" },
-    { "Output Pa&nel", "view.output_panel" },
-    { "Te&rminal", "view.terminal" },
-    { "&Problems", "view.problems" },
+    { "&Panels", {
+      { "Output Pa&nel", "view.output_panel" },
+      { "Te&rminal", "view.terminal" },
+      { "&Problems", "view.problems" },
+    } },
     { "Mini&map", "view.minimap" },
     { "Split Editor &Horizontally", "view.split_editor" },
     { "Split Editor &Vertically", "view.split_editor_vertical" },
@@ -275,6 +277,6 @@ return {
     { "&Keyboard Shortcuts", "help.keyboard_shortcuts" },
     { "&Plugin Guide", "help.plugin_guide" },
     "-",
-    { "&About MarkEdit", "help.about" },
+    { "&About Tinker Editor", "help.about" },
   } },
 }

@@ -1,10 +1,10 @@
 -- Help > Keyboard Shortcuts: builds the page as Markdown each time it opens.
 --
 -- The page is generated rather than written out by hand, so it always
--- matches the shortcuts MarkEdit really has and the menus the user really
--- sees, including a customised %APPDATA%\markedit\menus.lua.
+-- matches the shortcuts Tinker Editor really has and the menus the user really
+-- sees, including a customised %APPDATA%\tinkeredit\menus.lua.
 --
--- How it's run: markedit.rc builds this file into markedit.exe, and
+-- How it's run: tinkeredit.rc builds this file into tinkeredit.exe, and
 -- plugin_host_render_page() runs it in a Lua state of its own (not the one
 -- plugins share), with the base, string, table and utf8 libraries only. It
 -- gets one argument, a table:
@@ -83,10 +83,10 @@ local function collect(items, path, rows)
   return rows
 end
 
-line("# MarkEdit Keyboard Shortcuts")
+line("# Tinker Editor Keyboard Shortcuts")
 line()
 line("Every command is also in the menus.")
-line("This page is built from MarkEdit's current menus each time it opens. It's an")
+line("This page is built from Tinker Editor's current menus each time it opens. It's an")
 line("unsaved document, so editing it changes nothing.")
 line()
 
