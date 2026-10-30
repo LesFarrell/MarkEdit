@@ -21,6 +21,13 @@ struct TerminalView {
     TerminalGrid *grid;
     int session;
     int running;
+    int sessionMode;
+    int inputPending;
+    int inputDone;
+    char *inputText;
+    size_t inputLength;
+    size_t inputCapacity;
+    char *inputResult;
     DWORD exitCode;
 
     int cols, rows;
@@ -48,6 +55,7 @@ struct TerminalView {
 };
 
 static int next_session = 1;
+#define TERMINAL_SESSION_INPUT_MAX 4096
 
 /* ---- layout ---- */
 
@@ -177,8 +185,11 @@ static void copy_selection(TerminalView *view) {
     free(text);
 }
 
+static int append_session_input(TerminalView *view, const char *bytes, size_t length);
+
 static void paste_clipboard(TerminalView *view) {
-    if (!view->running || !OpenClipboard(view->hwnd)) return;
+    if ((!view->running && !(view->sessionMode && view->inputPending)) ||
+        !OpenClipboard(view->hwnd)) return;
     HANDLE data = GetClipboardData(CF_UNICODETEXT);
     if (data) {
         const WCHAR *wide = (const WCHAR *)GlobalLock(data);
@@ -188,7 +199,15 @@ static void paste_clipboard(TerminalView *view) {
                 char *utf8 = (char *)malloc((size_t)utf8Length);
                 if (utf8) {
                     WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, utf8Length, NULL, NULL);
-                    terminal_process_write(view->process, utf8, (size_t)utf8Length - 1);
+                    size_t length = (size_t)utf8Length - 1;
+                    if (view->sessionMode) {
+                        size_t lineLength = 0;
+                        while (lineLength < length && utf8[lineLength] != '\r' &&
+                               utf8[lineLength] != '\n') lineLength++;
+                        append_session_input(view, utf8, lineLength);
+                    } else {
+                        terminal_process_write(view->process, utf8, length);
+                    }
                     free(utf8);
                 }
             }
@@ -396,6 +415,50 @@ static void send_character(TerminalView *view, WCHAR ch, int prefixEscape, WORD 
     if (length > 0) send_repeated_bytes(view, utf8, (size_t)(length + offset), repeatCount);
 }
 
+static void session_write(TerminalView *view, const char *bytes, size_t length) {
+    if (!view || !bytes || !length) return;
+    terminal_grid_feed(view->grid, bytes, length, NULL, NULL);
+    view->scrollOffset = 0;
+    if (terminal_grid_take_dirty(view->grid)) InvalidateRect(view->hwnd, NULL, FALSE);
+}
+
+static int append_session_input(TerminalView *view, const char *bytes, size_t length) {
+    if (!view->inputPending || !length ||
+        view->inputLength + length > TERMINAL_SESSION_INPUT_MAX) return 0;
+    size_t needed = view->inputLength + length + 1;
+    if (needed > view->inputCapacity) {
+        size_t capacity = view->inputCapacity ? view->inputCapacity * 2 : 64;
+        while (capacity < needed) capacity *= 2;
+        char *grown = (char *)realloc(view->inputText, capacity);
+        if (!grown) return 0;
+        view->inputText = grown;
+        view->inputCapacity = capacity;
+    }
+    memcpy(view->inputText + view->inputLength, bytes, length);
+    view->inputLength += length;
+    view->inputText[view->inputLength] = 0;
+    session_write(view, bytes, length);
+    return 1;
+}
+
+static void erase_session_input_character(TerminalView *view) {
+    if (!view->inputPending || !view->inputLength) return;
+    size_t start = view->inputLength - 1;
+    while (start > 0 && ((unsigned char)view->inputText[start] & 0xc0) == 0x80) start--;
+    view->inputLength = start;
+    view->inputText[start] = 0;
+    session_write(view, "\b \b", 3);
+}
+
+static void finish_session_input(TerminalView *view, int cancelled) {
+    if (!view->inputPending) return;
+    free(view->inputResult);
+    view->inputResult = cancelled ? NULL : _strdup(view->inputText ? view->inputText : "");
+    if (!cancelled) session_write(view, "\r\n", 2);
+    view->inputPending = 0;
+    view->inputDone = 1;
+}
+
 /* ---- the process's output ---- */
 
 static void grid_reply(void *context, const char *bytes, size_t length) {
@@ -530,6 +593,23 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
                 view->suppressTranslatedChar = 1;
                 return 0;
             }
+            if (view->sessionMode) {
+                if (!view->inputPending) return 0;
+                if (shift && wParam == VK_INSERT) {
+                    paste_clipboard(view);
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_RETURN) {
+                    finish_session_input(view, 0);
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_ESCAPE) {
+                    finish_session_input(view, 1);
+                    view->suppressTranslatedChar = 1;
+                } else if (wParam == VK_BACK) {
+                    erase_session_input_character(view);
+                    view->suppressTranslatedChar = 1;
+                }
+                return 0;
+            }
             if (!view->running) {
                 if (wParam != VK_SHIFT && wParam != VK_CONTROL && wParam != VK_MENU) {
                     view->suppressTranslatedChar = 1;
@@ -548,6 +628,16 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
         }
         case WM_CHAR: case WM_SYSCHAR: {
             if (view->consumeCharCount) { view->consumeCharCount--; return 0; }
+            if (view->sessionMode) {
+                if (view->inputPending && wParam >= ' ') {
+                    char utf8[8];
+                    WCHAR character = (WCHAR)wParam;
+                    int length = WideCharToMultiByte(CP_UTF8, 0, &character, 1,
+                                                     utf8, sizeof(utf8), NULL, NULL);
+                    if (length > 0) append_session_input(view, utf8, (size_t)length);
+                }
+                return 0;
+            }
             if (!view->running) return 0;
             /* WM_SYSCHAR represents Alt/Meta and gets an Escape prefix. Right
                Alt plus Control is AltGr, so it remains a layout character. */
@@ -626,6 +716,8 @@ void terminal_view_free(TerminalView *view) {
     while (PeekMessageW(&msg, view->hwnd, WM_TERMINAL_CHUNK, WM_TERMINAL_CHUNK, PM_REMOVE))
         free((TerminalChunk *)msg.lParam);
     terminal_grid_free(view->grid);
+    free(view->inputText);
+    free(view->inputResult);
     release_back_buffer(view);
     if (view->hwnd) DestroyWindow(view->hwnd);
     free(view);
@@ -662,17 +754,88 @@ void terminal_view_show_message(TerminalView *view, const WCHAR *message) {
     InvalidateRect(view->hwnd, NULL, FALSE);
 }
 
-int terminal_view_running(const TerminalView *view) { return view->running; }
+int terminal_view_running(const TerminalView *view) {
+    return view && (view->running || view->sessionMode);
+}
+
+int terminal_view_session_active(const TerminalView *view) {
+    return view && view->sessionMode;
+}
 
 void terminal_view_stop(TerminalView *view) {
+    if (view && view->sessionMode) {
+        finish_session_input(view, 1);
+        view->sessionMode = 0;
+    }
     if (view->process) terminal_process_stop(view->process);
 }
 
 void terminal_view_clear_scrollback(TerminalView *view) {
-    terminal_grid_reset(view->grid);
+    terminal_grid_clear(view->grid);
     clear_selection(view);
     view->scrollOffset = 0;
     InvalidateRect(view->hwnd, NULL, FALSE);
+}
+
+int terminal_view_begin_session(TerminalView *view) {
+    if (!view) return 0;
+    terminal_process_free(view->process);
+    view->process = NULL;
+    view->running = 0;
+    view->sessionMode = 1;
+    view->inputPending = 0;
+    view->inputDone = 0;
+    view->inputLength = 0;
+    free(view->inputResult);
+    view->inputResult = NULL;
+    clear_selection(view);
+    view->scrollOffset = 0;
+    terminal_grid_clear(view->grid);
+    InvalidateRect(view->hwnd, NULL, FALSE);
+    return 1;
+}
+
+void terminal_view_write(TerminalView *view, const char *text, size_t length) {
+    if (view && view->sessionMode) session_write(view, text, length);
+}
+
+char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt) {
+    if (!view || !view->sessionMode || view->inputPending) return NULL;
+    if (prompt) session_write(view, prompt, strlen(prompt));
+    view->inputLength = 0;
+    if (view->inputText) view->inputText[0] = 0;
+    free(view->inputResult);
+    view->inputResult = NULL;
+    view->inputDone = 0;
+    view->inputPending = 1;
+    SetFocus(view->hwnd);
+
+    MSG message = {0};
+    int result = 1;
+    while (!view->inputDone && (result = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        if (message.hwnd == owner && message.message == WM_CLOSE) {
+            finish_session_input(view, 1);
+            continue;
+        }
+        if (terminal_view_pretranslate_message(view, &message)) continue;
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    if (result == 0) PostQuitMessage((int)message.wParam);
+    view->inputPending = 0;
+    view->inputDone = 0;
+    char *answer = view->inputResult;
+    view->inputResult = NULL;
+    return answer;
+}
+
+void terminal_view_end_session(TerminalView *view) {
+    if (!view || !view->sessionMode) return;
+    finish_session_input(view, 1);
+    view->sessionMode = 0;
+    session_write(view,
+        "\r\n\x1b[90m[Lua finished. Press any key to start PowerShell.]\x1b[0m\r\n",
+        sizeof("\r\n\x1b[90m[Lua finished. Press any key to start PowerShell.]\x1b[0m\r\n") - 1);
 }
 
 void terminal_view_apply_theme(TerminalView *view, const COLORREF ansi[16],

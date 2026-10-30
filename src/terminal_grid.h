@@ -63,6 +63,8 @@ void terminal_grid_feed(TerminalGrid *grid, const char *bytes, size_t length,
 /* Back to one blank screen, default cursor and attributes; scrollback is
    kept. For restarting the shell in the same control. */
 void terminal_grid_reset(TerminalGrid *grid);
+/* Drops scrollback as well as resetting to a blank screen. */
+void terminal_grid_clear(TerminalGrid *grid);
 
 /* 0-based column/row and whether it should be drawn; row is in screen
    coordinates (add terminal_grid_scrollback_count() for a line index). */

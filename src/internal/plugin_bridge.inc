@@ -152,6 +152,22 @@ static void plugin_output_clear(void) { clear_output_pane(&g_outputPanes[OUTPUT_
 static void plugin_output_show(void) { show_output_panel(OUTPUT_TAB_RUN, 0); }
 static void plugin_output_hide(void) { hide_output_panel(); }
 static int plugin_output_visible(void) { return g_outputPanelVisible; }
+static int plugin_terminal_begin(void) {
+    if (!terminal_view_begin_session(g_terminalView)) return 0;
+    show_output_panel(OUTPUT_TAB_TERMINAL, 1);
+    update_output_controls();
+    return 1;
+}
+static void plugin_terminal_write(const char *text) {
+    terminal_view_write(g_terminalView, text, strlen(text));
+}
+static char *plugin_terminal_read(const char *prompt) {
+    return terminal_view_read_line(g_terminalView, g_hMainWnd, prompt);
+}
+static void plugin_terminal_end(void) {
+    terminal_view_end_session(g_terminalView);
+    update_output_controls();
+}
 
 static void plugin_problems_report(const char *source, const char *text) {
     WCHAR *directory = g_currentFile ? path_directory(g_currentFile)
@@ -752,6 +768,8 @@ static void load_menus_and_plugins(void) {
         .output_write = plugin_output_write, .output_clear = plugin_output_clear,
         .output_show = plugin_output_show, .output_hide = plugin_output_hide,
         .output_visible = plugin_output_visible, .problems_report = plugin_problems_report,
+        .terminal_begin = plugin_terminal_begin, .terminal_write = plugin_terminal_write,
+        .terminal_read = plugin_terminal_read, .terminal_end = plugin_terminal_end,
     };
     /* A reload is the explicit boundary at which edits made directly to the
        settings file become visible to Lua configuration reads. */

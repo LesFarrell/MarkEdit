@@ -53,6 +53,10 @@ static void test_scroll_and_scrollback(void) {
     expect_line(grid, 0, "one", "the pushed-off line is kept, oldest first");
     expect_line(grid, 1, "two", "the screen's first row after a scroll");
     expect_line(grid, 2, "three", "the screen's second row after a scroll");
+    terminal_grid_clear(grid);
+    expect(terminal_grid_scrollback_count(grid) == 0,
+           "clearing the terminal drops its scrollback");
+    expect_line(grid, 0, "", "clearing the terminal blanks its screen");
     terminal_grid_free(grid);
 }
 

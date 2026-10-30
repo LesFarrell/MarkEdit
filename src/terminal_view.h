@@ -46,12 +46,22 @@ int terminal_view_start(TerminalView *view, const WCHAR *commandLine, const WCHA
    shell to have printed anything itself (e.g. it couldn't be started). */
 void terminal_view_show_message(TerminalView *view, const WCHAR *message);
 int terminal_view_running(const TerminalView *view);
+int terminal_view_session_active(const TerminalView *view);
 /* Ends the shell and everything it started, without waiting for its last output. */
 void terminal_view_stop(TerminalView *view);
 /* Drops scrollback and clears the screen, keeping the shell running - like
    a real terminal's "clear" / Ctrl+L, not output_panel.inc's Clear button on
    the Run tab, which only touches its own read-only log. */
 void terminal_view_clear_scrollback(TerminalView *view);
+
+/* An in-process interactive session, used by the bundled Lua runner. It
+   replaces the current shell, writes ANSI/UTF-8 directly to the terminal
+   grid, and reads one echoed line from the terminal control. After end(),
+   the transcript remains until the next key restarts the normal shell. */
+int terminal_view_begin_session(TerminalView *view);
+void terminal_view_write(TerminalView *view, const char *text, size_t length);
+char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt);
+void terminal_view_end_session(TerminalView *view);
 
 /* The 16 ANSI colours and the default foreground/background for the current
    theme - see output_panel.inc's OUTPUT_ANSI_LIGHT/DARK, which the caller

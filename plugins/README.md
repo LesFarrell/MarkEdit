@@ -183,7 +183,7 @@ Settings are private to each plugin and persist in `%APPDATA%\markedit\settings.
 
 ### app
 
-`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), API 4 adds `context_menu`, API 5 adds the [`problems`](#problems) diagnostics table, API 6 adds `save_and_open`, API 7 adds `configured_runner`, and API 8 adds `menu_enabled`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
+`app.date()`, `app.time()`, and `app.date_time()` return the local time. `app.version()`, `app.api_version()`, `app.platform()`, `app.memory_used()`, and `app.workspace_path()` expose safe runtime metadata. `app.capabilities()` returns named feature flags; API 3 adds `eol_conversion`, `save_encoding`, `tab_width`, `spelling` (the [`spell`](#spell) table) and `output_panel` (the [`output`](#output) table), API 4 adds `context_menu`, API 5 adds the [`problems`](#problems) diagnostics table, API 6 adds `save_and_open`, API 7 adds `configured_runner`, API 8 adds `menu_enabled`, and API 9 adds the [`terminal`](#terminal) table and `terminal_panel`. `app.defer(milliseconds, fn)` schedules one UI-thread callback (up to 60 seconds) and returns a token accepted by `app.cancel(token)`; it is intended for debouncing and incremental work rather than blocking background computation.
 
 ### documents
 
@@ -212,6 +212,17 @@ menu.add("Report TODOs", function()
   output.show()
 end)
 ```
+
+### terminal
+
+These run a bounded in-process interactive session on the Terminal tab. `terminal.begin()` replaces the current shell and clears its screen. Output accepts ANSI colour sequences. `terminal.read()` focuses the terminal and returns one echoed line; Escape or Stop returns `nil`. `terminal.finish()` leaves the transcript visible, and the next key restarts the normal PowerShell shell. The bundled Lua runner uses this API for `print`, `io.write`, errors and `io.read`.
+
+| Function | Does |
+|---|---|
+| `terminal.begin()` | Opens and clears the Terminal tab for an in-process session. |
+| `terminal.write(text, ...)` | Writes UTF-8/ANSI text to the terminal grid. |
+| `terminal.read([prompt])` | Optionally writes `prompt`, then reads and echoes one line. Escape or Stop returns `nil`. |
+| `terminal.finish()` | Ends the in-process session and leaves its transcript visible. |
 
 ### spell
 

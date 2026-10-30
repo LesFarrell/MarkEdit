@@ -774,9 +774,9 @@ static void test_environment(void) {
         "assert(app.time():match('^%d%d:%d%d:%d%d$'))\n"
         "assert(app.date_time():match('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$'))\n");
     load_ok("metadata.lua",
-        "assert(app.api_version() >= 8 and app.platform() == 'windows')\n"
+        "assert(app.api_version() >= 9 and app.platform() == 'windows')\n"
         "assert(type(app.version()) == 'string' and app.memory_used() > 0)\n"
-        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require and c.save_and_open and c.configured_runner and c.menu_enabled)\n"
+        "local c = app.capabilities(); assert(c.plugin_environments and c.lazy_require and c.save_and_open and c.configured_runner and c.menu_enabled and c.terminal_panel)\n"
         "assert(c.eol_conversion and c.save_encoding and c.tab_width)\n");
 }
 
@@ -936,12 +936,26 @@ static int find_command(const char *label) {
 
 static char s_outputText[2048];
 static int s_outputShown;
+static int s_terminalInputCancelled;
 static char s_problemSource[64], s_problemText[4096];
 
 static void fake_output_write(const char *text) {
     size_t used = strlen(s_outputText);
     snprintf(s_outputText + used, sizeof(s_outputText) - used, "%s", text);
 }
+static int fake_terminal_begin(void) {
+    s_outputText[0] = 0;
+    s_outputShown = 1;
+    return 1;
+}
+static void fake_terminal_write(const char *text) { fake_output_write(text); }
+static char *fake_terminal_read(const char *prompt) {
+    if (prompt) fake_output_write(prompt);
+    if (s_terminalInputCancelled) return NULL;
+    fake_output_write("42\r\n");
+    return _strdup("42");
+}
+static void fake_terminal_end(void) {}
 static void fake_output_clear(void) { s_outputText[0] = 0; }
 static void fake_output_show(void) { s_outputShown = 1; }
 static void fake_output_hide(void) { s_outputShown = 0; }
@@ -1033,6 +1047,8 @@ static void test_bundled_plugins(HWND editor) {
         .document_set_encoding = fake_document_set_encoding,
         .schedule_deferred = fake_schedule_deferred,
         .output_write = fake_output_write, .output_show = fake_output_show,
+        .terminal_begin = fake_terminal_begin, .terminal_write = fake_terminal_write,
+        .terminal_read = fake_terminal_read, .terminal_end = fake_terminal_end,
         .problems_report = fake_problems_report,
         .document_auto_reload = fake_document_auto_reload
     };
@@ -2079,7 +2095,7 @@ static void test_bundled_plugins(HWND editor) {
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     s_outputText[0] = 0;
     expect(luaRun >= 0 && luaEvaluate >= 0 && run_ok(luaRun, editor) &&
-           strstr(s_outputText, "a\t2\nb=> 5\n"),
+           strstr(s_outputText, "a\t2\r\nb=> 5\r\n"),
            "Lua runner prints, writes and shows returned values");
     set_document(editor, "-- first\nlocal x\nx()");
     SendMessageA(editor, SCI_SETSEL, 9, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
@@ -2097,20 +2113,22 @@ static void test_bundled_plugins(HWND editor) {
     set_document(editor, "print(leaked, io.open, os, menu)");
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     s_outputText[0] = 0;
-    expect(run_ok(luaRun, editor) && strstr(s_outputText, "nil\tnil\tnil\tnil\n"),
+    expect(run_ok(luaRun, editor) && strstr(s_outputText, "nil\tnil\tnil\tnil\r\n"),
            "Lua runner code has no file access and keeps no globals between runs");
-    set_document(editor, "io.write('Name? ')\nlocal n = io.read()\nprint('hi ' .. n)\nprint(io.read('n'))");
+    set_document(editor, "io.write('Name? ')\nassert(io.flush())\nlocal n = io.read()\nprint('hi ' .. n)\nprint(io.read('n'))");
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     s_outputText[0] = 0;
+    s_terminalInputCancelled = 0;
     expect(run_ok(luaRun, editor) &&
-           strstr(s_outputText, "Name? reply to Name? \nhi reply to Name? \n"
-                                "reply to Input for the Lua script: \nnil\n"),
-           "Lua runner reads input, asking with what the script last wrote");
+           strstr(s_outputText, "Name? 42\r\nhi 42\r\nInput for the Lua script: 42\r\n42"),
+           "Lua runner flushes prompts, then reads and echoes terminal input");
     set_document(editor, "io.write('cancel')\nprint(io.read())");
     SendMessageA(editor, SCI_SETSEL, 0, SendMessageA(editor, SCI_GETLENGTH, 0, 0));
     s_outputText[0] = 0;
-    expect(run_ok(luaRun, editor) && strstr(s_outputText, "cancelnil\n"),
-           "Lua runner input ends when the box is cancelled");
+    s_terminalInputCancelled = 1;
+    expect(run_ok(luaRun, editor) && strstr(s_outputText, "cancelnil\r\n"),
+           "Lua runner input ends when terminal input is cancelled");
+    s_terminalInputCancelled = 0;
 
     int luaFormatDocument = find_command("/Tools/Interpreters/Lua/Format Document");
     int luaFormatSelection = find_command("/Tools/Interpreters/Lua/Format Selection");

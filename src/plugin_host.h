@@ -21,7 +21,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define MARKEDIT_PLUGIN_API_VERSION 8
+#define MARKEDIT_PLUGIN_API_VERSION 9
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */
@@ -97,6 +97,11 @@ typedef struct {
     void (*output_show)(void);
     void (*output_hide)(void);
     int (*output_visible)(void);
+    /* An interactive in-process session on the Terminal tab. */
+    int (*terminal_begin)(void);
+    void (*terminal_write)(const char *text);
+    char *(*terminal_read)(const char *prompt);
+    void (*terminal_end)(void);
     /* Replaces a named producer's text in the Problems tab. Empty text
        removes that producer without disturbing other diagnostics. */
     void (*problems_report)(const char *source, const char *text);

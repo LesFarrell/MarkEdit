@@ -948,6 +948,8 @@ static int start_terminal(void) {
 static void size_output_panel(HWND panel); /* defined below, in "the panel window" section */
 
 static void select_output_tab(int tab) {
+    if (tab != OUTPUT_TAB_TERMINAL && terminal_view_session_active(g_terminalView))
+        terminal_view_stop(g_terminalView);
     g_outputTab = tab;
     for (int i = 0; i < OUTPUT_TAB_COUNT; i++)
         ShowWindow(g_outputPanes[i].view, i == tab ? SW_SHOW : SW_HIDE);
@@ -970,6 +972,7 @@ static void show_output_panel(int tab, int focusInput) {
 
 static void hide_output_panel(void) {
     if (!g_outputPanelVisible) return;
+    if (terminal_view_session_active(g_terminalView)) terminal_view_stop(g_terminalView);
     g_outputPanelVisible = 0;
     relayout_and_save(g_hMainWnd);
     if (g_editorVisible) SetFocus(g_hEdit);

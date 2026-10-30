@@ -839,7 +839,8 @@ static int app_capabilities(lua_State *L) {
         "plugin_environments", "memory_limit", "lazy_require", "event_unsubscribe",
         "documents", "command_execution", "path_picker", "status", "logging", "defer",
         "eol_conversion", "save_encoding", "tab_width", "spelling", "output_panel",
-        "context_menu", "problems", "save_and_open", "configured_runner", "menu_enabled"
+        "context_menu", "problems", "save_and_open", "configured_runner", "menu_enabled",
+        "terminal_panel"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -1140,6 +1141,45 @@ static const luaL_Reg output_functions[] = {
     {"write", output_write}, {"clear", output_clear}, {"show", output_show},
     {"hide", output_hide}, {"visible", output_visible}, {"report", output_report}, {NULL, NULL}
 };
+
+static int terminal_begin(lua_State *L) {
+    if (!s_callbacks.terminal_begin || !s_callbacks.terminal_begin())
+        return luaL_error(L, "terminal.begin is not available here");
+    return 0;
+}
+
+static int terminal_write(lua_State *L) {
+    int count = lua_gettop(L);
+    if (!s_callbacks.terminal_write)
+        return luaL_error(L, "terminal.write is not available here");
+    for (int i = 1; i <= count; i++)
+        s_callbacks.terminal_write(checked_cstring(L, i, "terminal text"));
+    return 0;
+}
+
+static int terminal_read(lua_State *L) {
+    const char *prompt = optional_cstring(L, 1, NULL, "terminal prompt");
+    if (!s_callbacks.terminal_read)
+        return luaL_error(L, "terminal.read is not available here");
+    char *answer = s_callbacks.terminal_read(prompt);
+    restart_time_limit();
+    if (answer) lua_pushstring(L, answer); else lua_pushnil(L);
+    free(answer);
+    return 1;
+}
+
+static int terminal_end(lua_State *L) {
+    (void)L;
+    if (!s_callbacks.terminal_end)
+        return luaL_error(L, "terminal.finish is not available here");
+    s_callbacks.terminal_end();
+    return 0;
+}
+
+static const luaL_Reg terminal_functions[] = {
+    {"begin", terminal_begin}, {"write", terminal_write},
+    {"read", terminal_read}, {"finish", terminal_end}, {NULL, NULL}
+};
 static int problems_report(lua_State *L) {
     const char *source = checked_cstring(L, 1, "problem source");
     const char *text = checked_cstring(L, 2, "problem report");
@@ -1185,6 +1225,8 @@ void plugin_registry_open(lua_State *L) {
     lua_setglobal(L, "spell");
     luaL_newlib(L, output_functions);
     lua_setglobal(L, "output");
+    luaL_newlib(L, terminal_functions);
+    lua_setglobal(L, "terminal");
     luaL_newlib(L, problems_functions);
     lua_setglobal(L, "problems");
 }

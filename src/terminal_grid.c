@@ -568,6 +568,19 @@ void terminal_grid_reset(TerminalGrid *grid) {
     grid->dirty = 1;
 }
 
+void terminal_grid_clear(TerminalGrid *grid) {
+    if (!grid) return;
+    for (int i = 0; i < grid->scrollbackCount; i++) {
+        int slot = (grid->scrollbackStart + i) % grid->scrollbackCapacity;
+        free(grid->scrollback[slot].cells);
+        grid->scrollback[slot].cells = NULL;
+        grid->scrollback[slot].width = 0;
+    }
+    grid->scrollbackStart = 0;
+    grid->scrollbackCount = 0;
+    terminal_grid_reset(grid);
+}
+
 void terminal_grid_resize(TerminalGrid *grid, int cols, int rows) {
     if (!grid || cols < 1 || rows < 1) return;
     if (cols == grid->cols && rows == grid->rows) return;

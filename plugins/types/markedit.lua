@@ -196,6 +196,19 @@ function output.hide() end
 ---@return boolean
 function output.visible() end
 
+terminal = {}
+---Starts an in-process session on the Terminal tab, replacing its shell.
+function terminal.begin() end
+---Writes UTF-8/ANSI text to the active terminal session.
+---@param ... string
+function terminal.write(...) end
+---Reads and echoes one line. Escape or Stop returns nil.
+---@param prompt? string
+---@return string?
+function terminal.read(prompt) end
+---Ends the session and leaves its transcript visible.
+function terminal.finish() end
+
 problems = {}
 ---Replaces a named source's report in the Problems tab without removing other sources.
 ---@param source string

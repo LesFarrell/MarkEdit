@@ -2,10 +2,11 @@
 --   Run Document        the whole document
 --   Run Selection       the selected text
 --   Evaluate Selection  shows the value of an expression, as a REPL would
--- print() and io.write() go to the output panel, and so do errors, as
--- path:line locations to double-click when the document is saved.
--- io.read() and io.lines() ask for each line in a box, titled with what the
--- script last wrote ("Name? "); Cancel ends the input. Unlike
+-- print(), io.write(), errors, io.read() and io.lines() all use the Terminal
+-- tab. Error text still contains path:line locations when the document is saved.
+-- io.read() and io.lines() take each line directly from the terminal. The
+-- script's last partial line ("Name? ") acts as its prompt; Escape or closing
+-- terminal session ends the input. Unlike
 -- Run (Ctrl+F5), this needs no Lua installed, and the code runs in the same
 -- sandbox as plugins: the basic functions and the string, table, math, utf8
 -- and coroutine libraries, plus editor, ui, output and app, so a script can
@@ -18,7 +19,7 @@ local BASIC = {
   "rawset", "select", "setmetatable", "getmetatable", "tonumber", "tostring", "type",
   "xpcall", "load", "_VERSION",
 }
-local LIBRARIES = { "string", "table", "math", "utf8", "coroutine", "editor", "ui", "output", "app" }
+local LIBRARIES = { "string", "table", "math", "utf8", "coroutine", "editor", "ui", "output", "terminal", "app" }
 
 local function copy(source)
   local result = {}
@@ -31,7 +32,7 @@ end
 local partial_line = ""
 
 local function write_text(text)
-  output.write(text)
+  terminal.write((text:gsub("\r\n", "\n"):gsub("\n", "\r\n")))
   partial_line = (partial_line .. text):match("[^\n]*$")
 end
 
@@ -41,12 +42,12 @@ local function write_values(separator, ...)
   write_text(table.concat(parts, separator))
 end
 
--- One line from the user, asked for in a box, or nil when they cancel (the
--- end of input). The answer is echoed to the output, as a terminal would.
+-- One line from the terminal, or nil when the user cancels (the end of
+-- input). terminal.read echoes the answer.
 local function read_line()
   local question = partial_line:match("^%s*(.-)%s*$")
-  local answer = ui.prompt(question ~= "" and question or "Input for the Lua script:", "", "Lua Input")
-  if answer then write_text(answer .. "\n") end
+  local answer = terminal.read(question == "" and "Input for the Lua script: " or nil)
+  if answer then partial_line = "" end
   return answer
 end
 
@@ -84,6 +85,9 @@ local function new_environment()
   end
   env.io = {
     write = function(...) write_values("", ...) end,
+    -- Writes reach the terminal grid synchronously, so there is no buffered
+    -- stream to drain. Keep standard prompt-and-read scripts compatible.
+    flush = function() return true end,
     read = read,
     lines = function() return function() return read_line() end end,
   }
@@ -107,23 +111,26 @@ local function run(code, title)
   partial_line = ""
   local env = new_environment()
   local chunk, problem = load(code, chunk_name(), "t", env)
-  output.write(string.char(27) .. "[1;36m" .. title .. string.char(27) .. "[0m\n")
-  output.show()
+  terminal.begin()
+  terminal.write(string.char(27) .. "[1;36m" .. title .. string.char(27) .. "[0m\r\n")
   if not chunk then
-    output.write(string.char(27) .. "[31m" .. problem .. string.char(27) .. "[0m\n\n")
+    terminal.write(string.char(27) .. "[31m" .. problem .. string.char(27) .. "[0m\r\n\r\n")
+    terminal.finish()
     return
   end
   local results = table.pack(xpcall(chunk, function(message) return tostring(message) end))
   if not results[1] then
-    output.write(string.char(27) .. "[31m" .. results[2] .. string.char(27) .. "[0m\n\n")
+    terminal.write(string.char(27) .. "[31m" .. results[2] .. string.char(27) .. "[0m\r\n\r\n")
+    terminal.finish()
     return
   end
   if results.n > 1 then
-    output.write("=> ")
+    terminal.write("=> ")
     write_values("\t", table.unpack(results, 2, results.n))
-    output.write("\n")
+    terminal.write("\r\n")
   end
-  output.write("\n")
+  terminal.write("\r\n")
+  terminal.finish()
 end
 
 local function selected_code()
