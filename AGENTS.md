@@ -4,7 +4,7 @@
 
 MarkEdit is a native Win32 editor written primarily in C. `src/markedit.c` owns startup and the window procedure; UI subsystems live in `src/internal/*.inc`. Reusable modules use paired `.c`/`.h` files under `src/`. Text transformations are in `src/lua/`, while `src/menus.lua` defines the menu bar.
 
-Only `src/markedit.c` includes `src/internal/*.inc`; those components stay in the unity translation unit until they can be expressed through a small context structure. Every `src/*.c` must be listed in a repo-root `*.rsp` response file. `check_structure.ps1` (run by `test.bat`) enforces both rules.
+Only `src/markedit.c` includes `src/internal/*.inc`; those components stay in the unity translation unit until they can be expressed through a small context structure. Every `src/*.c` must be listed in a repo-root `*.rsp` response file, and every `src/*.h` must be `#include`d from some `.c` or `.inc` file so a header left behind by a deleted or renamed source doesn't drift unnoticed. `check_structure.ps1` (run by `test.bat`) enforces all three rules.
 
 Tests live in `tests/`; `test_preview.js` covers the preview bridge. Bundled extensions and Lua types live in `plugins/`. Preview assets are at the root and in `katex/`; dependencies are under `third_party/`. Treat `build/`, `dist/`, and root binaries as generated output.
 

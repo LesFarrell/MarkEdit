@@ -55,7 +55,7 @@ $commonIncludes = @(
     "/DCMARK_GFM_EXTENSIONS_STATIC_DEFINE"
 )
 
-$markeditObjects = Compile-Sources "C" (Get-RspSources "markedit-sources.rsp") (Join-Path $objectRoot "markedit") ($commonIncludes + @("/wd4152", "/wd4702"))
+$markeditObjects = Compile-Sources "C" (Get-RspSources "markedit-sources.rsp") (Join-Path $objectRoot "markedit") ($commonIncludes + @("/wd4152", "/wd4702", "/Ob3"))
 $luaObjects = Compile-Sources "C" (Get-RspSources "lua-sources.rsp") (Join-Path $objectRoot "lua") @(
     "/I$(Join-Path $repo 'third_party\lua\src')", "/wd4244", "/wd4310", "/wd4324", "/wd4701", "/wd4702"
 )
