@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "../src/terminal_view.h"
+#include "../src/terminal_process.h"
 
 static int s_ok = 1;
 
@@ -161,6 +162,82 @@ static void test_session_rendering(TerminalView *view) {
     terminal_view_end_session(view);
 }
 
+/* ---- a real shell underneath an in-process session ----------------------
+   Only process I/O, never simulated keyboard/modifier state, so these are as
+   safe as test_terminal_process.c's own use of a real ConPTY shell. */
+
+static int grid_contains(TerminalView *view, const char *needle) {
+    int lines = terminal_view_total_lines(view);
+    char text[256];
+    for (int i = 0; i < lines; i++) {
+        terminal_view_line_text(view, i, text, sizeof(text));
+        if (strstr(text, needle)) return 1;
+    }
+    return 0;
+}
+
+static void pump_messages(void) {
+    MSG msg;
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+}
+
+static void pump_for(DWORD milliseconds) {
+    DWORD started = GetTickCount();
+    do { pump_messages(); Sleep(10); } while (GetTickCount() - started < milliseconds);
+}
+
+static void pump_until_contains(TerminalView *view, DWORD timeoutMs, const char *needle) {
+    DWORD started = GetTickCount();
+    do {
+        pump_messages();
+        if (grid_contains(view, needle)) return;
+        Sleep(10);
+    } while (GetTickCount() - started < timeoutMs);
+}
+
+static void test_shell_preservation(HWND owner) {
+    if (!terminal_process_available()) {
+        fprintf(stderr, "SKIP: shell preservation (ConPTY unavailable on this Windows)\n");
+        return;
+    }
+    TerminalView *view = terminal_view_create(owner, 2);
+    expect(view != NULL, "a second control is created for the live shell");
+    if (!view) return;
+    /* terminal_view_start() sizes the grid from the control's actual client
+       rect; left at its as-created 0x0, every row would collapse to a single
+       column and wrap each character onto its own line. */
+    MoveWindow(terminal_view_window(view), 0, 0, 800, 400, TRUE);
+
+    WCHAR command[] = L"cmd.exe /q /c \"echo marker1 & ping -n 2 127.0.0.1 >nul & echo marker2\"";
+    expect(terminal_view_start(view, command, NULL), "a real shell starts");
+
+    /* Catch it right after marker1, well before marker2 (~1s later, the
+       ping's delay) - a session needs to begin while there's more to come. */
+    pump_until_contains(view, 5000, "marker1");
+    expect(grid_contains(view, "marker1"), "the live shell's first output arrives");
+
+    expect(terminal_view_begin_session(view), "a Lua session can begin while a shell is running");
+    expect(!grid_contains(view, "marker1"),
+           "the session's own screen starts blank instead of showing the shell's history");
+
+    terminal_view_write(view, "lua output\r\n", strlen("lua output\r\n"));
+    pump_for(2500); /* long enough for marker2 to arrive on the hidden shell grid */
+    expect(!grid_contains(view, "marker2"),
+           "shell output that arrives while a session is active doesn't leak into it");
+    expect(grid_contains(view, "lua output"), "the session's own output is still visible");
+
+    terminal_view_end_session(view);
+
+    /* Any plain key returns from a finished transcript to the live shell
+       (Ctrl+C/Ctrl+V are not used here - see the file header comment). */
+    PostMessageW(terminal_view_window(view), WM_KEYDOWN, (WPARAM)'A', 1);
+    pump_for(300);
+    expect(grid_contains(view, "marker1") && grid_contains(view, "marker2"),
+           "the live shell's output survived the session untouched, including what arrived during it");
+
+    terminal_view_free(view);
+}
+
 int main(void) {
     HWND hwnd = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
     expect(hwnd != NULL, "a hidden host window is created");
@@ -181,6 +258,9 @@ int main(void) {
 
         terminal_view_free(view);
     }
+
+    test_shell_preservation(hwnd);
+
     if (hwnd) DestroyWindow(hwnd);
 
     if (s_ok) puts("All terminal view tests passed.");
