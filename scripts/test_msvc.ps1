@@ -78,6 +78,7 @@ $tests = @(
     @{ Name="test_terminal_grid"; Sources=@("src\terminal_grid.c"); Libraries=@() },
     @{ Name="test_terminal_input"; Sources=@("src\terminal_input.c"); Libraries=@("user32.lib") },
     @{ Name="test_terminal_process"; Sources=@("src\terminal_process.c"); Libraries=@("user32.lib") },
+    @{ Name="test_terminal_view"; Sources=@("src\terminal_view.c", "src\terminal_grid.c", "src\terminal_input.c", "src\terminal_process.c"); Libraries=@("user32.lib", "comctl32.lib", "gdi32.lib") },
     @{ Name="test_recovery"; Sources=@("src\recovery.c", "src\file_io.c", "src\text_codec.c", "src\path_utils.c"); Libraries=@("ole32.lib") },
     @{ Name="test_plugin_host"; Sources=$pluginSources; Objects=$luaObjects; Libraries=@("user32.lib") },
     @{ Name="test_assemblers"; Sources=@(); Objects=$luaObjects; Libraries=@() },

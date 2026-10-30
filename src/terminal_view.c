@@ -61,7 +61,6 @@ struct TerminalView {
     int selecting_any;
     int anchorLine, anchorCol, pointLine, pointCol;
 
-    unsigned int consumeCharCount; /* queued WM_(SYS)CHAR messages already handled as keys */
     int suppressTranslatedChar; /* set while the current pretranslated key is dispatched */
 };
 
@@ -838,7 +837,6 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
             return 0;
         }
         case WM_CHAR: case WM_SYSCHAR: {
-            if (view->consumeCharCount) { view->consumeCharCount--; return 0; }
             if (view->sessionMode) {
                 if (view->inputPending && wParam >= ' ') {
                     char utf8[8];
@@ -870,6 +868,21 @@ static LRESULT CALLBACK TerminalViewSubclassProc(HWND hwnd, UINT msg, WPARAM wPa
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
+/* Removes any WM_(SYS)CHAR/WM_(SYS)DEADCHAR TranslateMessage just queued for
+   this window. TranslateMessage's return value cannot tell us whether it
+   actually queued one: MSDN documents it as nonzero for WM_KEYDOWN/WM_KEYUP/
+   WM_SYSKEYDOWN/WM_SYSKEYUP regardless of whether translation produced a
+   character, so arrow keys, Home/End, Delete and the like report "translated"
+   even though they never queue anything - peeking the queue directly is the
+   only reliable way to find out, and to clear it when there is one. */
+static void discard_translated_char(HWND hwnd) {
+    MSG discard;
+    while (PeekMessageW(&discard, hwnd, WM_CHAR, WM_CHAR, PM_REMOVE) ||
+           PeekMessageW(&discard, hwnd, WM_SYSCHAR, WM_SYSCHAR, PM_REMOVE) ||
+           PeekMessageW(&discard, hwnd, WM_DEADCHAR, WM_DEADCHAR, PM_REMOVE) ||
+           PeekMessageW(&discard, hwnd, WM_SYSDEADCHAR, WM_SYSDEADCHAR, PM_REMOVE)) {}
+}
+
 int terminal_view_pretranslate_message(TerminalView *view, const MSG *message) {
     if (!view || !view->hwnd || !message ||
         (message->hwnd != view->hwnd && !IsChild(view->hwnd, message->hwnd)))
@@ -877,13 +890,13 @@ int terminal_view_pretranslate_message(TerminalView *view, const MSG *message) {
     switch (message->message) {
         case WM_KEYDOWN: case WM_SYSKEYDOWN:
             /* Translate first so layout-aware WM_(SYS)CHAR is queued, then let
-               the key handler emit any non-text VT sequence. If it did, count
-               the queued character so repeats cannot leak or swallow input. */
+               the key handler emit any non-text VT sequence. If it did,
+               discard whatever character translation queued for this key -
+               it must not also be delivered as typed text. */
             view->suppressTranslatedChar = 0;
-            int translated = TranslateMessage(message);
+            TranslateMessage(message);
             DispatchMessage(message);
-            if (translated && view->suppressTranslatedChar && view->consumeCharCount < UINT_MAX)
-                view->consumeCharCount++;
+            if (view->suppressTranslatedChar) discard_translated_char(view->hwnd);
             return 1;
         case WM_KEYUP: case WM_SYSKEYUP:
         case WM_CHAR: case WM_SYSCHAR:
@@ -1080,6 +1093,16 @@ void terminal_view_end_session(TerminalView *view) {
     session_write(view,
         "\r\n\x1b[90m[Lua finished. Press any key to return to PowerShell.]\x1b[0m\r\n",
         sizeof("\r\n\x1b[90m[Lua finished. Press any key to return to PowerShell.]\x1b[0m\r\n") - 1);
+}
+
+/* The rendered screen's text - for tests, the same way terminal_grid.h's own
+   terminal_grid_line_text() is; the grid itself stays private otherwise. */
+int terminal_view_total_lines(const TerminalView *view) {
+    return terminal_grid_total_lines(view->grid);
+}
+
+void terminal_view_line_text(const TerminalView *view, int lineIndex, char *utf8, size_t capacity) {
+    terminal_grid_line_text(view->grid, lineIndex, utf8, capacity);
 }
 
 void terminal_view_apply_theme(TerminalView *view, const COLORREF ansi[16],

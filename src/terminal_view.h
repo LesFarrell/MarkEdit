@@ -63,6 +63,11 @@ void terminal_view_write(TerminalView *view, const char *text, size_t length);
 char *terminal_view_read_line(TerminalView *view, HWND owner, const char *prompt,
                               int *interrupted);
 void terminal_view_end_session(TerminalView *view);
+/* The rendered screen's text - for tests; see terminal_grid.h's own
+   terminal_grid_line_text(), whose contract (trimmed, UTF-8, NUL-terminated
+   within capacity) this follows. */
+int terminal_view_total_lines(const TerminalView *view);
+void terminal_view_line_text(const TerminalView *view, int lineIndex, char *utf8, size_t capacity);
 
 /* The 16 ANSI colours and the default foreground/background for the current
    theme - see output_panel.inc's OUTPUT_ANSI_LIGHT/DARK, which the caller
