@@ -319,8 +319,16 @@ static void clear_output_pane(OutputPane *pane) {
     pane->replaceLine = 0;
 }
 
+/* Any single producer's update rebuilds the whole panel, even when the
+   reader is looking at an unrelated section; keep their place instead of
+   snapping back to the top on every refresh. */
 static void render_problem_reports(void) {
     OutputPane *pane = &g_outputPanes[OUTPUT_TAB_PROBLEMS];
+    HWND view = pane->view;
+    Sci_Position firstVisible = (Sci_Position)SendMessageA(view, SCI_GETFIRSTVISIBLELINE, 0, 0);
+    Sci_Position selStart = (Sci_Position)SendMessageA(view, SCI_GETSELECTIONSTART, 0, 0);
+    Sci_Position selEnd = (Sci_Position)SendMessageA(view, SCI_GETSELECTIONEND, 0, 0);
+
     clear_output_pane(pane);
     free(pane->directory);
     pane->directory = NULL;
@@ -336,6 +344,12 @@ static void render_problem_reports(void) {
         if (!length || report->text[length - 1] != '\n')
             append_output(pane, OUTPUT_STYLE_DEFAULT, "\n", 1);
     }
+
+    Sci_Position newLength = (Sci_Position)SendMessageA(view, SCI_GETLENGTH, 0, 0);
+    Sci_Position clampedStart = selStart > newLength ? newLength : selStart;
+    Sci_Position clampedEnd = selEnd > newLength ? newLength : selEnd;
+    SendMessageA(view, SCI_SETSEL, (WPARAM)clampedStart, (LPARAM)clampedEnd);
+    SendMessageA(view, SCI_SETFIRSTVISIBLELINE, (WPARAM)firstVisible, 0);
 }
 
 /* Replaces one diagnostics producer's contribution without disturbing other
