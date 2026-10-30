@@ -313,6 +313,12 @@ function editor.line_at(position) end
 function editor.line_range(n) end
 ---@return string?
 function editor.file_path() end
+---Reads a UTF-8 text file near the active document, resolved relative to its
+---own folder (the document must be saved). The path must be relative, not
+---absolute. Returns the text, or nil plus an error message.
+---@param relativePath string
+---@return string? text, string? error
+function editor.read_relative_file(relativePath) end
 ---@return string
 function editor.language() end
 ---@return boolean

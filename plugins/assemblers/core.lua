@@ -16,8 +16,19 @@ local assembler = {}
 local function trim(text) return (text:match("^%s*(.-)%s*$")) end
 local function lower(text) return trim(text):lower() end
 
+-- Set at the start of each assemble() call: line -> {file, line} for lines
+-- that came from an INCLUDE (file is nil for the document itself), so fail()
+-- can report an included file's own line number instead of its position in
+-- the merged stream.
+local current_line_display = {}
+
 local function fail(line, message)
-  error(("Line %d: %s"):format(line, message), 0)
+  local display = current_line_display[line]
+  if display and display.file then
+    error(("%s:%d: %s"):format(display.file, display.line, message), 0)
+  else
+    error(("Line %d: %s"):format(display and display.line or line, message), 0)
+  end
 end
 
 local function strip_comment(line)
@@ -214,35 +225,68 @@ local function qualify_locals(text, scope, line)
   return table.concat(out)
 end
 
-local function parse_source(source)
-  local lines = {}
-  source = source:gsub("\r\n", "\n"):gsub("\r", "\n")
-  if source:sub(-1) ~= "\n" then source = source .. "\n" end
-  local number, scope = 0, nil
-  for raw in source:gmatch("(.-)\n") do
-    number = number + 1
-    local text = trim(strip_comment(raw)); local label
-    local candidate, rest = text:match("^([A-Za-z_%.][A-Za-z0-9_%.]*)%s*:%s*(.*)$")
-    local colon_label = candidate ~= nil
-    if candidate then label, text = candidate:lower(), rest end
-    local equ_name, equ_expr = text:match("^([A-Za-z_%.][A-Za-z0-9_%.]*)%s+[Ee][Qq][Uu]%s+(.+)$")
-    if equ_name and not label then label, text = equ_name:lower(), "equ " .. equ_expr end
-    if label then
-      if label:sub(1, 1) == "." then
-        if not scope then fail(number, "local symbol '" .. label .. "' has no enclosing label") end
-        label = scope .. label
-      elseif colon_label then scope = label end
+-- INCLUDE splices a file's content in at parse time, before IF/ELSE/ENDIF or
+-- any other directive is evaluated - a conditionally-excluded INCLUDE line
+-- still reads the file; what it spliced in is then excluded like any other
+-- code, the same as the directive line itself would be. A nested INCLUDE's
+-- path is still resolved against the document being assembled, not the file
+-- that contains it.
+local MAX_INCLUDE_DEPTH = 32
+
+local function parse_source(source, read_file)
+  local lines, line_display = {}, {}
+  local total, scope, depth = 0, nil, 0
+
+  local function parse_into(text, file_name)
+    text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+    if text:sub(-1) ~= "\n" then text = text .. "\n" end
+    local relative = 0
+    for raw in text:gmatch("(.-)\n") do
+      relative = relative + 1
+      total = total + 1
+      local number = total
+      line_display[number] = { file = file_name, line = relative }
+      local line_text = trim(strip_comment(raw)); local label
+      local candidate, rest = line_text:match("^([A-Za-z_%.][A-Za-z0-9_%.]*)%s*:%s*(.*)$")
+      local colon_label = candidate ~= nil
+      if candidate then label, line_text = candidate:lower(), rest end
+      local equ_name, equ_expr = line_text:match("^([A-Za-z_%.][A-Za-z0-9_%.]*)%s+[Ee][Qq][Uu]%s+(.+)$")
+      if equ_name and not label then label, line_text = equ_name:lower(), "equ " .. equ_expr end
+      if label then
+        if label:sub(1, 1) == "." then
+          if not scope then fail(number, "local symbol '" .. label .. "' has no enclosing label") end
+          label = scope .. label
+        elseif colon_label then scope = label end
+      end
+      local mnemonic, rest_text = line_text:match("^(%S+)%s*(.-)%s*$")
+      mnemonic = mnemonic and mnemonic:lower()
+      if mnemonic == "include" then
+        if label then fail(number, "INCLUDE cannot have a label") end
+        local name = quoted_string(trim(rest_text))
+        if not name then fail(number, "INCLUDE expects one quoted file name") end
+        if not read_file then fail(number, "INCLUDE is not available here") end
+        if depth >= MAX_INCLUDE_DEPTH then
+          fail(number, "INCLUDE nested too deeply (possible circular INCLUDE)")
+        end
+        local included, err = read_file(name)
+        if not included then fail(number, "cannot include '" .. name .. "': " .. (err or "unknown error")) end
+        depth = depth + 1
+        parse_into(included, name)
+        depth = depth - 1
+      else
+        rest_text = qualify_locals(rest_text or "", scope, number)
+        lines[#lines + 1] = { number=number, label=label, mnemonic=mnemonic, args=rest_text }
+      end
     end
-    local mnemonic, rest_text = text:match("^(%S+)%s*(.-)%s*$")
-    rest_text = qualify_locals(rest_text or "", scope, number)
-    lines[#lines + 1] = { number=number, label=label, mnemonic=mnemonic and mnemonic:lower(),
-      args=rest_text }
   end
-  return lines
+
+  parse_into(source, nil)
+  return lines, line_display
 end
 
-function assembler.assemble(source, cpu)
-  local lines = parse_source(source)
+function assembler.assemble(source, cpu, read_file)
+  local lines, line_display = parse_source(source, read_file)
+  current_line_display = line_display
   local memo, top = {}, cpu.memory_size - 1
 
   -- Resolve constant-only EQU chains before layout so forward constants can

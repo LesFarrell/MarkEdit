@@ -34,7 +34,7 @@ end
 local function assemble_source(cpu)
   local title = cpu.name .. " assembly failed"
   local source, path = editor.get_text(), editor.file_path()
-  local ok, bytes, origin, symbols, info = pcall(core.assemble, source, cpu)
+  local ok, bytes, origin, symbols, info = pcall(core.assemble, source, cpu, editor.read_relative_file)
   if not ok then
     local message = tostring(bytes)
     local line = tonumber(message:match("^Line (%d+):"))

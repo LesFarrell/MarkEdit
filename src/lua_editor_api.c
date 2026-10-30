@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "file_io.h"
+#include "path_utils.h"
 #include "plugin_host.h"
 #include "text_codec.h"
 #include "../third_party/scintilla/include/Scintilla.h"
@@ -440,6 +442,60 @@ static int editor_file_path(lua_State *L) {
     return 1;
 }
 
+/* Reads a UTF-8 text file near the active document - for plugins such as the
+   bundled assemblers' INCLUDE directive that need another source file's
+   content, without opening the sandbox up to arbitrary paths. relativePath
+   must be relative (no drive letter, and not starting with a slash); it is
+   resolved against the document's own folder and then normalized, so ".."
+   can still reach a sibling project folder the way a real INCLUDE would, but
+   an absolute path can't point the read anywhere else on the machine. The
+   document must be saved, since there is otherwise no folder to resolve
+   against. Returns the text, or (nil, message) on failure. */
+static int editor_read_relative_file(lua_State *L) {
+    checked_editor(L);
+    const char *relativeUtf8 = luaL_checkstring(L, 1);
+    if (!s_callbacks.file_path)
+        return luaL_error(L, "editor.read_relative_file is not available here");
+    char *pathUtf8 = s_callbacks.file_path();
+    if (!pathUtf8) {
+        lua_pushnil(L);
+        lua_pushstring(L, "the document must be saved before it can include another file");
+        return 2;
+    }
+    WCHAR *docPath = to_wide(pathUtf8);
+    WCHAR *relative = to_wide(relativeUtf8);
+    free(pathUtf8);
+
+    const char *error = NULL;
+    char *text = NULL;
+    if (!docPath || !relative) {
+        error = "out of memory";
+    } else if (relative[0] == L'\\' || relative[0] == L'/' ||
+               (relative[0] != 0 && relative[1] == L':')) {
+        error = "the path must be relative to the document, not absolute";
+    } else {
+        WCHAR *directory = path_directory(docPath);
+        WCHAR *joined = directory ? path_join(directory, relative) : NULL;
+        free(directory);
+        WCHAR *extended = joined ? extended_path(joined) : NULL;
+        free(joined);
+        if (extended) text = read_text_file(extended, NULL, NULL, NULL);
+        free(extended);
+        if (!text) error = "could not read the file";
+    }
+    free(docPath);
+    free(relative);
+
+    if (text) {
+        lua_pushstring(L, text);
+        free(text);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, error);
+    return 2;
+}
+
 static int editor_language(lua_State *L) {
     checked_editor(L);
     if (!s_callbacks.language) return luaL_error(L, "editor.language is not available here");
@@ -705,6 +761,7 @@ static const luaL_Reg editor_functions[] = {
     {"eol", editor_eol},
     {"tab_width", editor_get_tab_width},
     {"file_path", editor_file_path},
+    {"read_relative_file", editor_read_relative_file},
     {"language", editor_language},
     {"modified", editor_modified},
     {"read_only", editor_read_only},

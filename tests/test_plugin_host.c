@@ -841,6 +841,84 @@ static void test_time_limit(void) {
     plugin_host_set_callbacks(NULL);
 }
 
+static char *s_relativeFileDocPath;
+static char *fake_relative_file_doc_path(void) {
+    if (!s_relativeFileDocPath) return NULL;
+    size_t length = strlen(s_relativeFileDocPath) + 1;
+    char *copy = (char *)malloc(length);
+    if (copy) memcpy(copy, s_relativeFileDocPath, length);
+    return copy;
+}
+
+/* editor.read_relative_file(), used by the bundled assemblers' INCLUDE: reads
+   a real sibling file (and one reached through a subfolder or ".."), and
+   rejects an absolute path or an unsaved document without touching the
+   filesystem outside the document's own folder. */
+static void test_read_relative_file(HWND editor) {
+    WCHAR tempRoot[MAX_PATH], base[MAX_PATH], subdir[MAX_PATH];
+    expect(GetTempPathW(MAX_PATH, tempRoot) > 0, "temp path available");
+    expect(GetTempFileNameW(tempRoot, L"rrf", 0, base) != 0, "temp name reserved");
+    DeleteFileW(base);
+    expect(CreateDirectoryW(base, NULL), "temp directory created");
+    swprintf(subdir, MAX_PATH, L"%ls\\sub", base);
+    CreateDirectoryW(subdir, NULL);
+
+    WCHAR siblingPath[MAX_PATH], nestedPath[MAX_PATH], mainPath[MAX_PATH];
+    swprintf(siblingPath, MAX_PATH, L"%ls\\lib.asm", base);
+    swprintf(nestedPath, MAX_PATH, L"%ls\\shared.asm", subdir);
+    swprintf(mainPath, MAX_PATH, L"%ls\\main.asm", base);
+    write_bytes_file(siblingPath, "sibling content", 15);
+    write_bytes_file(nestedPath, "nested content", 14);
+
+    char *mainPathUtf8 = to_utf8(mainPath);
+    s_relativeFileDocPath = mainPathUtf8;
+    PluginHostCallbacks callbacks = {0};
+    callbacks.file_path = fake_relative_file_doc_path;
+    plugin_host_set_callbacks(&callbacks);
+
+    int index = load_ok("read-relative.lua",
+        "menu.add('Sibling', function()\n"
+        "  local text, err = editor.read_relative_file('lib.asm')\n"
+        "  assert(text == 'sibling content' and err == nil)\n"
+        "end)\n"
+        "menu.add('Nested', function()\n"
+        "  assert(editor.read_relative_file('sub/shared.asm') == 'nested content')\n"
+        "end)\n"
+        "menu.add('Dotdot', function()\n"
+        "  assert(editor.read_relative_file('sub/../lib.asm') == 'sibling content')\n"
+        "end)\n"
+        "menu.add('Absolute', function()\n"
+        "  local text, err = editor.read_relative_file('C:\\\\Windows\\\\win.ini')\n"
+        "  assert(text == nil and err:find('absolute', 1, true))\n"
+        "end)\n"
+        "menu.add('Missing', function()\n"
+        "  local text, err = editor.read_relative_file('nope.asm')\n"
+        "  assert(text == nil and err ~= nil)\n"
+        "end)\n");
+    expect(run_ok(index, editor), "reads a sibling file");
+    expect(run_ok(index + 1, editor), "reads a file through a subfolder");
+    expect(run_ok(index + 2, editor), "'..' resolves back to a sibling");
+    expect(run_ok(index + 3, editor), "an absolute path is rejected");
+    expect(run_ok(index + 4, editor), "a missing file is reported, not a crash");
+
+    s_relativeFileDocPath = NULL;
+    callbacks.file_path = fake_relative_file_doc_path;
+    plugin_host_set_callbacks(&callbacks);
+    int unsavedIndex = load_ok("read-relative-unsaved.lua",
+        "menu.add('Unsaved', function()\n"
+        "  local text, err = editor.read_relative_file('lib.asm')\n"
+        "  assert(text == nil and err:find('saved', 1, true))\n"
+        "end)\n");
+    expect(run_ok(unsavedIndex, editor), "an unsaved document has no folder to resolve against");
+
+    plugin_host_set_callbacks(NULL);
+    free(mainPathUtf8);
+    DeleteFileW(siblingPath);
+    DeleteFileW(nestedPath);
+    RemoveDirectoryW(subdir);
+    RemoveDirectoryW(base);
+}
+
 static void write_script(const WCHAR *directory, const WCHAR *name, const char *code) {
     WCHAR *path = path_join(directory, name);
     expect(path && write_bytes_file(path, code, strlen(code)), "write test script");
@@ -2565,6 +2643,7 @@ int main(void) {
     test_environment();
     test_isolation(editor);
     test_time_limit();
+    test_read_relative_file(editor);
     test_directory(editor);
     test_bundled_plugins(editor);
     test_spelling(editor);

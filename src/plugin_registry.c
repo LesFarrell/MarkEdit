@@ -845,7 +845,7 @@ static int app_capabilities(lua_State *L) {
         "documents", "command_execution", "path_picker", "status", "logging", "defer",
         "eol_conversion", "save_encoding", "tab_width", "spelling", "output_panel",
         "context_menu", "problems", "save_and_open", "configured_runner", "menu_enabled",
-        "terminal_panel"
+        "terminal_panel", "relative_file_read"
     };
     lua_createtable(L, 0, (int)(sizeof(names) / sizeof(names[0])));
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {

@@ -90,6 +90,57 @@ expect_error("A EQU B\nB EQU A\nDB 0", "unresolved or circular EQU")
 expect_error("ORG 32768\nIF 1\nDB 0", "IF without ENDIF")
 expect_error("ORG 32768\nJR 33000", "relative jump target is out of range")
 
+-- ---- INCLUDE ----
+
+local function fake_source(files)
+  return function(name)
+    local text = files[name]
+    if text then return text end
+    return nil, "no such file"
+  end
+end
+
+-- INCLUDE splices the file's lines in at that point, in the same scope.
+do
+  local bytes = core.assemble("ORG 32768\nDB 1\nINCLUDE \"lib.asm\"\nDB 3\n", z80,
+    fake_source({ ["lib.asm"] = "value: EQU 5\nDB value\n" }))
+  assert(hex(bytes) == "010503", hex(bytes))
+end
+
+-- A label before INCLUDE still scopes the included file's own local labels,
+-- since INCLUDE is a textual splice rather than a separate compilation unit.
+do
+  local _, _, symbols = core.assemble("ORG 32768\nstart:\nINCLUDE \"lib.asm\"\n", z80,
+    fake_source({ ["lib.asm"] = ".loop: DJNZ .loop\n" }))
+  assert(symbols["start.loop"] == 0x8000, "included local label did not scope to the enclosing label")
+end
+
+-- An error inside an included file names the file and its own line number,
+-- not "Line N" (which would refer to the document open in the editor).
+do
+  local ok, message = pcall(core.assemble, "INCLUDE \"bad.asm\"\n", z80,
+    fake_source({ ["bad.asm"] = "DB 1\nBOGUS\n" }))
+  assert(not ok and message:find("^bad%.asm:2:"), "expected bad.asm:2: prefix, got " .. tostring(message))
+end
+
+do
+  local ok, message = pcall(core.assemble, "INCLUDE \"missing.asm\"\n", z80, fake_source({}))
+  assert(not ok and message:find("no such file", 1, true), tostring(message))
+end
+
+do
+  local ok, message = pcall(core.assemble, "INCLUDE \"x.asm\"\n", z80, nil)
+  assert(not ok and message:find("not available here", 1, true), tostring(message))
+end
+
+-- A circular INCLUDE is stopped rather than recursing until the Lua stack
+-- overflows.
+do
+  local ok, message = pcall(core.assemble, "INCLUDE \"a.asm\"\n", z80,
+    fake_source({ ["a.asm"] = "INCLUDE \"a.asm\"\n" }))
+  assert(not ok and message:find("nested too deeply", 1, true), tostring(message))
+end
+
 local image = tap.code("demo", string.char(0xc9), 0x8000, 0x8001)
 assert(#image > 50 and image:find(string.char(0xfd), 1, true), "TAP loader has no CLEAR token")
 assert(image:find("32767", 1, true) and image:find("32769", 1, true),

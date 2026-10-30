@@ -21,7 +21,7 @@
    plugins and modules, and prevents a script from exhausting the process. */
 #define PLUGIN_MEMORY_LIMIT_BYTES (64u * 1024u * 1024u)
 
-#define TINKEREDIT_PLUGIN_API_VERSION 10
+#define TINKEREDIT_PLUGIN_API_VERSION 11
 
 /* What the plugin API needs from the application. Any member may be NULL,
    in which case the matching Lua function raises an error. All text is UTF-8. */

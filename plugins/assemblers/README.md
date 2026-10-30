@@ -62,125 +62,28 @@ each routine can have its own `.loop`.
 | `ASSERT expression[,"message"]` | Stops with the message when the expression is 0. |
 | `ENTRY address` | Where the program starts, if not at the first byte. |
 | `END [address]` | Stops assembling; an address sets the entry point. |
+| `INCLUDE "path"` | Splices another file's source in at that point. The document being assembled must be saved: `path` is resolved relative to its folder (`..` can reach a sibling folder, but `path` itself must not be absolute), and included files can nest up to 32 deep. |
 
-## Z80
+None of the four has macros, `INCBIN`, or a repeat/loop directive (`REPT`,
+`.rept`); a source file plus whatever it `INCLUDE`s is assembled as one unit,
+top to bottom. `INCLUDE` is spliced in before `IF`/`ELSE`/`ENDIF` are
+evaluated, so a conditionally-excluded `INCLUDE` line still reads the file -
+what it spliced in is then excluded like any other code. An error inside an
+included file is reported as `name:line: message` instead of `Line N:`, and
+isn't highlighted in the editor (only the document actually open there can
+be).
 
-The documented Z80 instruction set, plus `SLL`/`SL1`, `IXH`, `IXL`, `IYH`,
-`IYL`, `IN (C)`, `IN F,(C)` and indexed CB operations with a register
-destination.
+### What each CPU supports, and what it doesn't
 
-**Compile** saves a TAP: a tokenized BASIC loader followed by the code. For
-code above Spectrum BASIC memory the loader lowers RAMTOP with `CLEAR`, then
-loads the code and calls the entry point (`ENTRY`/`END`, otherwise the first
-byte). **Compile and Run** saves the same TAP and asks Windows to open it with
-the application associated with `.tap` files, such as a Spectrum emulator.
-**Configure Emulator...** can instead select a specific emulator executable
-and optional arguments; the quoted TAP path is appended as the final argument.
+Each CPU's full instruction table, menu commands and save format are on its
+own page:
 
-## CHIP-8 and SUPER-CHIP
-
-Mnemonics follow Cowgod's widely used reference. Every instruction is two
-bytes. Registers are `V0`–`VF`; addresses are 12-bit (`$000`–`$FFF`).
-
-| Instruction | Opcode | Instruction | Opcode |
-|---|---|---|---|
-| `CLS` | `00E0` | `RET` | `00EE` |
-| `SYS addr` | `0nnn` | `JP addr` | `1nnn` |
-| `JP V0,addr` | `Bnnn` | `CALL addr` | `2nnn` |
-| `SE Vx,byte` | `3xkk` | `SE Vx,Vy` | `5xy0` |
-| `SNE Vx,byte` | `4xkk` | `SNE Vx,Vy` | `9xy0` |
-| `LD Vx,byte` | `6xkk` | `LD Vx,Vy` | `8xy0` |
-| `ADD Vx,byte` | `7xkk` | `ADD Vx,Vy` | `8xy4` |
-| `OR` / `AND` / `XOR Vx,Vy` | `8xy1` / `8xy2` / `8xy3` | `SUB` / `SUBN Vx,Vy` | `8xy5` / `8xy7` |
-| `SHR Vx[,Vy]` | `8xy6` | `SHL Vx[,Vy]` | `8xyE` |
-| `LD I,addr` | `Annn` | `ADD I,Vx` | `Fx1E` |
-| `RND Vx,byte` | `Cxkk` | `DRW Vx,Vy,n` | `Dxyn` |
-| `SKP Vx` | `Ex9E` | `SKNP Vx` | `ExA1` |
-| `LD Vx,DT` | `Fx07` | `LD Vx,K` | `Fx0A` |
-| `LD DT,Vx` | `Fx15` | `LD ST,Vx` | `Fx18` |
-| `LD F,Vx` | `Fx29` | `LD B,Vx` | `Fx33` |
-| `LD [I],Vx` | `Fx55` | `LD Vx,[I]` | `Fx65` |
-
-`[I]` may also be written `(I)`. A byte may be negative (`ADD V0,-1`). `SHR
-Vx` and `SHL Vx` shift `Vx` in place; the optional `Vy` is the source register
-the original COSMAC VIP interpreter used.
-
-**SUPER-CHIP 1.1** adds:
-
-| Instruction | Opcode | Meaning |
+| CPU | Supports | Does not support |
 |---|---|---|
-| `SCD n` | `00Cn` | Scroll down `n` lines |
-| `SCR` | `00FB` | Scroll right 4 pixels |
-| `SCL` | `00FC` | Scroll left 4 pixels |
-| `EXIT` | `00FD` | Exit the interpreter |
-| `LOW` | `00FE` | 64×32 display |
-| `HIGH` | `00FF` | 128×64 display |
-| `DRW Vx,Vy,0` | `Dxy0` | Draw a 16×16 sprite |
-| `LD HF,Vx` | `Fx30` | Point I at the large font digit in Vx |
-| `LD R,Vx` | `Fx75` | Save V0–Vx to the RPL flags |
-| `LD Vx,R` | `Fx85` | Restore V0–Vx from the RPL flags |
-
-Use them only with an interpreter that supports SUPER-CHIP.
-
-**Compile** saves the program as a `.ch8` file, which has no header:
-interpreters load it at `$200` and start there, so the program must begin at
-`$200` (the default `ORG`).
-
-## 6502
-
-The 56 documented instructions in every addressing mode:
-
-| Write | Mode |
-|---|---|
-| `LDA #$10` | Immediate. `#<value` and `#>value` take the low and high byte. |
-| `LDA $10` / `LDA $1234` | Zero page / absolute |
-| `LDA $10,X` / `LDA $1234,Y` | Zero page or absolute, indexed |
-| `LDA ($10,X)` | Indexed indirect |
-| `LDA ($10),Y` | Indirect indexed |
-| `JMP ($1234)` | Indirect |
-| `ASL` or `ASL A` | Accumulator |
-| `BNE label` | Relative (within -128..127 bytes) |
-
-The shorter zero-page form is used when the address is known to be below
-`$100`. `EQU` constants are always known, wherever they're defined, so
-declare zero-page variables with `EQU` (`counter EQU $10`). A label defined
-further down gets the absolute form even if it turns out to be in zero page,
-as in most 6502 assemblers, because the instruction's size has to be fixed
-before that label's address is known.
-
-**Compile C64 PRG** saves a `.prg`: the 2-byte load address followed by the
-code. Load it with `LOAD "NAME",8,1` and start it with `SYS 49152` (for the
-default `ORG $C000`). **Compile Raw Binary** saves just the bytes, for other
-6502 systems and emulators.
-
-## Game Boy (SM83)
-
-The Game Boy's SM83 is a cut-down Z80. Its instructions are the Z80's
-without IX/IY, `EX`, `EXX`, `DJNZ`, `IN`/`OUT`, the block instructions and
-the PO/PE/P/M conditions, which are reported as errors, plus these of its
-own:
-
-| Write | Does |
-|---|---|
-| `LD A,(HL+)` / `LD (HL-),A` | Load and step HL. `(HLI)`/`(HLD)` and `LDI`/`LDD` are the same. |
-| `LDH (n),A` / `LDH A,(n)` | The `$FF00`-`$FFFF` I/O page; `n` can be the full address or its low byte. |
-| `LDH (C),A` / `LD A,(C)` | `$FF00+C`. |
-| `LD HL,SP+e` / `ADD SP,e` | SP plus a signed byte. |
-| `LD (nn),SP` | Stores SP. |
-| `SWAP r`, `STOP`, `RETI` | Swap nibbles; stop the CPU; return from an interrupt. |
-
-Memory operands can be written with brackets, `LD A,[HL+]`, as in RGBDS
-sources, as well as with parentheses. Only A loads from or to an address:
-`LD HL,(nn)` is reported rather than read as `LD HL,nn`.
-
-**Compile ROM** saves a 32 KB cartridge with no memory bank controller, which
-every emulator and flash cartridge runs. Tinker Editor writes the header at
-`$0100`-`$014F` itself: `NOP` and `JP` to the entry point (`ENTRY`/`END`,
-otherwise the first byte of code), the Nintendo logo the boot ROM checks, a
-title from the file name, and both checksums. So code starts at `$0150`;
-`ORG $0000` first puts code in the RST and interrupt vectors (the gap to
-`$0150` is left for the header). Code in the header, or past `$7FFF`, is
-reported.
+| [Z80](z80.md) | The full documented instruction set, plus the common undocumented extras: `SLL`/`SL1`, `IXH`/`IXL`/`IYH`/`IYL`, `IN (C)`/`IN F,(C)`, and indexed `CB` operations with a register destination (`RLC (IX+d),B` and the like). | Nothing from the documented or commonly-used undocumented set; this is the one assembler here with no deliberate gaps. |
+| [CHIP-8 / SUPER-CHIP](chip8.md) | Every original CHIP-8 opcode and SUPER-CHIP 1.1's additions (scrolling, the 128×64 mode, the large font, RPL flag save/restore). | XO-CHIP (Octo) extensions: no 16-bit `i := long`, extra bitplane/scroll-up opcodes, audio pattern buffer, or `pitch`/`buffer` registers. Sticking to CHIP-8/SUPER-CHIP mnemonics keeps a program portable to interpreters that don't implement XO-CHIP either. |
+| [6502](mos6502.md) | The 56 documented NMOS instructions in every addressing mode they come in. | The NMOS "illegal"/undocumented opcodes (`LAX`, `SAX`, `DCP`, `SLO`, `RLA`, `SRE`, `RRA`, `ISC`/`ISB`, `ANC`, `ALR`, `ARR`, `SBX`, …) and every 65C02/65816 addition (`PHX`/`PHY`/`PLX`/`PLY`, `STZ`, `TRB`/`TSB`, `BRA`, `(zp)` without an index, `RMB`/`SMB`/`BBR`/`BBS`). Code written for a 65C02 needs rewriting to NMOS 6502 equivalents first. |
+| [Game Boy (SM83)](sm83.md) | The Z80 subset the hardware actually has, plus the SM83-only forms its page lists. | `IX`/`IY` and everything built on them, `EX`, `EXX`, `DJNZ`, `IN`/`OUT` and the I/O port instructions, the Z80 block instructions (`LDIR`/`LDDR`/`CPIR`/`CPDR`/…; `LDI`/`LDD` are repurposed instead), `IM`, `NEG`, `RETN`, and the `PO`/`PE`/`P`/`M` conditions. Each is reported as an error rather than silently misencoded. |
 
 ## Examples
 
@@ -189,10 +92,10 @@ Tinker Editor and use that CPU's **Compile** command:
 
 | File | CPU | Run it with |
 |---|---|---|
-| `examples/z80-hello.asm` | ZX Spectrum | The saved `.tap`, with `LOAD ""`. |
-| `examples/chip8-hello.asm` | CHIP-8 / SUPER-CHIP | The saved `.ch8` in any interpreter. |
-| `examples/c64-hello.asm` | 6502 (Commodore 64) | The saved `.prg`, with `SYS 49152`. |
-| `examples/gb-hello.asm` | Game Boy | The saved `.gb` in an emulator such as SameBoy, BGB or mGBA. |
+| `examples/z80-hello.asm` | [ZX Spectrum](z80.md) | The saved `.tap`, with `LOAD ""`. |
+| `examples/chip8-hello.asm` | [CHIP-8 / SUPER-CHIP](chip8.md) | The saved `.ch8` in any interpreter. |
+| `examples/c64-hello.asm` | [6502 (Commodore 64)](mos6502.md) | The saved `.prg`, with `SYS 49152`. |
+| `examples/gb-hello.asm` | [Game Boy](sm83.md) | The saved `.gb` in an emulator such as SameBoy, BGB or mGBA. |
 
 The `examples` folder has no `init.lua`, so Tinker Editor doesn't load it as a
 plugin.
@@ -203,7 +106,7 @@ plugin.
 |---|---|
 | `init.lua` | The menu commands and output formats |
 | `core.lua` | The shared front end and two-pass layout |
-| `z80.lua`, `chip8.lua`, `mos6502.lua`, `sm83.lua` | Instruction encoding for each CPU |
+| `z80.lua`, `chip8.lua`, `mos6502.lua`, `sm83.lua` | Instruction encoding for each CPU, documented in [z80.md](z80.md), [chip8.md](chip8.md), [mos6502.md](mos6502.md) and [sm83.md](sm83.md) |
 | `tap.lua` | The ZX Spectrum TAP format |
 | `gbrom.lua` | The Game Boy cartridge image and header |
 | `examples/` | A hello-world program for each assembler |
