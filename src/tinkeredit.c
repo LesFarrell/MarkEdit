@@ -139,6 +139,7 @@ static int g_menuFontDpi = 0;
 static char *g_pendingHtmlBody = NULL; /* set if update requested before webview ready */
 static int g_previewShowingRawHtml = 0; /* true once show_html_file_preview() has navigated away from the shell page */
 static WCHAR *g_expectedHtmlPreviewUrl = NULL; /* one-shot allowance for show_html_file_preview()'s own navigation; see NavStarting_Invoke */
+static WCHAR *g_documentMappingDirectory = NULL; /* avoids remapping document.local when tabs share a folder */
 static WCHAR *g_exportPath = NULL;
 static unsigned long g_exportRequest = 0;
 static WCHAR *g_pendingPdfPath = NULL;
@@ -200,6 +201,7 @@ typedef struct Document {
     unsigned untitledNumber;
     int closedIndex;
     int isReference; /* 0, or a ReferenceKind for a Help page so Help reuses its tab */
+    int viewKind; /* DOCUMENT_VIEW_*: text editor or a read-only image preview */
     int largeFile; /* using large-file mode, either from open or after growing past the threshold */
     int autoReload; /* reload changes on disk without asking while there are no unsaved edits */
     /* Where the last load from disk ended, so growth can be appended rather
@@ -210,6 +212,8 @@ typedef struct Document {
     int loadedTailLength;
     TextCodecState appendCodec;
 } Document;
+
+enum { DOCUMENT_VIEW_TEXT = 0, DOCUMENT_VIEW_IMAGE };
 
 /* The Help pages opened as unsaved Markdown tabs (see show_help_page()). */
 typedef enum { REFERENCE_MARKDOWN = 1, REFERENCE_SHORTCUTS } ReferenceKind;
@@ -226,6 +230,24 @@ typedef struct DocumentStore {
     int switching;
 } DocumentStore;
 static DocumentStore g_documentStore = { .nextUntitledNumber = 1 };
+
+static int image_file_path(const WCHAR *path) {
+    const WCHAR *extension = path ? PathFindExtensionW(path) : NULL;
+    return extension && extension_in_list(extension,
+        L".png;.jpg;.jpeg;.gif;.bmp;.webp;.svg;.ico;.avif");
+}
+
+static int active_document_is_image(void) {
+    return g_documentStore.count > 0 &&
+           g_documentStore.documents[g_documentStore.active].viewKind == DOCUMENT_VIEW_IMAGE;
+}
+
+static int active_document_is_raster_image(void) {
+    const WCHAR *path = g_documentStore.count > 0
+        ? g_documentStore.documents[g_documentStore.active].path : NULL;
+    return active_document_is_image() && path &&
+           _wcsicmp(PathFindExtensionW(path), L".svg") != 0;
+}
 static char g_tabTooltipAnsi[LONG_PATH_CAPACITY];
 /* Set on every edit and every dirty-state change; cleared once
    write_recovery_snapshot() has brought the on-disk snapshot back in sync.
@@ -276,6 +298,15 @@ static long long large_file_threshold_bytes(void) {
 }
 int g_previewVisible = 0;
 int g_editorVisible = 1;
+/* Image tabs temporarily occupy the preview area without changing the user's
+   saved editor/preview layout. Switching back restores that layout. */
+static int editor_pane_visible(void) {
+    return g_editorVisible && !active_document_is_image();
+}
+
+static int preview_pane_visible(void) {
+    return g_previewVisible || active_document_is_image();
+}
 int g_previewOnLeft = 0;
 int g_splitterRatio = 500; /* left pane width as thousandths of the available split width */
 int g_splitterPos = -1; /* pixel x of splitter, initialized from g_splitterRatio */
@@ -639,7 +670,7 @@ static void run_deferred_startup_init(void) {
     update_view_menu(g_hMainWnd);
     init_webview();
     if (g_pendingCliFile) {
-        load_file(g_pendingCliFile);
+        open_file_in_tab(g_pendingCliFile);
         free(g_pendingCliFile);
         g_pendingCliFile = NULL;
     } else if (!restore_recovery_snapshot()) {
@@ -832,6 +863,8 @@ static void destroy_main_window(HWND hwnd) {
     if (g_webviewController) { ICoreWebView2Controller_Release(g_webviewController); g_webviewController = NULL; }
     free(g_pendingHtmlBody);
     g_pendingHtmlBody = NULL;
+    free(g_documentMappingDirectory);
+    g_documentMappingDirectory = NULL;
     free(g_exportPath);
     g_exportPath = NULL;
     free(g_pendingPdfPath);
@@ -1236,14 +1269,15 @@ static void load_application_settings(const WCHAR *commandLineFile) {
     load_layout_settings();
     load_find_settings();
     load_compiler_settings();
-    if (commandLineFile && language_for_path(commandLineFile)->id == LANG_MARKDOWN) {
+    if (commandLineFile &&
+        (language_for_path(commandLineFile)->id == LANG_MARKDOWN || image_file_path(commandLineFile))) {
         /* File-association/command-line launches of a Markdown file are
            preview-only for this session, without overwriting the user's
            normal panel visibility. */
         g_previewVisible = 1;
         g_editorVisible = 0;
     } else if (g_commandLinePreviewMode) {
-        /* Command-line launch of a non-Markdown file: show it in the editor
+        /* Command-line launch of a non-Markdown, non-image file: show it in the editor
            for this session, same reasoning as above but the other pane. */
         g_previewVisible = 0;
         g_editorVisible = 1;

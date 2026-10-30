@@ -130,7 +130,7 @@ static void record_document_file_time(int index) {
    main pane's current location. */
 static void sync_split_editor_document(void) {
     if (!g_hSplitEdit || !g_splitScratchDocument || g_documentStore.count <= 0) return;
-    int visible = g_splitEditorVisible && g_editorVisible && !g_focusMode;
+    int visible = g_splitEditorVisible && editor_pane_visible() && !g_focusMode;
     sptr_t desired = visible
         ? g_documentStore.documents[g_documentStore.active].sciDocument
         : g_splitScratchDocument;
@@ -168,6 +168,8 @@ static void switch_document(int index) {
     g_documentStore.switching = 1;
     g_documentStore.active = index;
     set_active_editor_document(g_documentStore.documents[index].sciDocument);
+    apply_preview_host_theme();
+    apply_webview_background_colour();
     apply_editor_font();
     apply_document_language(g_documentStore.documents[index].path);
     restore_document_view(g_hEdit, &g_documentStore.documents[index]);
@@ -185,6 +187,7 @@ static void switch_document(int index) {
     if (g_hTabs) TabCtrl_SetCurSel(g_hTabs, index);
     update_document_mapping();
     update_preview();
+    layout(g_hMainWnd);
     update_title();
     update_status_bar();
     update_outline();
@@ -193,10 +196,10 @@ static void switch_document(int index) {
        itself - a plugin activating a tab, or do_save_all()/do_exit()'s
        switch-to-each-tab loops - and shouldn't steal focus from a pane like
        the terminal the user is actively using when that happens. */
-    if (!focus_outside_editor_area()) SetFocus(g_hEdit);
+    if (!active_document_is_image() && !focus_outside_editor_area()) SetFocus(g_hEdit);
 }
 
-static int create_document_tab(void) {
+static int create_document_tab_internal(int deferPresentation) {
     if (g_documentStore.count >= MAX_DOCUMENTS) {
         MessageBoxW(g_hMainWnd, L"Tinker Editor can keep up to 32 documents open at once.", L"Tinker Editor", MB_OK | MB_ICONINFORMATION);
         return 0;
@@ -222,10 +225,17 @@ static int create_document_tab(void) {
     SendMessageW(g_hTabs, TCM_INSERTITEMW, (WPARAM)index, (LPARAM)&item);
     TabCtrl_SetCurSel(g_hTabs, index);
     update_tab_label(index);
-    update_document_mapping();
-    update_preview();
-    update_title();
+    if (!deferPresentation) {
+        update_document_mapping();
+        update_preview();
+        layout(g_hMainWnd);
+        update_title();
+    }
     return 1;
+}
+
+static int create_document_tab(void) {
+    return create_document_tab_internal(0);
 }
 
 /* The document plugins were last told is active, and whether a check for a
@@ -691,6 +701,8 @@ static int append_file_growth(void) {
    already open leaves the recent-files list alone; reload_active_document()
    fires "reload" once it has put the view back. */
 static void finish_file_load(const WCHAR *path, int reloading) {
+    g_documentStore.documents[g_documentStore.active].viewKind = DOCUMENT_VIEW_TEXT;
+    SendMessageA(g_hEdit, SCI_SETREADONLY, FALSE, 0);
     replace_wstring(&g_currentFile, path);
     apply_document_language(g_currentFile);
     restore_persisted_breakpoints(g_currentFile);
@@ -771,6 +783,12 @@ static int load_file(const WCHAR *path) {
    then fires "reload" - after the view is back, so a handler can move it. */
 static int reload_active_document(void) {
     Document *doc = &g_documentStore.documents[g_documentStore.active];
+    if (doc->viewKind == DOCUMENT_VIEW_IMAGE) {
+        record_document_file_time(g_documentStore.active);
+        update_preview();
+        fire_plugin_event("reload", g_currentFile);
+        return 1;
+    }
     WCHAR *path = doc->path ? wcsdup_heap(doc->path) : NULL;
     if (!path) return 0;
     Sci_Position caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
@@ -837,7 +855,48 @@ static int active_document_is_reusable(void) {
            (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) == 0;
 }
 
+/* Opens an image as a lightweight, read-only document. Its Scintilla document
+   stays empty and hidden; the preview loads the file through document.local. */
+static int load_image_into_tab(const WCHAR *path) {
+    WCHAR *displayPath = absolute_path(path);
+    const WCHAR *filePath = displayPath ? displayPath : path;
+    WCHAR *ioPath = extended_path(filePath);
+    DWORD attributes = GetFileAttributesW(ioPath ? ioPath : filePath);
+    free(ioPath);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        free(displayPath);
+        show_error(L"Could not open image file.");
+        return 0;
+    }
+    replace_wstring(&g_currentFile, filePath);
+    free(displayPath);
+    Document *doc = &g_documentStore.documents[g_documentStore.active];
+    doc->viewKind = DOCUMENT_VIEW_IMAGE;
+    doc->encodingForced = 0;
+    doc->largeFile = 0;
+    SendMessageA(g_hEdit, SCI_CLEARALL, 0, 0);
+    reset_undo_history(g_hEdit);
+    SendMessageA(g_hEdit, SCI_SETSAVEPOINT, 0, 0);
+    SendMessageA(g_hEdit, SCI_SETREADONLY, TRUE, 0);
+    apply_preview_host_theme();
+    apply_webview_background_colour();
+    apply_document_language(g_currentFile);
+    record_document_file_time(g_documentStore.active);
+    update_document_mapping();
+    recent_list_add(&g_recentFileList, g_currentFile);
+    set_dirty(0);
+    update_tab_label(g_documentStore.active);
+    update_preview();
+    layout(g_hMainWnd);
+    update_status_bar();
+    update_outline();
+    refresh_menu(g_hMainWnd);
+    fire_plugin_event("open", g_currentFile);
+    return 1;
+}
+
 static int open_file_in_tab(const WCHAR *path) {
+    int imageFile = image_file_path(path);
     WCHAR *full = absolute_path(path);
     if (full) {
         for (int i = 0; i < g_documentStore.count; i++) {
@@ -851,10 +910,13 @@ static int open_file_in_tab(const WCHAR *path) {
     free(full);
     int created = 0;
     if (!active_document_is_reusable()) {
-        if (!create_document_tab()) return 0;
+        /* Loading an image immediately replaces every visible property of the
+           new tab. Avoid rendering and laying out an intermediate Untitled
+           text tab, especially when that would navigate back to the shell. */
+        if (!create_document_tab_internal(imageFile)) return 0;
         created = 1;
     }
-    if (load_file(path)) return 1;
+    if (imageFile ? load_image_into_tab(path) : load_file(path)) return 1;
     if (created && g_documentStore.count > 1) {
         sptr_t failedDoc = g_documentStore.documents[g_documentStore.active].sciDocument;
         int removeIndex = g_documentStore.active;
@@ -870,6 +932,7 @@ static int open_file_in_tab(const WCHAR *path) {
         TabCtrl_SetCurSel(g_hTabs, target);
         update_document_mapping();
         update_preview();
+        layout(g_hMainWnd);
         update_title();
     }
     return 0;
@@ -951,8 +1014,8 @@ static void do_open(void) {
     OPENFILENAMEW ofn = {0};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hMainWnd;
-    ofn.lpstrFilter = L"Markdown Files (*.md;*.markdown)\0*.md;*.markdown\0Python Files (*.py;*.pyw)\0*.py;*.pyw\0C/C++ Files (*.c;*.cc;*.cpp;*.cxx)\0*.c;*.cc;*.cpp;*.cxx\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
-    ofn.nFilterIndex = 5; /* "All Files (*.*)" - the dialog otherwise defaults to entry 1 */
+    ofn.lpstrFilter = L"Markdown Files (*.md;*.markdown)\0*.md;*.markdown\0Python Files (*.py;*.pyw)\0*.py;*.pyw\0C/C++ Files (*.c;*.cc;*.cpp;*.cxx)\0*.c;*.cc;*.cpp;*.cxx\0Text Files (*.txt)\0*.txt\0Image Files (*.png;*.jpg;*.gif;*.webp;*.svg)\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.svg;*.ico;*.avif\0All Files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 6; /* "All Files (*.*)" - the dialog otherwise defaults to entry 1 */
     ofn.lpstrFile = path;
     ofn.nMaxFile = cap;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
@@ -1006,8 +1069,7 @@ static void do_insert_file(void) {
 }
 
 static int is_image_file(const WCHAR *path) {
-    const WCHAR *extension = PathFindExtensionW(path);
-    return extension && extension_in_list(extension, L".png;.jpg;.jpeg;.gif;.bmp;.webp;.svg");
+    return image_file_path(path);
 }
 
 /* Create a collision-safe destination in an "images" folder next to the
@@ -1273,14 +1335,14 @@ static void handle_dropfiles(HDROP hDrop) {
         UINT cap = DragQueryFileW(hDrop, i, NULL, 0) + 1;
         WCHAR *path = (WCHAR *)malloc((size_t)cap * sizeof(WCHAR));
         if (path && DragQueryFileW(hDrop, i, path, cap)) {
-            if (g_editorVisible && shiftHeld) {
+            if (editor_pane_visible() && shiftHeld) {
                 if (!undoActive) {
                     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
                     undoActive = 1;
                 }
                 if (insertedImage) SendMessageA(g_hEdit, SCI_REPLACESEL, 0, (LPARAM)editor_eol_sequence());
                 if (shift_drop_link(path)) insertedImage = 1;
-            } else if (g_editorVisible && is_image_file(path)) {
+            } else if (editor_pane_visible() && is_image_file(path)) {
                 if (!undoActive) {
                     SendMessageA(g_hEdit, SCI_BEGINUNDOACTION, 0, 0);
                     undoActive = 1;
@@ -1355,6 +1417,10 @@ static void finish_document_save(const WCHAR *path, TextEncoding encoding, int h
 
 /* save_to_path()'s write, once the save handlers have run. */
 static int write_active_document(const WCHAR *path) {
+    if (active_document_is_image()) {
+        show_error(L"Image tabs are read-only.");
+        return 0;
+    }
     /* Written straight from Scintilla's own buffer: SCI_GETCHARACTERPOINTER
        closes the gap so the text is contiguous, and the pointer stays valid
        until the document is next modified. Only the encoding prompt below
@@ -1440,6 +1506,10 @@ static int save_to_path(const WCHAR *requestedPath) {
 }
 
 static int do_saveas(void) {
+    if (active_document_is_image()) {
+        show_error(L"Image tabs are read-only.");
+        return 0;
+    }
     DWORD cap = LONG_PATH_CAPACITY;
     WCHAR *path = (WCHAR *)calloc(cap, sizeof(WCHAR));
     if (!path) return 0;
@@ -1467,6 +1537,7 @@ static int do_saveas(void) {
 }
 
 static int do_save(void) {
+    if (active_document_is_image()) return 1;
     return g_currentFile ? save_to_path(g_currentFile) : do_saveas();
 }
 
@@ -1694,6 +1765,7 @@ static void do_close_document_at(int index) {
         update_tab_label(0);
         update_document_mapping();
         update_preview();
+        layout(g_hMainWnd);
         update_title();
         refresh_menu(g_hMainWnd);
         SetFocus(g_hEdit);
@@ -1718,10 +1790,11 @@ static void do_close_document_at(int index) {
     update_linenumber_margin_width(g_hEdit);
     update_document_mapping();
     update_preview();
+    layout(g_hMainWnd);
     update_title();
     refresh_menu(g_hMainWnd);
     prompt_reload_active_external_change();
-    SetFocus(g_hEdit);
+    if (!active_document_is_image()) SetFocus(g_hEdit);
 }
 
 static void do_reopen_closed_tab(void) {
@@ -1779,10 +1852,11 @@ static void do_reopen_closed_tab(void) {
     write_recovery_snapshot();
     update_document_mapping();
     update_preview();
+    layout(g_hMainWnd);
     update_title();
     refresh_menu(g_hMainWnd);
     prompt_reload_active_external_change();
-    SetFocus(g_hEdit);
+    if (!active_document_is_image()) SetFocus(g_hEdit);
 }
 
 static void prompt_reload_active_external_change(void) {
@@ -1804,6 +1878,12 @@ static void prompt_reload_external_change(int index) {
     doc->externalChanged = 0;
     InvalidateRect(g_hTabs, NULL, FALSE);
     if (doc->externalDeleted) {
+        if (doc->viewKind == DOCUMENT_VIEW_IMAGE) {
+            MessageBoxW(g_hMainWnd,
+                        L"This image was deleted or moved on disk. Close the tab or restore the file to the same path.",
+                        L"Tinker Editor", MB_OK | MB_ICONWARNING);
+            return;
+        }
         MessageBoxW(g_hMainWnd,
                     g_dirty
                         ? L"This file was deleted or moved on disk. Your unsaved text is still open; saving will recreate the old path."

@@ -142,6 +142,7 @@ enum { OUTPUT_TAB_RUN, OUTPUT_TAB_TERMINAL, OUTPUT_TAB_PROBLEMS, OUTPUT_TAB_DEBU
 /* Nonzero on success; zero on cancellation or write failure. */
 static int do_save(void);
 static void update_preview(void);
+static void show_image_file_preview(void);
 static void push_html_to_webview(const char *htmlFragment);
 static void apply_preview_theme(void);
 static void apply_preview_theme(void);

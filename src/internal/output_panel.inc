@@ -989,7 +989,7 @@ static void hide_output_panel(void) {
     if (terminal_view_session_active(g_terminalView)) terminal_view_stop(g_terminalView);
     g_outputPanelVisible = 0;
     relayout_and_save(g_hMainWnd);
-    if (g_editorVisible) SetFocus(g_hEdit);
+    if (editor_pane_visible()) SetFocus(g_hEdit);
 }
 
 /* View > Output Panel (Ctrl+`). */
@@ -1108,7 +1108,7 @@ static LRESULT CALLBACK OutputInputSubclassProc(HWND hwnd, UINT msg, WPARAM wPar
         if (wParam == VK_RETURN) { submit_output_input(); return 0; }
         if (wParam == VK_UP) { browse_output_history(-1); return 0; }
         if (wParam == VK_DOWN) { browse_output_history(1); return 0; }
-        if (wParam == VK_ESCAPE && g_editorVisible) { SetFocus(g_hEdit); return 0; }
+        if (wParam == VK_ESCAPE && editor_pane_visible()) { SetFocus(g_hEdit); return 0; }
     } else if (msg == WM_CHAR && (wParam == '\r' || wParam == '\n')) {
         return 0;
     } else if (msg == WM_NCDESTROY) {

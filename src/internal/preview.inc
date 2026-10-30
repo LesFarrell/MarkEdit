@@ -292,16 +292,33 @@ static ICoreWebView2AcceleratorKeyPressedEventHandlerVtbl g_accelKeyVtbl = {
 static ICoreWebView2AcceleratorKeyPressedEventHandler g_accelKeyHandler = { &g_accelKeyVtbl };
 
 /* NavigationCompleted handler: the initial shell page is ready, flush any pending content */
+static void apply_image_background_colour(void) {
+    if (!g_webview || !active_document_is_image()) return;
+    COLORREF colour = theme_bg_color();
+    char script[192];
+    snprintf(script, sizeof(script),
+        "document.documentElement.style.backgroundColor='#%02x%02x%02x';"
+        "document.body.style.backgroundColor='#%02x%02x%02x';",
+        GetRValue(colour), GetGValue(colour), GetBValue(colour),
+        GetRValue(colour), GetGValue(colour), GetBValue(colour));
+    execute_webview_script(script, &g_scriptHandler);
+}
+
 static HRESULT STDMETHODCALLTYPE NavDone_Invoke(ICoreWebView2NavigationCompletedEventHandler *this_, ICoreWebView2 *sender, ICoreWebView2NavigationCompletedEventArgs *args) {
     (void)this_;
     BOOL success = FALSE;
     LPWSTR source = NULL;
     if (FAILED(ICoreWebView2NavigationCompletedEventArgs_get_IsSuccess(args, &success)) || !success ||
-        FAILED(ICoreWebView2_get_Source(sender, &source)) || !is_preview_shell_uri(source)) {
+        FAILED(ICoreWebView2_get_Source(sender, &source))) {
         CoTaskMemFree(source);
         return S_OK;
     }
+    int shellPage = is_preview_shell_uri(source);
     CoTaskMemFree(source);
+    if (!shellPage) {
+        apply_image_background_colour();
+        return S_OK;
+    }
     g_webviewReady = 1;
     apply_preview_theme();
     apply_custom_preview_css(0);
@@ -311,6 +328,10 @@ static HRESULT STDMETHODCALLTYPE NavDone_Invoke(ICoreWebView2NavigationCompleted
         push_html_to_webview(body);
         free(body);
     }
+    /* An image may have become active while the WebView controller and shell
+       were still starting. It has no editor mutation to schedule another
+       render, so request it explicitly once the shell is ready. */
+    if (active_document_is_image()) update_preview();
     return S_OK;
 }
 static ICoreWebView2NavigationCompletedEventHandlerVtbl g_navVtbl = {
@@ -518,15 +539,16 @@ static void open_wikilink_target(const WCHAR *encoded) {
    link to ShellExecuteW would let a cloned README run [Setup](install.bat)
    in one click, so: file types the editor knows open in a tab (scripts
    included, as text); folders open in Explorer; types Windows itself treats
-   as dangerous to open are refused; anything else (images, PDFs) opens in
-   its default program only after the user confirms. */
+   as dangerous to open are refused; images open in a preview tab, and other
+   unknown types (such as PDFs) open in their default program after confirmation. */
 static void open_local_link(const WCHAR *path) {
     DWORD attrs = GetFileAttributesW(path);
     if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
         ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
         return;
     }
-    if (attrs != INVALID_FILE_ATTRIBUTES && language_for_known_path(path)) {
+    if (attrs != INVALID_FILE_ATTRIBUTES &&
+        (image_file_path(path) || language_for_known_path(path))) {
         push_wiki_back();
         open_file_in_tab(path);
         refresh_menu(g_hMainWnd);
@@ -630,8 +652,15 @@ static void update_document_mapping(void) {
     if (!g_webview3) return;
     WCHAR *directory = document_or_module_directory();
     if (directory) {
-        ICoreWebView2_3_SetVirtualHostNameToFolderMapping(g_webview3, L"document.local", directory,
+        if (g_documentMappingDirectory &&
+            _wcsicmp(g_documentMappingDirectory, directory) == 0) {
+            free(directory);
+            return;
+        }
+        HRESULT result = ICoreWebView2_3_SetVirtualHostNameToFolderMapping(
+            g_webview3, L"document.local", directory,
             COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+        if (SUCCEEDED(result)) replace_wstring(&g_documentMappingDirectory, directory);
         free(directory);
     }
 }
@@ -677,6 +706,10 @@ static void reveal_in_explorer(void) {
    matching palette - themes.lua may have changed them - so the page's bars
    match the app's own (see the scrollbar rules in preview_shell.html). */
 static void apply_preview_theme(void) {
+    if (active_document_is_image()) {
+        apply_image_background_colour();
+        return;
+    }
     if (!g_webviewReady || !g_webview || g_previewShowingRawHtml) return;
     const ThemePalette *palette = preview_palette();
     const COLORREF thumbs[3] = { palette->scrollThumb, palette->scrollThumbHot, palette->scrollThumbDrag };
@@ -826,7 +859,10 @@ static HRESULT STDMETHODCALLTYPE CtrlCreated_Invoke(ICoreWebView2CreateCoreWebVi
         free(exeDir);
         update_document_mapping();
     }
-    navigate_to_shell();
+    /* A raster image needs none of the shell's Markdown, highlighting, math,
+       or Mermaid assets. Navigate straight to it on cold start. */
+    if (g_webview3 && active_document_is_raster_image()) show_image_file_preview();
+    else navigate_to_shell();
 
     return S_OK;
 }
@@ -897,12 +933,64 @@ static char *source_as_markdown(const char *text, size_t length, const char *tag
     return markdown;
 }
 
+static void show_image_file_preview(void) {
+    if (!g_webview || !g_currentFile) return;
+    if (!g_webview3) {
+        push_html_to_webview("<p>Image preview needs a newer WebView2 Runtime.</p>");
+        return;
+    }
+    WCHAR *encodedName = percent_encode_url_segment(PathFindFileNameW(g_currentFile));
+    if (!encodedName) return;
+    const Document *doc = &g_documentStore.documents[g_documentStore.active];
+    size_t urlCapacity = wcslen(encodedName) + 64;
+    WCHAR *url = (WCHAR *)malloc(urlCapacity * sizeof(WCHAR));
+    if (!url) { free(encodedName); return; }
+    swprintf(url, urlCapacity, L"https://document.local/%ls?v=%08lx%08lx", encodedName,
+             (unsigned long)doc->fileTime.dwHighDateTime,
+             (unsigned long)doc->fileTime.dwLowDateTime);
+    free(encodedName);
+
+    /* A top-level SVG is an active document and may run script. Keep SVG in
+       the trusted shell as an <img>, where it is inert. Raster formats can
+       use WebView2's native image document, which is both simpler and more
+       reliable than updating an injected fragment during shell startup. */
+    if (_wcsicmp(PathFindExtensionW(g_currentFile), L".svg") == 0) {
+        if (g_previewShowingRawHtml) navigate_to_shell();
+        char *urlUtf8 = to_utf8(url);
+        if (urlUtf8) {
+            size_t htmlCapacity = strlen(urlUtf8) + 256;
+            char *html = (char *)malloc(htmlCapacity);
+            if (html) {
+                COLORREF background = theme_bg_color();
+                snprintf(html, htmlCapacity,
+                    "<div style=\"display:flex;justify-content:center;align-items:flex-start;min-height:calc(100vh - 96px);background:#%02x%02x%02x\">"
+                    "<img src=\"%s\" alt=\"\"></div>",
+                    GetRValue(background), GetGValue(background), GetBValue(background), urlUtf8);
+                push_html_to_webview(html);
+                apply_image_background_colour();
+                free(html);
+            }
+            free(urlUtf8);
+        }
+    } else {
+        replace_wstring(&g_expectedHtmlPreviewUrl, url);
+        g_previewShowingRawHtml = 1;
+        g_webviewReady = 0;
+        ICoreWebView2_Navigate(g_webview, url);
+    }
+    free(url);
+}
+
 static void update_preview(void) {
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_PREVIEW_UPDATE);
     /* Loading/restoring/switching tabs should not parse Markdown while the
        preview is hidden. Showing the pane calls update_preview(), and export
        sets g_exportPath first to force a current off-screen render. */
-    if (!g_previewVisible && !g_exportPath) return;
+    if (!preview_pane_visible() && !g_exportPath) return;
+    if (active_document_is_image()) {
+        show_image_file_preview();
+        return;
+    }
     /* HTML gets a real browser-style render (see show_html_file_preview());
        export bypasses it, since that navigation isn't a render the export can
        capture, and gets the highlighted-source render other languages use. */

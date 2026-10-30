@@ -9,19 +9,22 @@ static void apply_webview_background_colour(void) {
     ICoreWebView2Controller_QueryInterface(g_webviewController, &IID_ICoreWebView2Controller2,
                                            (void **)&ctrl2);
     if (!ctrl2) return;
-    COLORREF colour = preview_bg_color();
+    /* Image tabs belong visually to the editor side of the application even
+       though WebView2 displays them. Match the editor palette during the
+       navigation frame too, before the image document has painted. */
+    COLORREF colour = active_document_is_image() ? theme_bg_color() : preview_bg_color();
     COREWEBVIEW2_COLOR bg = {255, GetRValue(colour), GetGValue(colour), GetBValue(colour)};
     ICoreWebView2Controller2_put_DefaultBackgroundColor(ctrl2, bg);
     ICoreWebView2Controller2_Release(ctrl2);
 }
 
-/* (Re)creates g_previewBkBrush to match g_previewDarkMode, so the preview
-   host STATIC control's WM_CTLCOLORSTATIC background doesn't flash white/
-   light when starting (or switching to) dark mode, before WebView2 itself
-   has painted anything. */
+/* (Re)creates g_previewBkBrush for the content currently occupying the
+   WebView host: the preview palette for rendered documents, or the editor
+   palette for image tabs. This is the colour visible before WebView2 paints. */
 static void apply_preview_host_theme(void) {
     if (g_previewBkBrush) DeleteObject(g_previewBkBrush);
-    g_previewBkBrush = CreateSolidBrush(preview_bg_color());
+    COLORREF colour = active_document_is_image() ? theme_bg_color() : preview_bg_color();
+    g_previewBkBrush = CreateSolidBrush(colour);
     if (g_hPreview) InvalidateRect(g_hPreview, NULL, TRUE);
 }
 

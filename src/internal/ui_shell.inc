@@ -19,6 +19,13 @@ static WCHAR g_statusPartText[4][128];
    and only refreshed when the text can actually have changed. */
 static void update_status_position(void) {
     if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
+    if (active_document_is_image()) {
+        wcscpy(g_statusPartText[0], L"Image preview");
+        g_statusPartText[2][0] = 0;
+        wcscpy(g_statusPartText[3], L"Read only");
+        InvalidateRect(g_hStatus, NULL, FALSE);
+        return;
+    }
     HWND view = tracked_edit_view();
     Sci_Position position = (Sci_Position)SendMessageA(view, SCI_GETCURRENTPOS, 0, 0);
     Sci_Position line = (Sci_Position)SendMessageA(view, SCI_LINEFROMPOSITION, (WPARAM)position, 0) + 1;
@@ -46,6 +53,11 @@ static void update_status_position(void) {
 static void update_status_bar(void) {
     update_status_position();
     if (!g_hStatus || !g_hEdit || g_documentStore.count <= 0) return;
+    if (active_document_is_image()) {
+        g_statusPartText[1][0] = 0;
+        InvalidateRect(g_hStatus, NULL, FALSE);
+        return;
+    }
     if (g_largeFile) {
         double mib = (double)(Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0) / (1024.0 * 1024.0);
         swprintf(g_statusPartText[1], 128, L"Large file mode   %.1f MB", mib);
@@ -533,9 +545,12 @@ static int command_state(UINT id, CommandState *state) {
 #define STATE_CHECK(value) (state->checked = (value) != 0)
 #define STATE_RADIO(value) (state->radio = 1, state->checked = (value) != 0)
     switch (id) {
+        case IDM_FILE_SAVE: case IDM_FILE_SAVEAS:
+        case IDM_FILE_INSERT:
+            state->enabled = !active_document_is_image(); break;
         case IDM_FILE_REOPEN_UTF8: case IDM_FILE_REOPEN_UTF16LE:
         case IDM_FILE_REOPEN_UTF16BE: case IDM_FILE_REOPEN_ANSI:
-            state->enabled = g_currentFile != NULL; break;
+            state->enabled = g_currentFile != NULL && !active_document_is_image(); break;
         case IDM_FILE_REOPEN_CLOSED: state->enabled = g_closedDocumentCount != 0; break;
         case IDM_FILE_GO_BACK: state->enabled = g_wikiBackCount != 0; break;
         case IDM_VIEW_TOGGLEPREVIEW: STATE_CHECK(g_previewVisible); break;
@@ -929,7 +944,7 @@ static void layout_status_bar(HWND hwnd, LayoutArea *area) {
    Markdown source, so it's only useful (and only shown) while the editor
    pane is visible. */
 static void layout_toolbar_and_tabs(LayoutArea *area) {
-    int showToolbar = g_editorVisible && !g_focusMode;
+    int showToolbar = editor_pane_visible() && !g_focusMode;
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++)
         if (g_hToolbarButtons[i]) ShowWindow(g_hToolbarButtons[i], showToolbar ? SW_SHOW : SW_HIDE);
     int y = showToolbar ? layout_toolbar_at(area->width, 0) : 0;
@@ -995,7 +1010,7 @@ static void layout_output_panel(HWND hwnd, LayoutArea *area) {
 /* The outline pane, docked at the right edge. */
 static void layout_outline(HWND hwnd, LayoutArea *area) {
     if (!g_hOutline) return;
-    if (!g_outlineVisible || !g_editorVisible || g_focusMode) {
+    if (!g_outlineVisible || !editor_pane_visible() || g_focusMode) {
         ShowWindow(g_hOutline, SW_HIDE);
         return;
     }
@@ -1010,7 +1025,9 @@ static void layout_outline(HWND hwnd, LayoutArea *area) {
    between them, fill whatever the panels above left over. */
 static void layout_editor_and_preview(HWND hwnd, const LayoutArea *area) {
     int x = area->x, y = area->y, width = area->width, h = area->height;
-    if (g_editorVisible && !g_previewVisible) {
+    int showEditor = editor_pane_visible();
+    int showPreview = preview_pane_visible();
+    if (showEditor && !showPreview) {
         layout_editor_with_minimap(hwnd, x, y, width, h);
         ShowWindow(g_hPreview, SW_HIDE);
         RECT zero = { 0, 0, 0, 0 };
@@ -1018,7 +1035,7 @@ static void layout_editor_and_preview(HWND hwnd, const LayoutArea *area) {
         return;
     }
 
-    if (!g_editorVisible && g_previewVisible) {
+    if (!showEditor && showPreview) {
         ShowWindow(g_hEdit, SW_HIDE);
         if (g_hMinimap) ShowWindow(g_hMinimap, SW_HIDE);
         if (g_hSplitEdit) ShowWindow(g_hSplitEdit, SW_HIDE);
@@ -1125,7 +1142,7 @@ static void toggle_focus_mode(HWND hwnd) {
     /* Focus mode hides the menu, so Ctrl+Shift+F11 is the only way back out.
        Keep focus on the editor where the accelerator is reachable - WebView2
        claims F11 for its own fullscreen whenever the preview has focus. */
-    if (g_editorVisible) SetFocus(g_hEdit);
+    if (editor_pane_visible()) SetFocus(g_hEdit);
 }
 
 /* Cycles keyboard focus between the editor, preview, outline panel and
@@ -1137,10 +1154,10 @@ static void toggle_focus_mode(HWND hwnd) {
 static void cycle_pane_focus(int reverse) {
     HWND panes[6];
     int count = 0;
-    if (g_editorVisible && g_hEdit) panes[count++] = g_hEdit;
-    if (g_editorVisible && g_splitEditorVisible && g_hSplitEdit) panes[count++] = g_hSplitEdit;
-    if (g_previewVisible && g_hPreview) panes[count++] = g_hPreview;
-    if (g_outlineVisible && g_editorVisible && g_hOutline) panes[count++] = g_hOutline;
+    if (editor_pane_visible() && g_hEdit) panes[count++] = g_hEdit;
+    if (editor_pane_visible() && g_splitEditorVisible && g_hSplitEdit) panes[count++] = g_hSplitEdit;
+    if (preview_pane_visible() && g_hPreview) panes[count++] = g_hPreview;
+    if (g_outlineVisible && editor_pane_visible() && g_hOutline) panes[count++] = g_hOutline;
     if (g_outputPanelVisible && g_hOutputPanel) panes[count++] = g_hOutputPanel;
     if (g_hTabs) panes[count++] = g_hTabs;
     if (count == 0) return;
