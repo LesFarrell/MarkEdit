@@ -35,7 +35,7 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Les Farrell\0"
-            VALUE "FileDescription", "Tinker Editor Markdown editor\0"
+            VALUE "FileDescription", "Tinker Editor\0"
             VALUE "FileVersion", "1.0.0\0"
             VALUE "InternalName", "tinkeredit\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Les Farrell\0"
