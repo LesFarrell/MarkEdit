@@ -27,6 +27,8 @@ This guide is for people working on Tinker Editor's source. It covers each Lua f
 
 The built-in scripts are added to the exe as `RCDATA` resources by [tinkeredit.rc](../tinkeredit.rc), along with [src/help/markdown-reference.md](../src/help/markdown-reference.md), the **Help > Markdown Reference** page. They're read from the exe, not from `src/`, so **editing them has no effect until you rebuild**.
 
+In portable mode, replace `%APPDATA%\tinkeredit` with `portable-data` beside `tinkeredit.exe` throughout this guide.
+
 The **Run** command (Ctrl+F5) is unrelated. It runs a `.lua` document with an external `lua` found on `PATH`, not with the embedded interpreter.
 
 ## Load order

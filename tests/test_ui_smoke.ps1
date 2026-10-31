@@ -17,7 +17,13 @@ public static class TinkerEditorUiTestNative {
     public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr GetDlgItem(IntPtr parent, int id);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr FindWindowW(string className, string windowName);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -36,11 +42,14 @@ public static class TinkerEditorUiTestNative {
 
 $WM_COMMAND = 0x0111
 $WM_CLOSE = 0x0010
+$LB_GETTEXTLEN = 0x018A
 $TCM_GETITEMCOUNT = 0x1304
 $IDM_FILE_NEW = 201
 $IDM_FILE_CLOSE = 208
 $IDM_VIEW_PIN_TAB = 345
+$IDM_VIEW_COMMAND_PALETTE = 369
 $ID_TABS = 103
+$ID_CHOICE_LIST = 11
 $IDM_VIEW_GIT = 414
 $ID_OUTPUT_PANEL = 112
 $ID_OUTPUT_CLOSE = 120
@@ -61,6 +70,11 @@ function Wait-Until([scriptblock]$Condition, [string]$Failure, [int]$TimeoutMs =
 
 function Send-Command([IntPtr]$Window, [int]$Command) {
     [void][TinkerEditorUiTestNative]::SendMessage(
+        $Window, $WM_COMMAND, [IntPtr]$Command, [IntPtr]::Zero)
+}
+
+function Post-Command([IntPtr]$Window, [int]$Command) {
+    [void][TinkerEditorUiTestNative]::PostMessage(
         $Window, $WM_COMMAND, [IntPtr]$Command, [IntPtr]::Zero)
 }
 
@@ -136,6 +150,26 @@ try {
     Wait-Until { [TinkerEditorUiTestNative]::IsWindowVisible($panel) } `
         'Reopening the Git panel did not make the output panel visible.'
     Assert-PanelLayout $main $panel
+
+    Post-Command $main $IDM_VIEW_COMMAND_PALETTE
+    Wait-Until {
+        $script:palette = [TinkerEditorUiTestNative]::FindWindowW(
+            'TinkerEditorChoiceDialog', 'Command Palette')
+        $script:palette -ne [IntPtr]::Zero
+    } 'The command palette did not open.'
+    $commands = [TinkerEditorUiTestNative]::GetDlgItem($script:palette, $ID_CHOICE_LIST)
+    if ($commands -eq [IntPtr]::Zero) { throw 'The command palette list was not created.' }
+    for ($row = 0; $row -lt 16; $row++) {
+        $length = [int][TinkerEditorUiTestNative]::SendMessage(
+            $commands, $LB_GETTEXTLEN, [IntPtr]$row, [IntPtr]::Zero)
+        if ($length -le 0) { throw "Command palette row $row has no label." }
+    }
+    [void][TinkerEditorUiTestNative]::PostMessage(
+        $script:palette, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    Wait-Until {
+        [TinkerEditorUiTestNative]::FindWindowW(
+            'TinkerEditorChoiceDialog', 'Command Palette') -eq [IntPtr]::Zero
+    } 'The command palette did not close.'
 
     if (-not [TinkerEditorUiTestNative]::SetWindowPos(
         $main, [IntPtr]::Zero, 0, 0, 1000, 700, $SWP_NOMOVE -bor $SWP_NOZORDER)) {

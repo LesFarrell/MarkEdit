@@ -368,12 +368,28 @@ typedef struct ChoiceDialogState {
     HWND list;
 } ChoiceDialogState;
 
+/* Case-insensitive substring matching remains the strongest result, while a
+   subsequence fallback makes command/file pickers pleasantly fuzzy: "cmdpal"
+   matches "Command Palette" without changing the original item ordering. */
+static int choice_label_matches(const WCHAR *label, const WCHAR *filter) {
+    if (!filter[0] || StrStrIW(label, filter)) return 1;
+    const WCHAR *candidate = label;
+    for (const WCHAR *wanted = filter; *wanted; wanted++) {
+        if (iswspace(*wanted)) continue;
+        WCHAR needle = towlower(*wanted);
+        while (*candidate && towlower(*candidate) != needle) candidate++;
+        if (!*candidate) return 0;
+        candidate++;
+    }
+    return 1;
+}
+
 static void refill_choice_list(ChoiceDialogState *state) {
     WCHAR filter[256];
     GetWindowTextW(state->edit, filter, sizeof(filter) / sizeof(filter[0]));
     SendMessageW(state->list, LB_RESETCONTENT, 0, 0);
     for (int i = 0; i < state->count; i++) {
-        if (filter[0] && !StrStrIW(state->labels[i], filter)) continue;
+        if (!choice_label_matches(state->labels[i], filter)) continue;
         int row = (int)SendMessageW(state->list, LB_ADDSTRING, 0, (LPARAM)state->labels[i]);
         if (row >= 0) SendMessageW(state->list, LB_SETITEMDATA, (WPARAM)row, (LPARAM)i);
     }

@@ -6,7 +6,7 @@ A tiny, native Win32 Markdown editor with live HTML preview.
 - **Right pane** — a WebView2-hosted HTML preview, refreshed shortly after edits and rendered by the vendored [cmark-gfm](https://github.com/github/cmark-gfm) library. Every file type previews: Markdown renders as a document, HTML files render as the saved web page, and any other recognised type (source code, JSON, YAML, `.txt`) shows as its own syntax-highlighted source, with highlighting skipped above 512 KB. Files of an unrecognised type, and new untitled tabs, preview as Markdown.
 - A formatting toolbar above the editor for bold, italic, strikethrough, inline code, fenced code blocks, headings, blockquotes, bullet/numbered/task lists, links, images, tables, footnotes, horizontal rules, alerts, toggling the preview pane, and swapping the panel sides.
 - Preview supports [Mermaid](https://mermaid.js.org/) diagrams (fenced ` ```mermaid ` blocks) with zoom/pan controls, [KaTeX](https://katex.org/) mathematics, and GFM-style tables, task lists, strikethrough, links/images, and nested lists.
-- GitHub Light and GitHub Dark themes (View → Editor Theme and View → Markdown Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash). Their colours can be changed in Lua: Plugins → Customize Theme Colours writes `%APPDATA%\tinkeredit\themes.lua` listing every colour, and `plugins/examples/themes.lua` is a complete example.
+- GitHub Light and GitHub Dark themes (View → Editor Theme and View → Markdown Theme) apply to the editor, preview, and native window chrome (including a dark title bar), are remembered between sessions, and the preview starts directly in the selected theme (no wrong-theme flash). Their colours can be changed in Lua: Plugins → Customize Theme Colours writes `%APPDATA%\tinkeredit\themes.lua` (or `portable-data\themes.lua` in portable mode) listing every colour, and `plugins/examples/themes.lua` is a complete example.
 - The window appears immediately on launch; spell-check activation, the WebView2 preview engine, and reopening the previous session's files happen in the background right after, instead of delaying the window's appearance.
 
 Launching with no arguments opens the editor with the saved workspace layout; launching with a Markdown file path shows just the rendered preview (`tinkeredit.exe notes.md`), and any other file opens in the editor.
@@ -18,6 +18,9 @@ writing and small software projects:
 
 - Live GFM preview with local Mermaid, KaTeX and syntax-highlighting assets.
 - Multi-document Scintilla editing, workspaces, search, recovery and spell checking.
+- A fuzzy command palette (`Ctrl+Shift+P`) searches built-in and Lua plugin commands by menu path or shortcut, and shows checked and unavailable state.
+- The horizontal or vertical editor split can retain a different open text document; choose it from View or a tab's context menu and edit either pane independently.
+- Portable mode keeps settings, personal plugins, session/recent state, recovery snapshots, and the WebView2 profile in `portable-data` beside the executable when an empty `portable.mode` marker is present.
 - Integrated Run, Terminal, Problems, Debug and Git tabs.
 - Python and C/C++ running/debugging, plus sandboxed Lua extensions.
 - Bundled text, data and retro-computing tools, including Z80 TAP Compile and Run.
@@ -87,7 +90,7 @@ Running `tinkeredit.exe` also requires the [Microsoft Edge WebView2 Runtime](htt
 - the `plugins/` folder with bundled extensions, the plugin guide, examples, and Lua Language Server definitions (Lua itself is linked into `tinkeredit.exe`); and
 - `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the referenced component licence/version files under `third_party/`. The packaged GDB folder contains only `gdb.exe` and its small licence/provenance files; corresponding source remains in the Tinker Editor source repository rather than the binary distribution.
 
-Do not package `settings.json`, debug symbols, import libraries, compiler objects, or temporary archives. Application preferences and Lua plugin settings share `%APPDATA%\tinkeredit\settings.json`; the WebView2 browser profile and recovery snapshots live under `%LOCALAPPDATA%\TinkerEditor`. The Inno Setup manifest mirrors this runtime-and-licences layout.
+Do not package `settings.json`, `portable.mode`, `portable-data`, debug symbols, import libraries, compiler objects, or temporary archives. Normally, application preferences and Lua plugin settings share `%APPDATA%\tinkeredit\settings.json`, while the WebView2 browser profile and recovery snapshots live under `%LOCALAPPDATA%\TinkerEditor`. For a portable copy, create an empty `portable.mode` beside `tinkeredit.exe`; all of that writable state then goes under the sibling `portable-data` folder. The executable folder must be writable. The Inno Setup manifest mirrors the normal installed layout.
 
 ## Project layout
 
@@ -192,7 +195,7 @@ more than five seconds is stopped. Binary output can only be written through
 a user-controlled Save As dialog; its optional open-after-save action can use
 the saved file's Windows association or a plugin-supplied application, but
 only after that dialog is accepted. Only install plugins you trust. Personal
-extensions live in `%APPDATA%\tinkeredit\plugins`; folder extensions can read
+extensions live in `%APPDATA%\tinkeredit\plugins` (or `portable-data\plugins` in portable mode); folder extensions can read
 only their own Lua modules through Tinker Editor's restricted `require` loader.
 
 ## Licence

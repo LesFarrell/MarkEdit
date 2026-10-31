@@ -28,7 +28,7 @@ typedef enum {
     COMPILER_BACKEND_ZIG, COMPILER_BACKEND_MSVC
 } CompilerBackendPreference;
 
-/* Shared application state persisted to %APPDATA%\tinkeredit\settings.json.
+/* Shared application state persisted to the normal or portable settings.json.
    Defined (without static) in tinkeredit.c; read and written here. Transient
    Find/Replace state lives in find_state.h instead. */
 extern HWND g_hMainWnd;

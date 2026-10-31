@@ -534,7 +534,10 @@ static int command_state(UINT id, CommandState *state) {
         if (plugin_host_command_has_enabled(index)) {
             HWND editor = active_edit_view();
             if (editor) {
+                int oldPluginDocument = g_pluginCommandDocument;
+                g_pluginCommandDocument = document_index_for_view(editor);
                 char *error = plugin_host_command_enabled(index, editor, &state->enabled);
+                g_pluginCommandDocument = oldPluginDocument;
                 if (error) show_plugin_error(error);
                 free(error);
             }
@@ -579,6 +582,17 @@ static int command_state(UINT id, CommandState *state) {
         case IDM_VIEW_TOGGLESPLIT: STATE_CHECK(g_splitEditorVisible && !g_splitEditorVertical); break;
         case IDM_VIEW_SPLIT_VERTICAL: STATE_CHECK(g_splitEditorVisible && g_splitEditorVertical); break;
         case IDM_VIEW_RESET_SPLIT_EDITOR: state->enabled = g_splitEditorVisible != 0; break;
+        case IDM_VIEW_SPLIT_DOCUMENT: {
+            state->enabled = 0;
+            for (int i = 0; i < g_documentStore.count; i++) {
+                const Document *doc = &g_documentStore.documents[i];
+                if (doc->viewKind == DOCUMENT_VIEW_TEXT && !doc->largeFile) {
+                    state->enabled = 1;
+                    break;
+                }
+            }
+            break;
+        }
         case IDM_VIEW_SHOW_WHITESPACE: STATE_CHECK(g_showWhitespace); break;
         case IDM_VIEW_INDENT_GUIDES: STATE_CHECK(g_indentGuides); break;
         case IDM_VIEW_CHANGED_LINES: STATE_CHECK(g_markChangedLines); break;
@@ -1197,9 +1211,13 @@ static HWND active_edit_view(void) {
 static void toggle_word_wrap(HWND hwnd) {
     g_wordWrap = !g_wordWrap;
     apply_word_wrap(g_hEdit);
+    if (g_hSplitEdit) apply_word_wrap(g_hSplitEdit);
     /* Wrapping makes the horizontal extent meaningless; unwrapping has to
        re-measure it, which tracking does as lines come back into view. */
-    if (!g_wordWrap) SendMessageA(g_hEdit, SCI_SETSCROLLWIDTH, 1, 0);
+    if (!g_wordWrap) {
+        SendMessageA(g_hEdit, SCI_SETSCROLLWIDTH, 1, 0);
+        if (g_hSplitEdit) SendMessageA(g_hSplitEdit, SCI_SETSCROLLWIDTH, 1, 0);
+    }
     update_view_menu(hwnd);
     save_layout_settings();
 }
@@ -1216,6 +1234,7 @@ static void toggle_spell_check(HWND hwnd) {
 static void toggle_show_whitespace(HWND hwnd) {
     g_showWhitespace = !g_showWhitespace;
     apply_show_whitespace(g_hEdit);
+    if (g_hSplitEdit) apply_show_whitespace(g_hSplitEdit);
     update_view_menu(hwnd);
     save_layout_settings();
 }
@@ -1223,6 +1242,7 @@ static void toggle_show_whitespace(HWND hwnd) {
 static void toggle_indent_guides(HWND hwnd) {
     g_indentGuides = !g_indentGuides;
     apply_indent_guides(g_hEdit);
+    if (g_hSplitEdit) apply_indent_guides(g_hSplitEdit);
     update_view_menu(hwnd);
     save_layout_settings();
 }
@@ -1238,12 +1258,12 @@ static void toggle_changed_lines(HWND hwnd) {
 static void toggle_indent_use_spaces(HWND hwnd) {
     g_indentUseSpaces = !g_indentUseSpaces;
     apply_indentation(g_hEdit);
+    if (g_hSplitEdit) apply_indentation(g_hSplitEdit);
     /* Switching to spaces only affects how Tab now types going forward
        (apply_indentation() above) - without also converting what's already
-       there, the document is left with a mix of tabs and spaces even though
-       the setting says "spaces". g_hSplitEdit shares g_hEdit's document (see
-       its declaration), so converting through g_hEdit is enough for both
-       views. */
+       there, the selected document is left with a mix of tabs and spaces even
+       though the setting says "spaces". A different document retained in the
+       split is not rewritten unexpectedly. */
     if (g_indentUseSpaces) convert_indentation(g_hEdit, 1);
     update_view_menu(hwnd);
     save_layout_settings();
@@ -1255,6 +1275,7 @@ static void set_tab_width(int width) {
     if (width == g_tabWidth) return;
     g_tabWidth = width;
     apply_indentation(g_hEdit);
+    if (g_hSplitEdit) apply_indentation(g_hSplitEdit);
     save_layout_settings();
 }
 

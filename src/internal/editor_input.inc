@@ -442,7 +442,10 @@ static int append_plugin_context_menu_items(HMENU menu, int *itemIds, HWND hEdit
             destination = plugin_submenu(destination, parts[part], NULL);
         UINT flags = MF_STRING;
         int enabled = 0;
+        int oldPluginDocument = g_pluginCommandDocument;
+        g_pluginCommandDocument = document_index_for_view(hEdit);
         char *error = plugin_host_context_menu_item_enabled(i, hEdit, &enabled);
+        g_pluginCommandDocument = oldPluginDocument;
         if (error) show_plugin_error(error);
         free(error);
         if (!enabled) flags |= MF_GRAYED;
@@ -519,8 +522,11 @@ static void show_editor_context_menu(HWND hwnd, LPARAM lParam) {
 }
 
 static int show_spelling_context_menu(HWND hwnd, LPARAM lParam) {
-    if (!g_spellCheckEnabled || !g_spellChecker ||
-        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT))
+    int documentIndex = document_index_for_view(hwnd);
+    const Document *doc = documentIndex >= 0 ? &g_documentStore.documents[documentIndex] : NULL;
+    Language language = language_for_path(doc ? doc->path : NULL)->id;
+    if (!g_spellCheckEnabled || !g_spellChecker || !doc || doc->largeFile ||
+        (language != LANG_MARKDOWN && language != LANG_TEXT))
         return 0;
 
     POINT screenPoint;
@@ -733,18 +739,22 @@ static void move_document_tab(int from, int to) {
 
 static void do_save_tab_at(int index) {
     if (index < 0 || index >= g_documentStore.count) return;
+    int restoreSplitFocus = GetFocus() == g_hSplitEdit;
     int original = g_documentStore.active;
     if (index != original) switch_document(index);
     do_save();
     if (index != original && original < g_documentStore.count) switch_document(original);
+    if (restoreSplitFocus && g_splitEditorVisible) SetFocus(g_hSplitEdit);
 }
 
 static void do_saveas_tab_at(int index) {
     if (index < 0 || index >= g_documentStore.count) return;
+    int restoreSplitFocus = GetFocus() == g_hSplitEdit;
     int original = g_documentStore.active;
     if (index != original) switch_document(index);
     do_saveas();
     if (index != original && original < g_documentStore.count) switch_document(original);
+    if (restoreSplitFocus && g_splitEditorVisible) SetFocus(g_hSplitEdit);
 }
 
 /* do_close_document_at() shifts every document after the one it removes down
@@ -782,11 +792,213 @@ static void copy_text_to_clipboard(const WCHAR *text) {
     CloseClipboard();
 }
 
+typedef struct CommandPaletteEntry {
+    WORD command;
+    int enabled;
+    WCHAR *label;
+} CommandPaletteEntry;
+
+#define COMMAND_PALETTE_RECENT_MAX 16
+static WORD g_commandPaletteRecent[COMMAND_PALETTE_RECENT_MAX];
+static int g_commandPaletteRecentCount = 0;
+
+static int command_palette_recent_rank(WORD command) {
+    for (int i = 0; i < g_commandPaletteRecentCount; i++)
+        if (g_commandPaletteRecent[i] == command) return i;
+    return COMMAND_PALETTE_RECENT_MAX;
+}
+
+static void remember_palette_command(WORD command) {
+    int found = command_palette_recent_rank(command);
+    if (found >= g_commandPaletteRecentCount) {
+        if (g_commandPaletteRecentCount < COMMAND_PALETTE_RECENT_MAX)
+            g_commandPaletteRecentCount++;
+        found = g_commandPaletteRecentCount - 1;
+    }
+    for (int i = found; i > 0; i--) g_commandPaletteRecent[i] = g_commandPaletteRecent[i - 1];
+    g_commandPaletteRecent[0] = command;
+}
+
+static WCHAR *palette_clean_label(const char *utf8) {
+    WCHAR *source = to_wide(utf8 ? utf8 : "");
+    if (!source) return NULL;
+    size_t length = wcslen(source);
+    WCHAR *clean = (WCHAR *)malloc((length + 1) * sizeof(WCHAR));
+    if (!clean) { free(source); return NULL; }
+    size_t out = 0;
+    for (size_t i = 0; i < length; i++) {
+        if (source[i] == L'&') {
+            if (source[i + 1] == L'&') clean[out++] = source[i++];
+            continue;
+        }
+        clean[out++] = source[i];
+    }
+    clean[out] = 0;
+    free(source);
+    return clean;
+}
+
+static WCHAR *palette_join(const WCHAR *prefix, const WCHAR *label) {
+    size_t prefixLength = prefix ? wcslen(prefix) : 0;
+    size_t labelLength = label ? wcslen(label) : 0;
+    size_t capacity = prefixLength + labelLength + (prefixLength ? 4 : 1);
+    WCHAR *result = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (result) {
+        if (prefixLength) swprintf(result, capacity, L"%ls > %ls", prefix, label ? label : L"");
+        else swprintf(result, capacity, L"%ls", label ? label : L"");
+    }
+    return result;
+}
+
+static WCHAR *palette_find_in_menu(const PluginMenuItem *items, int count,
+                                   const char *name, const WCHAR *prefix) {
+    for (int i = 0; i < count; i++) {
+        const PluginMenuItem *item = &items[i];
+        WCHAR *label = item->label ? palette_clean_label(item->label) : NULL;
+        WCHAR *path = label ? palette_join(prefix, label) : NULL;
+        free(label);
+        if (item->kind == PLUGIN_MENU_COMMAND && item->name &&
+            strcmp(item->name, name) == 0) return path;
+        if (item->kind == PLUGIN_MENU_SUBMENU && path) {
+            WCHAR *found = palette_find_in_menu(item->items, item->itemCount, name, path);
+            if (found) { free(path); return found; }
+        }
+        free(path);
+    }
+    return NULL;
+}
+
+static WCHAR *palette_builtin_label(const MenuCommand *command) {
+    int count = 0;
+    const PluginMenuItem *menus = plugin_host_menu(&count);
+    WCHAR *found = palette_find_in_menu(menus, count, command->name, NULL);
+    if (found) return found;
+
+    WCHAR *fallback = to_wide(command->name);
+    if (!fallback) return NULL;
+    int capitalize = 1;
+    for (WCHAR *p = fallback; *p; p++) {
+        if (*p == L'.') {
+            *p = L':';
+            capitalize = 1;
+        } else if (*p == L'_') {
+            *p = L' ';
+            capitalize = 1;
+        } else if (capitalize && iswalpha(*p)) {
+            *p = towupper(*p);
+            capitalize = 0;
+        }
+    }
+    return fallback;
+}
+
+static WCHAR *palette_plugin_label(int index) {
+    WCHAR *source = palette_clean_label(plugin_host_command_label(index));
+    if (!source) return NULL;
+    int menuBarPath = source[0] == L'/';
+    size_t capacity = wcslen(source) * 3 + 1;
+    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (!label) { free(source); return NULL; }
+    WCHAR *read = source + (menuBarPath ? 1 : 0), *write = label;
+    while (*read) {
+        if (*read == L'/') {
+            memcpy(write, L" > ", 3 * sizeof(WCHAR));
+            write += 3;
+            read++;
+        } else {
+            *write++ = *read++;
+        }
+    }
+    *write = 0;
+    free(source);
+    if (menuBarPath) return label;
+    WCHAR *prefixed = palette_join(L"Plugins", label);
+    free(label);
+    return prefixed;
+}
+
+static WCHAR *palette_decorate_label(WCHAR *base, const char *shortcut,
+                                     const CommandState *state) {
+    WCHAR *wideShortcut = shortcut ? to_wide(shortcut) : NULL;
+    size_t capacity = (base ? wcslen(base) : 0) +
+        (wideShortcut ? wcslen(wideShortcut) : 0) + 48;
+    WCHAR *label = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+    if (label) swprintf(label, capacity, L"%ls%ls%ls%ls",
+        state->checked ? L"✓ " : L"", base ? base : L"Command",
+        wideShortcut ? L"    " : L"", wideShortcut ? wideShortcut : L"");
+    if (label && !state->enabled) wcscat(label, L"    [unavailable]");
+    free(wideShortcut);
+    free(base);
+    return label;
+}
+
+static void show_command_palette(void) {
+    int pluginCount = plugin_host_command_count(), builtInCount = 0;
+    while (menu_command_at(builtInCount)) builtInCount++;
+    int capacity = builtInCount + pluginCount;
+    CommandPaletteEntry *entries = (CommandPaletteEntry *)calloc(
+        (size_t)capacity, sizeof(CommandPaletteEntry));
+    WCHAR **labels = (WCHAR **)calloc((size_t)capacity, sizeof(WCHAR *));
+    if (!entries || !labels) { free(entries); free(labels); return; }
+
+    int count = 0;
+    for (int i = 0; i < builtInCount; i++) {
+        const MenuCommand *command = menu_command_at(i);
+        CommandState state;
+        command_state(command->id, &state);
+        WCHAR *label = palette_decorate_label(palette_builtin_label(command),
+                                               command->shortcut, &state);
+        if (!label) continue;
+        entries[count] = (CommandPaletteEntry){ command->id, state.enabled, label };
+        labels[count++] = label;
+    }
+    for (int i = 0; i < pluginCount; i++) {
+        if (plugin_host_command_is_separator(i) || plugin_host_command_overrides(i)) continue;
+        CommandState state;
+        command_state(IDM_PLUGIN_COMMAND_0 + (UINT)i, &state);
+        WCHAR *label = palette_decorate_label(palette_plugin_label(i),
+                                               plugin_host_command_shortcut(i), &state);
+        if (!label) continue;
+        entries[count] = (CommandPaletteEntry){ (WORD)(IDM_PLUGIN_COMMAND_0 + i),
+                                                state.enabled, label };
+        labels[count++] = label;
+    }
+
+    /* Commands chosen through the palette bubble to the top for the rest of
+       the session; everything else retains registry/menu order. */
+    for (int i = 1; i < count; i++) {
+        CommandPaletteEntry entry = entries[i];
+        int rank = command_palette_recent_rank(entry.command), at = i;
+        while (at > 0 && command_palette_recent_rank(entries[at - 1].command) > rank) {
+            entries[at] = entries[at - 1];
+            at--;
+        }
+        entries[at] = entry;
+    }
+    for (int i = 0; i < count; i++) labels[i] = entries[i].label;
+
+    HWND previousFocus = GetFocus();
+    int selected = show_choice_dialog(L"Command Palette",
+        L"Type a command, menu path, or shortcut:", labels, count, L"Run");
+    WORD command = selected >= 0 && selected < count ? entries[selected].command : 0;
+    int enabled = selected >= 0 && selected < count ? entries[selected].enabled : 0;
+    for (int i = 0; i < count; i++) free(entries[i].label);
+    free(labels);
+    free(entries);
+    if (command && enabled) {
+        remember_palette_command(command);
+        if (previousFocus && IsWindow(previousFocus)) SetFocus(previousFocus);
+        handle_main_command(g_hMainWnd, command);
+    } else if (command) {
+        MessageBeep(MB_ICONASTERISK);
+    }
+}
+
 static void show_tab_context_menu(int index, POINT screenPoint) {
     enum {
         TAB_CONTEXT_SAVE = 1, TAB_CONTEXT_SAVEAS, TAB_CONTEXT_PIN, TAB_CONTEXT_CLOSE,
         TAB_CONTEXT_CLOSE_OTHERS, TAB_CONTEXT_CLOSE_RIGHT, TAB_CONTEXT_CLOSE_ALL,
-        TAB_CONTEXT_COPY_PATH, TAB_CONTEXT_REVEAL
+        TAB_CONTEXT_COPY_PATH, TAB_CONTEXT_REVEAL, TAB_CONTEXT_SPLIT
     };
     if (index < 0 || index >= g_documentStore.count) return;
     const WCHAR *path = g_documentStore.documents[index].path;
@@ -797,6 +1009,10 @@ static void show_tab_context_menu(int index, POINT screenPoint) {
     AppendMenuW(menu, MF_STRING, TAB_CONTEXT_SAVEAS, L"Save As...");
     AppendMenuW(menu, MF_STRING, TAB_CONTEXT_PIN,
                 g_documentStore.documents[index].pinned ? L"Unpin Tab" : L"Pin Tab");
+    AppendMenuW(menu, MF_STRING |
+                ((g_documentStore.documents[index].viewKind == DOCUMENT_VIEW_TEXT &&
+                  !g_documentStore.documents[index].largeFile) ? 0 : MF_GRAYED),
+                TAB_CONTEXT_SPLIT, L"Show in Editor Split");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING | (g_documentStore.documents[index].pinned ? MF_GRAYED : 0),
                 TAB_CONTEXT_CLOSE, L"Close");
@@ -819,6 +1035,7 @@ static void show_tab_context_menu(int index, POINT screenPoint) {
         case TAB_CONTEXT_SAVE: do_save_tab_at(index); break;
         case TAB_CONTEXT_SAVEAS: do_saveas_tab_at(index); break;
         case TAB_CONTEXT_PIN: toggle_document_pinned(index); break;
+        case TAB_CONTEXT_SPLIT: set_split_document(index); break;
         case TAB_CONTEXT_CLOSE: do_close_document_at(index); break;
         case TAB_CONTEXT_CLOSE_OTHERS: do_close_other_tabs(index); break;
         case TAB_CONTEXT_CLOSE_RIGHT: do_close_tabs_to_right(index); break;

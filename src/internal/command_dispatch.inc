@@ -26,10 +26,16 @@ static int handle_file_command(HWND hwnd, WORD cmd) {
             refresh_menu(hwnd);
             break;
         case IDM_FILE_SAVE:
-            do_save();
+            if (GetFocus() == g_hSplitEdit && split_document_index() >= 0 &&
+                split_document_index() != g_documentStore.active)
+                do_save_tab_at(split_document_index());
+            else do_save();
             break;
         case IDM_FILE_SAVEAS:
-            do_saveas();
+            if (GetFocus() == g_hSplitEdit && split_document_index() >= 0 &&
+                split_document_index() != g_documentStore.active)
+                do_saveas_tab_at(split_document_index());
+            else do_saveas();
             break;
         case IDM_FILE_SAVE_ALL:
             do_save_all();
@@ -285,9 +291,11 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
             break;
         case IDM_VIEW_TOGGLESPLIT:
             toggle_split_editor(hwnd, 0);
+            for (int i = 0; i < g_documentStore.count; i++) update_tab_label(i);
             break;
         case IDM_VIEW_SPLIT_VERTICAL:
             toggle_split_editor(hwnd, 1);
+            for (int i = 0; i < g_documentStore.count; i++) update_tab_label(i);
             break;
         case IDM_VIEW_RESET_SPLIT_EDITOR:
             reset_split_editor(hwnd);
@@ -310,8 +318,14 @@ static int handle_view_command(HWND hwnd, WORD cmd) {
         case IDM_VIEW_TAB_SWITCHER:
             show_tab_switcher();
             break;
+        case IDM_VIEW_COMMAND_PALETTE:
+            show_command_palette();
+            break;
         case IDM_VIEW_PIN_TAB:
             toggle_document_pinned(g_documentStore.active);
+            break;
+        case IDM_VIEW_SPLIT_DOCUMENT:
+            show_split_document_dialog();
             break;
         case IDM_VIEW_CYCLE_PANE:
             cycle_pane_focus(0);
@@ -414,10 +428,17 @@ static void show_plugin_error(const char *report) {
    otherwise derive that flag from save-point notifications, so reconcile it
    explicitly after every plugin call. This also covers a successful handler
    that edits a freshly loaded/saved document. */
-static void sync_dirty_after_plugin(int wasDirty) {
+static void sync_dirty_after_plugin(HWND editor, int wasDirty) {
+    int index = document_index_for_view(editor);
     int modified = wasDirty || g_pluginChangedSaveEncoding ||
-                   SendMessageA(g_hEdit, SCI_GETMODIFY, 0, 0) != 0;
-    if (modified != (g_dirty != 0)) set_dirty(modified);
+                   SendMessageA(editor, SCI_GETMODIFY, 0, 0) != 0;
+    if (index == g_documentStore.active) {
+        if (modified != (g_dirty != 0)) set_dirty(modified);
+    } else if (index >= 0 && modified != (g_documentStore.documents[index].dirty != 0)) {
+        g_documentStore.documents[index].dirty = modified;
+        g_recoverySnapshotStale = 1;
+        update_tab_label(index);
+    }
 }
 
 /* Handlers act on the main pane, like plugin commands. A failing handler is
@@ -430,7 +451,7 @@ static void fire_plugin_event(const char *event, const WCHAR *path) {
     char *report = plugin_host_fire(event, argument, g_hEdit);
     refresh_plugin_performance_problems();
     free(argument);
-    sync_dirty_after_plugin(wasDirty);
+    sync_dirty_after_plugin(g_hEdit, wasDirty);
     if (report) show_plugin_error(report);
     free(report);
     /* Most high-frequency text/selection handlers only read configuration.

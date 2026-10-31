@@ -12,25 +12,11 @@
 #include "text_codec.h"
 #include "text_search.h" /* SEARCH_* find options */
 
-/* ---- persisted settings, stored in %APPDATA%\tinkeredit\settings.json ---- */
+/* Persisted settings: normally %APPDATA%\tinkeredit\settings.json, or
+   portable-data\settings.json when portable.mode is beside the executable. */
 WCHAR *get_settings_path(void) {
-    DWORD capacity = GetEnvironmentVariableW(L"APPDATA", NULL, 0);
-    WCHAR *appData = NULL;
-    while (capacity) {
-        appData = (WCHAR *)malloc((size_t)capacity * sizeof(WCHAR));
-        if (!appData) return NULL;
-        DWORD length = GetEnvironmentVariableW(L"APPDATA", appData, capacity);
-        if (length > 0 && length < capacity) break;
-        free(appData);
-        appData = NULL;
-        if (!length || length <= capacity) return NULL;
-        capacity = length;
-    }
-    if (!appData) return NULL;
-    WCHAR *directory = path_join(appData, L"tinkeredit");
-    free(appData);
+    WCHAR *directory = get_user_config_directory();
     if (!directory) return NULL;
-    CreateDirectoryW(directory, NULL);
     WCHAR *settings = path_join(directory, L"settings.json");
     free(directory);
     return settings;

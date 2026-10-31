@@ -108,6 +108,46 @@ WCHAR *extended_path(const WCHAR *path) {
     return extended;
 }
 
+int portable_mode_enabled(void) {
+    WCHAR *directory = module_directory();
+    WCHAR *marker = directory ? path_join(directory, L"portable.mode") : NULL;
+    int enabled = file_exists(marker);
+    free(marker);
+    free(directory);
+    return enabled;
+}
+
+/* Settings, menu/theme customisations and personal plugins share this root.
+   Keeping portable state in its own folder avoids confusing personal plugins
+   with the bundled plugins directory beside the executable. */
+WCHAR *get_user_config_directory(void) {
+    if (portable_mode_enabled()) {
+        WCHAR *module = module_directory();
+        WCHAR *portable = module ? path_join(module, L"portable-data") : NULL;
+        free(module);
+        if (portable) CreateDirectoryW(portable, NULL);
+        return portable;
+    }
+
+    DWORD capacity = GetEnvironmentVariableW(L"APPDATA", NULL, 0);
+    WCHAR *appData = NULL;
+    while (capacity) {
+        appData = (WCHAR *)malloc((size_t)capacity * sizeof(WCHAR));
+        if (!appData) return NULL;
+        DWORD length = GetEnvironmentVariableW(L"APPDATA", appData, capacity);
+        if (length > 0 && length < capacity) break;
+        free(appData);
+        appData = NULL;
+        if (!length || length <= capacity) return NULL;
+        capacity = length;
+    }
+    if (!appData) return NULL;
+    WCHAR *directory = path_join(appData, L"tinkeredit");
+    free(appData);
+    if (directory) CreateDirectoryW(directory, NULL);
+    return directory;
+}
+
 /* Shared by the workspace-scoped file enumeration (Quick Open/Find-in-Folder,
    in tinkeredit.c) and the file explorer's live watcher (file_explorer.c), so
    both agree on which directories are noisy/uninteresting to recurse into. */
@@ -149,10 +189,18 @@ int path_has_skipped_component(const WCHAR *path) {
     return 0;
 }
 
-/* %LOCALAPPDATA%\TinkerEditor\<name>, created if needed: per-user, machine-local
-   state that has to be writable wherever tinkeredit.exe itself lives -
-   including a Program Files install a standard user can't write to. */
+/* %LOCALAPPDATA%\TinkerEditor\<name>, created if needed: normally per-user,
+   machine-local state that stays writable wherever tinkeredit.exe lives -
+   including a Program Files install a standard user can't write to. Portable
+   mode redirects it under portable-data beside the executable instead. */
 WCHAR *get_local_app_directory(const WCHAR *name) {
+    if (portable_mode_enabled()) {
+        WCHAR *root = get_user_config_directory();
+        WCHAR *directory = root ? path_join(root, name) : NULL;
+        free(root);
+        if (directory) CreateDirectoryW(directory, NULL);
+        return directory;
+    }
     DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", NULL, 0);
     if (!needed) return NULL;
     WCHAR *local = (WCHAR *)malloc((size_t)needed * sizeof(WCHAR));

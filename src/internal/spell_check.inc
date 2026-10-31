@@ -179,22 +179,26 @@ static void visible_spell_range(HWND view, Sci_Position textLength,
     *rangeEnd = end > textLength ? textLength : end;
 }
 
-/* Checks one view's visible range. All indicator and text access still goes
-   through g_hEdit: g_hSplitEdit shares g_hEdit's document (see ui_shell.inc),
-   so indicators set there show up in both views regardless of which one's
-   viewport the range came from. */
+/* Checks one view's own document. The split may either share the selected
+   tab or retain another open document, so text, styles and indicators must
+   all go through the view whose viewport supplied the range. */
 static void spell_check_visible_range(HWND view, Sci_Position textLength) {
+    int documentIndex = document_index_for_view(view);
+    if (documentIndex < 0 || g_documentStore.documents[documentIndex].largeFile) return;
+    const WCHAR *path = g_documentStore.documents[documentIndex].path;
+    Language language = language_for_path(path)->id;
+    if (language != LANG_MARKDOWN && language != LANG_TEXT) return;
     Sci_Position rangeStart = 0, rangeEnd = 0;
     visible_spell_range(view, textLength, &rangeStart, &rangeEnd);
     Sci_Position rangeLength = rangeEnd - rangeStart;
     if (rangeLength <= 0) return;
 
-    SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE,
+    SendMessageA(view, SCI_INDICATORCLEARRANGE,
                  (WPARAM)rangeStart, (LPARAM)rangeLength);
 
     /* Ensure the Markdown styles used to exclude code and links are current. */
-    SendMessageA(g_hEdit, SCI_COLOURISE, (WPARAM)rangeStart, (LPARAM)rangeEnd);
-    char *utf8 = get_text_range(g_hEdit, rangeStart, rangeEnd);
+    SendMessageA(view, SCI_COLOURISE, (WPARAM)rangeStart, (LPARAM)rangeEnd);
+    char *utf8 = get_text_range(view, rangeStart, rangeEnd);
     if (!utf8) return;
 
     int wideLength = 0;
@@ -225,12 +229,12 @@ static void spell_check_visible_range(HWND view, Sci_Position textLength) {
                 /* Plain text has no lexer at all (see the LANG_TEXT entry in
                    LANGUAGES) to distinguish code/links from prose the way
                    Markdown's does, so every character in it is spellable. */
-                int spellable = g_activeLanguage == LANG_TEXT || markdown_style_is_prose(
-                    (int)SendMessageA(g_hEdit, SCI_GETSTYLEAT, (WPARAM)absoluteStart, 0));
+                int spellable = language == LANG_TEXT || markdown_style_is_prose(
+                    (int)SendMessageA(view, SCI_GETSTYLEAT, (WPARAM)absoluteStart, 0));
                 if (byteSpan > 0 && byteStart >= 0 && byteStart + byteSpan <= rangeLength &&
                     spellable) {
-                    SendMessageA(g_hEdit, SCI_SETINDICATORVALUE, 1, 0);
-                    SendMessageA(g_hEdit, SCI_INDICATORFILLRANGE,
+                    SendMessageA(view, SCI_SETINDICATORVALUE, 1, 0);
+                    SendMessageA(view, SCI_INDICATORFILLRANGE,
                                  (WPARAM)absoluteStart, (LPARAM)byteSpan);
                 }
             }
@@ -245,29 +249,39 @@ static void spell_check_visible_range(HWND view, Sci_Position textLength) {
 static void perform_spell_check(void) {
     if (!g_hEdit) return;
     if (g_hMainWnd) KillTimer(g_hMainWnd, IDT_SPELL_CHECK);
-    if (g_largeFile) return;
-
     Sci_Position textLength = (Sci_Position)SendMessageA(g_hEdit, SCI_GETLENGTH, 0, 0);
     SendMessageA(g_hEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
-    if (!g_spellCheckEnabled || !g_spellChecker ||
-        (g_activeLanguage != LANG_MARKDOWN && g_activeLanguage != LANG_TEXT)) {
+    if (!g_spellCheckEnabled || !g_spellChecker) {
         SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
+        if (g_hSplitEdit && g_splitEditorVisible) {
+            Sci_Position splitLength = (Sci_Position)SendMessageA(g_hSplitEdit, SCI_GETLENGTH, 0, 0);
+            SendMessageA(g_hSplitEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
+            SendMessageA(g_hSplitEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)splitLength);
+        }
         g_clearAllSpellingPending = 0;
         return;
     }
 
-    if (textLength <= 0) return;
     if (g_clearAllSpellingPending) {
         SendMessageA(g_hEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)textLength);
+        if (g_hSplitEdit && g_splitEditorVisible) {
+            Sci_Position splitLength = (Sci_Position)SendMessageA(g_hSplitEdit, SCI_GETLENGTH, 0, 0);
+            SendMessageA(g_hSplitEdit, SCI_SETINDICATORCURRENT, INDICATOR_SPELLING, 0);
+            SendMessageA(g_hSplitEdit, SCI_INDICATORCLEARRANGE, 0, (LPARAM)splitLength);
+        }
         g_clearAllSpellingPending = 0;
     }
 
     HWND tracked = tracked_edit_view();
-    spell_check_visible_range(tracked, textLength);
-    /* The split pane shares the document, so its own viewport can hold text
-       the tracked pane's range never covers; check it too when visible. */
-    if (g_hSplitEdit && g_splitEditorVisible && g_hSplitEdit != tracked)
-        spell_check_visible_range(g_hSplitEdit, textLength);
+    Sci_Position trackedLength = (Sci_Position)SendMessageA(tracked, SCI_GETLENGTH, 0, 0);
+    if (trackedLength > 0) spell_check_visible_range(tracked, trackedLength);
+    /* When both editors show one document this covers the other viewport;
+       with independent documents it covers the other document instead. */
+    HWND other = tracked == g_hSplitEdit ? g_hEdit : g_hSplitEdit;
+    if (other && IsWindowVisible(other)) {
+        Sci_Position otherLength = (Sci_Position)SendMessageA(other, SCI_GETLENGTH, 0, 0);
+        if (otherLength > 0) spell_check_visible_range(other, otherLength);
+    }
 }
 
 /* ---- spell.check for plugins. ------------------------------------------

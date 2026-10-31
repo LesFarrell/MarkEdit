@@ -59,7 +59,7 @@ void remeasure_linenumber_margin(HWND hEdit) {
    apply_document_language() whenever the active document changes:
    wrapping a large-file document would lay out every line of it up front. */
 void apply_word_wrap(HWND hEdit) {
-    int wrap = g_wordWrap && !g_host->largeFileActive();
+    int wrap = g_wordWrap && !g_host->largeFileActive(hEdit);
     SendMessageA(hEdit, SCI_SETWRAPMODE, wrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
     if (!wrap) return;
     SendMessageA(hEdit, SCI_SETWRAPINDENTMODE, SC_WRAPINDENT_SAME, 0);

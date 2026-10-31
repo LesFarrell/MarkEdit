@@ -4,6 +4,8 @@ A Tinker Editor plugin is a Lua script that adds commands, menus, and automatic 
 
 This guide covers everything a plugin can do. [`example.lua`](example.lua), in this folder, is a working plugin that uses most of it. The `plugins` folder also contains ready-to-use data conversion, JSON, CSV, SQL, CLEF log, number conversion, natural sorting, grammar, spelling report, readability, anagram, Lua runner, tail (follow a log file), Markdown structure/link/lint tools, HTML snippets, selection statistics, text, calculator, assembler, Lua formatting, and developer-oriented extensions.
 
+Paths below use `%APPDATA%\tinkeredit`; in portable mode use `portable-data` beside `tinkeredit.exe` instead.
+
 **Contents:** [Quick start](#quick-start) · [How plugins are loaded](#how-plugins-are-loaded) · [Positions, ranges, and lines](#positions-ranges-and-lines) · [API reference](#api-reference) · [Where commands appear](#where-commands-appear) · [Replacing built-in commands](#replacing-built-in-commands) · [Customizing the menu bar](#customizing-the-menu-bar) · [How commands run](#how-commands-run) · [The Lua environment](#the-lua-environment) · [Limits](#limits) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting)
 
 ## Quick start

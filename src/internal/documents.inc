@@ -48,6 +48,30 @@ static char *get_document_text(int index, Sci_Position *outLength) {
     return text;
 }
 
+static int document_index_for_sci_document(sptr_t document) {
+    if (!document) return -1;
+    for (int i = 0; i < g_documentStore.count; i++)
+        if (g_documentStore.documents[i].sciDocument == document) return i;
+    return -1;
+}
+
+static int document_index_for_view(HWND view) {
+    return view ? document_index_for_sci_document(
+        (sptr_t)SendMessageA(view, SCI_GETDOCPOINTER, 0, 0)) : -1;
+}
+
+static int split_document_index(void) {
+    return document_index_for_sci_document(g_splitDocument);
+}
+
+/* NULL means the split follows the selected main tab, as it always did
+   before independent split documents were introduced. */
+static const WCHAR *split_document_path(void) {
+    int index = split_document_index();
+    return g_splitEditorVisible && index >= 0 && index != g_documentStore.active
+        ? g_documentStore.documents[index].path : NULL;
+}
+
 
 /* ================= rest of the app (menus, file I/O, find/replace, font) ================= */
 
@@ -68,6 +92,7 @@ static void format_document_label(const Document *doc, WCHAR *label, size_t capa
             suffix[used] = 0;
         }
     }
+    if (g_splitEditorVisible && g_splitDocument == doc->sciDocument) wcscat(suffix, L" ↔");
     if (doc->isReference && !shortName) {
         swprintf(label, capacity, L"%ls%ls", reference_title(doc->isReference), suffix);
     } else if (shortName && shortName[0]) {
@@ -179,9 +204,17 @@ static void record_document_file_time(int index) {
    main pane's current location. */
 static void sync_split_editor_document(void) {
     if (!g_hSplitEdit || !g_splitScratchDocument || g_documentStore.count <= 0) return;
+    int splitIndex = split_document_index();
+    if (g_splitDocument && (splitIndex < 0 ||
+        g_documentStore.documents[splitIndex].viewKind != DOCUMENT_VIEW_TEXT ||
+        g_documentStore.documents[splitIndex].largeFile)) {
+        g_splitDocument = 0;
+        splitIndex = -1;
+    }
     int visible = g_splitEditorVisible && editor_pane_visible() && !g_focusMode;
     sptr_t desired = visible
-        ? g_documentStore.documents[g_documentStore.active].sciDocument
+        ? (g_splitDocument ? g_splitDocument
+                           : g_documentStore.documents[g_documentStore.active].sciDocument)
         : g_splitScratchDocument;
     sptr_t current = (sptr_t)SendMessageA(g_hSplitEdit, SCI_GETDOCPOINTER, 0, 0);
     if (current == desired) return;
@@ -189,19 +222,67 @@ static void sync_split_editor_document(void) {
     if (!visible && GetFocus() == g_hSplitEdit) SetFocus(g_hEdit);
     SendMessageA(g_hSplitEdit, SCI_SETDOCPOINTER, 0, (LPARAM)desired);
     if (visible) {
-        Sci_Position anchor = (Sci_Position)SendMessageA(g_hEdit, SCI_GETANCHOR, 0, 0);
-        Sci_Position caret = (Sci_Position)SendMessageA(g_hEdit, SCI_GETCURRENTPOS, 0, 0);
-        Sci_Position first = (Sci_Position)SendMessageA(g_hEdit, SCI_GETFIRSTVISIBLELINE, 0, 0);
-        SendMessageA(g_hSplitEdit, SCI_SETSEL, (WPARAM)anchor, (LPARAM)caret);
-        SendMessageA(g_hSplitEdit, SCI_SETFIRSTVISIBLELINE, (WPARAM)first, 0);
+        int desiredIndex = document_index_for_sci_document(desired);
+        if (desiredIndex >= 0) restore_document_view(
+            g_hSplitEdit, &g_documentStore.documents[desiredIndex]);
         remeasure_linenumber_margin(g_hSplitEdit);
     } else {
         g_lastEditView = g_hEdit;
     }
 }
 
-/* Swaps the shared document pointer for the editable views, keeping them in
-   sync with whichever tab is active. The minimap deliberately owns a
+static void set_split_document(int index) {
+    if (index < 0 || index >= g_documentStore.count) return;
+    Document *doc = &g_documentStore.documents[index];
+    if (doc->viewKind != DOCUMENT_VIEW_TEXT || doc->largeFile) {
+        MessageBoxW(g_hMainWnd, L"Images and large-file documents cannot be shown in the editor split.",
+                    L"Split Editor", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    sptr_t previous = g_splitDocument;
+    /* Choosing the selected tab means "follow the tab strip" again, which is
+       also the way to release a document retained in the secondary pane. */
+    g_splitDocument = index == g_documentStore.active ? 0 : doc->sciDocument;
+    if (!g_splitEditorVisible) {
+        g_splitEditorVertical = 1;
+        g_splitEditorPos = -1;
+        g_splitEditorVisible = 1;
+    }
+    sync_split_editor_document();
+    apply_document_language(g_currentFile);
+    for (int i = 0; i < g_documentStore.count; i++)
+        if (g_documentStore.documents[i].sciDocument == previous || i == index)
+            update_tab_label(i);
+    layout(g_hMainWnd);
+    update_view_menu(g_hMainWnd);
+    save_layout_settings();
+    SetFocus(g_hSplitEdit);
+}
+
+static void show_split_document_dialog(void) {
+    WCHAR *labels[MAX_DOCUMENTS] = {0};
+    int indices[MAX_DOCUMENTS], count = 0;
+    for (int i = 0; i < g_documentStore.count; i++) {
+        const Document *doc = &g_documentStore.documents[i];
+        if (doc->viewKind != DOCUMENT_VIEW_TEXT || doc->largeFile) continue;
+        WCHAR name[MAX_PATH + 32];
+        format_document_label(doc, name, sizeof(name) / sizeof(name[0]));
+        size_t capacity = wcslen(name) + (doc->path ? wcslen(doc->path) : 0) + 32;
+        labels[count] = (WCHAR *)malloc(capacity * sizeof(WCHAR));
+        if (!labels[count]) continue;
+        swprintf(labels[count], capacity, doc->path ? L"%ls — %ls" : L"%ls%ls",
+                 name, doc->path ? doc->path : (i == g_documentStore.active ? L" (current)" : L""));
+        indices[count++] = i;
+    }
+    if (!count) { MessageBeep(MB_ICONASTERISK); return; }
+    int selected = show_choice_dialog(L"Show Document in Split",
+        L"Choose a document for the split; choosing the current tab follows it:", labels, count, L"Show");
+    for (int i = 0; i < count; i++) free(labels[i]);
+    if (selected >= 0 && selected < count) set_split_document(indices[selected]);
+}
+
+/* Swaps the main editor to the active tab and refreshes the split editor,
+   which may follow that tab or retain its own document. The minimap owns a
    separate snapshot document so normal edits do not make its Scintilla view
    process every byte change before the throttled refresh. Not used for the
    transient peeks in get_document_text() and clear_debug_execution_markers(),
@@ -225,13 +306,8 @@ static void switch_document(int index) {
     restore_document_view(g_hEdit, &g_documentStore.documents[index]);
     update_linenumber_margin_width(g_hEdit);
     if (g_hSplitEdit) {
-        if (g_splitEditorVisible) {
-            /* Starts wherever the main pane starts; the user can then scroll
-               it independently - the split pane doesn't persist its own
-               per-document view state (see set_active_editor_document()). */
-            restore_document_view(g_hSplitEdit, &g_documentStore.documents[index]);
+        if (g_splitEditorVisible)
             update_linenumber_margin_width(g_hSplitEdit);
-        }
     }
     g_documentStore.switching = 0;
     if (g_hTabs) TabCtrl_SetCurSel(g_hTabs, index);
@@ -339,6 +415,7 @@ static void replace_active_scintilla_document(sptr_t sciDoc, int largeFile) {
     int oldSwitching = g_documentStore.switching;
     g_documentStore.switching = 1;
     g_documentStore.documents[g_documentStore.active].sciDocument = sciDoc;
+    if (g_splitDocument == old) g_splitDocument = sciDoc;
     g_largeFile = largeFile;
     set_active_editor_document(sciDoc);
     configure_scintilla(g_hEdit);
@@ -1016,6 +1093,10 @@ static void save_session_documents(void) {
     write_setting_string(L"Session", L"Count", count, settings);
     write_setting_string(L"Session", L"ActiveFile",
                          g_currentFile ? g_currentFile : L"", settings);
+    int splitIndex = split_document_index();
+    write_setting_string(L"Session", L"SplitFile",
+        splitIndex >= 0 && g_documentStore.documents[splitIndex].path
+            ? g_documentStore.documents[splitIndex].path : NULL, settings);
     free(settings);
 }
 
@@ -1026,6 +1107,7 @@ static void restore_session_documents(void) {
     if (count < 0) count = 0;
     if (count > MAX_DOCUMENTS) count = MAX_DOCUMENTS;
     WCHAR *activeFile = read_profile_string(L"Session", L"ActiveFile", settings);
+    WCHAR *splitFile = read_profile_string(L"Session", L"SplitFile", settings);
     for (int i = 0; i < count; i++) {
         WCHAR key[24], pinnedKey[24];
         swprintf(key, sizeof(key) / sizeof(key[0]), L"File%d", i);
@@ -1046,6 +1128,20 @@ static void restore_session_documents(void) {
             }
         }
     }
+    if (splitFile) {
+        for (int i = 0; i < g_documentStore.count; i++) {
+            Document *doc = &g_documentStore.documents[i];
+            if (doc->path && !doc->largeFile && doc->viewKind == DOCUMENT_VIEW_TEXT &&
+                _wcsicmp(doc->path, splitFile) == 0) {
+                g_splitDocument = doc->sciDocument;
+                sync_split_editor_document();
+                apply_document_language(g_currentFile);
+                update_tab_label(i);
+                break;
+            }
+        }
+    }
+    free(splitFile);
     free(activeFile);
     free(settings);
 }
@@ -1808,6 +1904,7 @@ static void do_close_document_at(int index) {
     if (!g_dirty) save_breakpoints_for_active_document(g_currentFile);
     int removeIndex = g_documentStore.active;
     Document removed = g_documentStore.documents[removeIndex];
+    if (g_splitDocument == removed.sciDocument) g_splitDocument = 0;
 
     if (g_documentStore.count <= 1) {
         sptr_t newDoc = (sptr_t)SendMessageA(g_hEdit, SCI_CREATEDOCUMENT, 0, 0);

@@ -404,9 +404,55 @@ static void test_markdown_links(void) {
     CHECK(probe.count == 1 && strcmp(probe.targets[0], "linked.md") == 0);
 }
 
+static int same_path(const WCHAR *left, const WCHAR *right) {
+    return left && right && _wcsicmp(left, right) == 0;
+}
+
+/* portable.mode beside this test executable must route both the per-user
+   settings root and the Local AppData folders into portable-data. */
+static void test_portable_paths(void) {
+    WCHAR *directory = module_directory();
+    CHECK(directory != NULL);
+    if (!directory) return;
+    WCHAR *marker = path_join(directory, L"portable.mode");
+    WCHAR *portableData = path_join(directory, L"portable-data");
+    WCHAR *recovery = path_join(portableData, L"Recovery");
+    CHECK(marker && portableData && recovery);
+    if (!marker || !portableData || !recovery) {
+        free(marker); free(portableData); free(recovery); free(directory);
+        return;
+    }
+
+    DeleteFileW(marker);
+    RemoveDirectoryW(recovery);
+    RemoveDirectoryW(portableData);
+    CHECK(!portable_mode_enabled());
+
+    int created = write_bytes_file(marker, "", 0);
+    CHECK(created);
+    if (created) {
+        CHECK(portable_mode_enabled());
+        WCHAR *config = get_user_config_directory();
+        CHECK(same_path(config, portableData));
+        WCHAR *local = get_local_app_directory(L"Recovery");
+        CHECK(same_path(local, recovery));
+        free(local);
+        free(config);
+    }
+
+    DeleteFileW(marker);
+    RemoveDirectoryW(recovery);
+    RemoveDirectoryW(portableData);
+    CHECK(!portable_mode_enabled());
+    free(marker);
+    free(portableData);
+    free(recovery);
+    free(directory);
+}
+
 int main(void) {
     test_codecs(); test_lossless_progress(); test_files(); test_plugin_settings(); test_workspace_text();
-    test_markdown_links();
+    test_markdown_links(); test_portable_paths();
     if (failures) return 1;
     puts("All core tests passed.");
     return 0;

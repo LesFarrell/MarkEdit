@@ -894,9 +894,10 @@ static HRESULT STDMETHODCALLTYPE EnvCreated_Invoke(ICoreWebView2CreateCoreWebVie
 }
 
 static void init_webview(void) {
-    /* The browser profile lives with the other per-user state rather than
-       beside tinkeredit.exe: an installed copy in Program Files can't write
-       there, which made creating the WebView2 environment fail outright. */
+    /* The browser profile normally lives with the other per-user state: an
+       installed copy in Program Files can't write beside tinkeredit.exe, which
+       made creating the WebView2 environment fail outright. Portable mode
+       deliberately redirects it to portable-data instead. */
     WCHAR *userDataDir = get_local_app_directory(L"WebView2");
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(NULL, userDataDir, NULL, &g_envHandler);
     free(userDataDir);

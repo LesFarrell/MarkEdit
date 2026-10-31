@@ -148,7 +148,7 @@ depend on a UI module.
 | `settings_io.h` | — | Load/save entry points over the values above | `settings_values.h` |
 | `layout_metrics.{h,c}` | `layout_metrics.h` | Explorer geometry values and `explorer_content_x()` | `settings_values.h` |
 | `settings.h` | — | Umbrella over the three headers above, for the app shell only | `settings_values.h`, `settings_io.h`, `find_state.h` |
-| `path_utils.c` | `path_utils.h` | Path manipulation, `LONG_PATH_CAPACITY`, and the per-user `%LOCALAPPDATA%\Tinker Editor` folders | shlwapi |
+| `path_utils.c` | `path_utils.h` | Path manipulation, `LONG_PATH_CAPACITY`, normal per-user data folders, and executable-local `portable.mode`/`portable-data` routing | shlwapi |
 | `text_codec.c` | `text_codec.h` | UTF-8/16 and BOM handling | — |
 | `git_status.c` | `git_status.h` | NUL-delimited Git porcelain v2 status parsing, including branch tracking state and exact UTF-8 paths | none (pure logic) |
 | `file_io.c` | `file_io.h` | Atomic file read/write helpers | `path_utils.h` |
@@ -253,7 +253,7 @@ Native dispatch remains grouped by responsibility in `handle_file_command`, `han
 
 ## Lua
 
-The plugin host is split across four files. `plugin_lua_runtime.c` owns the sandboxed Lua state, memory/time limits and protected calls; `plugin_registry.c` owns the API plugins see (`ui`, `menu`, `contextmenu`, `events`, `commands`, `config`, `app`, `documents`, `spell`, `output`, `problems`), the command and event registries and running a registered command; `plugin_discovery.c` owns extension discovery and the folder-local module loader; and `plugin_host.c` keeps the entry points, the menu definition and help page rendering. Bundled extensions load first and personal extensions from `%APPDATA%\tinkeredit\plugins` load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
+The plugin host is split across four files. `plugin_lua_runtime.c` owns the sandboxed Lua state, memory/time limits and protected calls; `plugin_registry.c` owns the API plugins see (`ui`, `menu`, `contextmenu`, `events`, `commands`, `config`, `app`, `documents`, `spell`, `output`, `problems`), the command and event registries and running a registered command; `plugin_discovery.c` owns extension discovery and the folder-local module loader; and `plugin_host.c` keeps the entry points, the menu definition and help page rendering. Bundled extensions load first and personal extensions from the normal or portable user config directory load afterward. `lua_editor_api.c` owns the Scintilla-facing `editor.*` API, including bulk multi-selection operations.
 
 The built-in formatter is stored as three focused files:
 

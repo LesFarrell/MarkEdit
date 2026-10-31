@@ -1,7 +1,8 @@
 /* ---- autosave recovery -------------------------------------------------
-   Recovery snapshots live in LocalAppData rather than beside the executable,
-   so running the portable distribution never dirties its own folder. Only
-   modified documents are written; normal saves and a clean exit remove them. */
+   Recovery snapshots normally live in LocalAppData; portable mode routes them
+   into portable-data beside the executable (see get_local_app_directory()).
+   Only modified documents are written; normal saves and a clean exit remove
+   them. */
 
 static WCHAR *get_recovery_root(void) {
     return get_local_app_directory(L"Recovery");

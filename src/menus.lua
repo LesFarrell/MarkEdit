@@ -1,7 +1,8 @@
 -- Tinker Editor's menu bar.
 --
--- Tinker Editor reads %APPDATA%\tinkeredit\menus.lua when it exists, and otherwise
--- uses the default menus built into tinkeredit.exe. Plugins > Customize
+-- Tinker Editor reads the user's menus.lua (normally under %APPDATA%\tinkeredit,
+-- or under portable-data in portable mode) when it exists, and otherwise uses
+-- the default menus built into tinkeredit.exe. Plugins > Customize
 -- Menus... copies the default menus there (if the file isn't there yet) and
 -- opens it. After editing it, save it and use Plugins > Reload Plugins.
 -- Delete it to go back to the default menus. If it has a mistake, Tinker Editor
@@ -107,6 +108,7 @@ return {
     { "&Next Tab", "view.next_tab" },
     { "&Previous Tab", "view.previous_tab" },
     { "Open Tab &Switcher...", "view.tab_switcher" },
+    { "&Command Palette...", "view.command_palette" },
     { "&Pin Current Tab", "view.pin_tab" },
     { "Cycle &Panes", "view.cycle_panes" },
     { "Cycle Panes &Backwards", "view.cycle_panes_previous" },
@@ -139,6 +141,7 @@ return {
     { "Mini&map", "view.minimap" },
     { "Split Editor &Horizontally", "view.split_editor" },
     { "Split Editor &Vertically", "view.split_editor_vertical" },
+    { "Show &Document in Split...", "view.split_document" },
     { "&Reset Split Editor", "view.reset_split_editor" },
     "-",
     { "Show W&hitespace", "view.show_whitespace" },

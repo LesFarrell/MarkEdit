@@ -1395,7 +1395,16 @@ static void refresh_theme(HWND hwnd) {
         strip_minimap_bold();
         SendMessageA(g_hMinimap, SCI_SETZOOM, 0, 0);
     }
-    if (g_hSplitEdit) apply_editor_theme(g_hSplitEdit);
+    if (g_hSplitEdit) {
+        const WCHAR *splitPath = split_document_path();
+        if (splitPath) {
+            int mainLanguage = g_activeLanguage;
+            apply_language_to_view(g_hSplitEdit, splitPath);
+            g_activeLanguage = mainLanguage;
+        } else {
+            apply_editor_theme(g_hSplitEdit);
+        }
+    }
     apply_output_panel_theme();
     apply_main_theme(hwnd);
     for (int i = 0; i < TOOLBAR_BUTTON_COUNT; i++) {

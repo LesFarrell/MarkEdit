@@ -2,7 +2,8 @@
 --
 -- The page is generated rather than written out by hand, so it always
 -- matches the shortcuts Tinker Editor really has and the menus the user really
--- sees, including a customised %APPDATA%\tinkeredit\menus.lua.
+-- sees, including a customised user menus.lua (%APPDATA%\tinkeredit normally,
+-- or portable-data in portable mode).
 --
 -- How it's run: tinkeredit.rc builds this file into tinkeredit.exe, and
 -- plugin_host_render_page() runs it in a Lua state of its own (not the one

@@ -324,22 +324,43 @@ static int plugin_document_auto_reload(int index, int value) {
 static int plugin_document_modified(int index) {
     return index >= 0 && index < g_documentStore.count && g_documentStore.documents[index].dirty;
 }
+
+/* While a Lua command runs, editor.* and document metadata describe the same
+   focused pane even when the split retains a different tab. Event handlers
+   and top-level plugin code keep the selected main tab as their context. */
+static int plugin_target_document(void) {
+    return g_pluginCommandDocument >= 0 && g_pluginCommandDocument < g_documentStore.count
+        ? g_pluginCommandDocument : g_documentStore.active;
+}
+
 static const char *plugin_document_encoding(void) {
     static const char *const names[] = { "utf-8", "utf-16le", "utf-16be", "ansi" };
-    if (g_encoding == TEXT_ENCODING_UTF8 && g_hasBom) return "utf-8-bom";
-    return g_encoding >= TEXT_ENCODING_UTF8 && g_encoding <= TEXT_ENCODING_ANSI
-        ? names[g_encoding] : "utf-8";
+    const Document *doc = &g_documentStore.documents[plugin_target_document()];
+    if (doc->encoding == TEXT_ENCODING_UTF8 && doc->hasBom) return "utf-8-bom";
+    return doc->encoding >= TEXT_ENCODING_UTF8 && doc->encoding <= TEXT_ENCODING_ANSI
+        ? names[doc->encoding] : "utf-8";
 }
 static int plugin_document_set_encoding(const char *encoding) {
-    int oldEncoding = g_encoding;
-    int oldBom = g_hasBom;
-    if (strcmp(encoding, "utf-8") == 0) set_document_encoding(TEXT_ENCODING_UTF8, 0);
-    else if (strcmp(encoding, "utf-8-bom") == 0) set_document_encoding(TEXT_ENCODING_UTF8, 1);
-    else if (strcmp(encoding, "utf-16le") == 0) set_document_encoding(TEXT_ENCODING_UTF16LE, 1);
-    else if (strcmp(encoding, "utf-16be") == 0) set_document_encoding(TEXT_ENCODING_UTF16BE, 1);
-    else if (strcmp(encoding, "ansi") == 0) set_document_encoding(TEXT_ENCODING_ANSI, 0);
+    TextEncoding newEncoding;
+    int newBom;
+    if (strcmp(encoding, "utf-8") == 0) { newEncoding = TEXT_ENCODING_UTF8; newBom = 0; }
+    else if (strcmp(encoding, "utf-8-bom") == 0) { newEncoding = TEXT_ENCODING_UTF8; newBom = 1; }
+    else if (strcmp(encoding, "utf-16le") == 0) { newEncoding = TEXT_ENCODING_UTF16LE; newBom = 1; }
+    else if (strcmp(encoding, "utf-16be") == 0) { newEncoding = TEXT_ENCODING_UTF16BE; newBom = 1; }
+    else if (strcmp(encoding, "ansi") == 0) { newEncoding = TEXT_ENCODING_ANSI; newBom = 0; }
     else return 0;
-    if (oldEncoding != g_encoding || oldBom != g_hasBom) g_pluginChangedSaveEncoding = 1;
+    int index = plugin_target_document();
+    Document *doc = &g_documentStore.documents[index];
+    if (doc->encoding == newEncoding && doc->hasBom == newBom) return 1;
+    doc->encoding = newEncoding;
+    doc->hasBom = newBom;
+    g_pluginChangedSaveEncoding = 1;
+    g_recoverySnapshotStale = 1;
+    if (index == g_documentStore.active) set_dirty(1);
+    else {
+        doc->dirty = 1;
+        update_tab_label(index);
+    }
     return 1;
 }
 static char *plugin_workspace_path(void) {
@@ -354,7 +375,8 @@ static int plugin_schedule_deferred(int token, unsigned delayMs, int cancel) {
 }
 
 static char *plugin_file_path(void) {
-    return g_currentFile ? to_utf8(g_currentFile) : NULL;
+    const WCHAR *path = g_documentStore.documents[plugin_target_document()].path;
+    return path ? to_utf8(path) : NULL;
 }
 
 static const char *plugin_language(void) {
@@ -362,7 +384,9 @@ static const char *plugin_language(void) {
         "markdown", "json", "xml", "html", "yaml", "cpp", "python", "bash", "powershell", "lua",
         "css", "sql", "ini", "toml", "batch", "makefile", "text",
     };
-    return g_activeLanguage >= 0 && g_activeLanguage < LANGUAGE_COUNT ? names[g_activeLanguage] : "text";
+    const Document *doc = &g_documentStore.documents[plugin_target_document()];
+    int language = doc->largeFile ? LANG_TEXT : language_for_path(doc->path)->id;
+    return language >= 0 && language < LANGUAGE_COUNT ? names[language] : "text";
 }
 
 static char *plugin_config_section(const char *plugin) {
@@ -475,7 +499,7 @@ static int set_plugin_enabled(const char *scope, const char *name, int enabled) 
 
 #define MENU_DEFINITION_MAX_BYTES (1024 * 1024)
 
-/* %APPDATA%\tinkeredit\menus.lua: the user's menu definition, when it exists. */
+/* The user's normal or portable menus.lua, when it exists. */
 static WCHAR *user_settings_item_path(const WCHAR *name) {
     WCHAR *settings = get_settings_path();
     WCHAR *directory = settings ? path_directory(settings) : NULL;
@@ -517,7 +541,7 @@ static void install_plugin_editor_metadata(const WCHAR *directory) {
     free(luarc);
 }
 
-/* %APPDATA%\tinkeredit\plugins, created with editor metadata when needed. */
+/* The normal or portable personal plugins folder, with editor metadata. */
 static WCHAR *user_plugin_directory(void) {
     WCHAR *directory = user_settings_item_path(L"plugins");
     if (!directory) return NULL;
@@ -660,7 +684,7 @@ static const char *set_theme_colour(void *context, int dark, const char *name, c
     return NULL;
 }
 
-/* Starts from the built-in palettes, then applies %APPDATA%\tinkeredit\
+/* Starts from the built-in palettes, then applies the normal or portable
    themes.lua when there is one. Problems are added to the report; the
    colours that did load still apply. */
 static char *load_theme_colours(char *report) {
@@ -1077,11 +1101,15 @@ static void manage_plugins(void) {
 /* Lua commands act on the pane being edited: the split editor's when it
    has the focus, otherwise the main one. */
 static void run_plugin_command(int index) {
-    int wasDirty = g_dirty;
+    HWND editor = active_edit_view();
+    int documentIndex = document_index_for_view(editor);
+    int wasDirty = documentIndex >= 0 ? g_documentStore.documents[documentIndex].dirty : g_dirty;
     g_pluginChangedSaveEncoding = 0;
-    char *error = plugin_host_run(index, active_edit_view());
+    g_pluginCommandDocument = documentIndex;
+    char *error = plugin_host_run(index, editor);
+    g_pluginCommandDocument = -1;
     refresh_plugin_performance_problems();
-    sync_dirty_after_plugin(wasDirty);
+    sync_dirty_after_plugin(editor, wasDirty);
     if (error) show_plugin_error(error);
     free(error);
     /* A command may toggle its own menu.checkbox or change a setting used by
@@ -1097,11 +1125,14 @@ static void run_plugin_command(int index) {
 }
 
 static void run_plugin_context_menu_item(int id, HWND hEdit) {
-    int wasDirty = g_dirty;
+    int documentIndex = document_index_for_view(hEdit);
+    int wasDirty = documentIndex >= 0 ? g_documentStore.documents[documentIndex].dirty : g_dirty;
     g_pluginChangedSaveEncoding = 0;
+    g_pluginCommandDocument = documentIndex;
     char *error = plugin_host_run_context_menu_item(id, hEdit);
+    g_pluginCommandDocument = -1;
     refresh_plugin_performance_problems();
-    sync_dirty_after_plugin(wasDirty);
+    sync_dirty_after_plugin(hEdit, wasDirty);
     if (error) show_plugin_error(error);
     free(error);
     update_view_menu(g_hMainWnd);

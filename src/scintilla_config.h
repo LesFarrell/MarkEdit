@@ -23,9 +23,9 @@ typedef struct ScintillaConfigHost {
     /* &AppWindows.splitEdit: the split view has its own line-number-digit
        cache, so the margin code needs the handle to tell the views apart. */
     const HWND *splitEdit;
-    /* Nonzero while the active document is in large-file mode; word wrap is
-       forced off for it (see apply_word_wrap). */
-    int (*largeFileActive)(void);
+    /* Nonzero when hEdit displays a large-file document; word wrap is forced
+       off for that view (see apply_word_wrap). */
+    int (*largeFileActive)(HWND hEdit);
 } ScintillaConfigHost;
 
 void scintilla_config_init(const ScintillaConfigHost *host);

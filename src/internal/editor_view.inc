@@ -175,7 +175,8 @@ static void apply_editor_theme(HWND hEdit) {
    storage to lex into (see read_large_file_document()). */
 static void apply_language_to_view(HWND hEdit, const WCHAR *path) {
     int isMinimap = hEdit == g_hMinimap;
-    const LanguageInfo *language = g_largeFile ? &LANGUAGES[LANG_TEXT] : language_for_path(path);
+    int largeFile = g_largeFile && !(hEdit == g_hSplitEdit && split_document_path());
+    const LanguageInfo *language = largeFile ? &LANGUAGES[LANG_TEXT] : language_for_path(path);
     g_activeLanguage = language->id;
 
     void *lexer = CreateLexer(language->lexer);
@@ -203,7 +204,7 @@ static void apply_language_to_view(HWND hEdit, const WCHAR *path) {
     } else {
         apply_word_wrap(hEdit);
     }
-    if (!g_largeFile) SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
+    if (!largeFile) SendMessageA(hEdit, SCI_COLOURISE, 0, (LPARAM)-1);
 
     /* The minimap owns a throttled snapshot rather than the live document,
        so it also needs a lexer. Refresh its snapshot after configuring that
@@ -219,7 +220,14 @@ static void apply_language_to_view(HWND hEdit, const WCHAR *path) {
    document: the main pane and, when it exists, the split pane. */
 static void apply_document_language(const WCHAR *path) {
     apply_language_to_view(g_hEdit, path);
-    if (g_hSplitEdit) apply_language_to_view(g_hSplitEdit, path);
+    if (g_hSplitEdit) {
+        int mainLanguage = g_activeLanguage;
+        const WCHAR *splitPath = split_document_path();
+        apply_language_to_view(g_hSplitEdit, splitPath ? splitPath : path);
+        /* The focused tab remains the app's active language even when the
+           secondary pane displays a different document. */
+        g_activeLanguage = mainLanguage;
+    }
 }
 
 static void configure_scintilla_feedback(HWND hEdit) {

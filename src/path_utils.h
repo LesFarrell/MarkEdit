@@ -15,9 +15,15 @@ WCHAR *path_directory(const WCHAR *path);
 WCHAR *path_join(const WCHAR *directory, const WCHAR *name);
 WCHAR *absolute_path(const WCHAR *path);
 WCHAR *extended_path(const WCHAR *path);
+/* An empty portable.mode beside tinkeredit.exe opts into portable storage. */
+int portable_mode_enabled(void);
+/* %APPDATA%\tinkeredit, or <exe>\portable-data in portable mode. Created if
+   needed. Caller frees. */
+WCHAR *get_user_config_directory(void);
 int skipped_workspace_directory(const WCHAR *name);
 int path_has_skipped_component(const WCHAR *path);
-/* %LOCALAPPDATA%\TinkerEditor\<name>, created if needed. Caller frees. */
+/* %LOCALAPPDATA%\TinkerEditor\<name>, or <exe>\portable-data\<name>. Created
+   if needed. Caller frees. */
 WCHAR *get_local_app_directory(const WCHAR *name);
 /* Whether `path` names an existing file (not a folder). NULL is never one. */
 int file_exists(const WCHAR *path);

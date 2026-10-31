@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <wctype.h>
 #include <process.h>
 #include <shlwapi.h>
 #include <shellapi.h>
@@ -111,6 +112,9 @@ static int g_lastPluginLoadSucceeded = 1;
    text buffer, so dirty-state reconciliation preserves that change. */
 static int g_pluginChangedSaveEncoding = 0;
 static int g_pluginConfigChanged = 0;
+/* Metadata context paired with the editor view bound into a running Lua
+   command/predicate; -1 means the selected main tab. */
+static int g_pluginCommandDocument = -1;
 static HACCEL create_main_accelerators(void);
 static void rebuild_main_accelerators(void);
 /* Font face/weight/point-size: see settings.h for MAX_FONT_FACE_NAME's
@@ -323,6 +327,10 @@ static RECT g_splitEditorSplitterRect = {0};
    every edit made to the active tab. This explicit reference keeps that
    document alive while the pane is temporarily attached elsewhere. */
 static sptr_t g_splitScratchDocument = 0;
+/* Optional document retained in the secondary editor while another tab is
+   selected in the main pane. It is always one of DocumentStore's live
+   Scintilla documents; closing that tab clears this pointer first. */
+static sptr_t g_splitDocument = 0;
 
 static HWND tracked_edit_view(void) {
     if (g_lastEditView == g_hSplitEdit && g_hSplitEdit && g_splitEditorVisible)
@@ -384,7 +392,13 @@ static ProgressDialogHost g_progressDialogHost;
 /* scintilla_config.c configures each editor view through this host; the
    persisted settings it reads come from settings_values.h directly. The host
    is filled in before any view is created (see initialize_main_window). */
-static int scintilla_config_large_file_active(void) { return g_largeFile; }
+static int scintilla_config_large_file_active(HWND hEdit) {
+    sptr_t document = hEdit ? (sptr_t)SendMessageA(hEdit, SCI_GETDOCPOINTER, 0, 0) : 0;
+    for (int i = 0; document && i < g_documentStore.count; i++)
+        if (g_documentStore.documents[i].sciDocument == document)
+            return g_documentStore.documents[i].largeFile;
+    return g_documentStore.count > 0 ? g_largeFile : 0;
+}
 static const ScintillaConfigHost g_scintillaConfigHost = {
     .splitEdit = &g_windows.splitEdit,
     .largeFileActive = scintilla_config_large_file_active,
@@ -685,8 +699,8 @@ static void run_deferred_startup_init(void) {
 }
 
 static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotification *scn) {
-    /* A shared document can produce UI notifications from both editor views.
-       Only the pane the user is actually working in should drive caret,
+    /* When the views share a document both produce UI notifications. Only
+       the pane the user is actually working in should drive caret,
        brace, preview-scroll, and plugin-selection updates. Live spell
        checking is the exception: an unfocused split pane can still be
        scrolled (mouse wheel, dragging its own scrollbar) without moving
@@ -694,6 +708,9 @@ static void handle_editor_ui_update(HWND hwnd, HWND editor, const struct SCNotif
     if (GetFocus() == editor) g_lastEditView = editor;
     if (scn->updated & SC_UPDATE_V_SCROLL) schedule_visible_spell_check();
     if (editor != tracked_edit_view()) return;
+    /* A secondary document has no relationship to the selected tab's live
+       preview, outline or plugin selection events. */
+    if (document_index_for_view(editor) != g_documentStore.active) return;
     if ((scn->updated & SC_UPDATE_V_SCROLL) && g_editorVisible && g_previewVisible) {
             if (g_ignoreNextEditorScroll) g_ignoreNextEditorScroll = 0;
             else SetTimer(hwnd, IDT_SCROLL_SYNC, SCROLL_SYNC_DELAY_MS, NULL);
@@ -719,8 +736,8 @@ static void schedule_word_completions(HWND hwnd, HWND editor) {
 static void handle_editor_margin_click(const struct SCNotification *scn) {
     if (scn->margin != MARGIN_BOOKMARKS) return;
 
-    /* Markers belong to the shared document, so either editor pane can update
-       them. Shift+Click always selects a bookmark in debuggable files. */
+    /* This handler is used only for the selected tab; an independently
+       retained split document ignores marker clicks. */
     Sci_Position line = (Sci_Position)SendMessageA(
         g_hEdit, SCI_LINEFROMPOSITION, (WPARAM)scn->position, 0);
     if (!(scn->modifiers & SCMOD_SHIFT) &&
@@ -792,15 +809,26 @@ static void handle_document_modified(HWND hwnd, const struct SCNotification *scn
 
     schedule_minimap_after_edit(hwnd, scn);
 
-    /* Everything below is document-level bookkeeping, not view-level, so it
-       applies regardless of which pane the edit came from - both panes are
-       views of the same shared document (without this, typing only in the
-       split pane would never mark the tab dirty or stale the recovery
-       snapshot, silently losing track of real unsaved edits). */
+    /* Main-view edits update the selected tab. A split view retaining another
+       document uses handle_secondary_document_modified() below. */
     if (!g_documentStore.switching && !g_dirty) set_dirty(1);
     if (!g_documentStore.switching) g_recoverySnapshotStale = 1;
     enter_large_file_mode_if_needed(hwnd);
     schedule_updates_after_edit(hwnd, scn);
+}
+
+static void handle_secondary_document_modified(HWND editor,
+                                                const struct SCNotification *scn) {
+    if (!(scn->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT)) ||
+        g_documentStore.switching) return;
+    int index = document_index_for_view(editor);
+    if (index < 0 || index == g_documentStore.active) return;
+    Document *doc = &g_documentStore.documents[index];
+    if (!doc->dirty) {
+        doc->dirty = 1;
+        update_tab_label(index);
+    }
+    g_recoverySnapshotStale = 1;
 }
 
 static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
@@ -815,10 +843,12 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
             break;
         case SCN_CHARADDED:
             g_lastEditView = notification->hwndFrom;
-            schedule_word_completions(hwnd, notification->hwndFrom);
+            if (document_index_for_view(notification->hwndFrom) == g_documentStore.active)
+                schedule_word_completions(hwnd, notification->hwndFrom);
             break;
         case SCN_MARGINCLICK:
-            handle_editor_margin_click(scn);
+            if (document_index_for_view(notification->hwndFrom) == g_documentStore.active)
+                handle_editor_margin_click(scn);
             break;
         case SCN_MODIFIED:
             /* Every view of the shared Scintilla document receives the same
@@ -826,6 +856,8 @@ static void handle_editor_notification(HWND hwnd, NMHDR *notification) {
                so split-editor mode does not run document bookkeeping twice. */
             if (notification->hwndFrom == g_hEdit)
                 handle_document_modified(hwnd, scn);
+            else if (document_index_for_view(g_hSplitEdit) != g_documentStore.active)
+                handle_secondary_document_modified(g_hSplitEdit, scn);
             break;
     }
 }
@@ -962,7 +994,7 @@ static int handle_main_timer(HWND hwnd, UINT_PTR timerId) {
         g_pluginChangedSaveEncoding = 0;
         char *error = plugin_host_run_deferred((int)(timerId - IDT_PLUGIN_DEFER_BASE), g_hEdit);
         refresh_plugin_performance_problems();
-        sync_dirty_after_plugin(wasDirty);
+        sync_dirty_after_plugin(g_hEdit, wasDirty);
         if (error) show_plugin_error(error);
         free(error);
         return 1;

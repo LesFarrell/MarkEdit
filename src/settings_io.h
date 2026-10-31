@@ -3,9 +3,8 @@
 
 #include "settings_values.h"
 
-/* Reading and writing %APPDATA%\tinkeredit\settings.json. A module that only
-   needs the persisted values includes settings_values.h; this header is for
-   callers that load or store them. */
+/* Reading and writing the normal per-user settings, or portable-data when an
+   executable-local portable.mode marker is present. */
 
 WCHAR *get_settings_path(void);
 /* Heap copy of an arbitrarily long string value (caller frees), or NULL
